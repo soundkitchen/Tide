@@ -1,0 +1,323 @@
+# Tide M1 アーキテクチャ
+
+## モジュール構成
+
+```
+Tide/
+├── Tide.xcodeproj
+├── Tide/
+│   ├── App/
+│   │   ├── TideApp.swift              @main、メニューバー常駐
+│   │   └── AppEnvironment.swift         依存性注入用のコンテナ
+│   ├── UI/
+│   │   ├── MenuBarContent.swift         メニューバーのドロップダウン
+│   │   ├── SettingsWindow.swift         設定画面（ウィンドウ）
+│   │   ├── SetupWizardWindow.swift      初回セットアップ
+│   │   └── Components/                  共通 UI コンポーネント
+│   ├── Core/
+│   │   ├── SyncEngine.swift             同期制御の中枢
+│   │   ├── FileWatcher.swift            FSEvents ラッパー
+│   │   ├── HashCalculator.swift         SHA-256 計算（ストリーミング）
+│   │   ├── IgnoreRules.swift            .syncignore パーサ（M3 で完成、M1 ではハードコード除外のみ）
+│   │   └── DebounceQueue.swift          変更イベントのデバウンス
+│   ├── Storage/
+│   │   ├── LocalDatabase.swift          GRDB.swift ラッパー
+│   │   ├── KeychainStore.swift          認証情報の保管
+│   │   ├── ConfigStore.swift            UserDefaults ラッパー
+│   │   └── Migrations.swift             DB マイグレーション定義
+│   ├── S3/
+│   │   ├── S3Client.swift               AWS SDK ラッパー
+│   │   ├── Manifest.swift               マニフェスト読み書き
+│   │   ├── ManifestSharding.swift       シャード振り分けロジック
+│   │   ├── Uploader.swift               アップロード処理
+│   │   └── BucketSetup.swift            バージョニング、ライフサイクル設定
+│   ├── Models/
+│   │   ├── FileEntry.swift              ファイルメタデータ
+│   │   ├── SyncEvent.swift              内部イベント
+│   │   ├── SyncStatus.swift             同期状態（idle, syncing, error 等）
+│   │   └── AWSCredentials.swift         認証情報
+│   └── Resources/
+│       └── Assets.xcassets
+└── TideTests/
+    ├── ManifestShardingTests.swift
+    ├── IgnoreRulesTests.swift
+    ├── HashCalculatorTests.swift
+    └── ...
+```
+
+## レイヤー構成と依存方向
+
+```
+┌─────────────────────────────────────┐
+│ UI Layer (SwiftUI)                  │
+│  - MenuBarContent                   │
+│  - SettingsWindow                   │
+│  - SetupWizardWindow                │
+└──────────────┬──────────────────────┘
+               │ observes
+               ▼
+┌─────────────────────────────────────┐
+│ Core Layer (Business Logic)         │
+│  - SyncEngine                       │
+│  - FileWatcher                      │
+│  - HashCalculator                   │
+└──────────────┬──────────────────────┘
+               │ uses
+               ▼
+┌──────────────────┬──────────────────┐
+│ Storage Layer    │ S3 Layer         │
+│ - LocalDatabase  │ - S3Client       │
+│ - KeychainStore  │ - Manifest       │
+│ - ConfigStore    │ - Uploader       │
+└──────────────────┴──────────────────┘
+```
+
+依存は常に下向き。UI → Core → Storage/S3。逆方向の依存は禁止。
+
+## 主要コンポーネント
+
+### SyncEngine（中枢）
+
+責務:
+- FileWatcher からの変更通知を受け取り、デバウンスして処理キューに積む
+- アップロード処理を順次実行（並列度は5）
+- 進捗・ステータスを `@Observable` で公開
+- エラー時のリトライ管理（指数バックオフ、最大3回）
+
+公開 API（M1 範囲）:
+```swift
+@Observable
+final class SyncEngine {
+    enum Status {
+        case idle
+        case syncing(progress: SyncProgress)
+        case paused
+        case error(SyncError)
+    }
+    
+    var status: Status { get }
+    var lastSyncedAt: Date? { get }
+    var queueDepth: Int { get }
+    
+    func start() async
+    func stop() async
+    func pause()
+    func resume()
+    func triggerFullScan() async  // 起動時のフル比較
+}
+```
+
+### FileWatcher
+
+責務:
+- 指定パス配下を FSEvents で監視
+- 変更イベントを `AsyncStream<FileChangeEvent>` で配信
+- ハードコード除外（`.DS_Store`, `.Trashes`, `.Spotlight-V100`, `.fseventsd`, `Thumbs.db`）
+
+公開 API:
+```swift
+struct FileChangeEvent {
+    let path: String  // 同期ルートからの相対パス
+    let kind: Kind
+    enum Kind { case created, modified, deleted, renamed(from: String) }
+}
+
+final class FileWatcher {
+    init(rootPath: URL)
+    var events: AsyncStream<FileChangeEvent> { get }
+    func start() throws
+    func stop()
+}
+```
+
+実装メモ:
+- `FSEventStreamCreate` を使用
+- `kFSEventStreamCreateFlagFileEvents` フラグを必ず付ける（ディレクトリ単位ではなくファイル単位の通知）
+- `kFSEventStreamCreateFlagNoDefer` を付けてレイテンシ短縮
+- latency 引数は 1.0 秒程度（FSEvents 自体のバッファリング）
+- アプリ層でさらに 2 秒デバウンス（DebounceQueue）
+
+### DebounceQueue
+
+責務:
+- 同じパスへの連続イベントを統合（例: エディタの保存で複数イベント発生）
+- 最後のイベントから 2 秒静かになったら下流に流す
+
+### HashCalculator
+
+責務:
+- ファイルの SHA-256 を計算
+- 大きいファイルはストリーミング処理（メモリに全部載せない）
+- 64KB チャンクで読み込み
+
+```swift
+struct HashCalculator {
+    static func sha256(of url: URL) async throws -> String
+}
+```
+
+### LocalDatabase
+
+責務:
+- ファイル状態のキャッシュ（再ハッシュ回避用）
+- アップロード予約のキュー永続化
+- 起動時の状態復元
+
+スキーマは `03-LOCAL-DATABASE.md` 参照。
+
+### S3Client
+
+責務:
+- AWS SDK for Swift のラッパー
+- リトライ、エラーハンドリングの統一
+- 認証情報の解決
+
+公開 API（M1 範囲）:
+```swift
+final class S3Client {
+    init(credentials: AWSCredentials, region: String, bucket: String)
+    
+    // Bucket
+    func checkBucketAccess() async throws
+    func isVersioningEnabled() async throws -> Bool
+    func enableVersioning() async throws
+    func setLifecycleRules() async throws
+    
+    // Objects
+    func putObject(key: String, data: Data, metadata: [String: String]) async throws -> PutObjectResult
+    func deleteObject(key: String) async throws  // delete marker を付ける
+    func headObject(key: String) async throws -> HeadObjectResult?
+    
+    // Manifest
+    func getIndex() async throws -> ManifestIndex?
+    func putIndex(_ index: ManifestIndex, expectedETag: String?) async throws
+    func getShard(_ id: String) async throws -> ManifestShard?
+    func putShard(_ shard: ManifestShard, expectedETag: String?) async throws
+}
+
+struct PutObjectResult {
+    let etag: String
+    let versionId: String?
+}
+```
+
+### Manifest
+
+責務:
+- マニフェストデータの読み書き、シャード分割
+- 楽観的ロックによる更新（`If-Match` ヘッダ）
+
+詳細は `02-S3-LAYOUT.md`。
+
+## 起動フロー
+
+```
+[アプリ起動]
+    │
+    ▼
+[ConfigStore で設定読み込み]
+    │
+    ├─ 設定がない（初回）
+    │       │
+    │       ▼
+    │  [SetupWizard 表示]
+    │       │
+    │       ├─ AWS 認証情報入力
+    │       ├─ バケット接続テスト
+    │       ├─ バージョニング有効化（未有効なら）
+    │       ├─ ライフサイクルルール投入
+    │       ├─ 同期フォルダ選択
+    │       └─ Device ID 生成
+    │
+    ├─ 設定あり
+    │       │
+    │       ▼
+    │  [SyncEngine.start()]
+    │       │
+    │       ├─ FileWatcher 起動
+    │       ├─ フルスキャン実行
+    │       │   └─ ローカル DB と実ファイルを照合
+    │       │       └─ 差分があればアップロードキューに積む
+    │       └─ 通常運転（FSEvents からのイベント処理）
+    │
+    ▼
+[メニューバーアイコン表示]
+```
+
+## 同期処理フロー（M1: 一方向）
+
+```
+[FSEvents イベント発生]
+    │
+    ▼
+[FileWatcher が AsyncStream に流す]
+    │
+    ▼
+[DebounceQueue で 2 秒デバウンス]
+    │
+    ▼
+[SyncEngine がイベントを受け取る]
+    │
+    ▼
+[除外ルール判定]
+    │
+    ├─ 除外対象 → 終了
+    │
+    ▼
+[ローカル DB から前回情報を取得]
+    │
+    ▼
+[変更タイプ別処理]
+    │
+    ├─ created / modified
+    │     │
+    │     ▼
+    │   [ファイルサイズ・mtime チェック]
+    │     │
+    │     ▼
+    │   [DB のキャッシュと size+mtime が一致？]
+    │     │
+    │     ├─ Yes → アップロード不要（イベント空振り）
+    │     └─ No  → SHA-256 計算
+    │             │
+    │             ▼
+    │           [DB の前回ハッシュと比較]
+    │             │
+    │             ├─ 一致 → DB の mtime 更新のみ
+    │             └─ 不一致 → アップロードキューに追加
+    │
+    └─ deleted
+          │
+          ▼
+        [DeleteObject 呼び出し]
+          │
+          ▼
+        [マニフェスト更新]
+          │
+          ▼
+        [DB のエントリ削除]
+    │
+    ▼
+[アップロード実行（並列度 5）]
+    │
+    ├─ PutObject（メタデータ付き）
+    ├─ DB 更新（version_id, etag, last_synced_at）
+    └─ マニフェスト更新（シャード + index）
+```
+
+## エラーハンドリング方針
+
+- **ネットワークエラー**: 指数バックオフで自動リトライ（1s, 2s, 4s, 8s, 16s）。最大5回。それでもダメなら error 状態へ。
+- **認証エラー**: 即座にユーザーに通知。リトライしない。設定画面を開いてもらう。
+- **権限エラー（S3）**: ユーザーに通知。リトライしない。
+- **ハッシュ計算中にファイル削除**: 警告ログを出して次のイベントを待つ。
+- **マニフェスト更新の楽観的ロック失敗**: 5回までリトライ（その都度マニフェスト再読み込み）。
+- **ローカル DB エラー**: クリティカル。アプリ停止して通知。
+
+## ログ出力
+
+- `os.Logger` を使用
+- サブシステム: `com.example.tide`
+- カテゴリ: `sync`, `s3`, `database`, `ui`
+- レベル: debug / info / error
+- リリースビルドでも error は残す

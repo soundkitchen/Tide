@@ -1,0 +1,103 @@
+name: Tide
+options:
+  bundleIdPrefix: org.izukawa
+  deploymentTarget:
+    macOS: "26.0"
+  developmentLanguage: en
+  createIntermediateGroups: true
+  groupSortPosition: top
+  generateEmptyDirectories: true
+
+settings:
+  base:
+    DEVELOPMENT_TEAM: G5G54TCH8W
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    MACOSX_DEPLOYMENT_TARGET: "26.0"
+    CODE_SIGN_STYLE: Automatic
+    ENABLE_HARDENED_RUNTIME: YES
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    SWIFT_EMIT_LOC_STRINGS: YES
+    GCC_WARN_INHIBIT_ALL_WARNINGS: NO
+    CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER: YES
+
+packages:
+  AWSSwiftSDK:
+    url: https://github.com/awslabs/aws-sdk-swift
+    from: 1.7.3
+  GRDB:
+    url: https://github.com/groue/GRDB.swift
+    from: 7.10.0
+
+targets:
+  Tide:
+    type: application
+    platform: macOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: Tide
+        excludes:
+          - "Info.plist"
+    info:
+      path: Tide/Info.plist
+      properties:
+        LSUIElement: YES
+        CFBundleName: $(PRODUCT_NAME)
+        CFBundleDisplayName: Tide
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        NSHumanReadableCopyright: ""
+        LSMinimumSystemVersion: "$(MACOSX_DEPLOYMENT_TARGET)"
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.izukawa.Tide
+        PRODUCT_NAME: Tide
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        ENABLE_PREVIEWS: YES
+        COMBINE_HIDPI_IMAGES: YES
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+    dependencies:
+      - package: AWSSwiftSDK
+        product: AWSS3
+      - package: AWSSwiftSDK
+        product: AWSClientRuntime
+      - package: AWSSwiftSDK
+        product: AWSSDKIdentity
+      - package: GRDB
+        product: GRDB
+
+  TideTests:
+    type: bundle.unit-test
+    platform: macOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: TideTests
+    dependencies:
+      - target: Tide
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.izukawa.TideTests
+        GENERATE_INFOPLIST_FILE: YES
+        BUNDLE_LOADER: $(TEST_HOST)
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/Tide.app/Contents/MacOS/Tide
+
+schemes:
+  Tide:
+    build:
+      targets:
+        Tide: all
+        TideTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - TideTests
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release

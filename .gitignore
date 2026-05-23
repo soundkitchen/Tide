@@ -1,0 +1,58 @@
+## Xcode
+build/
+DerivedData/
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcworkspace/xcuserdata/
+xcuserdata/
+*.xcscmblueprint
+*.xccheckout
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+## xcodegen-generated project (regenerate via `make generate`)
+## ただし SPM の Package.resolved は再現性のため追跡したいので negation 対で書く。
+Tide.xcodeproj/*
+!Tide.xcodeproj/project.xcworkspace
+Tide.xcodeproj/project.xcworkspace/*
+!Tide.xcodeproj/project.xcworkspace/xcshareddata
+Tide.xcodeproj/project.xcworkspace/xcshareddata/*
+!Tide.xcodeproj/project.xcworkspace/xcshareddata/swiftpm
+Tide.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/*
+!Tide.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
+
+## Swift Package Manager
+.swiftpm/
+.build/
+Packages/
+Package.pins
+# Package.resolved はアプリ（≠ライブラリ）では再現性のためコミットする。
+# Tide.xcodeproj 内に置かれるので上の negation セクションで救出している。
+
+## macOS
+.DS_Store
+
+## Editor
+*.swp
+.vscode/
+.idea/
+
+## Scratch / throwaway notes
+tmp/
+
+## direnv / dotenv (secrets — never commit)
+.env
+.env.*
+.envrc
+.envrc.local
+.envrc.private
+.direnv/
+
+# templates/samples are OK to commit
+!.env.example
+!.env.sample
+!.env.template
+!.envrc.example
