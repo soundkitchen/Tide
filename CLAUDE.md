@@ -42,8 +42,8 @@
 
 ### 重要な制約
 
-- `Tide.xcodeproj/` は `xcodegen` が `project.yml` から **毎回生成する**。**直接編集しない**。`.gitignore` 済み。
-- **Swift ファイルを追加 / 削除 / リネームしたら `make generate`** を踏まないと Xcode プロジェクトに反映されない。
+- `Tide.xcodeproj/` は `xcodegen` が `project.yml` から **毎回生成する**。git でも追跡しているが **直接編集しない**（再生成で上書きされる）。
+- **Swift ファイルを追加 / 削除 / リネームしたら `make generate`** を踏まないと Xcode プロジェクトに反映されない。再生成後の `Tide.xcodeproj` の差分も git に乗せる。
 - `xcodebuild` を直接叩く時は **`-skipPackagePluginValidation -skipMacroValidation` が必須**（aws-sdk-swift が依存する smithy-swift のビルドプラグインの検証が CLI からは初回承認できないため）。Makefile はこれを内包している。
 - macOS GUI で初回のみ Xcode から SmithyCodeGeneratorPlugin の承認を求められる。
 

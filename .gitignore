@@ -13,24 +13,18 @@ xcuserdata/
 *.dSYM.zip
 *.dSYM
 
-## xcodegen-generated project (regenerate via `make generate`)
-## ただし SPM の Package.resolved は再現性のため追跡したいので negation 対で書く。
-Tide.xcodeproj/*
-!Tide.xcodeproj/project.xcworkspace
-Tide.xcodeproj/project.xcworkspace/*
-!Tide.xcodeproj/project.xcworkspace/xcshareddata
-Tide.xcodeproj/project.xcworkspace/xcshareddata/*
-!Tide.xcodeproj/project.xcworkspace/xcshareddata/swiftpm
-Tide.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/*
-!Tide.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
+## Tide.xcodeproj は xcodegen で再生成されるが、git でも追跡している。
+## - clone 直後に Xcode で開ける利便性
+## - Package.resolved を救出する negation 対が要らなくなり .gitignore が読みやすい
+## ユーザ固有の状態 (xcuserdata 等) は上の Xcode セクションで除外済み。
 
 ## Swift Package Manager
 .swiftpm/
 .build/
 Packages/
 Package.pins
-# Package.resolved はアプリ（≠ライブラリ）では再現性のためコミットする。
-# Tide.xcodeproj 内に置かれるので上の negation セクションで救出している。
+# Package.resolved はアプリ（≠ライブラリ）では再現性のためコミットする
+# （Tide.xcodeproj まるごと追跡しているので自然と入る）。
 
 ## macOS
 .DS_Store

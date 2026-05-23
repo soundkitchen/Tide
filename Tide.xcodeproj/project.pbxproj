@@ -1,0 +1,700 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		000FA049016E7BEE14E46B7C /* ManifestReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5BFBDECCFCF00DE9860A9C1F /* ManifestReader.swift */; };
+		0440BDD7584DE6ABF2C5E610 /* Manifest.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86CCB3744E3CE4973CE0ED13 /* Manifest.swift */; };
+		114F8696EC6701E674C97FDA /* TideTmpDirectory.swift in Sources */ = {isa = PBXBuildFile; fileRef = 19BDDA56B819A3F918C424E9 /* TideTmpDirectory.swift */; };
+		1628205A2D702AD28C982B14 /* SyncEvent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52A253BAA0EB5A4D52C3E77A /* SyncEvent.swift */; };
+		34C9CD59AD38354487CAE58D /* SettingsWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC8E5DD109E48D0F8ABF0455 /* SettingsWindow.swift */; };
+		3858DAA7CA5E2ED41BB7BB7B /* AppEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C7D544B462DF81DFB84FC44 /* AppEnvironment.swift */; };
+		3BC2C69B981F941D2727FF08 /* PathValidatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B664427DD4577E4CDF8BCAE8 /* PathValidatorTests.swift */; };
+		456F89B1C5E9C6CEE665EE21 /* ManifestSharding.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85B8648A9E5391D4725A0EE7 /* ManifestSharding.swift */; };
+		471D1582272A7982801912E7 /* FileEntry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82D4E74A4850C7BA2FAD0EA3 /* FileEntry.swift */; };
+		4A8930AD2D0AE9A529E0478C /* FileWatcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = DDB67AE63D5670BED8543EBA /* FileWatcher.swift */; };
+		59403A709AC7BCBD0A22D194 /* AWSClientRuntime in Frameworks */ = {isa = PBXBuildFile; productRef = A50D20ED5B5AEECF1F032839 /* AWSClientRuntime */; };
+		5985D271E50C37ABEBE5327A /* Uploader.swift in Sources */ = {isa = PBXBuildFile; fileRef = D04EABECEE4BD6B84BAC341A /* Uploader.swift */; };
+		5BE0DB13AD7C865881AA99AF /* LocalDatabase.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C08DD3532C0C011010E53F2 /* LocalDatabase.swift */; };
+		5F924B1D5938B20402709207 /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA3C0DA079E4E103465665CD /* KeychainStore.swift */; };
+		6713D52E474D2DE81405414C /* ManifestShardingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57ED617F25861D75B21F4EE8 /* ManifestShardingTests.swift */; };
+		694216A7F3CCAD5B026C98A1 /* AWSCredentials.swift in Sources */ = {isa = PBXBuildFile; fileRef = 81A0B0642C4340182C0BDB0A /* AWSCredentials.swift */; };
+		6AF129A12A51D9159C0986FE /* DebounceQueueTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C531B92C91BFA8DF787AA83 /* DebounceQueueTests.swift */; };
+		6B17E559300F54CC080C866D /* IgnoreRules.swift in Sources */ = {isa = PBXBuildFile; fileRef = D28D69119A7668A0A23BDB57 /* IgnoreRules.swift */; };
+		77E7546C27CC6A58425F95FC /* AppLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5CA66881F9B9E5508D609E2 /* AppLogger.swift */; };
+		80FA3DEB098561CCBE351B6D /* ConfigStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1ABF6365546F76EB0474766A /* ConfigStore.swift */; };
+		819303744001AB587D5760BD /* DebounceQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29A0EA5C034CFDEE0E2994AE /* DebounceQueue.swift */; };
+		88CE1058350DE5CE715BDB27 /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = 868B594F3D527CF261BDC653 /* GRDB */; };
+		8A2492FBD381EC905AC4AC87 /* MenuBarContent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 026AC3AAA816DBF9DF595080 /* MenuBarContent.swift */; };
+		8A98F6AF29BC306DD893499F /* AWSSDKIdentity in Frameworks */ = {isa = PBXBuildFile; productRef = B70DC5D65F2DCBFC4293FC8E /* AWSSDKIdentity */; };
+		90A6EB78AF3A3DD31CF27760 /* SetupWizardWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4292EC731F5D275D86CFDAE2 /* SetupWizardWindow.swift */; };
+		96D7C21D7103303A59A8C4BB /* HardcodedIgnoreRulesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1BD4B605839107E1638A0D11 /* HardcodedIgnoreRulesTests.swift */; };
+		9B793A724C6B1B17CE22B11F /* HashCalculatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 16ED0B8D39615582C0CD3596 /* HashCalculatorTests.swift */; };
+		9FF79ED9D02C034D4A29C8CB /* AWSS3 in Frameworks */ = {isa = PBXBuildFile; productRef = 9D164DF37935E502C6D53EB6 /* AWSS3 */; };
+		A674AB99F3B090F076F6C29B /* TideApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45BAEBEBA92C44451EB1201D /* TideApp.swift */; };
+		AEEB1FD5D33DD25EADD1B5DD /* Downloader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9387D07371DA25AF234841AA /* Downloader.swift */; };
+		B2DCE996F5CB9F81078CAEC0 /* SmokeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2891D2A84ED794803593042D /* SmokeTests.swift */; };
+		B4526FDEB3B4C457DF3F76D6 /* S3Client.swift in Sources */ = {isa = PBXBuildFile; fileRef = C01FAB16EDCECA8698C1E5CF /* S3Client.swift */; };
+		B54010E5DAE38474C6EE3409 /* SyncEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 075300181A2D09025E384D3B /* SyncEngine.swift */; };
+		BACC401E33B0D4F9983A990D /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 1A9CB8EA6B406E2E0BB8E34C /* Localizable.xcstrings */; };
+		C1113CE816B5451E65B63071 /* HashCalculator.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0A0C2B81618658098C69DC2 /* HashCalculator.swift */; };
+		D1730746F1028260C48E2A90 /* SyncStatus.swift in Sources */ = {isa = PBXBuildFile; fileRef = 858DA1ADDCE543AC588ADC2A /* SyncStatus.swift */; };
+		D45DBF8182C8CDB7CDF3ED25 /* PathValidator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D5A3FCD54C910A40D3A0DF3 /* PathValidator.swift */; };
+		D7A7077860BD170A80B583CB /* KnownRegions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E6C42C9F1EF0B6B378A1D24 /* KnownRegions.swift */; };
+		DB647CF57D16DAD945F3C6C0 /* ConflictNamer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A37D12E34F75BE19B664B46 /* ConflictNamer.swift */; };
+		E62A2A1324F7FB72E560194A /* Migrations.swift in Sources */ = {isa = PBXBuildFile; fileRef = ADC61A4E5F7528718FC1A7C8 /* Migrations.swift */; };
+		EAC3C614D2A5536CDF93CE5D /* ConflictNamerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C30A8166AAE342D39ECF3D6F /* ConflictNamerTests.swift */; };
+		EC50EACACB83EEE810D0E3A2 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 64DE907E2B5F3A1E362A67CA /* Assets.xcassets */; };
+		FC518B2002C4E7EE05A72567 /* SyncError.swift in Sources */ = {isa = PBXBuildFile; fileRef = D9201C0AA706FDFF877045BB /* SyncError.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		7F9E1344B1DD0B1C477ED661 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 90A75D909A340A469D54F9F1 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 3DFFE12DD84D9B50195B8141;
+			remoteInfo = Tide;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		026AC3AAA816DBF9DF595080 /* MenuBarContent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarContent.swift; sourceTree = "<group>"; };
+		075300181A2D09025E384D3B /* SyncEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncEngine.swift; sourceTree = "<group>"; };
+		0C08DD3532C0C011010E53F2 /* LocalDatabase.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalDatabase.swift; sourceTree = "<group>"; };
+		16ED0B8D39615582C0CD3596 /* HashCalculatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HashCalculatorTests.swift; sourceTree = "<group>"; };
+		19BDDA56B819A3F918C424E9 /* TideTmpDirectory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TideTmpDirectory.swift; sourceTree = "<group>"; };
+		1A9CB8EA6B406E2E0BB8E34C /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
+		1ABF6365546F76EB0474766A /* ConfigStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfigStore.swift; sourceTree = "<group>"; };
+		1BD4B605839107E1638A0D11 /* HardcodedIgnoreRulesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HardcodedIgnoreRulesTests.swift; sourceTree = "<group>"; };
+		2891D2A84ED794803593042D /* SmokeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SmokeTests.swift; sourceTree = "<group>"; };
+		29A0EA5C034CFDEE0E2994AE /* DebounceQueue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebounceQueue.swift; sourceTree = "<group>"; };
+		2B6B12A4689B10709B734D22 /* Tide.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Tide.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		3C531B92C91BFA8DF787AA83 /* DebounceQueueTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebounceQueueTests.swift; sourceTree = "<group>"; };
+		3E6C42C9F1EF0B6B378A1D24 /* KnownRegions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KnownRegions.swift; sourceTree = "<group>"; };
+		4292EC731F5D275D86CFDAE2 /* SetupWizardWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SetupWizardWindow.swift; sourceTree = "<group>"; };
+		45BAEBEBA92C44451EB1201D /* TideApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TideApp.swift; sourceTree = "<group>"; };
+		52A253BAA0EB5A4D52C3E77A /* SyncEvent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncEvent.swift; sourceTree = "<group>"; };
+		57ED617F25861D75B21F4EE8 /* ManifestShardingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManifestShardingTests.swift; sourceTree = "<group>"; };
+		5BFBDECCFCF00DE9860A9C1F /* ManifestReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManifestReader.swift; sourceTree = "<group>"; };
+		64DE907E2B5F3A1E362A67CA /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		6A37D12E34F75BE19B664B46 /* ConflictNamer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConflictNamer.swift; sourceTree = "<group>"; };
+		6C7D544B462DF81DFB84FC44 /* AppEnvironment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppEnvironment.swift; sourceTree = "<group>"; };
+		721CD940D3929EFD005575FF /* TideTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = TideTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		7D5A3FCD54C910A40D3A0DF3 /* PathValidator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PathValidator.swift; sourceTree = "<group>"; };
+		81A0B0642C4340182C0BDB0A /* AWSCredentials.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AWSCredentials.swift; sourceTree = "<group>"; };
+		82D4E74A4850C7BA2FAD0EA3 /* FileEntry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileEntry.swift; sourceTree = "<group>"; };
+		858DA1ADDCE543AC588ADC2A /* SyncStatus.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncStatus.swift; sourceTree = "<group>"; };
+		85B8648A9E5391D4725A0EE7 /* ManifestSharding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManifestSharding.swift; sourceTree = "<group>"; };
+		86CCB3744E3CE4973CE0ED13 /* Manifest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Manifest.swift; sourceTree = "<group>"; };
+		9387D07371DA25AF234841AA /* Downloader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Downloader.swift; sourceTree = "<group>"; };
+		ADC61A4E5F7528718FC1A7C8 /* Migrations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Migrations.swift; sourceTree = "<group>"; };
+		B0A0C2B81618658098C69DC2 /* HashCalculator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HashCalculator.swift; sourceTree = "<group>"; };
+		B5CA66881F9B9E5508D609E2 /* AppLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLogger.swift; sourceTree = "<group>"; };
+		B664427DD4577E4CDF8BCAE8 /* PathValidatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PathValidatorTests.swift; sourceTree = "<group>"; };
+		BC8E5DD109E48D0F8ABF0455 /* SettingsWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsWindow.swift; sourceTree = "<group>"; };
+		C01FAB16EDCECA8698C1E5CF /* S3Client.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = S3Client.swift; sourceTree = "<group>"; };
+		C30A8166AAE342D39ECF3D6F /* ConflictNamerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConflictNamerTests.swift; sourceTree = "<group>"; };
+		D04EABECEE4BD6B84BAC341A /* Uploader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Uploader.swift; sourceTree = "<group>"; };
+		D28D69119A7668A0A23BDB57 /* IgnoreRules.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IgnoreRules.swift; sourceTree = "<group>"; };
+		D9201C0AA706FDFF877045BB /* SyncError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncError.swift; sourceTree = "<group>"; };
+		DA3C0DA079E4E103465665CD /* KeychainStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainStore.swift; sourceTree = "<group>"; };
+		DDB67AE63D5670BED8543EBA /* FileWatcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileWatcher.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		BA1E9CD571C3A35253F67797 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				9FF79ED9D02C034D4A29C8CB /* AWSS3 in Frameworks */,
+				59403A709AC7BCBD0A22D194 /* AWSClientRuntime in Frameworks */,
+				8A98F6AF29BC306DD893499F /* AWSSDKIdentity in Frameworks */,
+				88CE1058350DE5CE715BDB27 /* GRDB in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		1B76E8CE22781EF04418ADA8 /* Models */ = {
+			isa = PBXGroup;
+			children = (
+				81A0B0642C4340182C0BDB0A /* AWSCredentials.swift */,
+				82D4E74A4850C7BA2FAD0EA3 /* FileEntry.swift */,
+				52A253BAA0EB5A4D52C3E77A /* SyncEvent.swift */,
+				858DA1ADDCE543AC588ADC2A /* SyncStatus.swift */,
+			);
+			path = Models;
+			sourceTree = "<group>";
+		};
+		27A91B0AA5C097BEC18F59D9 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				6C7D544B462DF81DFB84FC44 /* AppEnvironment.swift */,
+				45BAEBEBA92C44451EB1201D /* TideApp.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		331C309B022C55E0D06BC47D /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				2B6B12A4689B10709B734D22 /* Tide.app */,
+				721CD940D3929EFD005575FF /* TideTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		4DC114B2554EF769BC159E63 /* Tide */ = {
+			isa = PBXGroup;
+			children = (
+				27A91B0AA5C097BEC18F59D9 /* App */,
+				8C89844453B82BE55617CAAF /* Core */,
+				1B76E8CE22781EF04418ADA8 /* Models */,
+				DFC8EEA52107EBE148BAECE0 /* Resources */,
+				55D2E8DA76CD60AEB60E6CAE /* S3 */,
+				7F5A34D78D69B4BA443982A4 /* Storage */,
+				A4441765349631E2E737C2FF /* UI */,
+			);
+			path = Tide;
+			sourceTree = "<group>";
+		};
+		4E81887C93152FFA10466E2C /* TideTests */ = {
+			isa = PBXGroup;
+			children = (
+				C30A8166AAE342D39ECF3D6F /* ConflictNamerTests.swift */,
+				3C531B92C91BFA8DF787AA83 /* DebounceQueueTests.swift */,
+				1BD4B605839107E1638A0D11 /* HardcodedIgnoreRulesTests.swift */,
+				16ED0B8D39615582C0CD3596 /* HashCalculatorTests.swift */,
+				57ED617F25861D75B21F4EE8 /* ManifestShardingTests.swift */,
+				B664427DD4577E4CDF8BCAE8 /* PathValidatorTests.swift */,
+				2891D2A84ED794803593042D /* SmokeTests.swift */,
+			);
+			path = TideTests;
+			sourceTree = "<group>";
+		};
+		55D2E8DA76CD60AEB60E6CAE /* S3 */ = {
+			isa = PBXGroup;
+			children = (
+				9387D07371DA25AF234841AA /* Downloader.swift */,
+				3E6C42C9F1EF0B6B378A1D24 /* KnownRegions.swift */,
+				86CCB3744E3CE4973CE0ED13 /* Manifest.swift */,
+				5BFBDECCFCF00DE9860A9C1F /* ManifestReader.swift */,
+				85B8648A9E5391D4725A0EE7 /* ManifestSharding.swift */,
+				C01FAB16EDCECA8698C1E5CF /* S3Client.swift */,
+				D04EABECEE4BD6B84BAC341A /* Uploader.swift */,
+			);
+			path = S3;
+			sourceTree = "<group>";
+		};
+		7F5A34D78D69B4BA443982A4 /* Storage */ = {
+			isa = PBXGroup;
+			children = (
+				1ABF6365546F76EB0474766A /* ConfigStore.swift */,
+				DA3C0DA079E4E103465665CD /* KeychainStore.swift */,
+				0C08DD3532C0C011010E53F2 /* LocalDatabase.swift */,
+				ADC61A4E5F7528718FC1A7C8 /* Migrations.swift */,
+			);
+			path = Storage;
+			sourceTree = "<group>";
+		};
+		8C89844453B82BE55617CAAF /* Core */ = {
+			isa = PBXGroup;
+			children = (
+				B5CA66881F9B9E5508D609E2 /* AppLogger.swift */,
+				6A37D12E34F75BE19B664B46 /* ConflictNamer.swift */,
+				29A0EA5C034CFDEE0E2994AE /* DebounceQueue.swift */,
+				DDB67AE63D5670BED8543EBA /* FileWatcher.swift */,
+				B0A0C2B81618658098C69DC2 /* HashCalculator.swift */,
+				D28D69119A7668A0A23BDB57 /* IgnoreRules.swift */,
+				7D5A3FCD54C910A40D3A0DF3 /* PathValidator.swift */,
+				075300181A2D09025E384D3B /* SyncEngine.swift */,
+				D9201C0AA706FDFF877045BB /* SyncError.swift */,
+				19BDDA56B819A3F918C424E9 /* TideTmpDirectory.swift */,
+			);
+			path = Core;
+			sourceTree = "<group>";
+		};
+		A4441765349631E2E737C2FF /* UI */ = {
+			isa = PBXGroup;
+			children = (
+				026AC3AAA816DBF9DF595080 /* MenuBarContent.swift */,
+				BC8E5DD109E48D0F8ABF0455 /* SettingsWindow.swift */,
+				4292EC731F5D275D86CFDAE2 /* SetupWizardWindow.swift */,
+			);
+			path = UI;
+			sourceTree = "<group>";
+		};
+		C5D009E4BEFF4F184C869BEF = {
+			isa = PBXGroup;
+			children = (
+				4DC114B2554EF769BC159E63 /* Tide */,
+				4E81887C93152FFA10466E2C /* TideTests */,
+				331C309B022C55E0D06BC47D /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		DFC8EEA52107EBE148BAECE0 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				64DE907E2B5F3A1E362A67CA /* Assets.xcassets */,
+				1A9CB8EA6B406E2E0BB8E34C /* Localizable.xcstrings */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		170C49D9D8E64E2F3E539E47 /* TideTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 6032BB7EF53EAEBEB13050CC /* Build configuration list for PBXNativeTarget "TideTests" */;
+			buildPhases = (
+				AF6AEB424593C8DBEC89EBF4 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				3BDAD2A6C1DB8781A49F327B /* PBXTargetDependency */,
+			);
+			name = TideTests;
+			packageProductDependencies = (
+			);
+			productName = TideTests;
+			productReference = 721CD940D3929EFD005575FF /* TideTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		3DFFE12DD84D9B50195B8141 /* Tide */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = FA5080E00E0123132278FFAC /* Build configuration list for PBXNativeTarget "Tide" */;
+			buildPhases = (
+				5AC26BCB031B9BC205E69E8B /* Sources */,
+				C2187F92E0C4E9A51C6D4576 /* Resources */,
+				BA1E9CD571C3A35253F67797 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Tide;
+			packageProductDependencies = (
+				9D164DF37935E502C6D53EB6 /* AWSS3 */,
+				A50D20ED5B5AEECF1F032839 /* AWSClientRuntime */,
+				B70DC5D65F2DCBFC4293FC8E /* AWSSDKIdentity */,
+				868B594F3D527CF261BDC653 /* GRDB */,
+			);
+			productName = Tide;
+			productReference = 2B6B12A4689B10709B734D22 /* Tide.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		90A75D909A340A469D54F9F1 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					170C49D9D8E64E2F3E539E47 = {
+						DevelopmentTeam = G5G54TCH8W;
+						ProvisioningStyle = Automatic;
+					};
+					3DFFE12DD84D9B50195B8141 = {
+						DevelopmentTeam = G5G54TCH8W;
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = 172CF19F4D0120DEAA067E1C /* Build configuration list for PBXProject "Tide" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+				ja,
+			);
+			mainGroup = C5D009E4BEFF4F184C869BEF;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				35759C9667E160527ABC276E /* XCRemoteSwiftPackageReference "aws-sdk-swift" */,
+				D8F7CF3246F1E8AAF506C2BB /* XCRemoteSwiftPackageReference "GRDB.swift" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 331C309B022C55E0D06BC47D /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				3DFFE12DD84D9B50195B8141 /* Tide */,
+				170C49D9D8E64E2F3E539E47 /* TideTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		C2187F92E0C4E9A51C6D4576 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				EC50EACACB83EEE810D0E3A2 /* Assets.xcassets in Resources */,
+				BACC401E33B0D4F9983A990D /* Localizable.xcstrings in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		5AC26BCB031B9BC205E69E8B /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				694216A7F3CCAD5B026C98A1 /* AWSCredentials.swift in Sources */,
+				3858DAA7CA5E2ED41BB7BB7B /* AppEnvironment.swift in Sources */,
+				77E7546C27CC6A58425F95FC /* AppLogger.swift in Sources */,
+				80FA3DEB098561CCBE351B6D /* ConfigStore.swift in Sources */,
+				DB647CF57D16DAD945F3C6C0 /* ConflictNamer.swift in Sources */,
+				819303744001AB587D5760BD /* DebounceQueue.swift in Sources */,
+				AEEB1FD5D33DD25EADD1B5DD /* Downloader.swift in Sources */,
+				471D1582272A7982801912E7 /* FileEntry.swift in Sources */,
+				4A8930AD2D0AE9A529E0478C /* FileWatcher.swift in Sources */,
+				C1113CE816B5451E65B63071 /* HashCalculator.swift in Sources */,
+				6B17E559300F54CC080C866D /* IgnoreRules.swift in Sources */,
+				5F924B1D5938B20402709207 /* KeychainStore.swift in Sources */,
+				D7A7077860BD170A80B583CB /* KnownRegions.swift in Sources */,
+				5BE0DB13AD7C865881AA99AF /* LocalDatabase.swift in Sources */,
+				0440BDD7584DE6ABF2C5E610 /* Manifest.swift in Sources */,
+				000FA049016E7BEE14E46B7C /* ManifestReader.swift in Sources */,
+				456F89B1C5E9C6CEE665EE21 /* ManifestSharding.swift in Sources */,
+				8A2492FBD381EC905AC4AC87 /* MenuBarContent.swift in Sources */,
+				E62A2A1324F7FB72E560194A /* Migrations.swift in Sources */,
+				D45DBF8182C8CDB7CDF3ED25 /* PathValidator.swift in Sources */,
+				B4526FDEB3B4C457DF3F76D6 /* S3Client.swift in Sources */,
+				34C9CD59AD38354487CAE58D /* SettingsWindow.swift in Sources */,
+				90A6EB78AF3A3DD31CF27760 /* SetupWizardWindow.swift in Sources */,
+				B54010E5DAE38474C6EE3409 /* SyncEngine.swift in Sources */,
+				FC518B2002C4E7EE05A72567 /* SyncError.swift in Sources */,
+				1628205A2D702AD28C982B14 /* SyncEvent.swift in Sources */,
+				D1730746F1028260C48E2A90 /* SyncStatus.swift in Sources */,
+				A674AB99F3B090F076F6C29B /* TideApp.swift in Sources */,
+				114F8696EC6701E674C97FDA /* TideTmpDirectory.swift in Sources */,
+				5985D271E50C37ABEBE5327A /* Uploader.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		AF6AEB424593C8DBEC89EBF4 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				EAC3C614D2A5536CDF93CE5D /* ConflictNamerTests.swift in Sources */,
+				6AF129A12A51D9159C0986FE /* DebounceQueueTests.swift in Sources */,
+				96D7C21D7103303A59A8C4BB /* HardcodedIgnoreRulesTests.swift in Sources */,
+				9B793A724C6B1B17CE22B11F /* HashCalculatorTests.swift in Sources */,
+				6713D52E474D2DE81405414C /* ManifestShardingTests.swift in Sources */,
+				3BC2C69B981F941D2727FF08 /* PathValidatorTests.swift in Sources */,
+				B2DCE996F5CB9F81078CAEC0 /* SmokeTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		3BDAD2A6C1DB8781A49F327B /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 3DFFE12DD84D9B50195B8141 /* Tide */;
+			targetProxy = 7F9E1344B1DD0B1C477ED661 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		0ED1E48A2E9F16B4C01FC6BD /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_PREVIEWS = YES;
+				INFOPLIST_FILE = Tide/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = org.izukawa.Tide;
+				PRODUCT_NAME = Tide;
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		200ACF2BA0537FE49CCAB4A2 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				PRODUCT_BUNDLE_IDENTIFIER = org.izukawa.TideTests;
+				SDKROOT = macosx;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Tide.app/Contents/MacOS/Tide";
+			};
+			name = Release;
+		};
+		C7BFCB0FDF7119A45ACD827B /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = G5G54TCH8W;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_INHIBIT_ALL_WARNINGS = NO;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		CAD2E86AC7182AB1F13B810B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_PREVIEWS = YES;
+				INFOPLIST_FILE = Tide/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = org.izukawa.Tide;
+				PRODUCT_NAME = Tide;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		D2DFEC7D45A80DC5DEEA45A6 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = G5G54TCH8W;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_INHIBIT_ALL_WARNINGS = NO;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		EFCB127186FA2F972E791605 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				PRODUCT_BUNDLE_IDENTIFIER = org.izukawa.TideTests;
+				SDKROOT = macosx;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Tide.app/Contents/MacOS/Tide";
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		172CF19F4D0120DEAA067E1C /* Build configuration list for PBXProject "Tide" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D2DFEC7D45A80DC5DEEA45A6 /* Debug */,
+				C7BFCB0FDF7119A45ACD827B /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		6032BB7EF53EAEBEB13050CC /* Build configuration list for PBXNativeTarget "TideTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				EFCB127186FA2F972E791605 /* Debug */,
+				200ACF2BA0537FE49CCAB4A2 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		FA5080E00E0123132278FFAC /* Build configuration list for PBXNativeTarget "Tide" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CAD2E86AC7182AB1F13B810B /* Debug */,
+				0ED1E48A2E9F16B4C01FC6BD /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		35759C9667E160527ABC276E /* XCRemoteSwiftPackageReference "aws-sdk-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/awslabs/aws-sdk-swift";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.7.3;
+			};
+		};
+		D8F7CF3246F1E8AAF506C2BB /* XCRemoteSwiftPackageReference "GRDB.swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/groue/GRDB.swift";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 7.10.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		868B594F3D527CF261BDC653 /* GRDB */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D8F7CF3246F1E8AAF506C2BB /* XCRemoteSwiftPackageReference "GRDB.swift" */;
+			productName = GRDB;
+		};
+		9D164DF37935E502C6D53EB6 /* AWSS3 */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 35759C9667E160527ABC276E /* XCRemoteSwiftPackageReference "aws-sdk-swift" */;
+			productName = AWSS3;
+		};
+		A50D20ED5B5AEECF1F032839 /* AWSClientRuntime */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 35759C9667E160527ABC276E /* XCRemoteSwiftPackageReference "aws-sdk-swift" */;
+			productName = AWSClientRuntime;
+		};
+		B70DC5D65F2DCBFC4293FC8E /* AWSSDKIdentity */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 35759C9667E160527ABC276E /* XCRemoteSwiftPackageReference "aws-sdk-swift" */;
+			productName = AWSSDKIdentity;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = 90A75D909A340A469D54F9F1 /* Project object */;
+}
