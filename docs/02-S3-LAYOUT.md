@@ -185,9 +185,48 @@ let request = PutBucketVersioningInput(
 )
 ```
 
+## Public Access Block (M2 で追加)
+
+初回セットアップ時に `TideS3Client.enforcePublicAccessBlock` で **4 設定すべて true** を投入する:
+
+```swift
+PutPublicAccessBlockInput(
+    bucket: bucket,
+    publicAccessBlockConfiguration: PublicAccessBlockConfiguration(
+        blockPublicAcls: true,
+        blockPublicPolicy: true,
+        ignorePublicAcls: true,
+        restrictPublicBuckets: true
+    )
+)
+```
+
+ユーザがコンソール等で将来うっかりバケットを公開設定にする事故をアプリ側で塞ぐ。
+IAM ポリシーに `s3:PutBucketPublicAccessBlock` が必要 (`docs/06-SETUP-AND-BUILD.md` 参照)。
+
+## サーバサイド暗号化 (M2 で追加)
+
+`PutObject` には常に `serverSideEncryption: .aes256` を明示する（バケット側のデフォルト暗号化に依らない）:
+
+```swift
+let input = PutObjectInput(
+    body: .data(data),
+    bucket: bucket,
+    contentType: contentType,
+    key: key,
+    metadata: metadata,
+    serverSideEncryption: .aes256
+)
+```
+
 ## ライフサイクルルール
 
 初回セットアップ時に自動投入。3つのルール:
+
+> **適用方針（M2 で確定）**: `TideS3Client.ensureLifecycleRules` は **マージ方式** で動く。
+> 既存ルールを `GetBucketLifecycleConfiguration` で取得して、`tide-` プレフィックスを持つ ID は Tide 製とみなして
+> 内容を最新の定義に差し替え、それ以外のユーザ独自ルールは **温存** する。3 ID すべて揃っていれば PUT もスキップ。
+> 結果として、ユーザがコンソールで手動投入したカスタムルールを破壊しない。
 
 ### ルール1: マルチパートアップロードの掃除（必須）
 

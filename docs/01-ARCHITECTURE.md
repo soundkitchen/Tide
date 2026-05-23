@@ -1,49 +1,67 @@
-# Tide M1 アーキテクチャ
+# Tide アーキテクチャ（M1 + M2 実装後の現状）
+
+> 当初は「M1 のみ」を対象に書かれたが、M2 の実装完了に伴って構成を更新した。
+> M3 で追加されるコンポーネントは [`07-M3-IMPLEMENTATION-GUIDE.md`](07-M3-IMPLEMENTATION-GUIDE.md) を参照。
 
 ## モジュール構成
 
 ```
 Tide/
-├── Tide.xcodeproj
+├── Tide.xcodeproj                    xcodegen 生成（git 追跡対象、直接編集不可）
+├── project.yml                       xcodegen の入力
+├── Makefile                          build / test / reset / fresh の統合
 ├── Tide/
 │   ├── App/
 │   │   ├── TideApp.swift              @main、メニューバー常駐
-│   │   └── AppEnvironment.swift         依存性注入用のコンテナ
+│   │   └── AppEnvironment.swift       依存性注入コンテナ + factoryReset
 │   ├── UI/
-│   │   ├── MenuBarContent.swift         メニューバーのドロップダウン
-│   │   ├── SettingsWindow.swift         設定画面（ウィンドウ）
-│   │   ├── SetupWizardWindow.swift      初回セットアップ
-│   │   └── Components/                  共通 UI コンポーネント
+│   │   ├── MenuBarContent.swift       メニューバーのポップオーバー
+│   │   ├── SettingsWindow.swift       設定画面
+│   │   └── SetupWizardWindow.swift    初回セットアップ（リージョン Picker / バケット作成分岐）
 │   ├── Core/
-│   │   ├── SyncEngine.swift             同期制御の中枢
-│   │   ├── FileWatcher.swift            FSEvents ラッパー
-│   │   ├── HashCalculator.swift         SHA-256 計算（ストリーミング）
-│   │   ├── IgnoreRules.swift            .syncignore パーサ（M3 で完成、M1 ではハードコード除外のみ）
-│   │   └── DebounceQueue.swift          変更イベントのデバウンス
+│   │   ├── SyncEngine.swift           同期制御の中枢（ローカル監視 + リモート pull）
+│   │   ├── FileWatcher.swift          FSEvents ラッパー
+│   │   ├── HashCalculator.swift       SHA-256 計算（ストリーミング）
+│   │   ├── IgnoreRules.swift          ハードコード除外 + 既定の機密ファイル除外
+│   │   ├── DebounceQueue.swift        変更イベントのデバウンス
+│   │   ├── ConflictNamer.swift        コンフリクト時のリネーム命名 (M2)
+│   │   ├── PathValidator.swift        リモート由来パス / シャード ID の検証 (security)
+│   │   ├── TideTmpDirectory.swift     ダウンロード一時ディレクトリの解決 (M2)
+│   │   ├── AppLogger.swift            os.Logger ラッパー
+│   │   └── SyncError.swift            アプリ独自エラー型
 │   ├── Storage/
-│   │   ├── LocalDatabase.swift          GRDB.swift ラッパー
-│   │   ├── KeychainStore.swift          認証情報の保管
-│   │   ├── ConfigStore.swift            UserDefaults ラッパー
-│   │   └── Migrations.swift             DB マイグレーション定義
+│   │   ├── LocalDatabase.swift        GRDB.swift ラッパー
+│   │   ├── KeychainStore.swift        認証情報保管（Data Protection Keychain）
+│   │   ├── ConfigStore.swift          UserDefaults ラッパー
+│   │   └── Migrations.swift           DB マイグレーション定義
 │   ├── S3/
-│   │   ├── S3Client.swift               AWS SDK ラッパー
-│   │   ├── Manifest.swift               マニフェスト読み書き
-│   │   ├── ManifestSharding.swift       シャード振り分けロジック
-│   │   ├── Uploader.swift               アップロード処理
-│   │   └── BucketSetup.swift            バージョニング、ライフサイクル設定
+│   │   ├── S3Client.swift             AWS SDK ラッパー（SSE-S3 / PublicAccessBlock / ensureLifecycleRules マージ）
+│   │   ├── Manifest.swift             マニフェスト型 + JSON 入出力
+│   │   ├── ManifestSharding.swift     シャード振り分け（SHA-1 先頭バイト）
+│   │   ├── ManifestReader.swift       リモート状態の集約読み込み (M2)
+│   │   ├── Uploader.swift             アップロード処理 + ManifestUpdater
+│   │   ├── Downloader.swift           ダウンロード + コンフリクトリネーム + 削除反映 (M2)
+│   │   └── KnownRegions.swift         AWS リージョン一覧（Picker 用）
 │   ├── Models/
-│   │   ├── FileEntry.swift              ファイルメタデータ
-│   │   ├── SyncEvent.swift              内部イベント
-│   │   ├── SyncStatus.swift             同期状態（idle, syncing, error 等）
-│   │   └── AWSCredentials.swift         認証情報
+│   │   ├── FileEntry.swift            マニフェストのファイルエントリ
+│   │   ├── SyncEvent.swift            FileChangeEvent
+│   │   ├── SyncStatus.swift           同期状態（idle, syncing, error 等）
+│   │   └── AWSCredentials.swift       認証情報
 │   └── Resources/
-│       └── Assets.xcassets
+│       ├── Assets.xcassets
+│       └── Localizable.xcstrings      String Catalog (en source / ja 翻訳)
 └── TideTests/
     ├── ManifestShardingTests.swift
-    ├── IgnoreRulesTests.swift
+    ├── HardcodedIgnoreRulesTests.swift
     ├── HashCalculatorTests.swift
-    └── ...
+    ├── DebounceQueueTests.swift
+    ├── ConflictNamerTests.swift
+    ├── PathValidatorTests.swift
+    └── SmokeTests.swift
 ```
+
+「会話を通じて決まったが本書の上記表で説明しきれていない実装上の判断」は
+プロジェクトルートの `CLAUDE.md` の「会話を通じて確定した実装決定」に集約している。
 
 ## レイヤー構成と依存方向
 

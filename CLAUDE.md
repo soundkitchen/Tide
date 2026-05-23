@@ -6,7 +6,7 @@
 
 ---
 
-## 🚨 大原則: ドキュメントとコミットメッセージは必ず日本語で
+## 🚨 大原則 (1): ドキュメントとコミットメッセージは必ず日本語で
 
 **このリポジトリで AI エージェントが生成する以下のものは、すべて日本語で書く**。
 英語で書いてはならない。例外なし。
@@ -20,6 +20,27 @@
 迷ったときの判断基準:
 - ユーザの目に触れる人間向けテキストは日本語
 - 機械が読む識別子・コードは英語
+
+---
+
+## 🚨 大原則 (2): 実装変更はドキュメント反映とセットでコミット
+
+**コード変更を含むコミットを作る前に、関連するドキュメントが最新かを必ず確認する。**
+実装とドキュメントが乖離した状態でコミットしてはならない。
+
+確認の対象:
+- `docs/*.md` — 仕様レベルの記述。実装がここから外れたら、同じコミットで docs も更新
+- `CLAUDE.md` の「会話で確定した実装決定」セクション — 仕様レベル未満の運用ルール
+- `security/*.md` — セキュリティ関連の変更があれば該当項目に **Status:** 行で反映
+- `README.md`（ある場合）/ `Makefile` のヘルプテキスト
+
+コミット前チェックリスト:
+1. `make build && make test` が通る
+2. **`docs/` を grep して、変更箇所の仕様記述を確認したか**
+3. 新規の運用上の決定があれば CLAUDE.md に追記したか
+4. セキュリティ周りなら `security/` の Status を更新したか
+
+「あとでまとめて直す」は禁止。**今のコミットに含める**。
 
 ---
 
@@ -150,7 +171,49 @@
 
 ---
 
-## 7. 既知の据え置き項目
+## 7. 会話を通じて確定した実装決定（docs/ に書ききれていない補足）
+
+`docs/` の仕様書本文を超えて、会話のキャッチボールで確定した運用上の決定をここに集約する。
+新規実装で挙動を変える時は、対応する `docs/*.md` も同時更新（→ 大原則 (2)）。
+
+### S3 / バケット運用
+- **リージョン入力は `Picker`（`KnownRegions.all`）**。フリーテキストはタイポ事故が起きるので使わない。
+- **バケット未存在時は「アラート → CreateBucket」フロー** (`SetupWizardWindow.runCreateBucketAndProvision`)。IAM ポリシーに一時的に `s3:CreateBucket` が要る（`docs/06-SETUP-AND-BUILD.md` 参照）。
+- **ライフサイクルルールはマージ方式** (`TideS3Client.ensureLifecycleRules`)。`tide-` プレフィックスの ID で Tide 製ルールを識別し、ユーザ独自ルールは温存する。3 ID すべて揃っていれば PUT もスキップ。
+- **`PutObject` は常に `serverSideEncryption: .aes256` を明示**。
+- **プロビジョニング時に `enforcePublicAccessBlock()`** で 4 設定すべて true を投入。
+
+### リセット / クリーンアップ
+- **`AppEnvironment.factoryReset` は `make reset` と同じ振る舞いに揃える**: Application Support / Caches / UserDefaults / Keychain を全部消す。deviceId も含めて消す（`ConfigStore.resetIncludingDeviceId`）。
+
+### ダウンロード一時ディレクトリ
+- **`TideTmpDirectory.resolve(for:)` で同一ボリュームの tmp を返す**。第一選択は `~/Library/Caches/Tide/tmp/`。同期ルートと別ボリュームになる時のみ `<syncRoot>/.tide/tmp/` にフォールバック。`moveItem` の atomic 性を保つため。
+
+### 競合ファイル命名
+- **`ConflictNamer.localCopyRelativePath(for:at:)` の命名規則**: `<stem> (local copy YYYY-MM-DD HH-MM-SS).<ext>`。
+  - 例: `note.txt` → `note (local copy 2026-05-24 12-34-56).txt`
+  - 拡張子なしファイル / dotfile (`.gitignore` 等) も対応済み。
+
+### リモート削除の取り扱い
+- **「リモートで消えたファイルをローカル削除するのは、ローカルファイルの SHA が DB 記録（最後にアップロードした内容）と一致するときのみ」**。一致しなければユーザが触っているとみなし、`sync_log` に warning を残してスキップ。`Downloader.applyRemoteDeletion`。
+
+### `xcodegen` / Xcode プロジェクト
+- **`Tide.xcodeproj/` は git 追跡対象**。`make generate` 後の差分も同じコミットに含めるのがルール。
+- xcuserdata は除外。
+
+### `Localizable.xcstrings` の運用
+- **新規キーには必ず `extractionState: "manual"`** を付ける（Xcode の自動 purge を防ぐため）。
+- **「キーが既に登録されていないか」を編集前に `grep` で確認**（汎用語の重複事故が起きやすい — 過去に `"Region"` 重複で JSON が壊れた）。
+
+### UI 起動・遷移
+- **`MenuBarExtra(.window)` のポップオーバー内ボタンから `openWindow(id:)` を呼ぶときは、`NSApp.activate(ignoringOtherApps: true)` を必ず前置**。LSUIElement = YES のアプリだとアプリがフォアグラウンドに来ておらず、新しいウィンドウが obscured になる。
+
+### Bootstrap 失敗時の挙動
+- **`AppEnvironment.bootstrapFailure` に詳細理由（どのフィールド / Keychain 読みでコケたか）を入れる**。`MenuBarContent` はその値を見て自動的にセットアップウィザードを再表示する。
+
+---
+
+## 8. 既知の据え置き項目
 
 - **C3 後半**: HTTPS 強制バケットポリシー（`PutBucketPolicy` で `aws:SecureTransport=true`）。SDK 自体は HTTPS 既定で送るので緊急度は低い。
 - **H3**: 静的 AWS キー → STS / IAM Identity Center への構造的置き換え。M3 以降で要検討。

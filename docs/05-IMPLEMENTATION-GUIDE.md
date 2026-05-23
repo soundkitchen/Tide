@@ -1,4 +1,8 @@
-# Claude Code 向け実装ガイド
+# Claude Code 向け実装ガイド（M1 — 完了済み・参考用）
+
+> **このドキュメントは過去ログ扱い**: M1 はステップ 1〜12 まで完了済み。
+> 現状のアーキテクチャは `01-ARCHITECTURE.md`、現状の同期ロジックは `04-SYNC-LOGIC.md` を参照。
+> M3 着手前の設計メモは `07-M3-IMPLEMENTATION-GUIDE.md`。
 
 このドキュメントは、Claude Code が M1 を実装するための手順書。
 

@@ -1,8 +1,13 @@
-# 同期ロジック（M1: 一方向）
+# 同期ロジック
+
+> **スコープの現状 (2026-05-24)**:
+> - **M1 完了**: ローカル → S3 の一方向アップロード（本書の前半）
+> - **M2 完了**: S3 → ローカルのダウンロード、定期ポーリング、リモート削除反映、コンフリクトリネーム（本書末尾「M2 セクション」）
+> - **M3 未着手**: 形式的な 3-way merge、マルチパートアップロード、`.syncignore`
 
 ## M1 のスコープ
 
-M1 では **ローカル → S3 の一方向** のみを実装する。S3 → ローカルは M2 で実装。
+M1 では **ローカル → S3 の一方向** のみを実装する。
 
 そのため M1 の同期ロジックは「ローカルファイルの変更を検知し、S3 に反映する」だけのシンプルな構造になる。3-way merge は M3 で実装する。
 
@@ -388,3 +393,112 @@ do {
 macOS は NFD（分解形式）でファイル名を返す。S3 にはこれをそのまま渡す。NFC（合成形式）に正規化したくなる誘惑があるが、**しない**。ローカルの実態と一致させる方が安全。
 
 ただし、別 OS（Windows / Linux）から見るときに見えにくくなる可能性はある。これは M3 以降で議論。
+
+---
+
+# M2: ダウンロード / 復元 / 定期ポーリング
+
+M2 で **S3 → ローカルの取り込み** が追加された。ローカル → S3（M1）の経路は維持しつつ、`SyncEngine` に **リモート pull ループ** を統合する形で実装している。
+
+## 全体像
+
+```
+[起動] / [3 分ごと] / [スリープ復帰] / [ネットワーク復帰]
+   │
+   ▼
+[SyncEngine.triggerRemotePull()]
+   │
+   ▼
+[ManifestReader.read()]
+   ├─ index.json を GET（最大 16 MiB に制限）
+   ├─ shard_state テーブルの etag キャッシュと突き合わせ
+   ├─ 変化したシャードのみ並列 GET（最大 8 並列、各 16 MiB 制限）
+   └─ 変化なしシャードのファイルはローカル DB から補完
+   │
+   ▼
+[全リモートファイル × 5 並列で reconcileRemoteEntry]
+   │  各 path に対して:
+   │  ├─ PathValidator で path / shardId を検証（攻撃面の遮断）
+   │  ├─ ローカル無し → ダウンロード
+   │  ├─ ローカルあり / SHA 一致 → スキップ（DB を最新化）
+   │  ├─ ローカルあり / SHA != remote / DB と一致 → ローカル未編集 → ダウンロード（上書き）
+   │  └─ ローカルあり / SHA != remote / DB とも違う → コンフリクト
+   │       └─ Downloader.renameLocalForConflict → リモートをダウンロード
+   ▼
+[リモート削除の反映]
+   │  「更新があったシャード」に属していたが remoteMap にない path を抽出
+   │  各 path に対して Downloader.applyRemoteDeletion
+   │  └─ ローカル SHA が DB 記録と一致するときのみ削除（触られていれば残す）
+   ▼
+[lastRemoteCheckedAt 更新]
+```
+
+## トリガー
+
+`SyncEngine.start()` で 3 つのオブザーバを起動する:
+
+1. **periodic poll**: `ConfigStore.pollingIntervalSeconds` で定期実行（既定 180 秒、最小 30 秒で clamp）
+2. **wake 復帰**: `NSWorkspace.didWakeNotification` を購読
+3. **network 復帰**: `NWPathMonitor` で `unsatisfied → satisfied` を検出
+
+3 つすべて `triggerRemotePullSafely(reason:)` を呼び、`remotePullInFlight` フラグで多重起動を抑制。
+
+## ManifestReader: 変更差分の効率取得
+
+`Tide/S3/ManifestReader.swift` が中心。
+
+```swift
+struct ReadResult {
+    var files: [String: ManifestFileEntry]  // 現在のリモート全ファイル
+    var updatedShards: Set<String>          // 今回新規 GET したシャード
+    var removedShards: Set<String>          // index から消えたシャード（=配下削除）
+}
+```
+
+- `index.json` だけ毎回取得（軽量）
+- 各シャードの etag を `shard_state` テーブルにキャッシュ
+- 差分のあるシャードだけ並列 GET
+- **変化なしシャードのファイル**はローカル DB の `files` テーブルから「最後に同期した状態」として補完する。シャード自体は再取得しない。
+
+## Downloader: 単一ファイル取得
+
+`Tide/S3/Downloader.swift` の `download(relativePath:entry:)`:
+
+```
+1. PathValidator.resolveSafely で path 検証 + syncRoot 配下確認
+2. 既存ローカルファイルがシンボリックリンクなら拒否（実体書換防止）
+3. ローカル SHA == manifest SHA ならスキップ（DB のみ最新化）
+4. GetObject（content-length / 受信長を maxBytes でチェック）
+5. SHA-256 検証（manifest と byte 不一致なら abort）
+6. 親ディレクトリ作成
+7. tmpDir 配下に書き込み（TideTmpDirectory が同一ボリュームを保証）
+8. mtime をマニフェストの値で復元
+9. 既存ファイルがあれば removeItem → moveItem で atomic に置換
+   （replaceItemAt は .sb-* 中間ファイルを作って FSEvents を汚すので使わない）
+10. DB を更新 + sync_log 記録
+```
+
+## 競合解決（M2 の単純ルール）
+
+形式的な 3-way merge は M3 で導入予定。M2 では次の単純ルールで運用する:
+
+| ローカル状態 | リモート状態 | 動作 |
+|---|---|---|
+| 無 | あり | ダウンロード |
+| あり / SHA = remote | あり | スキップ + DB 最新化 |
+| あり / SHA != remote / SHA = DB（前回 sync 時） | あり | ダウンロード（remote が新しいと判断） |
+| あり / SHA != remote / SHA != DB | あり | **コンフリクト**: `<stem> (local copy YYYY-MM-DD HH-MM-SS).<ext>` にリネーム → remote をダウンロード。リネーム後のファイルは FSEvents 経由で M1 アップロードキューに乗る |
+| あり / SHA = DB | 無 | ローカル削除（リモート削除の反映） |
+| あり / SHA != DB | 無 | **温存** + `sync_log` に warning（ユーザがローカルで編集中とみなす） |
+| 無 | 無 | 何もしない |
+
+リネーム規則は `ConflictNamer.localCopyRelativePath(for:at:)`。dotfile / 拡張子なしも対応。
+
+## セキュリティゲート
+
+- マニフェスト由来の `relativePath` / `shardId` は **すべて** `PathValidator` を通す（`..` / 絶対パス / NUL / バックスラッシュ等を拒否し、解決後 URL が syncRoot 配下にあることまで確認）
+- `getObject` は `maxBytes` 既定 200 MiB、マニフェスト系は 16 MiB
+- フルスキャンの enumerator はシンボリックリンクを skipDescendants して追従しない
+- Downloader の書き込み先がシンボリックリンクなら拒否
+
+詳細は `security/critical.md` の C1 / C2 と `security/medium.md` の M3 / M4 を参照。
