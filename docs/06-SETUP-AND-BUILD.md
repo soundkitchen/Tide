@@ -78,6 +78,23 @@ M1 のセットアップウィザードは「バケットが存在しなけれ�
 
 事前に AWS CLI でバケットを作っておけば（このページ冒頭の `aws s3 mb` のとおり）、上の追加権限は不要。
 
+#### バケット存在判定の挙動（HeadBucket と空ボディ応答）
+
+セットアップウィザードは `Test & Provision` で `HeadBucket` を実行して存在を確認する。`HeadBucket` は HEAD なので応答ボディが空で、S3/AWS SDK の挙動には次の癖がある:
+
+- **200** → バケットが存在しアクセス可能 → そのまま使用。
+- **空ボディ 404** → SDK のカスタマイズで `NotFound` に変換 → 「作成または使用」フローへ。
+- **空ボディ 403 / 301**（名前が他アカウントで使用中 / IAM に `s3:ListBucket` 権限が無い / リージョン不一致）→ smithy-swift が `<Code>` を読めず `missingRequiredData` を投げる。**この decode エラーには HTTP ステータスが乗らない**ため、Tide は存在を確定できない。
+
+このため Tide は「`missingRequiredData` を含む HeadBucket 失敗」も **「バケットがありません。作成しますか？」の confirm を出してから `CreateBucket` を実行し、その結果で確定**させる:
+
+- `CreateBucket` 成功 → 新規作成して使用。
+- `BucketAlreadyOwnedByYou`（既存・自分の所有）→ **エラーにせずそのまま使用**（複数マシンで同じバケットに合流するための既存利用パス）。
+- `BucketAlreadyExists`（他アカウントが使用中）→ 同期に使えないので「別の名前を」とエラー表示。
+- `AccessDenied`（`s3:CreateBucket` 権限が無い）→ 「権限が不足しています。IAM ポリシーに s3:CreateBucket が必要です」とエラー表示。
+
+なお、上記 IAM ポリシーのとおり `s3:ListBucket` を付与していれば `HeadBucket` は 200 / 404 を返し、この `missingRequiredData` 経路には入らない（既存の自分のバケットは confirm 無しでそのまま使われる）。
+
 ## プロジェクトのビルド
 
 ### コマンドラインから
@@ -94,6 +111,17 @@ xcodebuild -project Tide.xcodeproj \
 # 生成物
 ls ./build/Build/Products/Debug/Tide.app
 ```
+
+### コード署名と Keychain entitlement（初回のみ Mac の登録が必要）
+
+Tide は AWS 認証情報を **Data Protection Keychain**（`kSecUseDataProtectionKeychain=true`、セキュリティ対応 H1）に保存する。これを使うにはアプリに `keychain-access-groups` entitlement が必要で、`project.yml` の `entitlements` から `Tide/Tide.entitlements`（`$(AppIdentifierPrefix)org.izukawa.Tide`）が生成され署名に埋め込まれる。
+
+automatic signing でこの entitlement を付与するには **Mac App Development プロビジョニングプロファイル**が要り、その生成には **この Mac が開発者アカウントにデバイス登録**されている必要がある。未登録だとビルドが
+`Device "…" isn't registered in your developer account` で失敗し、実行時には Keychain 保存が `OSStatus 34018 (errSecMissingEntitlement)` になる。
+
+- **初回だけ Xcode GUI で登録する**: `Tide.xcodeproj` を Xcode で開き、`Tide` ターゲットの Signing & Capabilities が team `G5G54TCH8W` / Automatically manage signing になっていることを確認して一度ビルド（⌘B）する。Xcode がこの Mac を自動登録し、開発用プロビジョニングプロファイルを作成する。
+- 以後は CLI（`make build` / `make run` / `make test`）でも通る。`Makefile` の `xcodebuild` には **`-allowProvisioningUpdates`** を付けてあり、登録済みデバイス向けのプロファイル生成・更新を CLI から行えるようにしている（CLI 単体では未登録デバイスの新規登録はできない点に注意）。
+- デバイス登録が上限（Mac は年間で消せない）に達している等で登録できない場合は、`docs`/会話で file ベース Keychain へのフォールバック可否を相談する。
 
 ### Xcode から
 

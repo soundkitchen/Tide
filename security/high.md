@@ -4,7 +4,9 @@
 
 **Status:** ✅ Fixed (2026-05-24) — `KeychainStore` の共通クエリに `kSecUseDataProtectionKeychain=true`, `kSecAttrSynchronizable=false` を、attrs に `kSecAttrAccessible=kSecAttrAccessibleAfterFirstUnlock` と `kSecAttrLabel` を明示。Data Protection Keychain に寄せたので Bundle ID / Team ID 紐付けが厳格になり、`security` CLI からの素の覗き見も困難。
 
-**該当箇所:** `Tide/Storage/KeychainStore.swift:37-57`
+**追記 (2026-06-01):** Data Protection Keychain は `keychain-access-groups` entitlement が無いと実行時に `OSStatus 34018 (errSecMissingEntitlement)` で失敗する。`project.yml` の `entitlements` で `Tide/Tide.entitlements`（`keychain-access-groups: $(AppIdentifierPrefix)org.izukawa.Tide`）を付与し、`Makefile` に `-allowProvisioningUpdates` を追加して署名に埋め込むようにした。automatic signing の都合で **この Mac の開発者アカウントへのデバイス登録**（初回 Xcode GUI ビルドで自動）が前提（`docs/06-SETUP-AND-BUILD.md` 参照）。データ保護 Keychain の方針（本項）は維持。
+
+**該当箇所:** `Tide/Storage/KeychainStore.swift:37-57`, `project.yml`（entitlements）, `Tide/Tide.entitlements`
 
 ```swift
 let query: [String: Any] = [

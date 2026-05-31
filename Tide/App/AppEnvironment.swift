@@ -108,7 +108,41 @@ final class AppEnvironment {
         config.region = region
         config.syncRootPath = syncRootPath
         config.setupCompleted = true
+
+        // 新規バケットのときだけ既定 .syncignore を置く（既存バケット参加時は競合回避のため作らない）
+        let syncRoot = URL(fileURLWithPath: syncRootPath, isDirectory: true)
+        await Self.seedDefaultSyncIgnoreIfNewBucket(
+            credentials: credentials, bucket: bucket, region: region,
+            deviceId: config.deviceId, syncRoot: syncRoot
+        )
+
         try await launchEngineFromCurrentConfig()
+    }
+
+    /// ローカルに `.syncignore` が無く、かつリモートにマニフェストも無い（＝まだ誰も同期していない
+    /// 新規バケット）ときだけ、既定の除外テンプレートを `<syncRoot>/.syncignore` に書く。
+    /// 既存バケットに参加する場合は他デバイスの `.syncignore` と競合する恐れがあるので作らない。
+    /// 失敗しても致命的ではない（同期は続行）。
+    private static func seedDefaultSyncIgnoreIfNewBucket(
+        credentials: AWSCredentials, bucket: String, region: String,
+        deviceId: String, syncRoot: URL
+    ) async {
+        do {
+            let localURL = try PathValidator.resolveSafely(relativePath: ".syncignore", syncRoot: syncRoot)
+            // ローカルに既にあれば触らない（symlink も「ある」扱い）
+            if FileManager.default.fileExists(atPath: localURL.path) { return }
+
+            let s3 = try TideS3Client(
+                credentials: credentials, region: region, bucket: bucket, deviceId: deviceId
+            )
+            // リモートにマニフェストがあれば既存バケット → 作らない
+            if try await s3.getIndex() != nil { return }
+
+            try SyncIgnoreMatcher.defaultTemplate.write(to: localURL, atomically: true, encoding: .utf8)
+            AppLogger.sync.info("Seeded default .syncignore for new bucket")
+        } catch {
+            AppLogger.sync.error("Failed to seed default .syncignore: \(String(describing: error), privacy: .private)")
+        }
     }
 
     func factoryReset() async {

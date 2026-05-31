@@ -148,7 +148,8 @@ func shardId(for path: String) -> String {
    d. PUT で書き戻す
       ├─ If-Match: <現在の ETag> を指定
       ├─ 成功 → ステップ 4 へ
-      └─ 412 Precondition Failed → ループ先頭に戻る
+      └─ 412 Precondition Failed / 409 ConditionalRequestConflict → ループ先頭に戻る
+         （409 は同一キーへの並行条件付き PUT が同時実行された時の一時的衝突。再取得で解消する）
    
 4. index.json を更新（同じく楽観的ロック）:
    a. GET で現在の index.json を取得

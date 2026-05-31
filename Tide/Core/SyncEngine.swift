@@ -17,6 +17,9 @@ final class SyncEngine {
     var queueDepth: Int = 0
     var recentErrors: [String] = []
 
+    /// 現在有効な `.syncignore` のパターン行（Settings 表示用）。
+    var activeIgnorePatterns: [String] = []
+
     // MARK: - Dependencies
 
     private let db: LocalDatabase
@@ -37,6 +40,7 @@ final class SyncEngine {
     private var remotePullInFlight: Bool = false
     private var paused: Bool = false
     private var running: Bool = false
+    private var ignoreMatcher: SyncIgnoreMatcher = .empty
 
     let pollIntervalSeconds: Int
 
@@ -113,6 +117,7 @@ final class SyncEngine {
         }
 
         Task { [weak self] in
+            await self?.reloadIgnoreMatcher()
             await self?.triggerFullScan()
             await self?.triggerRemotePull()
         }
@@ -198,6 +203,43 @@ final class SyncEngine {
         status = .idle
     }
 
+    // MARK: - .syncignore
+
+    /// `<syncRoot>/.syncignore` を読み直して除外マッチャと Settings 表示用パターンを更新する。
+    func reloadIgnoreMatcher() async {
+        let matcher = await Self.loadIgnoreMatcher(syncRoot: syncRoot)
+        ignoreMatcher = matcher
+        activeIgnorePatterns = matcher.sourceLines
+        AppLogger.sync.info("Reloaded .syncignore: \(matcher.sourceLines.count) pattern(s)")
+    }
+
+    /// `.syncignore` を安全に読み込んでマッチャを構築する。無い/大きすぎる/symlink の時は空。
+    private static func loadIgnoreMatcher(syncRoot: URL) async -> SyncIgnoreMatcher {
+        let url: URL
+        do {
+            url = try PathValidator.resolveSafely(relativePath: ".syncignore", syncRoot: syncRoot)
+        } catch {
+            return .empty
+        }
+        return await Task.detached(priority: .utility) { () -> SyncIgnoreMatcher in
+            let fm = FileManager.default
+            guard fm.fileExists(atPath: url.path) else { return .empty }
+            // セキュリティゲート: シンボリックリンクは絶対に追従しない
+            if let values = try? url.resourceValues(forKeys: [.isSymbolicLinkKey]),
+               values.isSymbolicLink == true {
+                AppLogger.sync.error("Refusing to read symlinked .syncignore")
+                return .empty
+            }
+            guard let data = try? Data(contentsOf: url) else { return .empty }
+            if data.count > SyncIgnoreMatcher.maxBytes {
+                AppLogger.sync.error(".syncignore too large (\(data.count) bytes); ignoring")
+                return .empty
+            }
+            let text = String(decoding: data, as: UTF8.self)
+            return SyncIgnoreMatcher.parse(text)
+        }.value
+    }
+
     // MARK: - Full scan
 
     func triggerFullScan() async {
@@ -214,6 +256,7 @@ final class SyncEngine {
         let root = self.syncRoot
         let dev = self.deviceId
         let db = self.db
+        let matcher = self.ignoreMatcher
         let now = Date().timeIntervalSince1970
 
         let result: (newEnqueued: Int, deletedEnqueued: Int) = try await Task.detached(priority: .utility) { () -> (Int, Int) in
@@ -245,6 +288,7 @@ final class SyncEngine {
                 guard values.isRegularFile == true else { continue }
 
                 let relative = Self.relativePath(of: next, root: root)
+                // ハードコード除外は DB を読む前に弾く（大きな除外ツリーでの無駄な DB 読みを避ける）
                 if HardcodedIgnoreRules.shouldIgnore(relativePath: relative) { continue }
                 // C1: 念のため相対パスを検証（root エスケープを防ぐ）
                 do {
@@ -253,14 +297,21 @@ final class SyncEngine {
                     continue
                 }
 
-                foundPaths.insert(relative)
-
                 let size = Int64(values.fileSize ?? 0)
                 let mtime = values.contentModificationDate?.timeIntervalSince1970 ?? 0
 
                 let existing = try await db.pool.read { db in
                     try FileRecord.fetchOne(db, key: relative)
                 }
+
+                // .syncignore のユーザパターン除外（既存追跡は触らない＝新規のみスキップ）。
+                // スキップしたファイルは foundPaths に入れない（未追跡なので削除検出にも乗らない）。
+                let tracked = (existing?.lastSyncedAt != nil)
+                if IgnoreDecision.shouldSkip(relativePath: relative, isAlreadyTracked: tracked, matcher: matcher) {
+                    continue
+                }
+
+                foundPaths.insert(relative)
 
                 let needsEnqueue: Bool
                 if let existing {
@@ -398,6 +449,8 @@ final class SyncEngine {
             }
         }
 
+        // リモート由来の .syncignore 変更を反映（FSEvents 経由でも拾えるが初回 pull の保険）
+        await reloadIgnoreMatcher()
         await refreshQueueDepth()
     }
 
@@ -422,6 +475,13 @@ final class SyncEngine {
             }
         } catch {
             AppLogger.db.error("Remote pull DB read failed for \(path, privacy: .private): \(String(describing: error), privacy: .private)")
+            return
+        }
+
+        // 除外判定: リモート新規（未追跡）が除外対象ならダウンロードしない。既存追跡は触らない。
+        let tracked = (localRec?.lastSyncedAt != nil)
+        if IgnoreDecision.shouldSkip(relativePath: path, isAlreadyTracked: tracked, matcher: ignoreMatcher) {
+            AppLogger.sync.info("Skipping ignored remote entry: \(path, privacy: .private)")
             return
         }
 
@@ -479,6 +539,13 @@ final class SyncEngine {
         let path = event.relativePath
         let now = Date().timeIntervalSince1970
 
+        // .syncignore の変更/削除はルールを再読込し、フルスキャンで全体を再評価する。
+        // .syncignore 自身は同期対象（Q2）なので、この後の通常処理（アップロード/削除）も継続する。
+        if path == ".syncignore" {
+            await reloadIgnoreMatcher()
+            Task { [weak self] in await self?.triggerFullScan() }
+        }
+
         switch event.kind {
         case .createdOrModified:
             let fullURL = syncRoot.appendingPathComponent(path)
@@ -501,6 +568,12 @@ final class SyncEngine {
                abs(existing.mtime - mtime) < 0.001,
                existing.lastSyncedAt != nil {
                 return  // unchanged
+            }
+
+            // 除外判定（新規被マッチはスキップ。既存追跡・.syncignore 自身は通す）
+            let tracked = (existing?.lastSyncedAt != nil)
+            if IgnoreDecision.shouldSkip(relativePath: path, isAlreadyTracked: tracked, matcher: ignoreMatcher) {
+                return
             }
 
             try await db.pool.write { db in

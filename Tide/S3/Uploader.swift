@@ -217,7 +217,10 @@ struct ManifestUpdater {
                 }
                 return
             } catch {
-                if S3ErrorClassifier.isPreconditionFailed(error) {
+                // 412 PreconditionFailed / 409 ConditionalRequestConflict は同一シャードへの
+                // 並行更新による一時的失敗。再取得して PUT し直せば解消するのでリトライ。
+                if S3ErrorClassifier.isPreconditionFailed(error)
+                    || S3ErrorClassifier.isConditionalConflict(error) {
                     lastError = error
                     let nanos = UInt64.random(in: 100_000_000...500_000_000)
                     try? await Task.sleep(nanoseconds: nanos)
@@ -227,7 +230,7 @@ struct ManifestUpdater {
             }
         }
         throw SyncError.manifestUpdateFailed(
-            "shard \(shardId) precondition failed 5 times: \(String(describing: lastError))"
+            "shard \(shardId) conditional update failed 5 times: \(String(describing: lastError))"
         )
     }
 
@@ -244,7 +247,9 @@ struct ManifestUpdater {
                 _ = try await s3.putIndex(index, ifMatch: etag)
                 return
             } catch {
-                if S3ErrorClassifier.isPreconditionFailed(error) {
+                // 412 / 409 は index.json への並行更新による一時的失敗。再取得してリトライ。
+                if S3ErrorClassifier.isPreconditionFailed(error)
+                    || S3ErrorClassifier.isConditionalConflict(error) {
                     lastError = error
                     let nanos = UInt64.random(in: 100_000_000...500_000_000)
                     try? await Task.sleep(nanoseconds: nanos)
@@ -254,7 +259,7 @@ struct ManifestUpdater {
             }
         }
         throw SyncError.manifestUpdateFailed(
-            "index.json precondition failed 5 times: \(String(describing: lastError))"
+            "index.json conditional update failed 5 times: \(String(describing: lastError))"
         )
     }
 }

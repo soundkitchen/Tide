@@ -90,6 +90,39 @@
         }
       }
     },
+    "✓ Bucket already exists (owned by you) — using it" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "✓ バケットは既に存在します（あなたの所有）— そのまま使用します"
+          }
+        }
+      }
+    },
+    "That bucket name is already used by another AWS account. Choose a different name." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "そのバケット名は別の AWS アカウントで使用されています。別の名前を指定してください。"
+          }
+        }
+      }
+    },
+    "Couldn't create the bucket: insufficient permissions. Your IAM policy needs s3:CreateBucket." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "バケットを作成できませんでした: 権限が不足しています。IAM ポリシーに s3:CreateBucket が必要です。"
+          }
+        }
+      }
+    },
     "✓ HeadBucket: reachable" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -332,13 +365,35 @@
         }
       }
     },
-    "Excluded patterns (M1: hardcoded)" : {
+    "Excluded patterns (built-in)" : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "除外パターン (M1: ハードコード)"
+            "value" : "除外パターン（組み込み）"
+          }
+        }
+      }
+    },
+    ".syncignore" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : ".syncignore"
+          }
+        }
+      }
+    },
+    "No .syncignore patterns" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "（.syncignore パターンなし）"
           }
         }
       }

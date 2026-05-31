@@ -55,29 +55,46 @@ M1 で導入した「100 MB を超えたら `sync_log` にエラーを残して�
 
 ---
 
-## サブタスク B: `.syncignore` 対応
+## サブタスク B: `.syncignore` 対応（実装済み）
+
+> 実装日: 2026-06-01。会話で 3 つの設計判断を確定して実装した（下記）。
 
 ### 目的
 `HardcodedIgnoreRules` のハードコード除外に加えて、ユーザが `<syncRoot>/.syncignore` を置いて gitignore 構文で除外パターンを指定できるようにする。
 
-### 設計の出発点
-- gitignore 構文のサブセットをサポート: `*`, `**`, `?`, ディレクトリ末尾 `/`, 否定 `!`, コメント `#`
-- ライブラリ: `Glob` 系を自前で書くか、`fnmatch(3)` を CryptoKit のように包むか
-- `.syncignore` 自体は同期対象に含める？除外する？ → **同期対象に含めるのが慣例**（マニフェスト経由で他デバイスにも伝わる）
-- 既存の `HardcodedIgnoreRules.shouldIgnore(relativePath:)` の前段に挟むか、置き換えるか
+### 確定した設計判断
+- **構文**: gitignore の一般的サブセット — `*`, `**`, `?`, 先頭 `/` アンカー、末尾 `/` でディレクトリ限定、否定 `!`（再包含）、`#` コメント、空行。
+- **既存ファイルの扱い（gitignore 純正）**: `.syncignore` のユーザパターンは**新規ファイルにのみ**適用する。
+  既に同期済み（`FileRecord.lastSyncedAt != nil`）のファイルは触らない。S3 からも自動削除しない。
+  → orphan も「誤爆で全消し」も起きない。バックアップから外したい時はローカル削除 → 通常の削除伝播で消す。
+- **`.syncignore` 自体は同期対象に含める**: S3 経由で全デバイス・クリーンインストール復旧後にも除外設定が伝わる。
+- **セキュリティ不変条件**: `HardcodedIgnoreRules`（機密網）は常に最優先。`.syncignore` の否定 `!` で `.env` 等を再包含できない。
+  「既存は触らない」緩和はユーザパターンにのみ適用し、ハードコード除外には適用しない。
 
-### 影響範囲
-- `Tide/Core/IgnoreRules.swift` を拡張
-- `FileWatcher` / `SyncEngine.performFullScan` / `ManifestReader` 等の除外判定経路
-- `.syncignore` の変更検知 → リロード（FSEvents で拾える）
+### 実装
+- 新規 `Tide/Core/SyncIgnoreMatcher.swift`: 不変・`@unchecked Sendable` な値型。グロブ → 境界付き正規表現
+  （ユーザ正規表現は受けない。ReDoS 回避）。ファイルサイズ上限 256 KB / パターン数上限 10,000。
+- 新規 `Tide/Core/IgnoreDecision.swift`: 純粋関数 `shouldSkip(relativePath:isAlreadyTracked:matcher:)`。
+  判定順: ① ハードコード（常に）→ ② `.syncignore` 自身（決して除外しない）→ ③ ユーザパターン∧未追跡 → スキップ。
+- `SyncEngine`: `ignoreMatcher` を保持。`reloadIgnoreMatcher()` で `<syncRoot>/.syncignore` を安全に読込
+  （symlink 追従しない / `PathValidator.resolveSafely`）。`start()` / リモート pull 末尾 / `.syncignore` 変更検知で再読込。
+  統合点は `performFullScan` / `processEventToQueue` / `reconcileRemoteEntry` の 3 経路。
+- `.syncignore` 変更は FSEvents で拾い、再読込 + フルスキャン再評価。`.syncignore` 自身もアップロード（同期）。
+- `SettingsWindow`: 現行 `.syncignore` パターンを閲覧表示（編集は将来）。
+- 既定テンプレート: `SyncIgnoreMatcher.defaultTemplate`（`node_modules/` 等）を **新規バケットのセットアップ時のみ** `AppEnvironment.completeSetup` で `<syncRoot>/.syncignore` に自動生成。既存バケット参加時は競合回避のため作らない。`.git/` は含めない（同期対象のまま）。
+- テスト: `SyncIgnoreMatcherTests` / `IgnoreDecisionTests`。
 
-### ユーザに事前に決めてもらいたい
-- `.syncignore` 自体を同期対象に入れるかどうか
-- 既存ファイルが新たに除外パターンに該当するようになった時の挙動（S3 から削除する？残す？）
+### 既知の制限 / 将来タスク
+- **ディレクトリごとの `.syncignore`（git 風の階層的オーバーライド）は未対応**。現状はルートの `<syncRoot>/.syncignore` 1 ファイルのみを読む。サブディレクトリの `.syncignore` はただの同期対象ファイル扱い。→ **将来タスク**（各ファイル位置でのアンカー / 変更検知リロード / `*/.syncignore` の self-protect 拡張が必要）。
+- 親ディレクトリが除外された配下のファイルを `!` で再包含する gitignore の挙動は厳密には再現しない（同一階層の否定は正しく動く）。
+- マッチングは case-sensitive（gitignore 既定）。
+- `ManifestReader` には ignore 判定を入れず、ダウンロード可否は `reconcileRemoteEntry` で gate する（削除検出が完全な remoteMap に依存するため）。
 
 ### 受け入れ確認
-- `.syncignore` に `*.log` と書くと、新規 `*.log` がアップロードされない
-- gitignore と挙動が一致する（ユーザの直感を裏切らない）
+- `.syncignore` に `*.log` と書くと、新規 `*.log` がアップロードされない。`!important.log` で再包含される。
+- パターン追加前から同期済みのファイルは同期継続（S3 から勝手に消えない）。
+- `.syncignore` 自体が S3 にアップロードされる。
+- `!.env` を書いてもハードコード除外が勝ち、`.env` は同期されない。
 
 ---
 

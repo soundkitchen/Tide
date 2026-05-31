@@ -71,3 +71,16 @@ actor 内で `Task.detached` を `for` ループから発火している。`emit
 **該当箇所:** `Tide/UI/SetupWizardWindow.swift:11`
 
 SwiftUI の `@State private var secretAccessKey: String = ""` は SetupWizardWindow がディスポーズされるまで残り、`String` は zeroize できない。仕様上不可避だが、`runStartSyncing` 完了直後に `secretAccessKey = ""` を代入して参照を切る程度は意味がある（残留はあくまでヒープ任せだが、ライブなオブジェクトグラフからは切れる）。
+
+---
+
+## L8. `.syncignore`（リモート由来の除外パターン）の取り扱い
+
+**Status:** ✅ Fixed (2026-06-01) — M3 で `.syncignore` 対応を追加。リモート（S3）から伝播し得るユーザパターンが、ローカル FS 判定に影響することを踏まえた防御を入れた。
+
+**該当箇所:** `Tide/Core/SyncIgnoreMatcher.swift` / `Tide/Core/IgnoreDecision.swift` / `Tide/Core/SyncEngine.swift`
+
+- **機密網は否定 `!` で覆せない**: `IgnoreDecision.shouldSkip` はハードコード除外（`HardcodedIgnoreRules`）を最優先で評価し、`.syncignore` のユーザパターン（否定含む）より常に優先する。悪意ある / 壊れたリモート `.syncignore` に `!.env` 等を書かれても、`.env` などの機密ファイルが同期対象に戻ることはない。
+- **ReDoS / DoS 回避**: ユーザ正規表現は受け取らず、グロブから境界付き正規表現を生成。ファイルサイズ上限 256 KB / パターン数上限 10,000 で、巨大 / 大量パターンによる資源枯渇を防ぐ。
+- **読込経路の安全性**: `.syncignore` の読込は `PathValidator.resolveSafely(relativePath: ".syncignore", syncRoot:)` 経由で、シンボリックリンクは追従しない。
+- **影響の上限**: リモート由来パターンができるのは「除外」か（否定での）「再包含」のみ。再包含してもハードコード除外は覆せないため、最悪でも「同期されるべきファイルが同期されない（可用性）」に留まり、機密漏洩には繋がらない。

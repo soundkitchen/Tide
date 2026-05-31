@@ -48,6 +48,13 @@ targets:
         CFBundleVersion: "1"
         NSHumanReadableCopyright: ""
         LSMinimumSystemVersion: "$(MACOSX_DEPLOYMENT_TARGET)"
+    # Data Protection Keychain (kSecUseDataProtectionKeychain=true) を使うには
+    # keychain-access-groups entitlement が要る。無いと OSStatus 34018 (errSecMissingEntitlement)。
+    entitlements:
+      path: Tide/Tide.entitlements
+      properties:
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)org.izukawa.Tide
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: org.izukawa.Tide

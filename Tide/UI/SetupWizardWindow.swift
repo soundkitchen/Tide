@@ -230,7 +230,11 @@ struct SetupWizardWindow: View {
             try await probe.headBucket()
             bucketSetupLog.append(String(localized: "✓ HeadBucket: reachable"))
         } catch {
-            if S3ErrorClassifier.isNotFound(error) {
+            AppLogger.s3.error("HeadBucket failed: \(String(describing: error), privacy: .private)")
+            // 404（非存在）、または 404 以外の空ボディ（権限不足 / 別リージョン / 名前重複などが
+            // missingRequiredData として届く）。後者は HeadBucket だけでは確定できないので、
+            // 「作成または既存利用」フローへ進め、createBucket の結果で確定させる。
+            if S3ErrorClassifier.isNotFound(error) || S3ErrorClassifier.isInconclusiveHeadError(error) {
                 pendingCreateBucket = true
                 return  // alert で続行を委ねる
             }
@@ -258,10 +262,24 @@ struct SetupWizardWindow: View {
             try await probe.createBucket()
             bucketSetupLog.append(String(localized: "✓ Bucket created"))
         } catch {
-            let detail = String(describing: error)
-            errorMessage = String(localized: "Failed to create bucket: \(detail)")
-            step = .bucket
-            return
+            AppLogger.s3.error("CreateBucket failed: \(String(describing: error), privacy: .private)")
+            if S3ErrorClassifier.isBucketAlreadyOwnedByYou(error) {
+                // 既に存在し、かつ自分の所有 → そのまま使う（複数マシンでの既存バケット合流）
+                bucketSetupLog.append(String(localized: "✓ Bucket already exists (owned by you) — using it"))
+            } else if S3ErrorClassifier.isBucketNameTaken(error) {
+                errorMessage = String(localized: "That bucket name is already used by another AWS account. Choose a different name.")
+                step = .bucket
+                return
+            } else if S3ErrorClassifier.isForbidden(error) {
+                errorMessage = String(localized: "Couldn't create the bucket: insufficient permissions. Your IAM policy needs s3:CreateBucket.")
+                step = .bucket
+                return
+            } else {
+                let detail = String(describing: error)
+                errorMessage = String(localized: "Failed to create bucket: \(detail)")
+                step = .bucket
+                return
+            }
         }
         await finishProvisioning(probe: probe)
     }

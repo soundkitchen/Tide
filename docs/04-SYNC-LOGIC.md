@@ -206,8 +206,9 @@ func updateShard(shardId: String, transform: (inout ManifestShard) -> Void) asyn
             
             return  // 成功
             
-        } catch let error as S3Error where error.isPreconditionFailed {
-            // 412: 他のプロセスが更新した → リトライ
+        } catch let error where error.isPreconditionFailed || error.isConditionalConflict {
+            // 412 PreconditionFailed（他プロセスが更新済み）/ 409 ConditionalRequestConflict
+            // （同一キーへの並行条件付き PUT 衝突）→ 再取得してリトライ
             lastError = error
             try await Task.sleep(nanoseconds: UInt64.random(in: 100_000_000...500_000_000))
             continue
@@ -360,6 +361,21 @@ struct HardcodedIgnoreRules {
     }
 }
 ```
+
+## `.syncignore` 除外ルール（M3）
+
+M3 で `<syncRoot>/.syncignore`（gitignore 構文の一般的サブセット）対応を追加した。
+詳細な確定仕様は `docs/07-M3-IMPLEMENTATION-GUIDE.md` サブタスク B と `CLAUDE.md` 第 7 節を参照。要点:
+
+- `HardcodedIgnoreRules`（機密網）は**常に最優先**で効く。`.syncignore` の否定 `!` でも覆せない。
+- `.syncignore` のユーザパターンは**新規ファイルにのみ**適用する（gitignore 純正）。
+  既に同期済み（`FileRecord.lastSyncedAt != nil`）のファイルは触らない。S3 からも勝手に消さない。
+  バックアップから外したい時はローカル削除 → 通常の削除伝播で消す。
+- `.syncignore` 自身は同期対象に含める（S3 経由で全デバイス・復旧後にも除外設定が伝わる）。
+- **新規バケットのセットアップ時のみ**、`SyncIgnoreMatcher.defaultTemplate`（`node_modules/` 等の再生成可能な開発ジャンク）を `<syncRoot>/.syncignore` に自動生成する（`AppEnvironment.completeSetup`）。ローカルに既にある／リモートにマニフェストがある（既存バケット）場合は作らない。`.git/` は含めない（復旧目的で同期対象のまま）。
+- スキップ判定は純粋関数 `IgnoreDecision.shouldSkip(relativePath:isAlreadyTracked:matcher:)` に集約し、
+  ローカル列挙（`performFullScan`）/ ローカルイベント（`processEventToQueue`）/ リモート取り込み
+  （`reconcileRemoteEntry`）の 3 経路すべてで通す。
 
 ## エッジケース
 

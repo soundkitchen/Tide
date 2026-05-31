@@ -26,6 +26,7 @@
 | L5 | SHA1 のコメント | ✅ Fixed |
 | L6 | DebounceQueue 競合 | ⏸ Deferred — `UPLOAD_QUEUE.UNIQUE(path)` で実害なしの想定で観察 |
 | L7 | secretAccessKey の生存期間 | ✅ Fixed |
+| L8 | `.syncignore`（リモート由来の除外パターン）の取り扱い | ✅ Fixed (2026-06-01) — 機密網は否定で覆せない / ReDoS・DoS 上限 / symlink 非追従 |
 
 凡例: ✅ Fixed / 🟡 Partial / ⏸ Deferred
 
@@ -36,7 +37,7 @@
 | 🔴 Critical | [critical.md](critical.md) | 3 |
 | 🟠 High | [high.md](high.md) | 3 |
 | 🟡 Medium | [medium.md](medium.md) | 5 |
-| 🟢 Low / Hardening | [low.md](low.md) | 7 |
+| 🟢 Low / Hardening | [low.md](low.md) | 8 |
 
 ## 当初の推奨対応順（参考）
 

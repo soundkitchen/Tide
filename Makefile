@@ -17,7 +17,8 @@ XCODEBUILD := xcodebuild \
 	-derivedDataPath ./build \
 	-destination 'platform=macOS,arch=arm64' \
 	-skipPackagePluginValidation \
-	-skipMacroValidation
+	-skipMacroValidation \
+	-allowProvisioningUpdates
 
 .DEFAULT_GOAL := help
 

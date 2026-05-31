@@ -339,6 +339,13 @@ enum S3ErrorClassifier {
             || desc.contains("ConditionalRequestFailed")
     }
 
+    /// S3 の条件付き書き込み（If-Match / If-None-Match）が、同一キーへの並行操作と衝突したときに返る
+    /// 409 `ConditionalRequestConflict`。412 PreconditionFailed と同様、再取得して PUT し直せば
+    /// 解消する一時的失敗なので、楽観ロックの再試行対象に含める。
+    static func isConditionalConflict(_ error: Error) -> Bool {
+        String(describing: error).contains("ConditionalRequestConflict")
+    }
+
     static func isNotFound(_ error: Error) -> Bool {
         let desc = String(describing: error)
         return desc.contains("NotFound")
@@ -353,5 +360,26 @@ enum S3ErrorClassifier {
             || desc.contains("AccessDenied")
             || desc.contains("statusCode: 403")
             || desc.contains("status code: 403")
+    }
+
+    /// HeadBucket など HEAD 系が 404 以外の空ボディ応答（典型的に 403 / 301）を返すと、
+    /// smithy-swift の `RestXMLError` が `<Code>` を読めず `BaseErrorDecodeError.missingRequiredData`
+    /// を投げる（`RestXMLError.swift` の `code == nil && statusCode != .notFound` 分岐）。
+    /// この decode エラーには HTTP ステータスが乗らないため、存在判定としては「不確定」扱いにする。
+    /// （SDK のカスタマイズが空ボディ 404 のみ対象なのが根本原因。）
+    static func isInconclusiveHeadError(_ error: Error) -> Bool {
+        String(describing: error).contains("missingRequiredData")
+    }
+
+    /// CreateBucket が「既に存在し、かつ自分の所有」を返した（= そのまま使ってよい。複数マシン同期）。
+    static func isBucketAlreadyOwnedByYou(_ error: Error) -> Bool {
+        String(describing: error).contains("BucketAlreadyOwnedByYou")
+    }
+
+    /// CreateBucket が「その名前は他アカウントが使用中」を返した（= 同期に使えない）。
+    /// `BucketAlreadyOwnedByYou` は別物（こちらには含まれない）。
+    static func isBucketNameTaken(_ error: Error) -> Bool {
+        let desc = String(describing: error)
+        return desc.contains("BucketAlreadyExists") && !desc.contains("BucketAlreadyOwnedByYou")
     }
 }
