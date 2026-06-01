@@ -175,6 +175,11 @@ final class TideS3Client: @unchecked Sendable {
         let versionId: String?
     }
 
+    /// S3 が返す ETag は両端がダブルクォートで囲まれているので外す（全 API 共通の整形）。
+    private static func cleanETag(_ raw: String?) -> String {
+        (raw ?? "").trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+    }
+
     func putObject(
         key: String,
         data: Data,
@@ -194,7 +199,7 @@ final class TideS3Client: @unchecked Sendable {
             serverSideEncryption: .aes256  // SSE-S3 を明示
         )
         let output = try await client.putObject(input: input)
-        let etag = (output.eTag ?? "").trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+        let etag = Self.cleanETag(output.eTag)
         return PutObjectResult(etag: etag, versionId: output.versionId)
     }
 
@@ -215,7 +220,7 @@ final class TideS3Client: @unchecked Sendable {
         let input = HeadObjectInput(bucket: bucket, key: key)
         do {
             let output = try await client.headObject(input: input)
-            let etag = (output.eTag ?? "").trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+            let etag = Self.cleanETag(output.eTag)
             return ObjectHead(
                 etag: etag,
                 versionId: output.versionId,
@@ -247,7 +252,7 @@ final class TideS3Client: @unchecked Sendable {
                     userInfo: [NSLocalizedDescriptionKey: "object too large: \(len) > \(maxBytes) bytes for key \(key)"]
                 ))
             }
-            let etag = (output.eTag ?? "").trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+            let etag = Self.cleanETag(output.eTag)
             let data: Data
             if let body = output.body {
                 data = try await body.readData() ?? Data()
@@ -267,11 +272,8 @@ final class TideS3Client: @unchecked Sendable {
             _ = error
             return nil
         } catch {
-            // 404 系の他の表現にも対応
-            let desc = String(describing: error)
-            if desc.contains("NoSuchKey") || desc.contains("NotFound") || desc.contains("statusCode: 404") {
-                return nil
-            }
+            // 404 系の他の表現にも対応（判定は S3ErrorClassifier.isNotFound に集約）
+            if S3ErrorClassifier.isNotFound(error) { return nil }
             throw error
         }
     }
@@ -316,7 +318,7 @@ final class TideS3Client: @unchecked Sendable {
             uploadId: uploadId
         )
         let output = try await client.uploadPart(input: input)
-        let etag = (output.eTag ?? "").trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+        let etag = Self.cleanETag(output.eTag)
         if etag.isEmpty {
             throw SyncError.ioError(underlying: NSError(
                 domain: "Tide.S3", code: -31,
@@ -350,7 +352,7 @@ final class TideS3Client: @unchecked Sendable {
             uploadId: uploadId
         )
         let output = try await client.completeMultipartUpload(input: input)
-        let etag = (output.eTag ?? "").trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+        let etag = Self.cleanETag(output.eTag)
         return PutObjectResult(etag: etag, versionId: output.versionId)
     }
 
@@ -387,7 +389,7 @@ final class TideS3Client: @unchecked Sendable {
                     userInfo: [NSLocalizedDescriptionKey: "object too large: \(len) > \(maxBytes) bytes for key \(key)"]
                 ))
             }
-            let etag = (output.eTag ?? "").trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+            let etag = Self.cleanETag(output.eTag)
 
             FileManager.default.createFile(atPath: tmpURL.path, contents: nil)
             let handle = try FileHandle(forWritingTo: tmpURL)
@@ -427,10 +429,8 @@ final class TideS3Client: @unchecked Sendable {
             return nil
         } catch {
             try? FileManager.default.removeItem(at: tmpURL)
-            let desc = String(describing: error)
-            if desc.contains("NoSuchKey") || desc.contains("NotFound") || desc.contains("statusCode: 404") {
-                return nil
-            }
+            // 404 系は nil（判定は S3ErrorClassifier.isNotFound に集約）
+            if S3ErrorClassifier.isNotFound(error) { return nil }
             throw error
         }
     }
@@ -510,6 +510,7 @@ enum S3ErrorClassifier {
         let desc = String(describing: error)
         return desc.contains("NotFound")
             || desc.contains("NoSuchBucket")
+            || desc.contains("NoSuchKey")
             || desc.contains("statusCode: 404")
             || desc.contains("status code: 404")
     }

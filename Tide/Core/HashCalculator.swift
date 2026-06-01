@@ -15,7 +15,7 @@ enum HashCalculator {
             if chunk.isEmpty { break }
             hasher.update(data: chunk)
         }
-        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+        return hex(hasher.finalize())
     }
 
     /// SHA-256 ダイジェスト（やバイト列）を hex 小文字に整形する。

@@ -54,8 +54,12 @@ final class ConfigStore: @unchecked Sendable {
     /// この上限はアップロード方向のみに適用し、ダウンロード（復元）は常に許可する。
     var uploadSizeLimitBytes: Int64 {
         get {
-            let v = defaults.integer(forKey: Key.uploadSizeLimitBytes)
-            return v == 0 ? Self.defaultUploadSizeLimitBytes : Int64(v)
+            // キー未設定なら既定値。`0` を「未設定」と「明示的な 0」の両義で使わないよう、
+            // presence（`object(forKey:)`）で判定する（-1=無制限などの明示値はそのまま尊重）。
+            guard defaults.object(forKey: Key.uploadSizeLimitBytes) != nil else {
+                return Self.defaultUploadSizeLimitBytes
+            }
+            return Int64(defaults.integer(forKey: Key.uploadSizeLimitBytes))
         }
         set { defaults.set(Int(newValue), forKey: Key.uploadSizeLimitBytes) }
     }
