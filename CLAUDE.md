@@ -232,6 +232,7 @@
 - **H3**: 静的 AWS キー → STS / IAM Identity Center への構造的置き換え。M3 以降で要検討。
 - **M5 / F3 (L9)**: アップロード時のハッシュ + 読み込みの TOCTOU。F3 は読込直前の symlink 再チェックで Mitigated 済み。完全解消（`O_NOFOLLOW` で open し同一 FD からハッシュ計算＋本体読込）は M3 のマルチパート対応で同時に行う。
 - **F1 (L8)**: `.syncignore` ReDoS の構造的解消。現状は速攻ガード（長さ/ワイルドカード数/入力長キャップ + 隣接量化子縮約）で Mitigated。恒久解＝`NSRegularExpression` → 線形時間グロブ照合への置換は M3（`docs/07-M3-IMPLEMENTATION-GUIDE.md` 参照）。
+- **F4 (H2 UI 残)**: UI の `recentErrors` / `.error` が生 SDK エラー文字列（バケット名・キー・リージョン等のメタデータ。認証情報は含まない）を表示。**意図的に保持**（デバッグで実利が大きく、OS Log は `.private` 化済みで UI が事後コピーの実質唯一ソース。重要度 Low・本人画面のみ）。**他人配布／単一ユーザ開発を抜ける前に再評価**し、是正は単純削除でなく「UI は分類サマリ + 詳細をオンデマンド展開/コピー」案で（`S3ErrorClassifier` / `SyncError.description` 流用。`security/high.md` H2 残存項参照）。
 - **L1**: App Sandbox 化。security-scoped bookmark + entitlement の正規対応は M3+。
 - **L6**: `DebounceQueue.fire` の競合。`upload_queue.UNIQUE(path)` で実害は出ない想定。観察継続。
 - **ネスト `.syncignore`**: ディレクトリごとの `.syncignore`（git 風の階層的オーバーライド）は未対応。現状はルートの `<syncRoot>/.syncignore` のみ。将来タスク（`docs/07-M3-IMPLEMENTATION-GUIDE.md` サブタスク B「既知の制限 / 将来タスク」参照）。

@@ -41,12 +41,24 @@ AWS SDK のエラー記述には、リクエスト URL（バケット名・キ�
 - ログは `privacy: .private`（または既定値）にし、`(reason)` のみ public に
 - UI の `recentErrors` はクラス分けされたメッセージ（e.g. "AccessDenied on key X"）に絞る
 
-**残存 (F4, 2026-06-01) 🔴 未対応:** OS Log の `.public` 漏洩は是正済みだが、上記対策の 3 点目
-「UI の `recentErrors` をクラス分けされたメッセージに絞る」が**未実施**。`SyncEngine.appendError("\(path): \(error)")`
-および `status = .error(String(describing: error))` が生の SDK エラー文字列（バケット名・キー・リージョンを含み得る）を
-`MenuBarContent`（`textSelection` 有効）へ表示し続けている。表示先は本人画面のみのため重要度は Low。
-**推奨修正（実装スレッド向け）:** `SyncError` への classify→短い理由文字列に統一し、`recentErrors` と `.error`
-ラベルへは分類済みメッセージのみ渡す（`Tide/Core/SyncEngine.swift` / `Tide/UI/MenuBarContent.swift`）。
+**残存 (F4, 2026-06-01) ⏸ Deferred — 意図的保持 (2026-06-02 判断):** OS Log の `.public` 漏洩は是正済みだが、
+上記対策の 3 点目「UI の `recentErrors` をクラス分けされたメッセージに絞る」は**意図的に未実施**。
+`SyncEngine.appendError("\(path): \(error)")` および `status = .error(String(describing: error))` が生の SDK
+エラー文字列（バケット名・キー・リージョンを含み得る）を `MenuBarContent`（`textSelection` 有効）へ表示し続けている。
+
+**脅威:** 攻撃者前提なしの情報露出。露出するのは**メタデータ**（バケット名・S3 キー＝同期ファイルのパス・リージョン）で、
+**認証情報は含まない**（S3 エラー応答はエコーバックしない）。露出先は**本人画面のみ**で、API 経由のローカル読み出し経路は無い。
+現実的な漏洩経路は「ユーザがエラーをスクショ／コピペで公開チャンネルに貼る」＋肩越し／画面共有。バケットは非公開
+（Public Access Block 済み）なので名前を知られてもアクセス権は得られない。よって重要度は **Low（衛生寄り）**。
+
+**保持の理由:** 生エラーは開発中のデバッグで実利が大きい。H2 で OS Log を `.private` 化したため `log show`（事後）は
+伏字になり、`log stream --level debug`（リアルタイム）以外では UI が**事後コピーの実質唯一ソース**。現状は単一ユーザ
+（＝開発者本人）運用で、漏洩経路も本人の管理下。
+
+**再評価ゲートと是正方針:** **他人への配布／単一ユーザ開発を抜ける前に再評価する**。是正は単純削除（C 案: UI は短文のみ）
+ではなく、**B 案＝「UI 既定は分類サマリ（`SyncError` classify→短い理由文字列）＋『詳細』をオンデマンドで展開/コピー」**
+としてデバッグ性を保ったまま行う。再利用できる既存資産: `S3ErrorClassifier`（`Tide/S3/S3Client.swift`）/ `SyncError.description`。
+対象: `Tide/Core/SyncEngine.swift` / `Tide/UI/MenuBarContent.swift`。
 
 ---
 
