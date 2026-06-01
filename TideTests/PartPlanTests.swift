@@ -19,6 +19,8 @@ final class PartPlanTests: XCTestCase {
         let sizes: [Int64] = [
             1 * 1024 * 1024 * 1024,         // 1 GiB
             50 * 1024 * 1024 * 1024,        // 50 GiB
+            100 * 1024 * 1024 * 1024,       // 100 GiB
+            600 * 1024 * 1024 * 1024,       // 600 GiB（partSize 上限が効く付近）
             5 * 1024 * 1024 * 1024 * 1024,  // 5 TiB (S3 単一オブジェクト上限)
         ]
         let oneMiB: Int64 = 1024 * 1024
@@ -36,6 +38,18 @@ final class PartPlanTests: XCTestCase {
         let modest = PartPlan.plan(forFileSize: 20 * 1024 * 1024)
         let huge = PartPlan.plan(forFileSize: 50 * 1024 * 1024 * 1024)
         XCTAssertGreaterThan(huge.partSize, modest.partSize)
+    }
+
+    func testPartSizeCappedUntilTenThousandPartsForcesLarger() {
+        // L11: 10,000 パートに収まる範囲では partSize ≤ maxPartSize（常駐メモリ有界）。
+        for s: Int64 in [100 * 1024 * 1024 * 1024, 600 * 1024 * 1024 * 1024] {
+            let p = PartPlan.plan(forFileSize: s)
+            XCTAssertLessThanOrEqual(p.partSize, PartPlan.maxPartSize, "size=\(s)")
+        }
+        // 10,000 パートに収まらない超巨大ファイルだけ上限を超える（が partCount は 10,000 以下）。
+        let huge = PartPlan.plan(forFileSize: 5 * 1024 * 1024 * 1024 * 1024)  // 5 TiB
+        XCTAssertGreaterThan(huge.partSize, PartPlan.maxPartSize)
+        XCTAssertLessThanOrEqual(huge.partCount, PartPlan.maxPartCount)
     }
 
     func testUploadLimit() {

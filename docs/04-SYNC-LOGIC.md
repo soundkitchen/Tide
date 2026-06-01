@@ -158,7 +158,7 @@ func processUpload(_ queueItem: UploadQueueRecord) async throws {
 M1 の 100MiB ハード上限（`maxSizeM1`）は M3 で撤廃した。`Uploader.processUpload` はサイズで経路を分岐する。
 
 - **シングルパート**（`≤ 16 MiB`、`PartPlan.shouldUseMultipart` が false）: O_NOFOLLOW の単一 FD から 1 回読んだバッファでハッシュも本体も賄い（M5: 2 回 open を畳む）、`putObject` で送る。
-- **マルチパート**（`> 16 MiB`）: `MultipartUploader` が単一 FD から順次読込しつつ SHA-256 を逐次更新し、読み終えたパートを**有界並列（最大 3）で UploadPart**。アダプティブパートサイズ `partSize = max(5MiB, ceil(fileSize/9000))`（MiB 境界、`partCount ≤ 10,000`）。瞬断は**パート単位リトライ**で吸収し、恒久失敗は best-effort `abort` → throw（ファイル単位リトライへ）。`UploadId` の永続化・再起動またぎ再開はサブタスク D（別チャンク）。
+- **マルチパート**（`> 16 MiB`）: `MultipartUploader` が単一 FD から順次読込しつつ SHA-256 を逐次更新し、読み終えたパートを**有界並列（最大 3）で UploadPart**。アダプティブパートサイズ（`PartPlan`）: 目標パート数 9,000 基準値を `[5MiB, 64MiB]` にクランプ（常駐メモリ抑制）、10,000 パートに収まらない超巨大ファイルのみ必要分まで partSize を上げる（MiB 境界切り上げで `partCount ≤ 10,000`）。瞬断は**パート単位リトライ**で吸収し、恒久失敗は best-effort `abort` → throw（ファイル単位リトライへ）。`UploadId` の永続化・再起動またぎ再開はサブタスク D（別チャンク）。
 
 **1 ファイルあたりのアップロード上限**は `ConfigStore.uploadSizeLimitBytes`（Settings で変更、既定 1GiB、`-1` = 無制限）。上限はアップロード方向のみに適用し、ダウンロード（復元）は常に許可する。上限超過は**黙ってスキップせず** `SyncError.fileTooLarge` を投げ、`SyncEngine.handleProcessingFailure` がリトライせずに `recentErrors` へ明示 + `sync_log` の `error` 記録 + キュー除去する（「このファイルはバックアップされていない」を可視化）。
 

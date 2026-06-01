@@ -10,11 +10,11 @@
 
 | ID | 重要度 | 概要 | 状態 | 参照 |
 |---|---|---|---|---|
-| M7 | Medium（可用性） | 復元経路 `downloadToFile` がサイズ無制限（`maxBytes=nil`）。M4 の 200 MiB cap が新経路で失効＝マニフェスト改ざんでローカルディスク枯渇 | 🔴 未対応 | [medium.md](medium.md) M7 |
-| L10 | Low（可用性） | マルチパート中の「その場切り詰め」で空/過小パート → `CompleteMultipartUpload` 失敗 → リトライ空振り（自己回復・整合性は SHA で担保） | 🔴 未対応 | [low.md](low.md) L10 |
-| L11 | Low（資源） | 巨大ファイルのパートが肥大（5 TiB→583 MiB/部）し常駐メモリ ~2.3 GiB。`PartPlan` の防御ループはデッドコード | 🔴 未対応 | [low.md](low.md) L11 |
+| M7 | Medium（可用性） | 復元経路 `downloadToFile` がサイズ無制限（`maxBytes=nil`）。M4 の 200 MiB cap が新経路で失効＝マニフェスト改ざんでローカルディスク枯渇 | ✅ Fixed (2026-06-02) | [medium.md](medium.md) M7 |
+| L10 | Low（可用性） | マルチパート中の「その場切り詰め」で空/過小パート → `CompleteMultipartUpload` 失敗 → リトライ空振り（自己回復・整合性は SHA で担保） | ✅ Fixed (2026-06-02) | [low.md](low.md) L10 |
+| L11 | Low（資源） | 巨大ファイルのパートが肥大（5 TiB→583 MiB/部）し常駐メモリ ~2.3 GiB。`PartPlan` の防御ループはデッドコード | ✅ Fixed (2026-06-02) | [low.md](low.md) L11 |
 
-凡例: ✅ Fixed / 🟡 Mitigated / ⏸ Deferred / 🔴 未対応。M7 は C1/M4 と同じ前提（攻撃者がバケットを書ける）での可用性低下。L10/L11 は攻撃者起因ではなく局所変更・自己資源の問題で Low。
+凡例: ✅ Fixed / 🟡 Mitigated / ⏸ Deferred / 🔴 未対応。M7 は C1/M4 と同じ前提（攻撃者がバケットを書ける）での可用性低下。L10/L11 は攻撃者起因ではなく局所変更・自己資源の問題で Low。**3 件とも本スレッドで対応済み（2026-06-02）**: M7=復元に `maxBytes: entry.size`、L10=空 parts ガード（`completeMultipartUpload` と `MultipartUploader`）、L11=`PartPlan` の `maxPartSize`（64MiB）cap + デッドループを直接 floor 計算に置換。
 
 ## 再レビューのフォローアップ（2026-06-01）
 
@@ -58,8 +58,8 @@ F4 の据え置き理由: 生エラー文字列は開発中のデバッグで実
 | L7 | secretAccessKey の生存期間 | ✅ Fixed |
 | L8 | `.syncignore`（リモート由来の除外パターン）の取り扱い | 🟡 Partial / Mitigated — 機密網は否定で覆せない / symlink 非追従 / サイズ上限は維持。生成正規表現の ReDoS は速攻ガードで Mitigated（構造的解消は M3。→ F1） |
 | L9 | アップロード読込が symlink 追従（読込時の再チェック無し） | ✅ Fixed（2026-06-02・M3。`NoFollowFileReader` で `O_NOFOLLOW` 単一 FD 化） |
-| L10 | マルチパート中の切り詰めで CompleteMultipartUpload 失敗 | 🔴 未対応（2026-06-02 レビュー検出。可用性・自己回復） |
-| L11 | 巨大ファイルのパート肥大による常駐メモリ増 | 🔴 未対応（2026-06-02 レビュー検出。資源） |
+| L10 | マルチパート中の切り詰めで CompleteMultipartUpload 失敗 | ✅ Fixed（2026-06-02・空 parts ガード × 2） |
+| L11 | 巨大ファイルのパート肥大による常駐メモリ増 | ✅ Fixed（2026-06-02・`maxPartSize` 64MiB cap + デッドコード整理） |
 
 凡例: ✅ Fixed / 🟡 Partial / ⏸ Deferred / 🔴 未対応
 

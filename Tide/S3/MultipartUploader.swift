@@ -66,6 +66,17 @@ struct MultipartUploader {
                 }
             }
 
+            // L10: マルチパート選択（fstat で 16MiB 超）後、createMultipartUpload の往復中に対象ファイルが
+            // 0 バイトへ切り詰められると、O_NOFOLLOW の FD は何も読めず parts が空になる。空のまま Complete
+            // すると S3 が MalformedXML を返すので、ここで明示的に弾く（catch が abort し、上位のファイル単位
+            // リトライ → 次回スキャンが縮小後サイズでシングルパート再送して自己回復する）。
+            guard !parts.isEmpty else {
+                throw SyncError.ioError(underlying: NSError(
+                    domain: "Tide.MultipartUploader", code: -40,
+                    userInfo: [NSLocalizedDescriptionKey: "no parts read (file shrank during multipart upload?)"]
+                ))
+            }
+
             let sha = HashCalculator.hex(hasher.finalize())
             let put = try await client.completeMultipartUpload(
                 key: key, uploadId: uploadId, parts: parts

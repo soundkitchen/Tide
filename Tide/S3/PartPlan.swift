@@ -5,6 +5,9 @@ import Foundation
 enum PartPlan {
     /// S3 マルチパートの最小パートサイズ（最終パートを除く）。
     static let minPartSize: Int = 5 * 1024 * 1024            // 5 MiB
+    /// パートサイズの上限。常駐メモリ（≈ partSize ×（inflight+1））を抑えるための cap（L11）。
+    /// これを超えるのは、10,000 パート上限に収まらない超巨大ファイル（おおむね 640GiB 超）だけ。
+    static let maxPartSize: Int = 64 * 1024 * 1024           // 64 MiB
     /// S3 マルチパートの最大パート数。
     static let maxPartCount: Int = 10_000
     /// これを超えたらマルチパート、以下ならシングル PutObject。
@@ -23,22 +26,24 @@ enum PartPlan {
     }
 
     /// ファイルサイズからアダプティブにパートサイズ / パート数を決める。
-    /// `partSize = max(5MiB, ceil(fileSize / 9000))` を MiB 境界に切り上げ、`partCount ≤ 10,000` を保証。
+    /// 目標パート数（9,000）基準で割った値を `[5MiB, maxPartSize]` にクランプし、常駐メモリを抑える（L11）。
+    /// ただし 10,000 パート上限に収まらない超巨大ファイルだけは、収めるのに必要な分まで `partSize` を引き上げる
+    /// （このとき maxPartSize を超える）。MiB 境界へ切り上げているため `partCount ≤ 10,000` を常に満たす。
     static func plan(forFileSize fileSize: Int64) -> Plan {
         let oneMiB: Int64 = 1024 * 1024
-        // ceil(fileSize / targetMaxParts)
-        let rawPerPart = fileSize <= 0 ? 1 : (fileSize + targetMaxParts - 1) / targetMaxParts
-        // MiB 境界に切り上げ
-        let roundedToMiB = ((rawPerPart + oneMiB - 1) / oneMiB) * oneMiB
-        var partSize64 = max(Int64(minPartSize), roundedToMiB)
-
-        // 念のための防御: 万一 partCount が上限を超えるなら partSize を増やす（通常は targetMaxParts により発生しない）。
-        while partCount(forFileSize: fileSize, partSize: partSize64) > Int64(maxPartCount) {
-            partSize64 += oneMiB
+        func ceilToMiB(_ bytes: Int64) -> Int64 {
+            let raw = max(1, bytes)
+            return ((raw + oneMiB - 1) / oneMiB) * oneMiB
         }
+        // 目標パート数で割った基準値を [minPartSize, maxPartSize] にクランプ。
+        let targetBased = ceilToMiB(fileSize <= 0 ? 1 : (fileSize + targetMaxParts - 1) / targetMaxParts)
+        var partSize = min(max(Int64(minPartSize), targetBased), Int64(maxPartSize))
+        // 10,000 パートに収めるのに必要な最小 partSize（巨大ファイルでは cap を上回る）。
+        let minToFit = ceilToMiB(fileSize <= 0 ? 1 : (fileSize + Int64(maxPartCount) - 1) / Int64(maxPartCount))
+        partSize = max(partSize, minToFit)
 
-        let count = Int(partCount(forFileSize: fileSize, partSize: partSize64))
-        return Plan(partSize: Int(partSize64), partCount: count)
+        let count = Int(partCount(forFileSize: fileSize, partSize: partSize))
+        return Plan(partSize: Int(partSize), partCount: count)
     }
 
     private static func partCount(forFileSize fileSize: Int64, partSize: Int64) -> Int64 {

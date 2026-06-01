@@ -332,6 +332,14 @@ final class TideS3Client: @unchecked Sendable {
         uploadId: String,
         parts: [(partNumber: Int, etag: String)]
     ) async throws -> PutObjectResult {
+        // L10: パートが 1 つも無い状態で Complete すると S3 が MalformedXML を返す。
+        // 呼び出し側のバグや「アップロード中の切り詰め」を明示エラーで弾く（上位が abort する）。
+        guard !parts.isEmpty else {
+            throw SyncError.ioError(underlying: NSError(
+                domain: "Tide.S3", code: -32,
+                userInfo: [NSLocalizedDescriptionKey: "completeMultipartUpload called with no parts"]
+            ))
+        }
         let completed = parts
             .sorted { $0.partNumber < $1.partNumber }
             .map { S3ClientTypes.CompletedPart(eTag: $0.etag, partNumber: $0.partNumber) }

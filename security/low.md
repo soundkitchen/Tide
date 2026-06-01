@@ -143,7 +143,7 @@ symlink を辿り、リンク先（例: `~/.ssh/id_rsa`）の中身を S3 へ送
 
 ## L10. マルチパートアップロード中の「その場切り詰め」で `CompleteMultipartUpload` が失敗
 
-**Status:** 🔴 未対応 (2026-06-02) — M3 サブA のストリーミング・マルチパート化で新たに生じた窓。`xhigh` コードレビュー（2026-06-02）で検出・検証（CONFIRMED）。自己回復はするが最大 5 回のファイル単位リトライ（各 ×3 パートリトライ）を空振りする。
+**Status:** ✅ Fixed (2026-06-02) — 空 parts ガードを 2 箇所に追加。`TideS3Client.completeMultipartUpload` 入口で `parts.isEmpty` を弾き、`MultipartUploader.upload` でも task group 後に `parts.isEmpty`（＝総バイト 0、切り詰め）を検知して明示エラーを投げる（catch が `abortMultipartUpload` → 上位のファイル単位リトライ → 次回スキャンが縮小後サイズでシングルパート再送して自己回復）。`MalformedXML` をリトライ空振りする前に確定失敗させる。`xhigh` コードレビュー（2026-06-02）で検出・検証（CONFIRMED）。
 
 **該当箇所:** `Tide/S3/MultipartUploader.swift` `upload`（読込ループ）、`Tide/S3/S3Client.swift` `completeMultipartUpload`。
 
@@ -162,7 +162,7 @@ symlink を辿り、リンク先（例: `~/.ssh/id_rsa`）の中身を S3 へ送
 
 ## L11. 巨大ファイルのマルチパート・パートサイズが大きく常駐メモリが膨らむ
 
-**Status:** 🔴 未対応 (2026-06-02) — `xhigh` コードレビュー（2026-06-02）で検出。`PartPlan.plan` は目標パート数 9,000 でサイズを割るため、巨大ファイルほど 1 パートが大きくなる（5 TiB → 583 MiB/パート）。`MultipartUploader.maxInflightParts = 3` と合わせ、1 アップロードあたり `partSize × (inflight + 1)` ≈ **約 2.3 GiB 常駐**しうる。
+**Status:** ✅ Fixed (2026-06-02) — `PartPlan` に `maxPartSize = 64 MiB` の cap を導入。目標パート数（9,000）基準値を `[5MiB, 64MiB]` にクランプし、10,000 パートに収まらない超巨大ファイル（おおむね 640GiB 超）だけ「収めるのに必要な最小 partSize」を直接 floor 計算で引き上げる（cap を超えるのはこのときだけ）。これにより現実的な大ファイル（≤640GiB）の常駐メモリは `64MiB × (inflight+1)` ≈ **256 MiB** で頭打ち（従来は 5 TiB で ~2.3 GiB）。あわせて指摘どおり**デッドコードだった防御 `while` ループを撤去**し、直接 floor 計算（`minToFit`）に置換（`partCount ≤ 10,000` は MiB 切り上げにより常に成立）。`PartPlanTests` に cap の回帰を追加。`xhigh` コードレビュー（2026-06-02）で検出。
 
 **該当箇所:** `Tide/S3/PartPlan.swift` `plan`（`targetMaxParts = 9_000`）、`Tide/S3/MultipartUploader.swift`（in-flight バッファ）。
 

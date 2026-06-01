@@ -40,8 +40,9 @@ M1 で導入した「100 MB を超えたら `sync_log` にエラーを残して�
   でチャンク・ストリーミング → tmp へ書込 + SHA-256 逐次計算）を追加。SSE-S3 は create 時に必ず付与。
 - `MultipartUploader`: 単一 `NoFollowFileReader` から順次読込しつつ SHA-256 を逐次更新し、読み終えた
   パートを有界並列（最大 3）で UploadPart。読む順序＝ハッシュ更新順序を保つので全体ハッシュは正しく確定。
-- アダプティブパートサイズ（`PartPlan`）: `partSize = max(5MiB, ceil(fileSize/9000))`（MiB 境界、
-  `partCount ≤ 10,000`）。シングル/マルチ分岐閾値 16 MiB。
+- アダプティブパートサイズ（`PartPlan`）: 目標パート数 9,000 基準値を `[5MiB, maxPartSize(64MiB)]` に
+  クランプ（常駐メモリ抑制＝L11）、10,000 パートに収まらない超巨大ファイルのみ必要分まで partSize を上げる
+  （MiB 境界切り上げで `partCount ≤ 10,000`）。シングル/マルチ分岐閾値 16 MiB。
 - マニフェスト etag は S3 返値をそのまま格納（マルチパートは `<md5>-<partcount>`）。整合性は sha256 ベース。
 - object metadata から `sha256` を外した（create 時点で未確定 ＆ 参照する経路が無い）。詳細は `02-S3-LAYOUT.md`。
 - マニフェスト側の変更:
