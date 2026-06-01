@@ -76,11 +76,65 @@ SwiftUI の `@State private var secretAccessKey: String = ""` は SetupWizardWin
 
 ## L8. `.syncignore`（リモート由来の除外パターン）の取り扱い
 
-**Status:** ✅ Fixed (2026-06-01) — M3 で `.syncignore` 対応を追加。リモート（S3）から伝播し得るユーザパターンが、ローカル FS 判定に影響することを踏まえた防御を入れた。
+**Status:** 🟡 Partial / Mitigated (2026-06-01) — M3 で `.syncignore` 対応を追加。機密網の否定不可・symlink 非追従・サイズ/件数上限は実装済み。
+当初の「ReDoS 回避」は誤りで、生成された正規表現自体がバックトラッキングで爆発し得た（下記 F1）。**F1 は速攻ガードで Mitigated**（PoC 級を parse で遮断 + 照合入力長の有界化）。構造的な ReDoS 解消（線形時間グロブ照合への置換）は M3 タスクとして残置。
 
 **該当箇所:** `Tide/Core/SyncIgnoreMatcher.swift` / `Tide/Core/IgnoreDecision.swift` / `Tide/Core/SyncEngine.swift`
 
 - **機密網は否定 `!` で覆せない**: `IgnoreDecision.shouldSkip` はハードコード除外（`HardcodedIgnoreRules`）を最優先で評価し、`.syncignore` のユーザパターン（否定含む）より常に優先する。悪意ある / 壊れたリモート `.syncignore` に `!.env` 等を書かれても、`.env` などの機密ファイルが同期対象に戻ることはない。
-- **ReDoS / DoS 回避**: ユーザ正規表現は受け取らず、グロブから境界付き正規表現を生成。ファイルサイズ上限 256 KB / パターン数上限 10,000 で、巨大 / 大量パターンによる資源枯渇を防ぐ。
+- **DoS（サイズ/件数）回避**: ユーザ正規表現は受け取らず、ファイルサイズ上限 256 KB / パターン数上限 10,000 で巨大・大量パターンによる資源枯渇を防ぐ。
+- **⚠️ ReDoS は速攻ガードで Mitigated（F1）**: グロブから生成する正規表現を `NSRegularExpression`（ICU = バックトラッキング）で照合するため、`[^/]*` / `.*` が連続する正規表現は破滅的バックトラッキングを起こし得る（「境界付き正規表現＝ReDoS 回避」という当初の前提は不成立）。パターン長/ワイルドカード数の上限で PoC 級を parse 破棄し、照合入力長を有界化、隣接 `[^/]*` を縮約して緩和した。これは構造的保証ではない。詳細は下記 F1。
 - **読込経路の安全性**: `.syncignore` の読込は `PathValidator.resolveSafely(relativePath: ".syncignore", syncRoot:)` 経由で、シンボリックリンクは追従しない。
 - **影響の上限**: リモート由来パターンができるのは「除外」か（否定での）「再包含」のみ。再包含してもハードコード除外は覆せないため、最悪でも「同期されるべきファイルが同期されない（可用性）」に留まり、機密漏洩には繋がらない。
+
+### F1. `.syncignore` グロブ→正規表現の破滅的バックトラッキング（ReDoS）
+
+**Status:** 🟡 Mitigated (2026-06-01) — 速攻ガードを実装。`SyncIgnoreMatcher.parse` で 1 パターンの長さ（`maxPatternLength=256`）と `*`/`?` 個数（`maxWildcardsPerPattern=8`）に上限を設け超過行を破棄（実証 PoC の 15 連 `*` はここで落ちる）、`isIgnored` で照合入力長（`maxMatchPathLength=1024`）超を除外判定スキップ、`globToRegex` で隣接 `[^/]*` を縮約。`TideTests/SyncIgnoreMatcherTests.swift` に「病的パターンが parse 破棄され `isIgnored` が即時返る」回帰を追加。**これは PoC 級の遮断＋入力有界化であって線形時間の構造的保証ではない**。恒久解（`NSRegularExpression` → 線形時間グロブ照合への置換）は M3 タスクとして残置（`docs/07-M3-IMPLEMENTATION-GUIDE.md` 参照）。
+
+**該当箇所:** `Tide/Core/SyncIgnoreMatcher.swift`（`globToRegex` / `isIgnored`）。評価経路は
+`IgnoreDecision.shouldSkip` → `SyncEngine.reconcileRemoteEntry` / `performFullScan` / `processEventToQueue`。
+
+**重要度:** Low〜Medium（可用性のみ・復旧可能。前提は C1/C2 と同じ「攻撃者が S3 バケットを書ける」）。
+
+**内容:** `globToRegex` は `*` / `**` / `?` を `[^/]*` / `.*` / `(?:.*/)?` / `[^/]` に展開し、
+`NSRegularExpression`（ICU = バックトラッキング NFA）で照合する。`[^/]*` が連続する正規表現
+（例: グロブ `*a*a*a*…*z`）は、末尾が一致しない入力に対して超多項式的にバックトラッキングする。
+`maxPatterns=10,000` / `maxBytes=256KB` の上限は無力（約 40 文字の単一パターンで成立）。
+
+**実証:** `globToRegex` と等価な正規表現（`[^/]*a` を 15 連結 + 末尾不一致文字）を 40 文字入力に照合 →
+**12 秒経過しても完了せず**（線形マッチャなら μ 秒）。
+
+**「既存追跡は触らない（gitignore 純正）」は止血にならない（重要）:** `IgnoreDecision.shouldSkip` は
+重い `matcher.isIgnored(path)` を tracked / 未追跡を問わず**先に**評価し、`isAlreadyTracked` は
+マッチ完了「後」の出し分けに過ぎない。よって既存同期済みファイルのパスでもフルスキャンのたびに照合が走る。
+さらに攻撃者は `reconcileRemoteEntry` で**マニフェスト由来の新規（未追跡）パス**を注入して確実に発火させられる。
+
+**影響:** `Task.detached` ワーカが 100% CPU で無限スピンし、remote pull / full scan が完了しなくなる。
+データ消失・ルート脱出は無い。`.syncignore` から該当行を消せば復旧可能。
+
+**推奨修正（実装スレッド向け）:**
+- (即効・推奨) パターン単位の `*` / `?` 個数と 1 行長に上限を設け、超過パターンは `parse` で破棄する。
+  照合対象パス長にも上限を設ける。隣接 `[^/]*` の縮約も検討。最小変更で確実にハングを防げる。
+- (恒久・将来タスク) `NSRegularExpression` をやめ、線形時間のグロブ照合（two-pointer / DP、gitignore 実装の定番）へ
+  置換し、入力長に比例する計算量を構造的に保証する。`**` / 否定 / アンカー等の既存セマンティクスを正確に移植する。
+- `TideTests/SyncIgnoreMatcherTests.swift` に「病的パターン × 非一致入力が即座に返る」回帰テストを追加。
+
+---
+
+## L9. Uploader が symlink 追従 API で読む（読込時の symlink 再チェック無し）
+
+**Status:** 🟡 Mitigated (2026-06-01) — `processUpload` の `resolveSafely` 直後に共有ヘルパ `PathValidator.isSymbolicLink(at:)` で再チェックを追加。symlink へ差し替えられていたらアップロードせず拒否し、`upload_queue` から当該行を除去（無限リトライ防止）＋ `sync_log` 記録＋警告ログ（`privacy: .private`）。差し替えで誤ってリモートの正データを消さないよう `convertQueueItemToDelete` は使わない。`PathValidatorTests` に `isSymbolicLink` の判定テストを追加。**残存**: チェック〜`Data(contentsOf:)` 間の再差し替え窓は残る。完全な TOCTOU 解消（`O_NOFOLLOW` で open し同一 FD からハッシュ計算＋本体読込）は M5 と同根で M3 へ残置。
+
+**該当箇所:** `Tide/S3/Uploader.swift` `processUpload`（`FileManager.attributesOfItem(atPath:)` / `Data(contentsOf:)`）。
+
+**重要度:** Low（防御多重化）。同一ユーザ権限ゆえ権限昇格は無い。
+
+**内容:** symlink は走査時（`SyncEngine.performFullScan`）と FSEvents 時（`FileWatcher` が
+`kFSEventStreamEventFlagItemIsSymlink` をスキップ）に弾くが、**アップロード直前に再チェックしない**。
+通常ファイルとしてキュー投入された後に symlink へ差し替える TOCTOU 窓があると、`Data(contentsOf:)` が
+symlink を辿り、リンク先（例: `~/.ssh/id_rsa`）の中身を S3 へ送り得る。symlink 保護を回避する
+クラウド持ち出し経路。
+
+**推奨修正（実装スレッド向け）:**
+- `processUpload` の `resolveSafely` 後に `resourceValues(forKeys: [.isSymbolicLinkKey])` を確認して拒否。
+- 理想は `O_NOFOLLOW` で open し、同一 FD からハッシュ計算と本体読込を行う（M5 の TOCTOU も同時解消）。

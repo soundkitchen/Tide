@@ -122,4 +122,50 @@ final class SyncIgnoreMatcherTests: XCTestCase {
         XCTAssertTrue(s.isIgnored("p0"))            // 先頭は採用される
         XCTAssertEqual(s.sourceLines.count, SyncIgnoreMatcher.maxPatterns)
     }
+
+    // MARK: - ReDoS 速攻ガード (F1 / L8)
+
+    /// k 個のワイルドカードを持つグロブを生成（`*s0*s1*…`）。
+    private func glob(stars k: Int) -> String {
+        (0..<k).map { "*s\($0)" }.joined()
+    }
+
+    func testPathologicalManyWildcardPatternDropped() {
+        // 実証 PoC 級（多 `*`）は parse で破棄され、コンパイルされない＝ハングし得ない。
+        let s = m(glob(stars: 15))
+        XCTAssertEqual(s.sourceLines.count, 0)
+        XCTAssertFalse(s.isIgnored("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab"))
+    }
+
+    func testWildcardCapBoundaryIsInclusive() {
+        // ちょうど上限個（8）は採用、超過（9）は破棄。
+        XCTAssertEqual(m(glob(stars: SyncIgnoreMatcher.maxWildcardsPerPattern)).sourceLines.count, 1)
+        XCTAssertEqual(m(glob(stars: SyncIgnoreMatcher.maxWildcardsPerPattern + 1)).sourceLines.count, 0)
+    }
+
+    func testOverlongPatternLineDropped() {
+        let longLine = String(repeating: "a", count: SyncIgnoreMatcher.maxPatternLength + 1)
+        XCTAssertEqual(m(longLine).sourceLines.count, 0)
+        // 上限ちょうどは採用される
+        let okLine = String(repeating: "a", count: SyncIgnoreMatcher.maxPatternLength)
+        XCTAssertEqual(m(okLine).sourceLines.count, 1)
+    }
+
+    func testOverlongMatchInputIsNotIgnored() {
+        let s = m("*.log")
+        // 通常長は従来どおりマッチ
+        XCTAssertTrue(s.isIgnored("dir/app.log"))
+        // 異常に長い入力は照合せず「除外しない」を返す（安全側）
+        let huge = String(repeating: "a", count: SyncIgnoreMatcher.maxMatchPathLength + 1) + ".log"
+        XCTAssertFalse(s.isIgnored(huge))
+    }
+
+    func testNormalPatternsStillWorkUnderCaps() {
+        // ワイルドカード数が上限以下の正当パターンはキャップに引っかからない。
+        let s = m("**/node_modules\na/**/*.log\n*.min.*.js")
+        XCTAssertEqual(s.sourceLines.count, 3)
+        XCTAssertTrue(s.isIgnored("x/node_modules/y"))
+        XCTAssertTrue(s.isIgnored("a/deep/path/err.log"))
+        XCTAssertTrue(s.isIgnored("vendor/jquery.min.slim.js"))
+    }
 }

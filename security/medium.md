@@ -73,3 +73,30 @@ data = try await body.readData() ?? Data()
 `HashCalculator.sha256(of:)` でハッシュを取り、その後別途 `Data(contentsOf: fullURL)` で読み直してアップロードしている。間にファイルが書き換えられると、メタデータの sha256 と実バイトが食い違い、整合性検証（`Downloader.swift:42`）に失敗する。検知できるので安全側に倒れているが、**アップロード後の DB に古いハッシュが残る不整合**が起こりうる。
 
 **対策:** ハッシュ計算をストリーミングで行いつつ同じバッファをアップロードに使う、または putObject 後に取得 ETag と「アップロードしたバイトから計算した sha256」を再検証してから DB 更新。
+
+---
+
+## M6. ダウンロード書込の祖先ディレクトリ symlink による syncRoot 脱出（C1/C2 の補完漏れ）
+
+**Status:** ✅ Fixed (2026-06-01) — `PathValidator.resolveForWrite(relativePath:syncRoot:)` を新設。`resolveSafely` に加え、解決後 URL の**最深の既存祖先ディレクトリ**の実パス（`resolvingSymlinksInPath()`）が syncRoot の実パス配下に収まることを検証する（root 側も `resolvingSymlinksInPath()` で解決し同一基準で比較）。`Downloader.download` / `applyRemoteDeletion` / `renameLocalForConflict` の書込・削除入口をこの API 経由に変更。`ValidationError.escapesSyncRootViaSymlink` を追加。`TideTests/PathValidatorTests.swift` に祖先 symlink 脱出を弾く回帰テスト（`testResolveForWriteRejectsAncestorSymlinkEscape` ほか）を追加。
+
+**該当箇所:** `Tide/Core/PathValidator.swift` `resolveForWrite`、`Tide/S3/Downloader.swift` `download` / `applyRemoteDeletion` / `renameLocalForConflict`。
+
+**重要度:** Medium（任意絶対パスは書けず、既存 symlink の指す先に限定。前提は C1 と同じマニフェスト改ざん）。
+
+**内容:** `resolveSafely` は `standardizedFileURL` で root 配下を判定するが、`standardizedFileURL` は
+`.` / `..` を**字句的に**解決するだけで **symlink は解決しない**（`resolvingSymlinksInPath` ではない）。
+`Downloader.download` の symlink ガードは**最終コンポーネントのみ**（`isSymlink(at: fullURL)`、しかも
+未作成パスでは false）。よって syncRoot 配下の**祖先ディレクトリが外部を指す symlink**（例: 開発者が
+`data/` を外部ボリュームへ symlink）だと、マニフェストエントリ `data/x/evil` は字句上 root 配下なので
+`resolveSafely` を通過し、`createDirectory(withIntermediateDirectories:)` / `moveItem` が symlink を辿って
+**実体側（例: `/Volumes/ext`・`/tmp/...`）へ書き込む** = 実 syncRoot 外への書き込みになる。
+
+C2 はアップロード走査（symlink スキップ）と最終書込先は守るが、**ダウンロード書込経路の祖先 symlink** は
+未防御。前提は「syncRoot 内に既存の symlink ディレクトリがある」＋「マニフェスト改ざん（C1 と同じ）」。
+
+**推奨修正（実装スレッド向け）:**
+- 解決後に「最深の既存祖先ディレクトリの実パス（`resolvingSymlinksInPath`）が `syncRoot` の実パス配下に収まる」
+  ことを検証するヘルパを `PathValidator` に追加。または各パスコンポーネントを走査して symlink を拒否。
+- `Downloader.download`（親ディレクトリ作成直前）/ `renameLocalForConflict` / `applyRemoteDeletion` の入口に適用。
+- `TideTests/PathValidatorTests.swift` に「祖先 symlink 経由の脱出を弾く」回帰テストを追加。

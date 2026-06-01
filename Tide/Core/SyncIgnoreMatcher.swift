@@ -9,8 +9,12 @@ import Foundation
 /// - 先頭または中間の `/` はルートアンカー。スラッシュが無ければ任意階層でマッチ
 /// - `*` は `/` 以外の任意、`?` は `/` 以外 1 文字、`**` はパスセグメントをまたぐ
 ///
-/// セキュリティ: ユーザ正規表現は受け取らず、グロブから境界付き正規表現を生成する（ReDoS 回避）。
-/// 否定 `!` で `HardcodedIgnoreRules`（機密網）を覆すことはできない（判定の優先順は呼び出し側で担保）。
+/// セキュリティ: ユーザ正規表現は受け取らず、グロブから境界付き正規表現を生成する。生成した正規表現を
+/// `NSRegularExpression`（ICU = バックトラッキング）で照合するため、`*a*a*…` 系の多ワイルドカードパターン ×
+/// 部分一致する長い入力では破滅的バックトラッキングが起こり得る（security F1 / L8）。これを**速攻ガード**で緩和:
+/// パターン単位の長さ・ワイルドカード数に上限を設けて実証 PoC 級を `parse` で破棄し、照合入力長にも上限を設け、
+/// 隣接する `[^/]*` を縮約する。これは PoC 級の遮断と入力の有界化であって線形時間の構造的保証ではない
+/// （恒久解 = 線形時間グロブ照合への置換は M3 タスク）。
 ///
 /// `NSRegularExpression` はマッチング用途ではスレッドセーフ（Apple ドキュメント）かつ生成後は不変なので、
 /// 値型として `@unchecked Sendable` にしている（`performFullScan` の `Task.detached` へスナップショットを渡すため）。
@@ -22,6 +26,14 @@ struct SyncIgnoreMatcher: @unchecked Sendable {
     static let maxBytes = 256 * 1024
     /// パターン数上限。超過分は捨てる。
     static let maxPatterns = 10_000
+    /// 1 パターン（1 行）の最大文字数。超過行は parse で破棄（ReDoS 速攻ガード: F1）。
+    static let maxPatternLength = 256
+    /// 1 パターンに含められる `*` / `?` の最大個数。超過行は parse で破棄。
+    /// 多ワイルドカードによる多項式バックトラッキングを抑える。正当なパターンは通常これを大きく下回る。
+    static let maxWildcardsPerPattern = 8
+    /// `isIgnored` が照合する相対パスの最大文字数。超過パスは除外判定をスキップ（= 除外しない＝安全側）。
+    /// 実在 FS パスは PATH_MAX 内に収まるため実害はない。攻撃者がマニフェスト経由で長大パスを注入する経路を遮断する。
+    static let maxMatchPathLength = 1024
 
     private struct Pattern {
         let regex: NSRegularExpression
@@ -84,6 +96,12 @@ struct SyncIgnoreMatcher: @unchecked Sendable {
             if line.isEmpty { continue }
             if line.hasPrefix("#") { continue }
 
+            // ReDoS 速攻ガード (F1): 長すぎる行 / ワイルドカード過多の行は破棄する。
+            // 否定 `!` は機密網 (HardcodedIgnoreRules) を覆せないため、破棄しても機密が再包含されることはない。
+            if line.count > maxPatternLength { continue }
+            let wildcardCount = line.reduce(0) { $0 + (($1 == "*" || $1 == "?") ? 1 : 0) }
+            if wildcardCount > maxWildcardsPerPattern { continue }
+
             var pat = line
             var negated = false
             if pat.hasPrefix("!") {
@@ -124,6 +142,9 @@ struct SyncIgnoreMatcher: @unchecked Sendable {
     /// gitignore と同様、後に書かれたパターンが優先（否定で再包含）。
     func isIgnored(_ relativePath: String) -> Bool {
         guard !patterns.isEmpty else { return false }
+        // ReDoS 速攻ガード (F1): 異常に長い入力は照合せず「除外しない」を返す（安全側）。
+        // 実在 FS パスは PATH_MAX 内なので実害なし。攻撃者注入の長大パスでの照合爆発を防ぐ。
+        guard relativePath.count <= Self.maxMatchPathLength else { return false }
         let range = NSRange(relativePath.startIndex..., in: relativePath)
         var ignored = false
         for p in patterns where p.regex.firstMatch(in: relativePath, options: [], range: range) != nil {
@@ -141,6 +162,11 @@ struct SyncIgnoreMatcher: @unchecked Sendable {
         let n = chars.count
         var re = ""
         var i = 0
+        // 隣接する `[^/]*` の縮約（ReDoS 速攻ガード: F1）。`[^/]*[^/]*` は `[^/]*` と等価なので、
+        // 冗長な量化子の重なり（バックトラッキングの曖昧さの源）を取り除く。
+        func appendStarSegment() {
+            if !re.hasSuffix("[^/]*") { re += "[^/]*" }
+        }
         while i < n {
             let c = chars[i]
             switch c {
@@ -158,11 +184,11 @@ struct SyncIgnoreMatcher: @unchecked Sendable {
                             re += ".*"          // 末尾 `**`
                         }
                     } else {
-                        re += "[^/]*"           // セグメント内の `**` は `*` 扱い
+                        appendStarSegment()     // セグメント内の `**` は `*` 扱い
                     }
                     i = j
                 } else {
-                    re += "[^/]*"
+                    appendStarSegment()
                     i += 1
                 }
             case "?":

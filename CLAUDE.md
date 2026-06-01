@@ -116,7 +116,9 @@
 
 - **`PathValidator.resolveSafely(relativePath:syncRoot:)` を、リモート由来の path がローカル FS 操作に到達する全入口で呼ぶ**（Downloader / Uploader / SyncEngine / ManifestReader）。`..` / 絶対パス / NUL / バックスラッシュ / 空コンポーネントを拒否し、解決後の URL が syncRoot 配下にあることまで検証する。
 - **`PathValidator.validateShardId(_:)` を、`shardId` が S3 キーに組み立てられる全入口で呼ぶ**（S3Client.getShard/putShard/deleteShard、ManifestReader.read）。`^[0-9a-f]{2}$` 強制。
-- **シンボリックリンクは絶対に追従しない**: `SyncEngine.performFullScan` の enumerator で `.isSymbolicLinkKey` を取り、symlink なら `skipDescendants()` + `continue`。Downloader の書き込み先がシンボリックリンクなら拒否。
+- **シンボリックリンクは絶対に追従しない**: `SyncEngine.performFullScan` の enumerator で `.isSymbolicLinkKey` を取り、symlink なら `skipDescendants()` + `continue`。Downloader の書き込み先（最終コンポーネント）がシンボリックリンクなら拒否。
+- **書込・削除経路は `PathValidator.resolveForWrite(relativePath:syncRoot:)` を通す**（Downloader の `download` / `applyRemoteDeletion` / `renameLocalForConflict`）。`resolveSafely` は字句検証のみで symlink を解決しないため、**祖先ディレクトリの symlink 経由のルート脱出**（最深の既存祖先の実パスが syncRoot 実パス配下か）も拒否する（F2 / M6）。
+- **Uploader はアップロード読込の直前に `PathValidator.isSymbolicLink(at:)` で再チェック**し、symlink に差し替えられていたら拒否してキューから外す（F3 / L9。完全な TOCTOU 解消＝`O_NOFOLLOW` 化は M5/M3）。
 - **新しい dotfile / 拡張子で「機密が紛れ込みそう」と思ったら、`HardcodedIgnoreRules` に即追加**。
 - `PutObject` は常に `serverSideEncryption: .aes256` を指定。
 - Keychain クエリは `kSecUseDataProtectionKeychain=true`, `kSecAttrAccessible=AfterFirstUnlock`, `kSecAttrSynchronizable=false` を必ず含める。
@@ -200,7 +202,8 @@
 - **「リモートで消えたファイルをローカル削除するのは、ローカルファイルの SHA が DB 記録（最後にアップロードした内容）と一致するときのみ」**。一致しなければユーザが触っているとみなし、`sync_log` に warning を残してスキップ。`Downloader.applyRemoteDeletion`。
 
 ### `.syncignore` 除外ルール（M3）
-- **構文は gitignore の一般的サブセット**: `*` `**` `?`、先頭 `/` アンカー、末尾 `/` でディレクトリ限定、`!` 否定（再包含）、`#` コメント、空行。`SyncIgnoreMatcher` がグロブを境界付き正規表現に変換する（**ユーザ正規表現は受けない**。ReDoS 回避）。サイズ上限 256 KB / パターン数上限 10,000。
+- **構文は gitignore の一般的サブセット**: `*` `**` `?`、先頭 `/` アンカー、末尾 `/` でディレクトリ限定、`!` 否定（再包含）、`#` コメント、空行。`SyncIgnoreMatcher` がグロブを境界付き正規表現に変換する（**ユーザ正規表現は受けない**）。サイズ上限 256 KB / パターン数上限 10,000。
+- **ReDoS は速攻ガードで Mitigated（構造的解消は M3）**: 生成正規表現を `NSRegularExpression`（ICU = バックトラッキング）で照合するため `*a*a*…` 系で破滅的バックトラッキングが起こり得る。`parse` で 1 パターンの長さ（`maxPatternLength`）/ ワイルドカード数（`maxWildcardsPerPattern`）上限超を破棄、`isIgnored` で照合入力長（`maxMatchPathLength`）上限超を判定スキップ、`globToRegex` で隣接 `[^/]*` を縮約。**これは PoC 級遮断＋入力有界化であって線形時間保証ではない**。恒久解＝線形時間グロブ照合への置換は M3（F1 / L8）。
 - **ハードコード除外（機密網）は常に最優先**。`.syncignore` の否定 `!` では `.env` 等を再包含できない。「既存は触らない」緩和は**ユーザパターンにのみ**適用し、ハードコード除外には適用しない。
 - **gitignore 純正（既存は触らない）**: `.syncignore` のユーザパターンは**新規ファイル（未追跡 = `FileRecord.lastSyncedAt == nil`）にのみ**適用。既に同期済みのファイルは同期継続、S3 からも自動削除しない。バックアップから外したい時はローカル削除 → 通常の削除伝播。
 - **`.syncignore` 自身は同期対象に含める**（S3 経由で全デバイス・復旧後にも伝播）。`IgnoreDecision.shouldSkip` は `.syncignore` 自身を決して除外しない。
@@ -227,7 +230,8 @@
 
 - **C3 後半**: HTTPS 強制バケットポリシー（`PutBucketPolicy` で `aws:SecureTransport=true`）。SDK 自体は HTTPS 既定で送るので緊急度は低い。
 - **H3**: 静的 AWS キー → STS / IAM Identity Center への構造的置き換え。M3 以降で要検討。
-- **M5**: アップロード時のハッシュ + 読み込みの TOCTOU。M3 のマルチパート対応で同時解消する。
+- **M5 / F3 (L9)**: アップロード時のハッシュ + 読み込みの TOCTOU。F3 は読込直前の symlink 再チェックで Mitigated 済み。完全解消（`O_NOFOLLOW` で open し同一 FD からハッシュ計算＋本体読込）は M3 のマルチパート対応で同時に行う。
+- **F1 (L8)**: `.syncignore` ReDoS の構造的解消。現状は速攻ガード（長さ/ワイルドカード数/入力長キャップ + 隣接量化子縮約）で Mitigated。恒久解＝`NSRegularExpression` → 線形時間グロブ照合への置換は M3（`docs/07-M3-IMPLEMENTATION-GUIDE.md` 参照）。
 - **L1**: App Sandbox 化。security-scoped bookmark + entitlement の正規対応は M3+。
 - **L6**: `DebounceQueue.fire` の競合。`upload_queue.UNIQUE(path)` で実害は出ない想定。観察継続。
 - **ネスト `.syncignore`**: ディレクトリごとの `.syncignore`（git 風の階層的オーバーライド）は未対応。現状はルートの `<syncRoot>/.syncignore` のみ。将来タスク（`docs/07-M3-IMPLEMENTATION-GUIDE.md` サブタスク B「既知の制限 / 将来タスク」参照）。

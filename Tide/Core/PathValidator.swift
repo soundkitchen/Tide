@@ -7,13 +7,15 @@ enum PathValidator {
     enum ValidationError: Error, CustomStringConvertible {
         case invalidRelativePath(String, reason: String)
         case escapesSyncRoot(String)
+        case escapesSyncRootViaSymlink(String)
         case invalidShardId(String)
 
         var description: String {
             switch self {
-            case .invalidRelativePath(let p, let r): return "invalid relative path \(p): \(r)"
-            case .escapesSyncRoot(let p):            return "path escapes sync root: \(p)"
-            case .invalidShardId(let s):             return "invalid shard id: \(s)"
+            case .invalidRelativePath(let p, let r):  return "invalid relative path \(p): \(r)"
+            case .escapesSyncRoot(let p):             return "path escapes sync root: \(p)"
+            case .escapesSyncRootViaSymlink(let p):   return "path escapes sync root via symlinked ancestor: \(p)"
+            case .invalidShardId(let s):              return "invalid shard id: \(s)"
             }
         }
     }
@@ -60,6 +62,47 @@ enum PathValidator {
             throw ValidationError.escapesSyncRoot(relativePath)
         }
         return full
+    }
+
+    /// `resolveSafely` に加えて、書込・削除経路で**祖先ディレクトリの symlink によるルート脱出**を防ぐ。
+    ///
+    /// `resolveSafely` は `standardizedFileURL` で字句的に root 配下を判定するだけで symlink を解決しない。
+    /// syncRoot 内に外部を指す symlink ディレクトリ（例 `data/ → /Volumes/ext`）があると、マニフェスト
+    /// 由来の `data/x/evil` が字句上 root 配下なので通過し、`createDirectory(withIntermediateDirectories:)`
+    /// / `moveItem` / `removeItem` が symlink を辿って syncRoot 外へ到達してしまう（security F2 / M6）。
+    ///
+    /// そこで「解決後 URL の**最深の既存祖先ディレクトリ**の実パス（symlink 解決後）が syncRoot の実パス
+    /// 配下に収まる」ことを検証する。root 側も `resolvingSymlinksInPath()` で解決して同一基準で比較する
+    /// （`/tmp`→`/private/tmp` などの差異を吸収するため）。
+    ///
+    /// 最終コンポーネント自身が symlink のケースは呼び出し側（Downloader）の `isSymbolicLink` ガードが担当する。
+    /// 本メソッドは祖先専用。
+    static func resolveForWrite(relativePath: String, syncRoot: URL) throws -> URL {
+        let full = try resolveSafely(relativePath: relativePath, syncRoot: syncRoot)
+        let realRoot = syncRoot.resolvingSymlinksInPath().standardizedFileURL.path
+
+        // 最深の既存祖先ディレクトリを探す（書込時に createDirectory が辿る対象）。
+        var ancestor = full.deletingLastPathComponent()
+        let fm = FileManager.default
+        while !fm.fileExists(atPath: ancestor.path) {
+            let parent = ancestor.deletingLastPathComponent()
+            if parent.path == ancestor.path { break }  // ファイルシステムルート到達
+            ancestor = parent
+        }
+
+        let realAncestor = ancestor.resolvingSymlinksInPath().standardizedFileURL.path
+        guard realAncestor == realRoot || realAncestor.hasPrefix(realRoot + "/") else {
+            throw ValidationError.escapesSyncRootViaSymlink(relativePath)
+        }
+        return full
+    }
+
+    /// `url` がシンボリックリンクか（リンク先は辿らず、その場所のメタデータで判定）。
+    /// 存在しないパスは false。書込/読込直前の symlink 再チェックに使う共有ヘルパ。
+    static func isSymbolicLink(at url: URL) -> Bool {
+        guard FileManager.default.fileExists(atPath: url.path) else { return false }
+        let values = try? url.resourceValues(forKeys: [.isSymbolicLinkKey])
+        return values?.isSymbolicLink ?? false
     }
 
     /// `^[0-9a-f]{2}$`（小文字 hex 2 桁）以外を弾く。

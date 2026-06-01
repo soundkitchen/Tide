@@ -41,6 +41,13 @@ AWS SDK のエラー記述には、リクエスト URL（バケット名・キ�
 - ログは `privacy: .private`（または既定値）にし、`(reason)` のみ public に
 - UI の `recentErrors` はクラス分けされたメッセージ（e.g. "AccessDenied on key X"）に絞る
 
+**残存 (F4, 2026-06-01) 🔴 未対応:** OS Log の `.public` 漏洩は是正済みだが、上記対策の 3 点目
+「UI の `recentErrors` をクラス分けされたメッセージに絞る」が**未実施**。`SyncEngine.appendError("\(path): \(error)")`
+および `status = .error(String(describing: error))` が生の SDK エラー文字列（バケット名・キー・リージョンを含み得る）を
+`MenuBarContent`（`textSelection` 有効）へ表示し続けている。表示先は本人画面のみのため重要度は Low。
+**推奨修正（実装スレッド向け）:** `SyncError` への classify→短い理由文字列に統一し、`recentErrors` と `.error`
+ラベルへは分類済みメッセージのみ渡す（`Tide/Core/SyncEngine.swift` / `Tide/UI/MenuBarContent.swift`）。
+
 ---
 
 ## H3. AWS 静的アクセスキーの長期保管

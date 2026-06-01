@@ -73,7 +73,11 @@ M1 で導入した「100 MB を超えたら `sync_log` にエラーを残して�
 
 ### 実装
 - 新規 `Tide/Core/SyncIgnoreMatcher.swift`: 不変・`@unchecked Sendable` な値型。グロブ → 境界付き正規表現
-  （ユーザ正規表現は受けない。ReDoS 回避）。ファイルサイズ上限 256 KB / パターン数上限 10,000。
+  （ユーザ正規表現は受けない）。ファイルサイズ上限 256 KB / パターン数上限 10,000。
+  生成した正規表現を `NSRegularExpression`（ICU = バックトラッキング）で照合するため ReDoS が起こり得る（F1 / L8）。
+  **速攻ガード**で緩和済み: 1 パターンの長さ（`maxPatternLength`）/ ワイルドカード数（`maxWildcardsPerPattern`）上限で
+  実証 PoC 級を `parse` で破棄、照合入力長（`maxMatchPathLength`）上限、隣接 `[^/]*` の縮約。
+  これは PoC 級の遮断＋入力有界化であって線形時間の構造的保証ではない。**恒久解＝線形時間グロブ照合への置換は将来タスク**（下記）。
 - 新規 `Tide/Core/IgnoreDecision.swift`: 純粋関数 `shouldSkip(relativePath:isAlreadyTracked:matcher:)`。
   判定順: ① ハードコード（常に）→ ② `.syncignore` 自身（決して除外しない）→ ③ ユーザパターン∧未追跡 → スキップ。
 - `SyncEngine`: `ignoreMatcher` を保持。`reloadIgnoreMatcher()` で `<syncRoot>/.syncignore` を安全に読込
@@ -87,6 +91,7 @@ M1 で導入した「100 MB を超えたら `sync_log` にエラーを残して�
 ### 既知の制限 / 将来タスク
 - **ディレクトリごとの `.syncignore`（git 風の階層的オーバーライド）は未対応**。現状はルートの `<syncRoot>/.syncignore` 1 ファイルのみを読む。サブディレクトリの `.syncignore` はただの同期対象ファイル扱い。→ **将来タスク**（各ファイル位置でのアンカー / 変更検知リロード / `*/.syncignore` の self-protect 拡張が必要）。
 - 親ディレクトリが除外された配下のファイルを `!` で再包含する gitignore の挙動は厳密には再現しない（同一階層の否定は正しく動く）。
+- **ReDoS の構造的解消（F1 / L8）は将来タスク**。現状は `NSRegularExpression` ベースに速攻ガード（長さ/ワイルドカード数/入力長キャップ + 隣接量化子縮約）を被せた緩和。恒久解は `NSRegularExpression` をやめ、線形時間のグロブ照合（two-pointer / DP。`**` / 否定 / アンカーのセマンティクスを移植）へ置換する。`SyncIgnoreMatcherTests` を回帰の基準に使える。
 - マッチングは case-sensitive（gitignore 既定）。
 - `ManifestReader` には ignore 判定を入れず、ダウンロード可否は `reconcileRemoteEntry` で gate する（削除検出が完全な remoteMap に依存するため）。
 

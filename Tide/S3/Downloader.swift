@@ -17,10 +17,10 @@ struct Downloader {
         relativePath: String,
         entry: ManifestFileEntry
     ) async throws -> Bool {
-        // C1/C2: 入口でリモート由来パスを検証 + sync root エスケープ防止
-        let fullURL = try PathValidator.resolveSafely(relativePath: relativePath, syncRoot: syncRoot)
+        // C1/C2/F2: 入口でリモート由来パスを検証 + sync root エスケープ防止（祖先 symlink 経由の脱出も含む）
+        let fullURL = try PathValidator.resolveForWrite(relativePath: relativePath, syncRoot: syncRoot)
         // 既存パスがシンボリックリンクなら拒否（リンク先実体を書き換えない）
-        if try isSymlink(at: fullURL) {
+        if PathValidator.isSymbolicLink(at: fullURL) {
             throw SyncError.ioError(underlying: NSError(
                 domain: "Tide.Downloader",
                 code: -13,
@@ -91,12 +91,6 @@ struct Downloader {
         return true
     }
 
-    private func isSymlink(at url: URL) throws -> Bool {
-        guard FileManager.default.fileExists(atPath: url.path) else { return false }
-        let values = try url.resourceValues(forKeys: [.isSymbolicLinkKey])
-        return values.isSymbolicLink ?? false
-    }
-
     /// 既存ローカルファイルを衝突用にリネームし、その新パスを返す。
     /// rename された後のファイルは M1 ロジックでアップロードキューに乗ることが期待される。
     @discardableResult
@@ -122,8 +116,9 @@ struct Downloader {
             newRelative = ConflictNamer.localCopyRelativePath(for: relativePath, at: now.addingTimeInterval(Double(tries)))
         }
 
-        let from = syncRoot.appendingPathComponent(relativePath)
-        let to = syncRoot.appendingPathComponent(newRelative)
+        // F2: 祖先 symlink 経由でルート外を移動元/移動先にしない
+        let from = try PathValidator.resolveForWrite(relativePath: relativePath, syncRoot: syncRoot)
+        let to = try PathValidator.resolveForWrite(relativePath: newRelative, syncRoot: syncRoot)
         try FileManager.default.createDirectory(
             at: to.deletingLastPathComponent(),
             withIntermediateDirectories: true
@@ -152,9 +147,10 @@ struct Downloader {
     /// - Returns: 削除を実行したら true、温存したら false。
     @discardableResult
     func applyRemoteDeletion(relativePath: String) async throws -> Bool {
-        let fullURL = try PathValidator.resolveSafely(relativePath: relativePath, syncRoot: syncRoot)
+        // F2: 祖先 symlink 経由でルート外のファイルを削除しない
+        let fullURL = try PathValidator.resolveForWrite(relativePath: relativePath, syncRoot: syncRoot)
         // シンボリックリンクは削除対象外（リンク先実体を消さない）
-        if try isSymlink(at: fullURL) {
+        if PathValidator.isSymbolicLink(at: fullURL) {
             AppLogger.sync.info("Refusing to remove a symbolic link: \(relativePath, privacy: .private)")
             return false
         }

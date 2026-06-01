@@ -481,8 +481,8 @@ struct ReadResult {
 `Tide/S3/Downloader.swift` の `download(relativePath:entry:)`:
 
 ```
-1. PathValidator.resolveSafely で path 検証 + syncRoot 配下確認
-2. 既存ローカルファイルがシンボリックリンクなら拒否（実体書換防止）
+1. PathValidator.resolveForWrite で path 検証 + syncRoot 配下確認（祖先ディレクトリの symlink 経由のルート脱出も拒否 / F2）
+2. 既存ローカルファイル（最終コンポーネント）がシンボリックリンクなら拒否（実体書換防止）
 3. ローカル SHA == manifest SHA ならスキップ（DB のみ最新化）
 4. GetObject（content-length / 受信長を maxBytes でチェック）
 5. SHA-256 検証（manifest と byte 不一致なら abort）
@@ -515,6 +515,8 @@ struct ReadResult {
 - マニフェスト由来の `relativePath` / `shardId` は **すべて** `PathValidator` を通す（`..` / 絶対パス / NUL / バックスラッシュ等を拒否し、解決後 URL が syncRoot 配下にあることまで確認）
 - `getObject` は `maxBytes` 既定 200 MiB、マニフェスト系は 16 MiB
 - フルスキャンの enumerator はシンボリックリンクを skipDescendants して追従しない
-- Downloader の書き込み先がシンボリックリンクなら拒否
+- Downloader の書き込み先（最終コンポーネント）がシンボリックリンクなら拒否
+- 書込・削除経路（Downloader の `download` / `applyRemoteDeletion` / `renameLocalForConflict`）は `PathValidator.resolveForWrite` を通し、**祖先ディレクトリの symlink 経由のルート脱出**も拒否する（F2 / M6）
+- Uploader はアップロード読込の直前に `PathValidator.isSymbolicLink` で再チェックし、symlink に差し替えられていたら拒否してキューから外す（F3 / L9。完全な TOCTOU 解消＝`O_NOFOLLOW` 化は M5/M3）
 
-詳細は `security/critical.md` の C1 / C2 と `security/medium.md` の M3 / M4 を参照。
+詳細は `security/critical.md` の C1 / C2、`security/medium.md` の M3 / M4 / M6、`security/low.md` の L9 を参照。

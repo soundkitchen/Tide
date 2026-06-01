@@ -32,6 +32,29 @@ struct Uploader {
         try PathValidator.validateRelativePath(path)
         let fullURL = try PathValidator.resolveSafely(relativePath: path, syncRoot: syncRoot)
 
+        // F3 (L9): キュー投入後に通常ファイルが symlink へ差し替えられていないか、読込直前に再チェックする。
+        // symlink は同期対象外（リンク先実体＝例: ~/.ssh/id_rsa を S3 へ送らない）。拒否してキューから外す。
+        // ※ チェック〜Data(contentsOf:) 間の再差し替え窓は残る。完全な TOCTOU 解消は O_NOFOLLOW 化（M5/M3）。
+        // ※ 差し替えで誤ってリモートの正データを消さないよう convertQueueItemToDelete は使わず、キュー除去に留める。
+        if PathValidator.isSymbolicLink(at: fullURL) {
+            try await db.pool.write { db in
+                try UploadQueueRecord
+                    .filter(Column("path") == path)
+                    .deleteAll(db)
+                var log = SyncLogRecord(
+                    id: nil,
+                    timestamp: Date().timeIntervalSince1970,
+                    eventType: "error",
+                    path: path,
+                    message: "Refusing to upload a symbolic link (skipped)",
+                    details: nil
+                )
+                try log.insert(db)
+            }
+            AppLogger.sync.error("Refusing to upload a symbolic link: \(path, privacy: .private)")
+            return
+        }
+
         // 1. attribute / hash
         let attrs: [FileAttributeKey: Any]
         do {
