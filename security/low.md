@@ -138,3 +138,38 @@ symlink を辿り、リンク先（例: `~/.ssh/id_rsa`）の中身を S3 へ送
 **推奨修正（実装スレッド向け）:**
 - `processUpload` の `resolveSafely` 後に `resourceValues(forKeys: [.isSymbolicLinkKey])` を確認して拒否。
 - 理想は `O_NOFOLLOW` で open し、同一 FD からハッシュ計算と本体読込を行う（M5 の TOCTOU も同時解消）。
+
+---
+
+## L10. マルチパートアップロード中の「その場切り詰め」で `CompleteMultipartUpload` が失敗
+
+**Status:** 🔴 未対応 (2026-06-02) — M3 サブA のストリーミング・マルチパート化で新たに生じた窓。`xhigh` コードレビュー（2026-06-02）で検出・検証（CONFIRMED）。自己回復はするが最大 5 回のファイル単位リトライ（各 ×3 パートリトライ）を空振りする。
+
+**該当箇所:** `Tide/S3/MultipartUploader.swift` `upload`（読込ループ）、`Tide/S3/S3Client.swift` `completeMultipartUpload`。
+
+**重要度:** Low（**可用性**。攻撃者ではなく「アップロード対象ファイル自身の局所的な変更」が必要＝ローカル書込権限が前提で、実害は自己 DoS 的。**整合性は SHA で担保**され、破損したままアップロードが完了することは無い）。
+
+**内容:** fstat で 16 MiB 超 → マルチパート選択。`createMultipartUpload` のネットワーク往復の間に対象ファイルが「その場切り詰め」（`: > file`、ログの copytruncate など。**inode を保持したまま縮める**操作）されると、`O_NOFOLLOW` の FD は縮んだ長さを読む。結果 `readChunk` が即 `nil` → `parts` が空 → `completeMultipartUpload(parts: [])` で S3 が `MalformedXML`、または非最終パートが 5 MiB 未満 → `EntityTooSmall`。旧 `Data(contentsOf:)` 一括読みでは起き得なかった挙動（ストリーミング化のトレードオフ）。失敗は汎用エラー扱いで `SyncEngine.handleProcessingFailure` が最大 5 回リトライ後に give up、ファイルは 0/縮小後のサイズで次回スキャンが再エンキューしシングルパートで成功（自己回復）。`completeMultipartUpload` 側にも空 `parts` ガードは無い。
+
+**関連（別 Low・要併記）:** `handleProcessingFailure` の `fileTooLarge` 分岐は、キュー行削除の DB 書込が失敗すると早期 `return` でバックオフを飛ばすため、当該行が残り次周回以降 busy-loop しうる（`Tide/Core/SyncEngine.swift`）。発生条件は DB 書込失敗（ディスク満杯/ロック）で稀。
+
+**推奨修正（実装スレッド向け）:**
+- `MultipartUploader.upload` で読み終えた総バイト数が 0、または fstat の `size` と大きく食い違う場合に early-return し、delete 変換 or 再 stat（シングル/マルチ再判定）に回す。
+- `TideS3Client.completeMultipartUpload` 入口に `parts.isEmpty` ガードを足し、空なら abort して明示エラーにする。
+- `MultipartUploader.uploadPartWithRetry` は現状あらゆるエラーを 3 回リトライする（非リトライ可能な `EntityTooSmall` / 認証エラーも含む）。恒久失敗を即時諦める分類を入れると、本件のリトライ空振りコスト（S3 API 課金含む）が減る。
+
+---
+
+## L11. 巨大ファイルのマルチパート・パートサイズが大きく常駐メモリが膨らむ
+
+**Status:** 🔴 未対応 (2026-06-02) — `xhigh` コードレビュー（2026-06-02）で検出。`PartPlan.plan` は目標パート数 9,000 でサイズを割るため、巨大ファイルほど 1 パートが大きくなる（5 TiB → 583 MiB/パート）。`MultipartUploader.maxInflightParts = 3` と合わせ、1 アップロードあたり `partSize × (inflight + 1)` ≈ **約 2.3 GiB 常駐**しうる。
+
+**該当箇所:** `Tide/S3/PartPlan.swift` `plan`（`targetMaxParts = 9_000`）、`Tide/S3/MultipartUploader.swift`（in-flight バッファ）。
+
+**重要度:** Low（**可用性・資源**。攻撃者起因ではなく、ユーザ自身が巨大ファイルを同期対象に置いたときのメモリ圧。メニューバー常駐アプリで激しいページング／jetsam のリスク）。
+
+**内容:** S3 のパート数上限 10,000 に対して 9,000 で余裕を取った設計が裏目に出て、part 数を抑える代わりに 1 パートを肥大化させている。`O_NOFOLLOW` 単一 FD から順次読みつつ最大 3 パートを in-flight にするため、肥大パート × 4 ぶんの `Data` が常駐する。整合性・正当性に問題は無く、純粋に資源効率の問題。
+
+**推奨修正（実装スレッド向け）:**
+- `partSize` に上限（例: 64〜128 MiB）を設け、巨大ファイルは part 数を 10,000 上限まで増やす方向にする。常駐メモリが概ね 5〜10 倍下がる。
+- 付随して `PartPlan.plan` 末尾の防御 `while partCount > maxPartCount { partSize += 1MiB }` は**現設計ではデッドコード**（partCount は最大 8,993 で上限に達しない）。partSize 上限を入れるとこのループが実際に機能し始めるので、同時に整理する。

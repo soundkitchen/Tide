@@ -4,6 +4,18 @@
 レビュー日: 2026-05-24
 スコープ: `Tide/` 配下の自前コード（依存ライブラリ・build 成果物は対象外）
 
+## M3 マルチパートブランチのコードレビュー（2026-06-02）
+
+`feature/m3-multipart`（M3 サブA: マルチパート + ストリーミング + 1 ファイルアップロード上限）の差分を `xhigh` 効率でレビュー。`docs/` 仕様レベルではなく実装の正当性・可用性に絞った結果、**セキュリティ/可用性に関係する未対応項目を 3 件**記録する（純粋なコード整理＝etag 重複・hex 再利用・Picker ラベル・404 判定の三重化・`ConfigStore` の `0` 多義性などは security 対象外として除外）。**取捨選択は別スレッドで行う**前提で、ここでは状態を 🔴 未対応 とし honest severity を付す。
+
+| ID | 重要度 | 概要 | 状態 | 参照 |
+|---|---|---|---|---|
+| M7 | Medium（可用性） | 復元経路 `downloadToFile` がサイズ無制限（`maxBytes=nil`）。M4 の 200 MiB cap が新経路で失効＝マニフェスト改ざんでローカルディスク枯渇 | 🔴 未対応 | [medium.md](medium.md) M7 |
+| L10 | Low（可用性） | マルチパート中の「その場切り詰め」で空/過小パート → `CompleteMultipartUpload` 失敗 → リトライ空振り（自己回復・整合性は SHA で担保） | 🔴 未対応 | [low.md](low.md) L10 |
+| L11 | Low（資源） | 巨大ファイルのパートが肥大（5 TiB→583 MiB/部）し常駐メモリ ~2.3 GiB。`PartPlan` の防御ループはデッドコード | 🔴 未対応 | [low.md](low.md) L11 |
+
+凡例: ✅ Fixed / 🟡 Mitigated / ⏸ Deferred / 🔴 未対応。M7 は C1/M4 と同じ前提（攻撃者がバケットを書ける）での可用性低下。L10/L11 は攻撃者起因ではなく局所変更・自己資源の問題で Low。
+
 ## 再レビューのフォローアップ（2026-06-01）
 
 現行コード全体の再レビューで検出した懸念。F1〜F3 は 2026-06-01 に対応（コード + テスト + ドキュメント）。F4 は**意図的に保持**（下記）。
@@ -36,6 +48,7 @@ F4 の据え置き理由: 生エラー文字列は開発中のデバッグで実
 | M4 | getObject サイズ無制限 | ✅ Fixed（簡易: contentLength + 受信長の二段チェック） |
 | M5 | アップロードの TOCTOU | ⏸ Deferred — M3 のマルチパート対応時に併修（→ F3 も同根） |
 | M6 | ダウンロード書込の祖先 symlink によるルート脱出 | ✅ Fixed（2026-06-01・F2。`PathValidator.resolveForWrite`） |
+| M7 | 復元 `downloadToFile` のサイズ無制限（M4 の回帰） | 🔴 未対応（2026-06-02 レビュー検出） |
 | L1 | App Sandbox 無効 | 🟡 Partial — 死蔵キー除去のみ。Sandbox 化自体は M3+ |
 | L2 | 機密ファイル除外 | ✅ Fixed |
 | L3 | openSyncFolder URL 検証 | ✅ Fixed |
@@ -44,7 +57,9 @@ F4 の据え置き理由: 生エラー文字列は開発中のデバッグで実
 | L6 | DebounceQueue 競合 | ⏸ Deferred — `UPLOAD_QUEUE.UNIQUE(path)` で実害なしの想定で観察 |
 | L7 | secretAccessKey の生存期間 | ✅ Fixed |
 | L8 | `.syncignore`（リモート由来の除外パターン）の取り扱い | 🟡 Partial / Mitigated — 機密網は否定で覆せない / symlink 非追従 / サイズ上限は維持。生成正規表現の ReDoS は速攻ガードで Mitigated（構造的解消は M3。→ F1） |
-| L9 | アップロード読込が symlink 追従（読込時の再チェック無し） | 🟡 Mitigated（2026-06-01・F3。直前再チェック。`O_NOFOLLOW` 化は M5/M3） |
+| L9 | アップロード読込が symlink 追従（読込時の再チェック無し） | ✅ Fixed（2026-06-02・M3。`NoFollowFileReader` で `O_NOFOLLOW` 単一 FD 化） |
+| L10 | マルチパート中の切り詰めで CompleteMultipartUpload 失敗 | 🔴 未対応（2026-06-02 レビュー検出。可用性・自己回復） |
+| L11 | 巨大ファイルのパート肥大による常駐メモリ増 | 🔴 未対応（2026-06-02 レビュー検出。資源） |
 
 凡例: ✅ Fixed / 🟡 Partial / ⏸ Deferred / 🔴 未対応
 
@@ -54,8 +69,8 @@ F4 の据え置き理由: 生エラー文字列は開発中のデバッグで実
 |---|---|---|
 | 🔴 Critical | [critical.md](critical.md) | 3 |
 | 🟠 High | [high.md](high.md) | 3 |
-| 🟡 Medium | [medium.md](medium.md) | 6（M6 は 2026-06-01 に Fixed） |
-| 🟢 Low / Hardening | [low.md](low.md) | 9（L9/F1 は 2026-06-01 に Mitigated） |
+| 🟡 Medium | [medium.md](medium.md) | 7（M6 Fixed / M7 は 2026-06-02 検出・未対応） |
+| 🟢 Low / Hardening | [low.md](low.md) | 11（L9 Fixed / L10・L11 は 2026-06-02 検出・未対応） |
 
 ## 当初の推奨対応順（参考）
 

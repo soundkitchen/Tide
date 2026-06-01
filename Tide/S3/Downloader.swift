@@ -35,20 +35,15 @@ struct Downloader {
             return false
         }
 
-        // 親ディレクトリ作成
-        try FileManager.default.createDirectory(
-            at: fullURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-
         // 一時ファイルは SyncEngine 起動時に決めた tmpDir に置く
         // （同一ボリュームが保証されるので、後段の moveItem が atomic な rename になる）
         try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
         let tmpURL = tmpDir.appendingPathComponent(UUID().uuidString)
 
-        // S3 からチャンク・ストリーミングで tmp へ取得し、SHA-256 を逐次計算する。
-        // 大ファイルでもメモリはチャンクで有界（旧 200MiB インメモリ cap を撤廃）。
-        guard let result = try await s3.downloadToFile(key: s3Key, into: tmpURL) else {
+        // S3 からチャンク・ストリーミングで tmp へ取得し、SHA-256 を逐次計算する。メモリはチャンクで有界。
+        // M7: マニフェストの真実サイズ entry.size を maxBytes に渡し、サーバ申告 contentLength と
+        // 受信累積長の両方で弾く（巨大本文による同期ボリュームのディスク枯渇 DoS を防ぐ＝M4 の cap を復元経路でも維持）。
+        guard let result = try await s3.downloadToFile(key: s3Key, into: tmpURL, maxBytes: entry.size) else {
             AppLogger.s3.error("Download object not found on S3: \(relativePath, privacy: .private)")
             throw SyncError.ioError(underlying: NSError(
                 domain: "Tide.Downloader",
@@ -75,6 +70,12 @@ struct Downloader {
                 ofItemAtPath: tmpURL.path
             )
         }
+
+        // 親ディレクトリ作成（SHA 検証後に行う＝不一致で捨てるときに空ディレクトリの litter を残さない）
+        try FileManager.default.createDirectory(
+            at: fullURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
 
         // 既存ファイルを削除してから rename（同一 FS なので atomic）。
         // replaceItemAt は sandbox 中間ファイル (`.sb-*`) を作って FSEvents を汚すので使わない。

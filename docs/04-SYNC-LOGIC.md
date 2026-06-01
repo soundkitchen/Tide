@@ -507,7 +507,7 @@ struct ReadResult {
 ## セキュリティゲート
 
 - マニフェスト由来の `relativePath` / `shardId` は **すべて** `PathValidator` を通す（`..` / 絶対パス / NUL / バックスラッシュ等を拒否し、解決後 URL が syncRoot 配下にあることまで確認）
-- マニフェスト系の `getObject` は `maxBytes` 16 MiB（OOM 自己防衛）。通常ファイルの DL は `downloadToFile` でチャンク・ストリーミング書込（メモリ有界）なので原則サイズ無制限（旧 200MiB インメモリ cap は撤廃）
+- マニフェスト系の `getObject` は `maxBytes` 16 MiB（OOM 自己防衛）。通常ファイルの DL は `downloadToFile` でチャンク・ストリーミング書込（メモリ有界）。旧 200MiB インメモリ cap は撤廃したが、**`maxBytes` にマニフェストの真実サイズ `entry.size` を渡し**、サーバ申告 contentLength と受信累積長の両方で弾く（巨大本文によるローカルディスク枯渇 DoS 防止＝M4 を復元経路でも維持。M7）。アップロード上限とは別物（復元方向はユーザ上限を適用しない）
 - フルスキャンの enumerator はシンボリックリンクを skipDescendants して追従しない
 - Downloader の書き込み先（最終コンポーネント）がシンボリックリンクなら拒否
 - 書込・削除経路（Downloader の `download` / `applyRemoteDeletion` / `renameLocalForConflict`）は `PathValidator.resolveForWrite` を通し、**祖先ディレクトリの symlink 経由のルート脱出**も拒否する（F2 / M6）

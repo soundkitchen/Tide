@@ -100,3 +100,22 @@ C2 はアップロード走査（symlink スキップ）と最終書込先は守
   ことを検証するヘルパを `PathValidator` に追加。または各パスコンポーネントを走査して symlink を拒否。
 - `Downloader.download`（親ディレクトリ作成直前）/ `renameLocalForConflict` / `applyRemoteDeletion` の入口に適用。
 - `TideTests/PathValidatorTests.swift` に「祖先 symlink 経由の脱出を弾く」回帰テストを追加。
+
+---
+
+## M7. ストリーミングダウンロードのレスポンスサイズ無制限（M4 の回帰）
+
+**Status:** ✅ Fixed (2026-06-02) — `Downloader.download` が `downloadToFile(key:into:maxBytes:)` に**マニフェストの真実サイズ `entry.size`** を渡すように変更。`downloadToFile` 内の二段チェック（サーバ申告 `contentLength` を事前に弾く + 受信累積長が `maxBytes` 超で打ち切り、書きかけ tmp を掃除して throw）が効くようになり、M4 が `getObject` で塞いだ「巨大本文によるローカルディスク枯渇 DoS」を復元経路でも維持する。復元方向はユーザのアップロード上限（`uploadSizeLimitBytes`）ではなく**真実値であるマニフェスト `size`** を基準にする（アップロード上限はアップロード方向のみ）。あわせて L9 関連の litter も解消（下記）。`xhigh` コードレビュー（2026-06-02）で検出。
+
+**該当箇所:** `Tide/S3/S3Client.swift` `downloadToFile`、`Tide/S3/Downloader.swift` `download`（`maxBytes: entry.size` を渡す）。
+
+**重要度:** Medium（前提は C1 / M4 と同じ＝マニフェスト改ざん or バケットを書ける第三者。機密漏えいではなく**可用性＝ローカルディスク枯渇**）。
+
+**内容:** メモリはチャンクで有界（`.stream` 経路で SDK が常時ストリーミングすることは検証済み）だが、**tmpDir への書込はストリーム全長ぶん行われ、SHA 検証は全部書き終えた後**。よって C1 の攻撃者が小さなマニフェストエントリを巨大オブジェクトに向ける（あるいは S3 が巨大本文を返す）と、SHA 不一致で tmp を捨てる前に同期ボリュームのディスクを食い尽くせる。M4 が `getObject` で塞いだ DoS が、復元経路で再び開いている。`downloadToFile` 内部には `maxBytes` 指定時の二段チェック（contentLength 事前弾き + 累積長）の素地が既にあり、呼び出し側が値を渡していないだけ。
+
+**関連（同経路の軽微な挙動変化・別 Low）:** ✅ 併せて解消。復元の親ディレクトリ作成を **SHA 検証後**（move 直前）に移動し、SHA 不一致で捨てるときに空ディレクトリの litter を `syncRoot` に残さないようにした。
+
+**推奨修正（実装スレッド向け）:**
+- `Downloader.download` で `downloadToFile(key:into:maxBytes:)` にマニフェストの `entry.size`（+ 小さなスラック）を渡し、サーバ申告 contentLength と受信累積長の両方で弾く。
+- もしくは tmpDir のボリューム空き容量に対する上限 / ハード上限を設ける。復元方向はアップロード上限を適用しない方針（docs）なので、真実値であるマニフェスト `size` を基準にするのが筋。
+- `TideTests` に「contentLength 過大／本文過大で `downloadToFile` が弾く」回帰を追加。
