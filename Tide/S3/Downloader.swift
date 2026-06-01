@@ -1,5 +1,4 @@
 import Foundation
-import CryptoKit
 import GRDB
 
 /// 単一ファイルのダウンロードと、それに伴うローカル書き込み・DB 更新をまとめた処理。
@@ -36,28 +35,6 @@ struct Downloader {
             return false
         }
 
-        // S3 から取得
-        guard let fetch = try await s3.getObject(key: s3Key) else {
-            AppLogger.s3.error("Download object not found on S3: \(relativePath, privacy: .private)")
-            throw SyncError.ioError(underlying: NSError(
-                domain: "Tide.Downloader",
-                code: -10,
-                userInfo: [NSLocalizedDescriptionKey: "object not found on S3"]
-            ))
-        }
-        let data = fetch.data
-
-        // SHA 検証
-        let actualSha = sha256(of: data)
-        if actualSha != entry.sha256 {
-            AppLogger.s3.error("SHA mismatch downloading \(relativePath, privacy: .private)")
-            throw SyncError.ioError(underlying: NSError(
-                domain: "Tide.Downloader",
-                code: -11,
-                userInfo: [NSLocalizedDescriptionKey: "SHA-256 mismatch"]
-            ))
-        }
-
         // 親ディレクトリ作成
         try FileManager.default.createDirectory(
             at: fullURL.deletingLastPathComponent(),
@@ -68,7 +45,28 @@ struct Downloader {
         // （同一ボリュームが保証されるので、後段の moveItem が atomic な rename になる）
         try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
         let tmpURL = tmpDir.appendingPathComponent(UUID().uuidString)
-        try data.write(to: tmpURL)
+
+        // S3 からチャンク・ストリーミングで tmp へ取得し、SHA-256 を逐次計算する。
+        // 大ファイルでもメモリはチャンクで有界（旧 200MiB インメモリ cap を撤廃）。
+        guard let result = try await s3.downloadToFile(key: s3Key, into: tmpURL) else {
+            AppLogger.s3.error("Download object not found on S3: \(relativePath, privacy: .private)")
+            throw SyncError.ioError(underlying: NSError(
+                domain: "Tide.Downloader",
+                code: -10,
+                userInfo: [NSLocalizedDescriptionKey: "object not found on S3"]
+            ))
+        }
+
+        // SHA 検証（不一致なら書きかけ tmp を捨てて失敗）
+        if result.sha256 != entry.sha256 {
+            try? FileManager.default.removeItem(at: tmpURL)
+            AppLogger.s3.error("SHA mismatch downloading \(relativePath, privacy: .private)")
+            throw SyncError.ioError(underlying: NSError(
+                domain: "Tide.Downloader",
+                code: -11,
+                userInfo: [NSLocalizedDescriptionKey: "SHA-256 mismatch"]
+            ))
+        }
 
         // mtime 復元（rename で保たれる）
         if let mtimeDate = parseISO8601(entry.mtime) {
@@ -87,7 +85,7 @@ struct Downloader {
 
         // DB 反映
         try await updateDBEntryAfterDownload(relativePath: relativePath, entry: entry)
-        AppLogger.s3.info("Downloaded (bytes=\(data.count)): \(relativePath, privacy: .private)")
+        AppLogger.s3.info("Downloaded (bytes=\(result.bytes)): \(relativePath, privacy: .private)")
         return true
     }
 
@@ -213,10 +211,6 @@ struct Downloader {
     private func currentLocalSha(at url: URL) throws -> String? {
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
         return try HashCalculator.sha256(of: url)
-    }
-
-    private func sha256(of data: Data) -> String {
-        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
     private func parseISO8601(_ s: String) -> Date? {

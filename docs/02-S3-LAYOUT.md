@@ -105,7 +105,7 @@ s3://<user-bucket>/
   - `mtime`: ファイルの修正時刻（ローカルファイルシステムから取得）。ISO8601 UTC。
   - `sha256`: ファイル内容の SHA-256。hex 小文字。
   - `s3_version_id`: アップロード時に S3 が返した version ID。
-  - `etag`: S3 が返した ETag。シングルパートアップロードなら MD5 と一致。
+  - `etag`: S3 が返した ETag。シングルパートアップロードなら MD5 と一致。**マルチパート（M3、16MiB 超）では `<md5>-<partcount>` 形式**。整合性検証は `sha256` ベースなので etag は情報用途（パース不要）。
   - `device_id`: アップロードしたデバイスの ID。
   - `uploaded_at`: アップロード完了時刻。
 
@@ -276,16 +276,17 @@ let input = PutObjectInput(
 
 ## S3 オブジェクトメタデータ
 
-各ファイル本体には以下のユーザーメタデータを付ける（`x-amz-meta-*`）。マニフェストが壊れた時の復旧用。
+各ファイル本体には以下のユーザーメタデータを付ける（`x-amz-meta-*`）。
 
 ```
-x-amz-meta-sha256: <sha256-hex>
 x-amz-meta-mtime: <iso8601-utc>
 x-amz-meta-device: <device-id>
 x-amz-meta-size: <bytes>
 ```
 
 注意: メタデータは ASCII 推奨。日本語ファイル名は値ではなくキー（オブジェクトキー）に含まれるので問題ない。
+
+**M3 で `x-amz-meta-sha256` は付けない**。マルチパートでは `CreateMultipartUpload` 時点で sha256 が未確定（全パートを読むまで分からない）であり、シングルパート経路も両者の挙動を揃えるため外した。**ファイル内容の整合性の真実は `ManifestFileEntry.sha256`**（ダウンロード時の検証もこれを使う）であり、object metadata の sha256 を参照する経路は無い。
 
 ## クリーンインストール復旧シナリオ（M2 で実装）
 

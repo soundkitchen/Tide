@@ -48,6 +48,23 @@ final class NoFollowFileReader {
         }
     }
 
+    struct FileInfo {
+        let size: Int64
+        let mtime: Date
+    }
+
+    /// 開いている FD を `fstat(2)` し、サイズと mtime を返す。
+    /// 読込と同じ inode の情報なので、パス再 stat の TOCTOU を避けられる。
+    func info() throws -> FileInfo {
+        var st = stat()
+        if fstat(fd, &st) != 0 {
+            throw FileOpenError.io(errno: errno)
+        }
+        let mt = st.st_mtimespec
+        let mtime = Date(timeIntervalSince1970: Double(mt.tv_sec) + Double(mt.tv_nsec) / 1_000_000_000)
+        return FileInfo(size: Int64(st.st_size), mtime: mtime)
+    }
+
     /// 最大 `count` バイトを読む。内部で `read(2)` を繰り返し、`count` バイト集めるか EOF まで読む
     /// （regular file でも短い read があり得るため。マルチパートの中間パートが 5MiB を割らないようにする）。
     /// クリーン EOF で何も読めなければ `nil` を返す。

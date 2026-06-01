@@ -123,9 +123,9 @@ SwiftUI の `@State private var secretAccessKey: String = ""` は SetupWizardWin
 
 ## L9. Uploader が symlink 追従 API で読む（読込時の symlink 再チェック無し）
 
-**Status:** 🟡 Mitigated (2026-06-01) — `processUpload` の `resolveSafely` 直後に共有ヘルパ `PathValidator.isSymbolicLink(at:)` で再チェックを追加。symlink へ差し替えられていたらアップロードせず拒否し、`upload_queue` から当該行を除去（無限リトライ防止）＋ `sync_log` 記録＋警告ログ（`privacy: .private`）。差し替えで誤ってリモートの正データを消さないよう `convertQueueItemToDelete` は使わない。`PathValidatorTests` に `isSymbolicLink` の判定テストを追加。**残存**: チェック〜`Data(contentsOf:)` 間の再差し替え窓は残る。完全な TOCTOU 解消（`O_NOFOLLOW` で open し同一 FD からハッシュ計算＋本体読込）は M5 と同根で M3 へ残置。
+**Status:** ✅ Fixed (2026-06-02) — M3 で `processUpload` を `NoFollowFileReader`（`open(path, O_RDONLY | O_NOFOLLOW)`）に置換。最終コンポーネントが symlink なら `open` が ELOOP を返し `FileOpenError.isSymbolicLink` として拒否（`upload_queue` から当該行を除去＝無限リトライ防止 ＋ `sync_log` error 記録 ＋ 警告ログ `privacy: .private`、`convertQueueItemToDelete` は使わない＝リモートの正データを誤って消さない）。**チェック〜読込間の再差し替え窓は消滅**: 検知に使う FD と、ハッシュ計算・本体読込/パート送信に使う FD が同一になったため（M5 と一括解消）。`NoFollowFileReaderTests` に symlink 拒否（ELOOP）の回帰テストを追加。**残存範囲**: `O_NOFOLLOW` は最終コンポーネントのみ。祖先 symlink は `resolveSafely` の字句検証とスキャンの skip に委ねる。
 
-**該当箇所:** `Tide/S3/Uploader.swift` `processUpload`（`FileManager.attributesOfItem(atPath:)` / `Data(contentsOf:)`）。
+**該当箇所:** `Tide/S3/Uploader.swift` `processUpload` / `Tide/Core/NoFollowFileReader.swift`。
 
 **重要度:** Low（防御多重化）。同一ユーザ権限ゆえ権限昇格は無い。
 

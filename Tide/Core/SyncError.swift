@@ -23,7 +23,7 @@ enum SyncError: Error, CustomStringConvertible {
         case .manifestUpdateFailed(let msg):
             return "Manifest update failed: \(msg)"
         case .fileTooLarge(let path, let size):
-            return "File too large for M1 (\(size) bytes): \(path)"
+            return "File exceeds the per-file upload size limit (\(size) bytes); not backed up. Adjust the limit in Settings: \(path)"
         case .awsError(let err):
             return "AWS error: \(err)"
         case .databaseError(let err):

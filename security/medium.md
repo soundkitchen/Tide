@@ -66,9 +66,9 @@ data = try await body.readData() ?? Data()
 
 ## M5. アップロードのハッシュ計算とデータ読込が別 syscall（TOCTOU）
 
-**Status:** ⏸ Deferred — M3（マルチパートアップロード）で `Uploader` をストリーミング化する際に併修予定。現状は SHA 不整合を検知して安全側に倒れるので、被害は「DB に記録された SHA が新バイトと食い違って次回スキャンで再アップロードされる」程度で、データ消失や任意書込みには繋がらない。
+**Status:** ✅ Fixed (2026-06-02) — M3 マルチパート対応で `Uploader.processUpload` をストリーミング化。`NoFollowFileReader`（`open(path, O_RDONLY | O_NOFOLLOW)`）で **1 回だけ open** し、ハッシュ計算と本体読込/パート送信をすべて同一 FD から行う。これにより「ハッシュ用 `HashCalculator.sha256(of:)` の open → 本体用 `Data(contentsOf:)` の open」の 2 回 open に存在した TOCTOU 窓を解消。最終コンポーネントが symlink なら `open` が ELOOP を返し `FileOpenError.isSymbolicLink` として拒否（L9 と同根で一括解消）。**残存範囲**: `O_NOFOLLOW` は最終コンポーネントのみ有効で、祖先ディレクトリの symlink は対象外。これは `PathValidator.resolveSafely`（字句検証）とフルスキャン / FSEvents の symlink skip に委ねる（過大評価しない）。
 
-**該当箇所:** `Tide/S3/Uploader.swift:66-95`
+**該当箇所:** `Tide/S3/Uploader.swift`（processUpload）/ `Tide/Core/NoFollowFileReader.swift` / `Tide/S3/MultipartUploader.swift`
 
 `HashCalculator.sha256(of:)` でハッシュを取り、その後別途 `Data(contentsOf: fullURL)` で読み直してアップロードしている。間にファイルが書き換えられると、メタデータの sha256 と実バイトが食い違い、整合性検証（`Downloader.swift:42`）に失敗する。検知できるので安全側に倒れているが、**アップロード後の DB に古いハッシュが残る不整合**が起こりうる。
 
