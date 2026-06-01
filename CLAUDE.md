@@ -197,6 +197,7 @@
 - **アップロード上限は「1 ファイルあたり」**（バケット総量ではない）。`ConfigStore.uploadSizeLimitBytes`（既定 1GiB、`-1`=無制限）。**Uploader は周回ごとに `config` から読み直す**（Settings 変更が次の処理で反映）。上限はアップロード方向のみ＝ダウンロード（復元）は常に許可。
 - **上限超過は黙ってスキップしない**: `SyncError.fileTooLarge` を投げ、`SyncEngine.handleProcessingFailure` がリトライせずに `recentErrors` へ明示 + `sync_log` error + キュー除去（「このファイルはバックアップされていない」を可視化）。バックアップツールでサイレントな取りこぼしは最悪なので必ず見せる。
 - **大ファイルのダウンロードも `downloadToFile` でストリーミング書込**（旧 200MiB インメモリ cap を撤廃。メモリはチャンク有界）。マニフェスト経路の 16MiB cap は厳守。
+- **Settings の上限 UI**: `SettingsWindow` の Sync セクションに `Picker`「Upload size limit」（1GB / 10GB / 50GB / 無制限、tag=Int64 バイト・無制限=-1）。`ConfigStore` は @Observable でないので `@State` で持ち `onAppear` で読込・`onChange` で書込（write-through）。**既定 1GB より大きい or 無制限を選ぶと課金注意 caption を表示**（`A larger limit can increase your AWS storage costs.` / 「上限を大きくすると AWS のストレージ課金が増える可能性があります。」）。新規 xcstrings キーは `extractionState:"manual"`。
 
 ### リセット / クリーンアップ
 - **`AppEnvironment.factoryReset` は `make reset` と同じ振る舞いに揃える**: Application Support / Caches / UserDefaults / Keychain を全部消す。deviceId も含めて消す（`ConfigStore.resetIncludingDeviceId`）。

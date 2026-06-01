@@ -871,6 +871,39 @@
         }
       }
     },
+    "A larger limit can increase your AWS storage costs." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "上限を大きくすると AWS のストレージ課金が増える可能性があります。"
+          }
+        }
+      }
+    },
+    "No limit" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "無制限"
+          }
+        }
+      }
+    },
+    "Upload size limit" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "アップロードサイズ上限"
+          }
+        }
+      }
+    },
     "Syncing…" : {
       "extractionState" : "manual",
       "localizations" : {
