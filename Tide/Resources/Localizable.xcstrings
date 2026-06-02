@@ -35,6 +35,17 @@
         }
       }
     },
+    "%@ exceeds the upload size limit and was not backed up. Increase the limit in Settings." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ はアップロードサイズ上限を超えているためバックアップされませんでした。Settings で上限を上げてください。"
+          }
+        }
+      }
+    },
     "%lld GB" : {
       "extractionState" : "manual",
       "localizations" : {

@@ -151,7 +151,7 @@ symlink を辿り、リンク先（例: `~/.ssh/id_rsa`）の中身を S3 へ送
 
 **内容:** fstat で 16 MiB 超 → マルチパート選択。`createMultipartUpload` のネットワーク往復の間に対象ファイルが「その場切り詰め」（`: > file`、ログの copytruncate など。**inode を保持したまま縮める**操作）されると、`O_NOFOLLOW` の FD は縮んだ長さを読む。結果 `readChunk` が即 `nil` → `parts` が空 → `completeMultipartUpload(parts: [])` で S3 が `MalformedXML`、または非最終パートが 5 MiB 未満 → `EntityTooSmall`。旧 `Data(contentsOf:)` 一括読みでは起き得なかった挙動（ストリーミング化のトレードオフ）。失敗は汎用エラー扱いで `SyncEngine.handleProcessingFailure` が最大 5 回リトライ後に give up、ファイルは 0/縮小後のサイズで次回スキャンが再エンキューしシングルパートで成功（自己回復）。`completeMultipartUpload` 側にも空 `parts` ガードは無い。
 
-**関連（別 Low・要併記）:** `handleProcessingFailure` の `fileTooLarge` 分岐は、キュー行削除の DB 書込が失敗すると早期 `return` でバックオフを飛ばすため、当該行が残り次周回以降 busy-loop しうる（`Tide/Core/SyncEngine.swift`）。発生条件は DB 書込失敗（ディスク満杯/ロック）で稀。
+**関連（別 Low・要併記）:** ✅ 解消（2026-06-02・PR #1 レビュー反映）。`handleProcessingFailure` の `fileTooLarge` 分岐は、キュー行削除の DB 書込が失敗すると早期 `return` してバックオフを飛ばし busy-loop しうる問題があったが、**削除失敗時は return せず通常のバックオフ経路へフォールスルー**するよう修正（`attempts++` と `nextRetryAt` が設定される）。発生条件自体（DB 書込失敗＝ディスク満杯/ロック）は稀。
 
 **推奨修正（実装スレッド向け）:**
 - `MultipartUploader.upload` で読み終えた総バイト数が 0、または fstat の `size` と大きく食い違う場合に early-return し、delete 変換 or 再 stat（シングル/マルチ再判定）に回す。
