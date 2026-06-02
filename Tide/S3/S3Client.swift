@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 @preconcurrency import AWSS3
 @preconcurrency import AWSSDKIdentity
 @preconcurrency import Smithy
@@ -174,6 +175,11 @@ final class TideS3Client: @unchecked Sendable {
         let versionId: String?
     }
 
+    /// S3 が返す ETag は両端がダブルクォートで囲まれているので外す（全 API 共通の整形）。
+    private static func cleanETag(_ raw: String?) -> String {
+        (raw ?? "").trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+    }
+
     func putObject(
         key: String,
         data: Data,
@@ -193,7 +199,7 @@ final class TideS3Client: @unchecked Sendable {
             serverSideEncryption: .aes256  // SSE-S3 を明示
         )
         let output = try await client.putObject(input: input)
-        let etag = (output.eTag ?? "").trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+        let etag = Self.cleanETag(output.eTag)
         return PutObjectResult(etag: etag, versionId: output.versionId)
     }
 
@@ -214,7 +220,7 @@ final class TideS3Client: @unchecked Sendable {
         let input = HeadObjectInput(bucket: bucket, key: key)
         do {
             let output = try await client.headObject(input: input)
-            let etag = (output.eTag ?? "").trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+            let etag = Self.cleanETag(output.eTag)
             return ObjectHead(
                 etag: etag,
                 versionId: output.versionId,
@@ -246,7 +252,7 @@ final class TideS3Client: @unchecked Sendable {
                     userInfo: [NSLocalizedDescriptionKey: "object too large: \(len) > \(maxBytes) bytes for key \(key)"]
                 ))
             }
-            let etag = (output.eTag ?? "").trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+            let etag = Self.cleanETag(output.eTag)
             let data: Data
             if let body = output.body {
                 data = try await body.readData() ?? Data()
@@ -266,11 +272,165 @@ final class TideS3Client: @unchecked Sendable {
             _ = error
             return nil
         } catch {
-            // 404 系の他の表現にも対応
-            let desc = String(describing: error)
-            if desc.contains("NoSuchKey") || desc.contains("NotFound") || desc.contains("statusCode: 404") {
-                return nil
+            // 404 系の他の表現にも対応（判定は S3ErrorClassifier.isNotFound に集約）
+            if S3ErrorClassifier.isNotFound(error) { return nil }
+            throw error
+        }
+    }
+
+    // MARK: - Multipart upload
+
+    /// マルチパートアップロードを開始し uploadId を返す。SSE-S3 を必ず付与する。
+    func createMultipartUpload(
+        key: String,
+        contentType: String = "application/octet-stream",
+        metadata: [String: String] = [:]
+    ) async throws -> String {
+        let input = CreateMultipartUploadInput(
+            bucket: bucket,
+            contentType: contentType,
+            key: key,
+            metadata: metadata,
+            serverSideEncryption: .aes256  // SSE-S3 を明示（putObject と揃える）
+        )
+        let output = try await client.createMultipartUpload(input: input)
+        guard let uploadId = output.uploadId else {
+            throw SyncError.ioError(underlying: NSError(
+                domain: "Tide.S3", code: -30,
+                userInfo: [NSLocalizedDescriptionKey: "createMultipartUpload returned no uploadId"]
+            ))
+        }
+        return uploadId
+    }
+
+    /// 1 パートをアップロードし、その eTag（クォート除去済み）を返す。
+    func uploadPart(
+        key: String,
+        uploadId: String,
+        partNumber: Int,
+        body: Data
+    ) async throws -> String {
+        let input = UploadPartInput(
+            body: .data(body),
+            bucket: bucket,
+            key: key,
+            partNumber: partNumber,
+            uploadId: uploadId
+        )
+        let output = try await client.uploadPart(input: input)
+        let etag = Self.cleanETag(output.eTag)
+        if etag.isEmpty {
+            throw SyncError.ioError(underlying: NSError(
+                domain: "Tide.S3", code: -31,
+                userInfo: [NSLocalizedDescriptionKey: "uploadPart returned no eTag for part \(partNumber)"]
+            ))
+        }
+        return etag
+    }
+
+    /// 全パートを束ねてマルチパートアップロードを完了する。返る etag は `<md5>-<partcount>` 形式。
+    func completeMultipartUpload(
+        key: String,
+        uploadId: String,
+        parts: [(partNumber: Int, etag: String)]
+    ) async throws -> PutObjectResult {
+        // L10: パートが 1 つも無い状態で Complete すると S3 が MalformedXML を返す。
+        // 呼び出し側のバグや「アップロード中の切り詰め」を明示エラーで弾く（上位が abort する）。
+        guard !parts.isEmpty else {
+            throw SyncError.ioError(underlying: NSError(
+                domain: "Tide.S3", code: -32,
+                userInfo: [NSLocalizedDescriptionKey: "completeMultipartUpload called with no parts"]
+            ))
+        }
+        let completed = parts
+            .sorted { $0.partNumber < $1.partNumber }
+            .map { S3ClientTypes.CompletedPart(eTag: $0.etag, partNumber: $0.partNumber) }
+        let input = CompleteMultipartUploadInput(
+            bucket: bucket,
+            key: key,
+            multipartUpload: S3ClientTypes.CompletedMultipartUpload(parts: completed),
+            uploadId: uploadId
+        )
+        let output = try await client.completeMultipartUpload(input: input)
+        let etag = Self.cleanETag(output.eTag)
+        return PutObjectResult(etag: etag, versionId: output.versionId)
+    }
+
+    /// 失敗したマルチパートアップロードを中止する（best-effort）。
+    /// 呼び忘れ・失敗時もライフサイクルルール tide-abort-incomplete-multipart が 7 日後に掃除する。
+    func abortMultipartUpload(key: String, uploadId: String) async throws {
+        let input = AbortMultipartUploadInput(bucket: bucket, key: key, uploadId: uploadId)
+        _ = try await client.abortMultipartUpload(input: input)
+    }
+
+    // MARK: - Streaming download
+
+    struct DownloadResult: Sendable {
+        let sha256: String
+        let bytes: Int64
+        let etag: String
+    }
+
+    /// オブジェクトをチャンク・ストリーミングで `tmpURL` へ書き込みつつ SHA-256 を逐次計算する。
+    /// 大ファイル（files/...）の復元用。マニフェスト経路（`getObject(maxBytes:)` の 16MiB cap）とは別物で、
+    /// こちらは原則サイズ無制限（メモリはチャンクで有界）。404 のとき nil を返す。
+    /// 失敗時は書きかけの tmpURL を掃除する。SHA の検証（期待値との突合）は呼び出し側で行う。
+    func downloadToFile(
+        key: String,
+        into tmpURL: URL,
+        maxBytes: Int64? = nil
+    ) async throws -> DownloadResult? {
+        let input = GetObjectInput(bucket: bucket, key: key)
+        do {
+            let output = try await client.getObject(input: input)
+            if let maxBytes, let len = output.contentLength, Int64(len) > maxBytes {
+                throw SyncError.ioError(underlying: NSError(
+                    domain: "Tide.S3", code: -22,
+                    userInfo: [NSLocalizedDescriptionKey: "object too large: \(len) > \(maxBytes) bytes for key \(key)"]
+                ))
             }
+            let etag = Self.cleanETag(output.eTag)
+
+            FileManager.default.createFile(atPath: tmpURL.path, contents: nil)
+            let handle = try FileHandle(forWritingTo: tmpURL)
+            defer { try? handle.close() }
+
+            var hasher = SHA256()
+            var total: Int64 = 0
+            func consume(_ data: Data) throws {
+                guard !data.isEmpty else { return }
+                total += Int64(data.count)
+                if let maxBytes, total > maxBytes {
+                    throw SyncError.ioError(underlying: NSError(
+                        domain: "Tide.S3", code: -23,
+                        userInfo: [NSLocalizedDescriptionKey: "downloaded body exceeds maxBytes: \(total) > \(maxBytes)"]
+                    ))
+                }
+                hasher.update(data: data)
+                try handle.write(contentsOf: data)
+            }
+
+            switch output.body {
+            case .some(.stream(let stream)):
+                while let chunk = try await stream.readAsync(upToCount: 1 << 20) {
+                    if chunk.isEmpty { break }
+                    try consume(chunk)
+                }
+            case .some(.data(let data)):
+                if let data { try consume(data) }
+            case .some(.noStream), .none:
+                break
+            }
+            try handle.synchronize()
+            return DownloadResult(sha256: HashCalculator.hex(hasher.finalize()), bytes: total, etag: etag)
+        } catch let error as NoSuchKey {
+            _ = error
+            try? FileManager.default.removeItem(at: tmpURL)
+            return nil
+        } catch {
+            try? FileManager.default.removeItem(at: tmpURL)
+            // 404 系は nil（判定は S3ErrorClassifier.isNotFound に集約）
+            if S3ErrorClassifier.isNotFound(error) { return nil }
             throw error
         }
     }
@@ -350,6 +510,7 @@ enum S3ErrorClassifier {
         let desc = String(describing: error)
         return desc.contains("NotFound")
             || desc.contains("NoSuchBucket")
+            || desc.contains("NoSuchKey")
             || desc.contains("statusCode: 404")
             || desc.contains("status code: 404")
     }

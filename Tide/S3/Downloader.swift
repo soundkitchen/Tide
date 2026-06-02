@@ -1,5 +1,4 @@
 import Foundation
-import CryptoKit
 import GRDB
 
 /// 単一ファイルのダウンロードと、それに伴うローカル書き込み・DB 更新をまとめた処理。
@@ -36,8 +35,15 @@ struct Downloader {
             return false
         }
 
-        // S3 から取得
-        guard let fetch = try await s3.getObject(key: s3Key) else {
+        // 一時ファイルは SyncEngine 起動時に決めた tmpDir に置く
+        // （同一ボリュームが保証されるので、後段の moveItem が atomic な rename になる）
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        let tmpURL = tmpDir.appendingPathComponent(UUID().uuidString)
+
+        // S3 からチャンク・ストリーミングで tmp へ取得し、SHA-256 を逐次計算する。メモリはチャンクで有界。
+        // M7: マニフェストの真実サイズ entry.size を maxBytes に渡し、サーバ申告 contentLength と
+        // 受信累積長の両方で弾く（巨大本文による同期ボリュームのディスク枯渇 DoS を防ぐ＝M4 の cap を復元経路でも維持）。
+        guard let result = try await s3.downloadToFile(key: s3Key, into: tmpURL, maxBytes: entry.size) else {
             AppLogger.s3.error("Download object not found on S3: \(relativePath, privacy: .private)")
             throw SyncError.ioError(underlying: NSError(
                 domain: "Tide.Downloader",
@@ -45,11 +51,10 @@ struct Downloader {
                 userInfo: [NSLocalizedDescriptionKey: "object not found on S3"]
             ))
         }
-        let data = fetch.data
 
-        // SHA 検証
-        let actualSha = sha256(of: data)
-        if actualSha != entry.sha256 {
+        // SHA 検証（不一致なら書きかけ tmp を捨てて失敗）
+        if result.sha256 != entry.sha256 {
+            try? FileManager.default.removeItem(at: tmpURL)
             AppLogger.s3.error("SHA mismatch downloading \(relativePath, privacy: .private)")
             throw SyncError.ioError(underlying: NSError(
                 domain: "Tide.Downloader",
@@ -58,18 +63,6 @@ struct Downloader {
             ))
         }
 
-        // 親ディレクトリ作成
-        try FileManager.default.createDirectory(
-            at: fullURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-
-        // 一時ファイルは SyncEngine 起動時に決めた tmpDir に置く
-        // （同一ボリュームが保証されるので、後段の moveItem が atomic な rename になる）
-        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
-        let tmpURL = tmpDir.appendingPathComponent(UUID().uuidString)
-        try data.write(to: tmpURL)
-
         // mtime 復元（rename で保たれる）
         if let mtimeDate = parseISO8601(entry.mtime) {
             try? FileManager.default.setAttributes(
@@ -77,6 +70,12 @@ struct Downloader {
                 ofItemAtPath: tmpURL.path
             )
         }
+
+        // 親ディレクトリ作成（SHA 検証後に行う＝不一致で捨てるときに空ディレクトリの litter を残さない）
+        try FileManager.default.createDirectory(
+            at: fullURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
 
         // 既存ファイルを削除してから rename（同一 FS なので atomic）。
         // replaceItemAt は sandbox 中間ファイル (`.sb-*`) を作って FSEvents を汚すので使わない。
@@ -87,7 +86,7 @@ struct Downloader {
 
         // DB 反映
         try await updateDBEntryAfterDownload(relativePath: relativePath, entry: entry)
-        AppLogger.s3.info("Downloaded (bytes=\(data.count)): \(relativePath, privacy: .private)")
+        AppLogger.s3.info("Downloaded (bytes=\(result.bytes)): \(relativePath, privacy: .private)")
         return true
     }
 
@@ -213,10 +212,6 @@ struct Downloader {
     private func currentLocalSha(at url: URL) throws -> String? {
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
         return try HashCalculator.sha256(of: url)
-    }
-
-    private func sha256(of data: Data) -> String {
-        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
     private func parseISO8601(_ s: String) -> Date? {

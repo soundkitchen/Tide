@@ -24,34 +24,53 @@
 
 ---
 
-## サブタスク A: マルチパートアップロード
+## サブタスク A: マルチパートアップロード（実装済み）
+
+> 実装日: 2026-06-02。**自前ラッパ方式**で実装した（当初案の `aws-sdk-swift-s3-transfer-manager`
+> パッケージは採用せず＝新規依存なし）。FD/ハッシュ統合（M5）とパート進捗の制御を握りやすく、既存の
+> 薄いラッパ流儀（`TideS3Client`）に揃うため。中断・再開は (a) セッション内のパート単位リトライのみ
+> 実装し、UploadId 永続化・再起動またぎ再開・Range ダウンロード再開はサブタスク D（別チャンク）に分離した。
 
 ### 目的
 M1 で導入した「100 MB を超えたら `sync_log` にエラーを残してスキップ」(`Uploader.maxSizeM1`) を撤廃する。大きい写真・動画・アーカイブを同期できるようにする。
 
-### 設計の出発点
-- 公式の上位 API: `aws-sdk-swift-s3-transfer-manager`（別パッケージ）
-  - 5 MiB のパートサイズが既定、自動分割 / 並列 PutPart / 失敗時の partial upload abort をハンドル
-  - SHA-256 / Content-MD5 整合性は自前で組む（既存の `HashCalculator` を継承）
+### 実装（自前ラッパ）
+- `TideS3Client` に AWSS3 の `createMultipartUpload` / `uploadPart` / `completeMultipartUpload` /
+  `abortMultipartUpload` の薄いラッパと、`downloadToFile`（GetObject のボディを `ByteStream.readAsync`
+  でチャンク・ストリーミング → tmp へ書込 + SHA-256 逐次計算）を追加。SSE-S3 は create 時に必ず付与。
+- `MultipartUploader`: 単一 `NoFollowFileReader` から順次読込しつつ SHA-256 を逐次更新し、読み終えた
+  パートを有界並列（最大 3）で UploadPart。読む順序＝ハッシュ更新順序を保つので全体ハッシュは正しく確定。
+- アダプティブパートサイズ（`PartPlan`）: 目標パート数 9,000 基準値を `[5MiB, maxPartSize(64MiB)]` に
+  クランプ（常駐メモリ抑制＝L11）、10,000 パートに収まらない超巨大ファイルのみ必要分まで partSize を上げる
+  （MiB 境界切り上げで `partCount ≤ 10,000`）。シングル/マルチ分岐閾値 16 MiB。
+- マニフェスト etag は S3 返値をそのまま格納（マルチパートは `<md5>-<partcount>`）。整合性は sha256 ベース。
+- object metadata から `sha256` を外した（create 時点で未確定 ＆ 参照する経路が無い）。詳細は `02-S3-LAYOUT.md`。
 - マニフェスト側の変更:
   - `ManifestFileEntry.etag` は **マルチパート時は `<md5>-<part数>` 形式**。シングルパート時の挙動と挙動分岐が要る。`s3_version_id` は引き続き S3 が返したものを保持。
 - ライフサイクルルール `tide-abort-incomplete-multipart` は既に投入済み（7 日後 abort）なので、失敗した multipart 残骸はコスト事故にならない。
 
-### 影響範囲
-- `project.yml` の packages に `aws-sdk-swift-s3-transfer-manager` を追加
-- `Uploader.processUpload` を「サイズで分岐 → 100 MiB 以下なら従来パス、超ならマルチパート」に拡張
-- `TideS3Client` にマルチパート用の薄いラッパを追加
-- `security/medium.md` の **M5 (TOCTOU)** をこのタイミングで解消（ハッシュ計算と読み込みを 1 ストリームに統合）
+### 影響範囲（実績）
+- `project.yml` は変更なし（自前ラッパのため新規パッケージ追加せず）
+- `Uploader.processUpload` をサイズ分岐に改修（≤16MiB は単発、超はマルチパート）。`maxSizeM1` 撤廃
+- `TideS3Client` にマルチパート薄ラッパ + `downloadToFile` を追加。新規 `MultipartUploader` / `NoFollowFileReader` / `PartPlan`
+- `security/medium.md` の **M5 (TOCTOU)** を解消（`O_NOFOLLOW` の単一 FD でハッシュ + 読込を統合）。`security/low.md` L9 も一括解消
+- 大ファイルの **ダウンロード**も `downloadToFile` でストリーミング化（旧 200MiB インメモリ cap を撤廃。復元の round-trip を保つ）
 
-### ユーザに事前に決めてもらいたい
-- アップロードサイズ上限（M3 では撤廃 or 別途設定可能 UI を出すか）
-- 失敗時のリトライ方針（ファイル単位 / パート単位 / リジューム可否）
+### 確定した設計判断（ユーザ承認済み）
+- アップロード上限は **1 ファイルあたり**（バケット総量ではない）。**UI 設定可能・既定 1GiB**・`-1`=無制限。`ConfigStore.uploadSizeLimitBytes`。
+  上限超過は黙ってスキップせず `recentErrors` に明示 + `sync_log` error + キュー除去（リトライしない）。Settings で 1GiB 超を選ぶと課金注意を表示。
+- 失敗時リトライ: **パート単位（セッション内、指数バックオフ 3 回）** + 既存のファイル単位リトライ（最大 5 回）。永続再開はサブD。
 
-### 受け入れ確認
-- `~/TideSandbox/big.bin`（例: 500 MB）をマルチパートでアップロード可能
-- ネットワーク切断 → 再接続でリジューム or 安全に失敗 → 再キュー
-- マニフェストの etag フォーマットが S3 と一致
-- 100 MB 以下のファイルは従来通り（リグレッションなし）
+### 受け入れ確認（手動チェックリスト `tmp/M3-動作チェックリスト.md`）
+- `~/TideSandbox/big.bin`（例: 500 MB）を up → S3 → down で SHA 一致（round-trip）
+- ネットワーク瞬断 → 失敗パートのみ再送で完走
+- 上限超過ファイルが `recentErrors` に明示される（黙ってスキップしない）
+- マニフェストの etag フォーマットが S3 と一致（`<md5>-<partcount>`）
+- 16 MiB 以下のファイルは従来通り（リグレッションなし）
+
+### レビュー指摘の据え置き（PR #1 のコードレビュー、将来タスク）
+- **結合部の自動テスト（テスト負債）**: `MultipartUploader`（有界並列・inflight 会計・空 parts ガード・リトライ）と `downloadToFile`（`.stream`/`.data` 分岐・二段 maxBytes）にユニットテストが無い。現状は手動チェックリストが gate。恒久対応は `TideS3Client`（具象 final class）の S3 パート API に **protocol seam を切って fake 注入**できるようにし、inflight 上限・空 parts・リトライ分岐をユニット化する。`PartPlan`/`NoFollowFileReader`/`ConfigStore` の純粋ロジックは既にカバー済み。
+- **`uploadPartWithRetry` のエラー分類**: 現状あらゆるエラーを 3 回リトライする。認証エラー・`EntityTooSmall` 等の恒久失敗は即諦める分類を入れるとリトライ空振り（S3 API 課金含む）を減らせる（`security/low.md` L10 参照）。
 
 ---
 

@@ -3,12 +3,12 @@ import GRDB
 
 /// 単一ファイルのアップロード / 削除と、それに伴うマニフェスト・DB 更新をまとめた処理。
 struct Uploader {
-    static let maxSizeM1: Int64 = 100 * 1024 * 1024  // 100 MiB
-
     let s3: TideS3Client
     let db: LocalDatabase
     let syncRoot: URL
     let deviceId: String
+    /// 1 ファイルあたりのアップロード上限を都度参照する（Settings 変更を次の処理で反映）。
+    let config: ConfigStore
 
     /// upload_queue の 1 件を処理する。
     func process(_ item: UploadQueueRecord) async throws {
@@ -32,11 +32,15 @@ struct Uploader {
         try PathValidator.validateRelativePath(path)
         let fullURL = try PathValidator.resolveSafely(relativePath: path, syncRoot: syncRoot)
 
-        // F3 (L9): キュー投入後に通常ファイルが symlink へ差し替えられていないか、読込直前に再チェックする。
-        // symlink は同期対象外（リンク先実体＝例: ~/.ssh/id_rsa を S3 へ送らない）。拒否してキューから外す。
-        // ※ チェック〜Data(contentsOf:) 間の再差し替え窓は残る。完全な TOCTOU 解消は O_NOFOLLOW 化（M5/M3）。
-        // ※ 差し替えで誤ってリモートの正データを消さないよう convertQueueItemToDelete は使わず、キュー除去に留める。
-        if PathValidator.isSymbolicLink(at: fullURL) {
+        // M5 (F3 / L9): O_NOFOLLOW で 1 回だけ open する。
+        // - 最終コンポーネントが symlink なら ELOOP → 拒否してキューから外す（リンク先実体を S3 へ送らない）。
+        // - 以後のハッシュ計算と本体読込はすべてこの同一 FD から行うので「ハッシュ用 open → 本体用 open」の
+        //   2 回 open に存在した TOCTOU 窓が無くなる（祖先 symlink は resolveSafely とスキャンの skip に委ねる）。
+        let reader: NoFollowFileReader
+        do {
+            reader = try NoFollowFileReader(path: fullURL.path)
+        } catch FileOpenError.isSymbolicLink {
+            // symlink への差し替えを検知 → キュー除去に留める（誤ってリモートの正データを消さない）。
             try await db.pool.write { db in
                 try UploadQueueRecord
                     .filter(Column("path") == path)
@@ -53,71 +57,58 @@ struct Uploader {
             }
             AppLogger.sync.error("Refusing to upload a symbolic link: \(path, privacy: .private)")
             return
-        }
-
-        // 1. attribute / hash
-        let attrs: [FileAttributeKey: Any]
-        do {
-            attrs = try FileManager.default.attributesOfItem(atPath: fullURL.path)
-        } catch CocoaError.fileReadNoSuchFile {
+        } catch FileOpenError.notFound {
             // 読み込みタイミングで削除された → delete として再処理
             try await convertQueueItemToDelete(item)
             return
         }
+        defer { reader.close() }
 
-        let size = (attrs[.size] as? NSNumber)?.int64Value ?? 0
-        let mtimeDate = (attrs[.modificationDate] as? Date) ?? Date()
+        // 1. attribute（同一 FD を fstat）
+        let info = try reader.info()
+        let size = info.size
+        let mtimeDate = info.mtime
         let mtime = mtimeDate.timeIntervalSince1970
 
-        if size > Self.maxSizeM1 {
-            try await db.pool.write { db in
-                try UploadQueueRecord
-                    .filter(Column("path") == path)
-                    .deleteAll(db)
-                var log = SyncLogRecord(
-                    id: nil,
-                    timestamp: Date().timeIntervalSince1970,
-                    eventType: "error",
-                    path: path,
-                    message: "File too large for M1 (>100MB). Skipped. // TODO(M3): multipart upload",
-                    details: "size=\(size)"
-                )
-                try log.insert(db)
-            }
-            AppLogger.sync.error("Skipped large file (\(size) bytes): \(path, privacy: .private)")
-            return
+        // 1 ファイルあたりのアップロード上限。超過は黙ってスキップせず fileTooLarge を投げ、
+        // SyncEngine 側でリトライせずに recentErrors へ明示 + キュー除去する（「バックアップされていない」可視化）。
+        let limit = config.uploadSizeLimitBytes
+        guard PartPlan.isWithinUploadLimit(size: size, limitBytes: limit) else {
+            throw SyncError.fileTooLarge(path: path, size: size)
         }
 
-        let sha256: String
-        do {
-            sha256 = try HashCalculator.sha256(of: fullURL)
-        } catch CocoaError.fileReadNoSuchFile {
-            try await convertQueueItemToDelete(item)
-            return
-        }
-
-        let data: Data
-        do {
-            data = try Data(contentsOf: fullURL)
-        } catch CocoaError.fileReadNoSuchFile {
-            try await convertQueueItemToDelete(item)
-            return
-        }
-
-        // 2. S3 upload
+        // 2. hash + S3 upload（sha256 は CreateMultipartUpload 時点で未確定なので object metadata には載せない。
+        //    整合性の真実は ManifestFileEntry.sha256。metadata は mtime / device / size のみ）。
         let metadata: [String: String] = [
-            "sha256": sha256,
             "mtime": ISO8601.format(mtimeDate),
             "device": deviceId,
             "size": String(size)
         ]
         let s3Key = "files/\(path)"
-        let result = try await s3.putObject(
-            key: s3Key,
-            data: data,
-            contentType: "application/octet-stream",
-            metadata: metadata
-        )
+
+        let sha256: String
+        let result: TideS3Client.PutObjectResult
+        if PartPlan.shouldUseMultipart(fileSize: size) {
+            let plan = PartPlan.plan(forFileSize: size)
+            let mp = try await MultipartUploader(s3: s3).upload(
+                key: s3Key,
+                reader: reader,
+                partSize: plan.partSize,
+                metadata: metadata
+            )
+            sha256 = mp.sha256
+            result = mp.put
+        } else {
+            // シングルパート: 同一 FD から 1 回読んだバッファでハッシュも本体も賄う（2 回 open を畳む）。
+            let (data, sha) = try HashCalculator.readAllAndHash(reader)
+            sha256 = sha
+            result = try await s3.putObject(
+                key: s3Key,
+                data: data,
+                contentType: "application/octet-stream",
+                metadata: metadata
+            )
+        }
         AppLogger.s3.info("Uploaded \(path, privacy: .private) (\(size) bytes)")
 
         // 3. manifest update

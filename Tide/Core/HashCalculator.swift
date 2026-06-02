@@ -15,6 +15,23 @@ enum HashCalculator {
             if chunk.isEmpty { break }
             hasher.update(data: chunk)
         }
-        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+        return hex(hasher.finalize())
+    }
+
+    /// SHA-256 ダイジェスト（やバイト列）を hex 小文字に整形する。
+    static func hex<D: Sequence>(_ digest: D) -> String where D.Element == UInt8 {
+        digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// `NoFollowFileReader` からファイル全体を読み切り、`(本体データ, sha256 hex)` を返す。
+    /// シングルパート経路で「1 回 open でハッシュも本体も賄う」ために使う（2 回 open を畳む）。
+    static func readAllAndHash(_ reader: NoFollowFileReader, chunkSize: Int = 1 << 20) throws -> (data: Data, sha256: String) {
+        var hasher = SHA256()
+        var data = Data()
+        while let chunk = try reader.readChunk(chunkSize) {
+            hasher.update(data: chunk)
+            data.append(chunk)
+        }
+        return (data, hex(hasher.finalize()))
     }
 }

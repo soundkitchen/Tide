@@ -27,6 +27,7 @@ final class SyncEngine {
     private let syncRoot: URL
     private let deviceId: String
     private let tmpDir: URL
+    private let config: ConfigStore
 
     // MARK: - Internals
 
@@ -49,12 +50,14 @@ final class SyncEngine {
         s3: TideS3Client,
         syncRoot: URL,
         deviceId: String,
+        config: ConfigStore,
         pollIntervalSeconds: Int = 180
     ) {
         self.db = db
         self.s3 = s3
         self.syncRoot = syncRoot
         self.deviceId = deviceId
+        self.config = config
         self.pollIntervalSeconds = max(30, pollIntervalSeconds)
 
         let (tmp, usedFallback) = TideTmpDirectory.resolve(for: syncRoot)
@@ -619,7 +622,7 @@ final class SyncEngine {
     // MARK: - Queue processing loop
 
     private func runQueueLoop() async {
-        let uploader = Uploader(s3: s3, db: db, syncRoot: syncRoot, deviceId: deviceId)
+        let uploader = Uploader(s3: s3, db: db, syncRoot: syncRoot, deviceId: deviceId, config: config)
         while !Task.isCancelled {
             if paused {
                 try? await Task.sleep(for: .seconds(1))
@@ -676,7 +679,35 @@ final class SyncEngine {
     }
 
     private func handleProcessingFailure(item: UploadQueueRecord, error: Error) async {
-        await appendError("\(item.path): \(error)")
+        // サイズ上限超過は恒久的失敗（リトライしても無駄）。黙ってスキップせず、ユーザ向けに
+        // ローカライズしたメッセージを recentErrors に出す（生エラー文字列ではなく一級 UX 状態として扱う）。
+        if case SyncError.fileTooLarge = error {
+            await appendError(String(localized: "\(item.path) exceeds the upload size limit and was not backed up. Increase the limit in Settings."))
+            do {
+                try await db.pool.write { db in
+                    try UploadQueueRecord
+                        .filter(Column("path") == item.path)
+                        .deleteAll(db)
+                    var log = SyncLogRecord(
+                        id: nil,
+                        timestamp: Date().timeIntervalSince1970,
+                        eventType: "error",
+                        path: item.path,
+                        message: "Exceeds the per-file upload size limit; not backed up. Adjust the limit in Settings.",
+                        details: nil
+                    )
+                    try log.insert(db)
+                }
+                return
+            } catch {
+                // 削除に失敗したら即 return せず通常バックオフへフォールスルーする。
+                // さもないと行が残ったまま nextRetryAt も更新されず、次周回で即再処理＝busy-loop になる。
+                AppLogger.db.error("Failed to record size-limit skip: \(String(describing: error), privacy: .private)")
+            }
+        } else {
+            await appendError("\(item.path): \(error)")
+        }
+
         let attempts = item.attempts + 1
         let now = Date().timeIntervalSince1970
 

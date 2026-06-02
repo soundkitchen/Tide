@@ -153,25 +153,19 @@ func processUpload(_ queueItem: UploadQueueRecord) async throws {
 }
 ```
 
-### 100MB 超のファイル（M1 では未対応）
+### 大きいファイル（M3: マルチパート + 1 ファイル上限）
+
+M1 の 100MiB ハード上限（`maxSizeM1`）は M3 で撤廃した。`Uploader.processUpload` はサイズで経路を分岐する。
+
+- **シングルパート**（`≤ 16 MiB`、`PartPlan.shouldUseMultipart` が false）: O_NOFOLLOW の単一 FD から 1 回読んだバッファでハッシュも本体も賄い（M5: 2 回 open を畳む）、`putObject` で送る。
+- **マルチパート**（`> 16 MiB`）: `MultipartUploader` が単一 FD から順次読込しつつ SHA-256 を逐次更新し、読み終えたパートを**有界並列（最大 3）で UploadPart**。アダプティブパートサイズ（`PartPlan`）: 目標パート数 9,000 基準値を `[5MiB, 64MiB]` にクランプ（常駐メモリ抑制）、10,000 パートに収まらない超巨大ファイルのみ必要分まで partSize を上げる（MiB 境界切り上げで `partCount ≤ 10,000`）。瞬断は**パート単位リトライ**で吸収し、恒久失敗は best-effort `abort` → throw（ファイル単位リトライへ）。`UploadId` の永続化・再起動またぎ再開はサブタスク D（別チャンク）。
+
+**1 ファイルあたりのアップロード上限**は `ConfigStore.uploadSizeLimitBytes`（Settings で変更、既定 1GiB、`-1` = 無制限）。上限はアップロード方向のみに適用し、ダウンロード（復元）は常に許可する。上限超過は**黙ってスキップせず** `SyncError.fileTooLarge` を投げ、`SyncEngine.handleProcessingFailure` がリトライせずに `recentErrors` へ明示 + `sync_log` の `error` 記録 + キュー除去する（「このファイルはバックアップされていない」を可視化）。
 
 ```swift
-let MAX_SIZE_M1 = 100 * 1024 * 1024  // 100 MiB
-
-if size > MAX_SIZE_M1 {
-    // M1 ではスキップしてエラーログだけ残す
-    try await database.write { db in
-        try UploadQueueRecord
-            .filter(Column("path") == path)
-            .deleteAll(db)
-        try SyncLog.insert(
-            db, 
-            type: "error", 
-            path: path, 
-            message: "File too large for M1 (>100MB). Will be handled in M3."
-        )
-    }
-    return
+let limit = config.uploadSizeLimitBytes   // 既定 1GiB、-1 = 無制限
+guard PartPlan.isWithinUploadLimit(size: size, limitBytes: limit) else {
+    throw SyncError.fileTooLarge(path: path, size: size)  // → recentErrors に明示、リトライしない
 }
 ```
 
@@ -513,10 +507,10 @@ struct ReadResult {
 ## セキュリティゲート
 
 - マニフェスト由来の `relativePath` / `shardId` は **すべて** `PathValidator` を通す（`..` / 絶対パス / NUL / バックスラッシュ等を拒否し、解決後 URL が syncRoot 配下にあることまで確認）
-- `getObject` は `maxBytes` 既定 200 MiB、マニフェスト系は 16 MiB
+- マニフェスト系の `getObject` は `maxBytes` 16 MiB（OOM 自己防衛）。通常ファイルの DL は `downloadToFile` でチャンク・ストリーミング書込（メモリ有界）。旧 200MiB インメモリ cap は撤廃したが、**`maxBytes` にマニフェストの真実サイズ `entry.size` を渡し**、サーバ申告 contentLength と受信累積長の両方で弾く（巨大本文によるローカルディスク枯渇 DoS 防止＝M4 を復元経路でも維持。M7）。アップロード上限とは別物（復元方向はユーザ上限を適用しない）
 - フルスキャンの enumerator はシンボリックリンクを skipDescendants して追従しない
 - Downloader の書き込み先（最終コンポーネント）がシンボリックリンクなら拒否
 - 書込・削除経路（Downloader の `download` / `applyRemoteDeletion` / `renameLocalForConflict`）は `PathValidator.resolveForWrite` を通し、**祖先ディレクトリの symlink 経由のルート脱出**も拒否する（F2 / M6）
-- Uploader はアップロード読込の直前に `PathValidator.isSymbolicLink` で再チェックし、symlink に差し替えられていたら拒否してキューから外す（F3 / L9。完全な TOCTOU 解消＝`O_NOFOLLOW` 化は M5/M3）
+- **Uploader は `O_NOFOLLOW` の単一 FD で open し、最終コンポーネントが symlink なら ELOOP で拒否してキューから外す。ハッシュ計算と本体読込/パート送信は同一 FD から行うので、「ハッシュ用 open → 本体用 open」の 2 回 open に存在した TOCTOU 窓を解消した（M5 / F3 / L9）**。祖先 symlink は対象外で `resolveSafely` の字句検証とスキャンの skip に委ねる
 
-詳細は `security/critical.md` の C1 / C2、`security/medium.md` の M3 / M4 / M6、`security/low.md` の L9 を参照。
+詳細は `security/critical.md` の C1 / C2、`security/medium.md` の M3 / M4 / M5 / M6、`security/low.md` の L9 を参照。

@@ -123,9 +123,9 @@ SwiftUI の `@State private var secretAccessKey: String = ""` は SetupWizardWin
 
 ## L9. Uploader が symlink 追従 API で読む（読込時の symlink 再チェック無し）
 
-**Status:** 🟡 Mitigated (2026-06-01) — `processUpload` の `resolveSafely` 直後に共有ヘルパ `PathValidator.isSymbolicLink(at:)` で再チェックを追加。symlink へ差し替えられていたらアップロードせず拒否し、`upload_queue` から当該行を除去（無限リトライ防止）＋ `sync_log` 記録＋警告ログ（`privacy: .private`）。差し替えで誤ってリモートの正データを消さないよう `convertQueueItemToDelete` は使わない。`PathValidatorTests` に `isSymbolicLink` の判定テストを追加。**残存**: チェック〜`Data(contentsOf:)` 間の再差し替え窓は残る。完全な TOCTOU 解消（`O_NOFOLLOW` で open し同一 FD からハッシュ計算＋本体読込）は M5 と同根で M3 へ残置。
+**Status:** ✅ Fixed (2026-06-02) — M3 で `processUpload` を `NoFollowFileReader`（`open(path, O_RDONLY | O_NOFOLLOW)`）に置換。最終コンポーネントが symlink なら `open` が ELOOP を返し `FileOpenError.isSymbolicLink` として拒否（`upload_queue` から当該行を除去＝無限リトライ防止 ＋ `sync_log` error 記録 ＋ 警告ログ `privacy: .private`、`convertQueueItemToDelete` は使わない＝リモートの正データを誤って消さない）。**チェック〜読込間の再差し替え窓は消滅**: 検知に使う FD と、ハッシュ計算・本体読込/パート送信に使う FD が同一になったため（M5 と一括解消）。`NoFollowFileReaderTests` に symlink 拒否（ELOOP）の回帰テストを追加。**残存範囲**: `O_NOFOLLOW` は最終コンポーネントのみ。祖先 symlink は `resolveSafely` の字句検証とスキャンの skip に委ねる。
 
-**該当箇所:** `Tide/S3/Uploader.swift` `processUpload`（`FileManager.attributesOfItem(atPath:)` / `Data(contentsOf:)`）。
+**該当箇所:** `Tide/S3/Uploader.swift` `processUpload` / `Tide/Core/NoFollowFileReader.swift`。
 
 **重要度:** Low（防御多重化）。同一ユーザ権限ゆえ権限昇格は無い。
 
@@ -138,3 +138,38 @@ symlink を辿り、リンク先（例: `~/.ssh/id_rsa`）の中身を S3 へ送
 **推奨修正（実装スレッド向け）:**
 - `processUpload` の `resolveSafely` 後に `resourceValues(forKeys: [.isSymbolicLinkKey])` を確認して拒否。
 - 理想は `O_NOFOLLOW` で open し、同一 FD からハッシュ計算と本体読込を行う（M5 の TOCTOU も同時解消）。
+
+---
+
+## L10. マルチパートアップロード中の「その場切り詰め」で `CompleteMultipartUpload` が失敗
+
+**Status:** ✅ Fixed (2026-06-02) — 空 parts ガードを 2 箇所に追加。`TideS3Client.completeMultipartUpload` 入口で `parts.isEmpty` を弾き、`MultipartUploader.upload` でも task group 後に `parts.isEmpty`（＝総バイト 0、切り詰め）を検知して明示エラーを投げる（catch が `abortMultipartUpload` → 上位のファイル単位リトライ → 次回スキャンが縮小後サイズでシングルパート再送して自己回復）。`MalformedXML` をリトライ空振りする前に確定失敗させる。`xhigh` コードレビュー（2026-06-02）で検出・検証（CONFIRMED）。
+
+**該当箇所:** `Tide/S3/MultipartUploader.swift` `upload`（読込ループ）、`Tide/S3/S3Client.swift` `completeMultipartUpload`。
+
+**重要度:** Low（**可用性**。攻撃者ではなく「アップロード対象ファイル自身の局所的な変更」が必要＝ローカル書込権限が前提で、実害は自己 DoS 的。**整合性は SHA で担保**され、破損したままアップロードが完了することは無い）。
+
+**内容:** fstat で 16 MiB 超 → マルチパート選択。`createMultipartUpload` のネットワーク往復の間に対象ファイルが「その場切り詰め」（`: > file`、ログの copytruncate など。**inode を保持したまま縮める**操作）されると、`O_NOFOLLOW` の FD は縮んだ長さを読む。結果 `readChunk` が即 `nil` → `parts` が空 → `completeMultipartUpload(parts: [])` で S3 が `MalformedXML`、または非最終パートが 5 MiB 未満 → `EntityTooSmall`。旧 `Data(contentsOf:)` 一括読みでは起き得なかった挙動（ストリーミング化のトレードオフ）。失敗は汎用エラー扱いで `SyncEngine.handleProcessingFailure` が最大 5 回リトライ後に give up、ファイルは 0/縮小後のサイズで次回スキャンが再エンキューしシングルパートで成功（自己回復）。`completeMultipartUpload` 側にも空 `parts` ガードは無い。
+
+**関連（別 Low・要併記）:** ✅ 解消（2026-06-02・PR #1 レビュー反映）。`handleProcessingFailure` の `fileTooLarge` 分岐は、キュー行削除の DB 書込が失敗すると早期 `return` してバックオフを飛ばし busy-loop しうる問題があったが、**削除失敗時は return せず通常のバックオフ経路へフォールスルー**するよう修正（`attempts++` と `nextRetryAt` が設定される）。発生条件自体（DB 書込失敗＝ディスク満杯/ロック）は稀。
+
+**推奨修正（実装スレッド向け）:**
+- `MultipartUploader.upload` で読み終えた総バイト数が 0、または fstat の `size` と大きく食い違う場合に early-return し、delete 変換 or 再 stat（シングル/マルチ再判定）に回す。
+- `TideS3Client.completeMultipartUpload` 入口に `parts.isEmpty` ガードを足し、空なら abort して明示エラーにする。
+- `MultipartUploader.uploadPartWithRetry` は現状あらゆるエラーを 3 回リトライする（非リトライ可能な `EntityTooSmall` / 認証エラーも含む）。恒久失敗を即時諦める分類を入れると、本件のリトライ空振りコスト（S3 API 課金含む）が減る。
+
+---
+
+## L11. 巨大ファイルのマルチパート・パートサイズが大きく常駐メモリが膨らむ
+
+**Status:** ✅ Fixed (2026-06-02) — `PartPlan` に `maxPartSize = 64 MiB` の cap を導入。目標パート数（9,000）基準値を `[5MiB, 64MiB]` にクランプし、10,000 パートに収まらない超巨大ファイル（おおむね 640GiB 超）だけ「収めるのに必要な最小 partSize」を直接 floor 計算で引き上げる（cap を超えるのはこのときだけ）。これにより現実的な大ファイル（≤640GiB）の常駐メモリは `64MiB × (inflight+1)` ≈ **256 MiB** で頭打ち（従来は 5 TiB で ~2.3 GiB）。あわせて指摘どおり**デッドコードだった防御 `while` ループを撤去**し、直接 floor 計算（`minToFit`）に置換（`partCount ≤ 10,000` は MiB 切り上げにより常に成立）。`PartPlanTests` に cap の回帰を追加。`xhigh` コードレビュー（2026-06-02）で検出。
+
+**該当箇所:** `Tide/S3/PartPlan.swift` `plan`（`targetMaxParts = 9_000`）、`Tide/S3/MultipartUploader.swift`（in-flight バッファ）。
+
+**重要度:** Low（**可用性・資源**。攻撃者起因ではなく、ユーザ自身が巨大ファイルを同期対象に置いたときのメモリ圧。メニューバー常駐アプリで激しいページング／jetsam のリスク）。
+
+**内容:** S3 のパート数上限 10,000 に対して 9,000 で余裕を取った設計が裏目に出て、part 数を抑える代わりに 1 パートを肥大化させている。`O_NOFOLLOW` 単一 FD から順次読みつつ最大 3 パートを in-flight にするため、肥大パート × 4 ぶんの `Data` が常駐する。整合性・正当性に問題は無く、純粋に資源効率の問題。
+
+**推奨修正（実装スレッド向け）:**
+- `partSize` に上限（例: 64〜128 MiB）を設け、巨大ファイルは part 数を 10,000 上限まで増やす方向にする。常駐メモリが概ね 5〜10 倍下がる。
+- 付随して `PartPlan.plan` 末尾の防御 `while partCount > maxPartCount { partSize += 1MiB }` は**現設計ではデッドコード**（partCount は最大 8,993 で上限に達しない）。partSize 上限を入れるとこのループが実際に機能し始めるので、同時に整理する。

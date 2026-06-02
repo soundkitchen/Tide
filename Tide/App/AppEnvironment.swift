@@ -88,6 +88,7 @@ final class AppEnvironment {
             s3: s3,
             syncRoot: url,
             deviceId: config.deviceId,
+            config: config,
             pollIntervalSeconds: config.pollingIntervalSeconds
         )
         self.database = db
