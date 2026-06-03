@@ -488,21 +488,23 @@ struct ReadResult {
 10. DB を更新 + sync_log 記録
 ```
 
-## 競合解決（M2 の単純ルール）
+## 競合解決（3-way merge）
 
-形式的な 3-way merge は M3 で導入予定。M2 では次の単純ルールで運用する:
+M3 サブ C で **ベース / ローカル / リモートの 3 SHA による 3-way merge として形式化**した（2026-06-04）。判定は純粋関数 `ThreeWayMerge.decide(base:local:remote:) -> MergeDecision` に集約され、`SyncEngine.reconcileRemoteEntry`（pull 側）と `Downloader.applyRemoteDeletion`（削除側）の両方がこれを通す。**ベースは「最後にローカル DB へ記録した SHA」(`FileRecord.sha256`)** で、マニフェスト schema は拡張していない。挙動は下表（旧 M2 ルール）と 1:1 で一致し、全分岐は `ThreeWayMergeTests` で網羅する。
 
-| ローカル状態 | リモート状態 | 動作 |
-|---|---|---|
-| 無 | あり | ダウンロード |
-| あり / SHA = remote | あり | スキップ + DB 最新化 |
-| あり / SHA != remote / SHA = DB（前回 sync 時） | あり | ダウンロード（remote が新しいと判断） |
-| あり / SHA != remote / SHA != DB | あり | **コンフリクト**: `<stem> (local copy YYYY-MM-DD HH-MM-SS).<ext>` にリネーム → remote をダウンロード。リネーム後のファイルは FSEvents 経由で M1 アップロードキューに乗る |
-| あり / SHA = DB | 無 | ローカル削除（リモート削除の反映） |
-| あり / SHA != DB | 無 | **温存** + `sync_log` に warning（ユーザがローカルで編集中とみなす） |
-| 無 | 無 | 何もしない |
+| ローカル状態 | リモート状態 | 動作 | `MergeDecision` |
+|---|---|---|---|
+| 無 | あり | ダウンロード | `.download` |
+| あり / SHA = remote | あり | スキップ + DB 最新化 | `.localMatchesRemote` |
+| あり / SHA != remote / SHA = DB（前回 sync 時） | あり | ダウンロード（remote が新しいと判断） | `.download` |
+| あり / SHA != remote / SHA != DB（or DB 記録なし） | あり | **コンフリクト**: `<stem> (local copy YYYY-MM-DD HH-MM-SS).<ext>` にリネーム → remote をダウンロード。リネーム後のファイルは FSEvents 経由で M1 アップロードキューに乗る | `.conflictThenDownload` |
+| あり / SHA = DB | 無 | ローカル削除（リモート削除の反映） | `.deleteLocal` |
+| あり / SHA != DB（or DB 記録なし / ハッシュ不能） | 無 | **温存** + `sync_log` に warning（ユーザがローカルで編集中とみなす） | `.keepLocalRemoteDeleted` |
+| 無 | 無 | 何もしない | `.noop` |
 
-リネーム規則は `ConflictNamer.localCopyRelativePath(for:at:)`。dotfile / 拡張子なしも対応。
+「両方が同じ方向に変化」（ベースから local も remote も同一内容へ）は `local == remote` なので `.localMatchesRemote`（fast-forward）に入る。リネーム規則は `ConflictNamer.localCopyRelativePath(for:at:)`。dotfile / 拡張子なしも対応。
+
+> **既知の制限（アップロード側の last-writer-wins）**: 競合検出は現状 **pull/削除側のみ**。同一ベースから 2 台が編集すると後勝ちでマニフェストが上書きされ、先に上げた側は次回 pull で「local == base＝未編集」と判定して相手版を取り込み、自分のローカル編集がワーキングコピーから消える（S3 のバージョン履歴には残る）。アップロード直前にも `ThreeWayMerge` を適用する対称化は将来サブタスク（`07-M3-IMPLEMENTATION-GUIDE.md` 参照）。
 
 ## セキュリティゲート
 

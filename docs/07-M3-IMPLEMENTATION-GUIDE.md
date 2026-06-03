@@ -120,33 +120,27 @@ M1 で導入した「100 MB を超えたら `sync_log` にエラーを残して�
 
 ---
 
-## サブタスク C: 3-way merge 形式化
+## サブタスク C: 3-way merge 形式化 — ✅ 実装済み（2026-06-04）
 
 ### 目的
-現状の M2 はテーブル化された単純ルール（`04-SYNC-LOGIC.md` の「競合解決（M2 の単純ルール）」）で動いている。これを **ベースバージョン / ローカル変更 / リモート変更** の 3-way 視点で形式化する。
+M2 の単純ルール（`04-SYNC-LOGIC.md`「競合解決」）を **ベース / ローカル / リモート** の 3-way 視点で形式化し、判定を副作用から切り離してユニットテストで固める。
 
-### 設計の出発点
-- ベースは「最後にローカル DB に記録された SHA」(`FileRecord.sha256`)
-- 3 つの SHA を比較して 8 通りの分岐を整理
-  - 3 つすべて同じ → スキップ
-  - ローカルだけ変化 → upload
-  - リモートだけ変化 → download
-  - 両方が同じ方向に変化 → スキップ（fast-forward）
-  - 両方違う方向に変化 → コンフリクト（M2 の rename ロジック）
-- マニフェストエントリに「親バージョン」フィールドを増やすかは設計判断（増やすとマニフェストが膨らむが、より厳密にできる）
+### 実装
+- 新規 `Tide/Core/ThreeWayMerge.swift`: 純粋関数 `decide(base:local:remote:) -> MergeDecision`（`IgnoreDecision`/`PartPlan`/`ConflictNamer` と同じ純粋 enum + static パターン）。`MergeDecision` は `.download` / `.localMatchesRemote` / `.conflictThenDownload` / `.deleteLocal` / `.keepLocalRemoteDeleted` / `.noop`。
+- `SyncEngine.reconcileRemoteEntry`（pull 側）と `Downloader.applyRemoteDeletion`（削除側）を `decide()` 経由に整理。安全ゲート（`PathValidator` / symlink 拒否 / ignore 判定）と I/O は維持。
+- 新規 `TideTests/ThreeWayMergeTests.swift`: `base ∈ {nil,"A"}` × `local ∈ {nil,"A","B"}` × `remote ∈ {nil,"A","B","C"}` の真理値表 + M2 表対応 named ケースで全分岐網羅。
 
-### 影響範囲
-- `SyncEngine.reconcileRemoteEntry` の判定ロジック
-- `Uploader.processUpload` 直前にも同等の判定が要るかも（並行更新検出）
-- マニフェストスキーマ拡張（後方互換のため version up）
+### 確定した設計判断
+- **ベース = `FileRecord.sha256`（ローカル DB）**。マニフェストにベース SHA / parent version_id は**追加しない**（version dispatch 基盤が無く、旧クライアントが未知フィールドを round-trip で落とすリスク。形式化に schema 拡張は不要）。`ManifestShard.version`/`ManifestIndex.version` も 1 のまま。
+- **挙動は M2 と 1:1 一致**を優先（厳密性のための挙動変更はしない）。`decide()` の各分岐は旧 reconcile/applyRemoteDeletion の分岐と等価（`04-SYNC-LOGIC.md` の表参照）。
+- **アップロード側の並行更新検出はスコープ外**（下記の既知の制限）。`Uploader.processUpload` は変更していない。
 
-### ユーザに事前に決めてもらいたい
-- マニフェストにベース SHA / parent version_id を増やすか
-- 既存のテーブル方式から大きく挙動が変わらないことを優先するか、厳密性を優先するか
+### 受け入れ確認（達成）
+- 既存 M2 動作（特に conflict rename・リモート削除の温存条件）と挙動一致。
+- 全分岐を `ThreeWayMergeTests` で網羅（`make test` 緑）。
 
-### 受け入れ確認
-- 既存の M2 動作（特に conflict rename）と挙動が一致する
-- 8 通りの分岐をすべてユニットテストで網羅
+### 既知の制限 / 将来サブタスク
+- **アップロード側の last-writer-wins ギャップ**: 競合検出は pull/削除側のみ。同一ベースから 2 台が編集すると後勝ちでマニフェストが上書きされ、先に上げた側は次回 pull で「local == base＝未編集」判定で相手版を取り込み、ローカル編集がワーキングコピーから消える（S3 バージョン履歴には残る）。対称化＝`Uploader.processUpload` 直前にも `ThreeWayMerge` を適用（per-upload でリモートマニフェスト読み + アップロード側コンフリクト経路の新設）は別サブタスク。
 
 ---
 
