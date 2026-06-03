@@ -489,26 +489,26 @@ final class SyncEngine {
         }
 
         do {
-            // ローカル SHA。ファイル不在 or ハッシュ失敗は nil（どちらも「リモート採用」に倒れる＝現行と等価）。
-            let localSha: String?
+            // ローカル状態。不在 / 存在するがハッシュ不能 / SHA 取得済み を区別して decide() へ渡す。
+            let localState: LocalState
             if FileManager.default.fileExists(atPath: fullURL.path) {
-                localSha = try? HashCalculator.sha256(of: fullURL)
+                localState = (try? HashCalculator.sha256(of: fullURL)).map(LocalState.present) ?? .unreadable
             } else {
-                localSha = nil
+                localState = .absent
             }
 
             // 競合解決は ThreeWayMerge に一本化（remote はここでは常に非 nil）。
-            switch ThreeWayMerge.decide(base: localRec?.sha256, local: localSha, remote: entry.sha256) {
+            switch ThreeWayMerge.decide(base: localRec?.sha256, local: localState, remote: entry.sha256) {
             case .download, .localMatchesRemote:
                 // リモート採用（欠落/上書き）または内容一致（download() の早期 return で DB を最新化）。
                 try await dl.download(relativePath: path, entry: entry)
             case .conflictThenDownload:
-                // 双方乖離 → ローカルをコンフリクトコピーへ退避してからリモート取得。
+                // 双方乖離（ローカル編集 / 未追跡 / unreadable）→ ローカルをコンフリクトコピーへ退避してからリモート取得。
                 _ = try dl.renameLocalForConflict(relativePath: path)
                 try await dl.download(relativePath: path, entry: entry)
             case .deleteLocal, .keepLocalRemoteDeleted, .noop:
-                // remote が非 nil のここでは到達しない（防御的に何もしない）。
-                break
+                // remote が非 nil のここでは到達しない。来たら decide() のロジックバグ。
+                assertionFailure("unreachable: remote is non-nil in reconcileRemoteEntry")
             }
         } catch {
             AppLogger.sync.error("Remote reconcile \(path, privacy: .private) failed: \(String(describing: error), privacy: .private)")

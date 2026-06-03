@@ -490,7 +490,9 @@ struct ReadResult {
 
 ## 競合解決（3-way merge）
 
-M3 サブ C で **ベース / ローカル / リモートの 3 SHA による 3-way merge として形式化**した（2026-06-04）。判定は純粋関数 `ThreeWayMerge.decide(base:local:remote:) -> MergeDecision` に集約され、`SyncEngine.reconcileRemoteEntry`（pull 側）と `Downloader.applyRemoteDeletion`（削除側）の両方がこれを通す。**ベースは「最後にローカル DB へ記録した SHA」(`FileRecord.sha256`)** で、マニフェスト schema は拡張していない。挙動は下表（旧 M2 ルール）と 1:1 で一致し、全分岐は `ThreeWayMergeTests` で網羅する。
+M3 サブ C で **ベース / ローカル / リモートの 3 SHA による 3-way merge として形式化**した（2026-06-04）。判定は純粋関数 `ThreeWayMerge.decide(base:local:remote:) -> MergeDecision` に集約され、`SyncEngine.reconcileRemoteEntry`（pull 側）と `Downloader.applyRemoteDeletion`（削除側）の両方がこれを通す。**ベースは「最後にローカル DB へ記録した SHA」(`FileRecord.sha256`)** で、マニフェスト schema は拡張していない。挙動は下表（旧 M2 ルール）と一致し（1 点だけ後述の unreadable の扱いを安全側に厳格化）、全分岐は `ThreeWayMergeTests` で網羅する。
+
+ローカル状態は `LocalState`（`.absent` / `.unreadable` / `.present(sha)`）で表す。下表の「あり」は SHA が取れた `.present`。
 
 | ローカル状態 | リモート状態 | 動作 | `MergeDecision` |
 |---|---|---|---|
@@ -499,8 +501,10 @@ M3 サブ C で **ベース / ローカル / リモートの 3 SHA による 3-w
 | あり / SHA != remote / SHA = DB（前回 sync 時） | あり | ダウンロード（remote が新しいと判断） | `.download` |
 | あり / SHA != remote / SHA != DB（or DB 記録なし） | あり | **コンフリクト**: `<stem> (local copy YYYY-MM-DD HH-MM-SS).<ext>` にリネーム → remote をダウンロード。リネーム後のファイルは FSEvents 経由で M1 アップロードキューに乗る | `.conflictThenDownload` |
 | あり / SHA = DB | 無 | ローカル削除（リモート削除の反映） | `.deleteLocal` |
-| あり / SHA != DB（or DB 記録なし / ハッシュ不能） | 無 | **温存** + `sync_log` に warning（ユーザがローカルで編集中とみなす） | `.keepLocalRemoteDeleted` |
+| あり / SHA != DB（or DB 記録なし） | 無 | **温存** + `sync_log` に warning（ユーザがローカルで編集中とみなす） | `.keepLocalRemoteDeleted` |
 | 無 | 無 | 何もしない | `.noop` |
+
+**`.unreadable`（ファイルは在るが SHA を計算できない＝権限/I-O エラー等）の扱い**: 乖離の有無を確認できないので**データ安全側へ倒す**。リモートあり（pull）→ 無確認で上書きせず `.conflictThenDownload`（ローカルをコンフリクトコピーへ退避してから取得）／リモート無（削除）→ `.keepLocalRemoteDeleted`（温存）。旧 M2 は pull 側のハッシュ失敗を無確認 download に倒していた（＝乖離ローカルを失い得た）が、サブ C で `LocalState` に持ち上げてこの 1 点だけ厳格化した（PR #3 レビュー指摘 1）。
 
 「両方が同じ方向に変化」（ベースから local も remote も同一内容へ）は `local == remote` なので `.localMatchesRemote`（fast-forward）に入る。リネーム規則は `ConflictNamer.localCopyRelativePath(for:at:)`。dotfile / 拡張子なしも対応。
 

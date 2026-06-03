@@ -127,8 +127,9 @@ M2 の単純ルール（`04-SYNC-LOGIC.md`「競合解決」）を **ベース /
 
 ### 実装
 - 新規 `Tide/Core/ThreeWayMerge.swift`: 純粋関数 `decide(base:local:remote:) -> MergeDecision`（`IgnoreDecision`/`PartPlan`/`ConflictNamer` と同じ純粋 enum + static パターン）。`MergeDecision` は `.download` / `.localMatchesRemote` / `.conflictThenDownload` / `.deleteLocal` / `.keepLocalRemoteDeleted` / `.noop`。
+- ローカル状態は `LocalState`（`.absent` / `.unreadable` / `.present(sha)`）で表現。「不在」と「在るが SHA 計算不能」を区別し、**pull 側の unreadable を無確認上書きから保守的なコンフリクト退避へ厳格化**（PR #3 レビュー指摘 1。旧 M2 はここを download に倒していた）。これで unreadable の意味論も `decide()` に集約・テスト可能。
 - `SyncEngine.reconcileRemoteEntry`（pull 側）と `Downloader.applyRemoteDeletion`（削除側）を `decide()` 経由に整理。安全ゲート（`PathValidator` / symlink 拒否 / ignore 判定）と I/O は維持。
-- 新規 `TideTests/ThreeWayMergeTests.swift`: `base ∈ {nil,"A"}` × `local ∈ {nil,"A","B"}` × `remote ∈ {nil,"A","B","C"}` の真理値表 + M2 表対応 named ケースで全分岐網羅。
+- 新規 `TideTests/ThreeWayMergeTests.swift`: `base`(nil/"A"/"B") × `local`(.absent/.unreadable/.present) × `remote`(nil/SHA) の分岐代表ケース + M2 表対応 named ケース + unreadable ケースで全分岐網羅。
 
 ### 確定した設計判断
 - **ベース = `FileRecord.sha256`（ローカル DB）**。マニフェストにベース SHA / parent version_id は**追加しない**（version dispatch 基盤が無く、旧クライアントが未知フィールドを round-trip で落とすリスク。形式化に schema 拡張は不要）。`ManifestShard.version`/`ManifestIndex.version` も 1 のまま。
@@ -141,6 +142,7 @@ M2 の単純ルール（`04-SYNC-LOGIC.md`「競合解決」）を **ベース /
 
 ### 既知の制限 / 将来サブタスク
 - **アップロード側の last-writer-wins ギャップ**: 競合検出は pull/削除側のみ。同一ベースから 2 台が編集すると後勝ちでマニフェストが上書きされ、先に上げた側は次回 pull で「local == base＝未編集」判定で相手版を取り込み、ローカル編集がワーキングコピーから消える（S3 バージョン履歴には残る）。対称化＝`Uploader.processUpload` 直前にも `ThreeWayMerge` を適用（per-upload でリモートマニフェスト読み + アップロード側コンフリクト経路の新設）は別サブタスク。
+- **配線部（`MergeDecision` → 実 I/O）が未結合テスト**（PR #3 レビュー指摘 2）: `decide()` の純粋ロジックは全分岐網羅したが、「`.deleteLocal` が削除+DB削除+log」「`.conflictThenDownload` が rename→download」等の switch マッピングを検証する結合テストは無い（switch の取り違えを回帰検出できない）。`Downloader.applyRemoteDeletion` は S3 を使わないので、`MultipartUploadClient` と同様に `Downloader` へ最小 S3 シームを切れば temp DB + temp syncRoot で削除側の結合テストが可能。重いので別サブタスクに据え置き。
 
 ---
 

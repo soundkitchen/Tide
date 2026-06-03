@@ -165,13 +165,10 @@ struct Downloader {
         let dbRec = try await db.pool.read { db in
             try FileRecord.fetchOne(db, key: relativePath)
         }
-        let currentSha: String? = try? HashCalculator.sha256(of: fullURL)
-
-        // 競合解決は ThreeWayMerge に一本化（remote = nil の削除側）。
-        // ファイルは存在するがハッシュ不能のときは「未編集と確認できない」ので保守的に温存する。
-        let decision: MergeDecision = currentSha.map {
-            ThreeWayMerge.decide(base: dbRec?.sha256, local: $0, remote: nil)
-        } ?? .keepLocalRemoteDeleted
+        // ここに来た時点でファイルは必ず存在（上の guard）。SHA 取得済み or unreadable のいずれか。
+        // 競合解決は ThreeWayMerge に一本化（remote = nil の削除側）。unreadable は decide() 側で温存に倒れる。
+        let localState: LocalState = (try? HashCalculator.sha256(of: fullURL)).map(LocalState.present) ?? .unreadable
+        let decision = ThreeWayMerge.decide(base: dbRec?.sha256, local: localState, remote: nil)
 
         switch decision {
         case .deleteLocal:
