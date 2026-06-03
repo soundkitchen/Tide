@@ -69,7 +69,7 @@ M1 で導入した「100 MB を超えたら `sync_log` にエラーを残して�
 - 16 MiB 以下のファイルは従来通り（リグレッションなし）
 
 ### レビュー指摘の据え置き（PR #1 のコードレビュー、将来タスク）
-- **結合部の自動テスト（テスト負債）**: `MultipartUploader`（有界並列・inflight 会計・空 parts ガード・リトライ）と `downloadToFile`（`.stream`/`.data` 分岐・二段 maxBytes）にユニットテストが無い。現状は手動チェックリストが gate。恒久対応は `TideS3Client`（具象 final class）の S3 パート API に **protocol seam を切って fake 注入**できるようにし、inflight 上限・空 parts・リトライ分岐をユニット化する。`PartPlan`/`NoFollowFileReader`/`ConfigStore` の純粋ロジックは既にカバー済み。
+- **結合部の自動テスト（テスト負債）**: `MultipartUploader` は ✅ **解消（2026-06-04）**。`protocol MultipartUploadClient`（4 メソッド）を切って `TideS3Client` を適合させ、actor フェイク + 実一時ファイルで SHA 整合・パート分割・空 parts ガード・一時/恒久リトライ・abort を `MultipartUploaderTests` でユニット化した（リトライ遅延は `MultipartUploader.RetryPolicy` 注入で高速化）。`PartPlan`/`NoFollowFileReader`/`ConfigStore` の純粋ロジックは既にカバー済み。**残**: `downloadToFile`（`.stream`/`.data` 分岐・二段 maxBytes）のユニットテストは未整備（DL 経路の seam は別途）。
 - **`uploadPartWithRetry` のエラー分類**: 現状あらゆるエラーを 3 回リトライする。認証エラー・`EntityTooSmall` 等の恒久失敗は即諦める分類を入れるとリトライ空振り（S3 API 課金含む）を減らせる（`security/low.md` L10 参照）。
 
 ---
@@ -91,12 +91,10 @@ M1 で導入した「100 MB を超えたら `sync_log` にエラーを残して�
   「既存は触らない」緩和はユーザパターンにのみ適用し、ハードコード除外には適用しない。
 
 ### 実装
-- 新規 `Tide/Core/SyncIgnoreMatcher.swift`: 不変・`@unchecked Sendable` な値型。グロブ → 境界付き正規表現
-  （ユーザ正規表現は受けない）。ファイルサイズ上限 256 KB / パターン数上限 10,000。
-  生成した正規表現を `NSRegularExpression`（ICU = バックトラッキング）で照合するため ReDoS が起こり得る（F1 / L8）。
-  **速攻ガード**で緩和済み: 1 パターンの長さ（`maxPatternLength`）/ ワイルドカード数（`maxWildcardsPerPattern`）上限で
-  実証 PoC 級を `parse` で破棄、照合入力長（`maxMatchPathLength`）上限、隣接 `[^/]*` の縮約。
-  これは PoC 級の遮断＋入力有界化であって線形時間の構造的保証ではない。**恒久解＝線形時間グロブ照合への置換は将来タスク**（下記）。
+- 新規 `Tide/Core/SyncIgnoreMatcher.swift`: 不変・`Sendable` な値型。グロブ → トークン列へコンパイルし
+  （ユーザ正規表現は受けない）、照合は **reachable-set DP**（`O(パターン長 × パス長)`）で行う。ファイルサイズ上限 256 KB / パターン数上限 10,000。
+  **ReDoS は構造的に解消済み（F1 / L8、2026-06-04）**: 旧来は生成正規表現を `NSRegularExpression`（ICU = バックトラッキング）で照合していたため `*a*a*…` 系で破滅的バックトラッキングが起こり得たが、`NSRegularExpression` を廃して線形時間照合に置換した（バックトラッキング自体が存在しない）。
+  前段の上限（パターン長 `maxPatternLength` / ワイルドカード数 `maxWildcardsPerPattern` / 照合入力長 `maxMatchPathLength`）は ReDoS 防御の load-bearing ではなくなったが、防御的サニティ上限として保持。
 - 新規 `Tide/Core/IgnoreDecision.swift`: 純粋関数 `shouldSkip(relativePath:isAlreadyTracked:matcher:)`。
   判定順: ① ハードコード（常に）→ ② `.syncignore` 自身（決して除外しない）→ ③ ユーザパターン∧未追跡 → スキップ。
 - `SyncEngine`: `ignoreMatcher` を保持。`reloadIgnoreMatcher()` で `<syncRoot>/.syncignore` を安全に読込
@@ -105,12 +103,12 @@ M1 で導入した「100 MB を超えたら `sync_log` にエラーを残して�
 - `.syncignore` 変更は FSEvents で拾い、再読込 + フルスキャン再評価。`.syncignore` 自身もアップロード（同期）。
 - `SettingsWindow`: 現行 `.syncignore` パターンを閲覧表示（編集は将来）。
 - 既定テンプレート: `SyncIgnoreMatcher.defaultTemplate`（`node_modules/` 等）を **新規バケットのセットアップ時のみ** `AppEnvironment.completeSetup` で `<syncRoot>/.syncignore` に自動生成。既存バケット参加時は競合回避のため作らない。`.git/` は含めない（同期対象のまま）。
-- テスト: `SyncIgnoreMatcherTests` / `IgnoreDecisionTests`。
+- テスト: `SyncIgnoreMatcherTests`（意味論全件 + 線形時間回帰 `testPathologicalPatternMatchesInLinearTime` + 旧 regex との differential fuzz `testLinearMatcherMatchesReferenceRegex`）/ `IgnoreDecisionTests`。
 
 ### 既知の制限 / 将来タスク
 - **ディレクトリごとの `.syncignore`（git 風の階層的オーバーライド）は未対応**。現状はルートの `<syncRoot>/.syncignore` 1 ファイルのみを読む。サブディレクトリの `.syncignore` はただの同期対象ファイル扱い。→ **将来タスク**（各ファイル位置でのアンカー / 変更検知リロード / `*/.syncignore` の self-protect 拡張が必要）。
 - 親ディレクトリが除外された配下のファイルを `!` で再包含する gitignore の挙動は厳密には再現しない（同一階層の否定は正しく動く）。
-- **ReDoS の構造的解消（F1 / L8）は将来タスク**。現状は `NSRegularExpression` ベースに速攻ガード（長さ/ワイルドカード数/入力長キャップ + 隣接量化子縮約）を被せた緩和。恒久解は `NSRegularExpression` をやめ、線形時間のグロブ照合（two-pointer / DP。`**` / 否定 / アンカーのセマンティクスを移植）へ置換する。`SyncIgnoreMatcherTests` を回帰の基準に使える。
+- ~~**ReDoS の構造的解消（F1 / L8）は将来タスク**~~ → ✅ **完了（2026-06-04）**。`NSRegularExpression` を廃し、グロブをトークン列へコンパイルして reachable-set DP で評価する線形時間照合へ置換した（`**` / 否定 / アンカー / dirOnly のセマンティクスを移植）。`SyncIgnoreMatcherTests` の既存意味論テストを回帰オラクルに維持し、旧 regex 実装との differential fuzz（`testLinearMatcherMatchesReferenceRegex`）で同値を確認。
 - マッチングは case-sensitive（gitignore 既定）。
 - `ManifestReader` には ignore 判定を入れず、ダウンロード可否は `reconcileRemoteEntry` で gate する（削除検出が完全な remoteMap に依存するため）。
 

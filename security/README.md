@@ -18,12 +18,12 @@
 
 ## 再レビューのフォローアップ（2026-06-01）
 
-現行コード全体の再レビューで検出した懸念。F1〜F3 は 2026-06-01 に対応（コード + テスト + ドキュメント）。F4 は**意図的に保持**（下記）。
+現行コード全体の再レビューで検出した懸念。F1〜F3 は 2026-06-01 に対応（コード + テスト + ドキュメント）。F1 は当初速攻ガードで Mitigated 止まりだったが、**2026-06-04 に線形時間グロブ照合への置換で構造的に解消（Fixed）**。F4 は**意図的に保持**（下記）。
 各項目の詳細・対応内容・追加テストは参照先 md に記載する。
 
 | ID | 重要度 | 概要 | 状態 | 参照 |
 |---|---|---|---|---|
-| F1 | Low〜Medium（可用性） | `.syncignore` の glob→正規表現が破滅的バックトラッキング（ReDoS）。当初の「ReDoS 回避済み」は過大記載だった | 🟡 Mitigated（速攻ガード。構造的解消は M3） | [low.md](low.md) L8/F1 |
+| F1 | Low〜Medium（可用性） | `.syncignore` の glob→正規表現が破滅的バックトラッキング（ReDoS）。当初の「ReDoS 回避済み」は過大記載だった | ✅ Fixed（線形時間グロブ照合に置換。2026-06-04） | [low.md](low.md) L8/F1 |
 | F2 | Medium | 祖先ディレクトリが symlink だとダウンロード書込が syncRoot 外へ抜ける（`resolveSafely` は字句検証のみ。C1/C2 の補完漏れ） | ✅ Fixed（`resolveForWrite` 新設） | [medium.md](medium.md) M6 |
 | F3 | Low | `Uploader` が symlink 追従 API で読む。アップロード直前の symlink 再チェックが無い（TOCTOU、M5 と同根） | 🟡 Mitigated（直前再チェック。`O_NOFOLLOW` 化は M5/M3） | [low.md](low.md) L9 |
 | F4 | Low | UI の `recentErrors` / `.error` が生エラー文字列を表示し続けている（H2 の UI 側残存） | ⏸ Deferred（意図的保持。配布前に再評価） | [high.md](high.md) H2 |
@@ -56,7 +56,7 @@ F4 の据え置き理由: 生エラー文字列は開発中のデバッグで実
 | L5 | SHA1 のコメント | ✅ Fixed |
 | L6 | DebounceQueue 競合 | ⏸ Deferred — `UPLOAD_QUEUE.UNIQUE(path)` で実害なしの想定で観察 |
 | L7 | secretAccessKey の生存期間 | ✅ Fixed |
-| L8 | `.syncignore`（リモート由来の除外パターン）の取り扱い | 🟡 Partial / Mitigated — 機密網は否定で覆せない / symlink 非追従 / サイズ上限は維持。生成正規表現の ReDoS は速攻ガードで Mitigated（構造的解消は M3。→ F1） |
+| L8 | `.syncignore`（リモート由来の除外パターン）の取り扱い | ✅ Fixed — 機密網は否定で覆せない / symlink 非追従 / サイズ上限は維持。生成正規表現の ReDoS は線形時間グロブ照合への置換で構造的に解消（2026-06-04。→ F1） |
 | L9 | アップロード読込が symlink 追従（読込時の再チェック無し） | ✅ Fixed（2026-06-02・M3。`NoFollowFileReader` で `O_NOFOLLOW` 単一 FD 化） |
 | L10 | マルチパート中の切り詰めで CompleteMultipartUpload 失敗 | ✅ Fixed（2026-06-02・空 parts ガード × 2） |
 | L11 | 巨大ファイルのパート肥大による常駐メモリ増 | ✅ Fixed（2026-06-02・`maxPartSize` 64MiB cap + デッドコード整理） |

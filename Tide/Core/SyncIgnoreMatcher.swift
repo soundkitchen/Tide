@@ -9,34 +9,50 @@ import Foundation
 /// - 先頭または中間の `/` はルートアンカー。スラッシュが無ければ任意階層でマッチ
 /// - `*` は `/` 以外の任意、`?` は `/` 以外 1 文字、`**` はパスセグメントをまたぐ
 ///
-/// セキュリティ: ユーザ正規表現は受け取らず、グロブから境界付き正規表現を生成する。生成した正規表現を
-/// `NSRegularExpression`（ICU = バックトラッキング）で照合するため、`*a*a*…` 系の多ワイルドカードパターン ×
-/// 部分一致する長い入力では破滅的バックトラッキングが起こり得る（security F1 / L8）。これを**速攻ガード**で緩和:
-/// パターン単位の長さ・ワイルドカード数に上限を設けて実証 PoC 級を `parse` で破棄し、照合入力長にも上限を設け、
-/// 隣接する `[^/]*` を縮約する。これは PoC 級の遮断と入力の有界化であって線形時間の構造的保証ではない
-/// （恒久解 = 線形時間グロブ照合への置換は M3 タスク）。
+/// セキュリティ: ユーザ正規表現は受け取らず、グロブを**トークン列**へコンパイルし、照合は
+/// reachable-set DP（`isIgnored`）で行う。計算量は `O(パターン長 × パス長)` に**構造的に**有界で、
+/// `*a*a*…` 系の多ワイルドカードパターンでも破滅的バックトラッキング（ReDoS）が起こらない（security F1 / L8）。
+/// 以前は `NSRegularExpression`（ICU = バックトラッキング）で照合していたため、キャップ内のパターンでも
+/// 多項式爆発でハングし得た。本実装で恒久解（線形時間グロブ照合への置換）に到達した。
 ///
-/// `NSRegularExpression` はマッチング用途ではスレッドセーフ（Apple ドキュメント）かつ生成後は不変なので、
-/// 値型として `@unchecked Sendable` にしている（`performFullScan` の `Task.detached` へスナップショットを渡すため）。
+/// `parse` 時のキャップ（`maxPatternLength` / `maxWildcardsPerPattern` / `maxMatchPathLength`）は
+/// ReDoS 防御の load-bearing ではなくなったが、防御的なサニティ上限として保持する（資源消費の有界化）。
+///
+/// 全ストアドプロパティが Sendable な値型なので、`performFullScan` の `Task.detached` へ
+/// スナップショットを安全に渡せる（値型 + `Sendable`）。
 ///
 /// 既知の制限: 親ディレクトリが除外された配下のファイルを `!` で再包含する gitignore の挙動
 /// （「除外ディレクトリ配下は再包含できない」）は厳密には再現しない。同一階層での否定は正しく動く。
-struct SyncIgnoreMatcher: @unchecked Sendable {
+struct SyncIgnoreMatcher: Sendable {
     /// `.syncignore` のバイト数上限。これを超える分は読み込み側で打ち切る。
     static let maxBytes = 256 * 1024
     /// パターン数上限。超過分は捨てる。
     static let maxPatterns = 10_000
-    /// 1 パターン（1 行）の最大文字数。超過行は parse で破棄（ReDoS 速攻ガード: F1）。
+    /// 1 パターン（1 行）の最大文字数。超過行は parse で破棄（防御的サニティ上限）。
     static let maxPatternLength = 256
     /// 1 パターンに含められる `*` / `?` の最大個数。超過行は parse で破棄。
-    /// 多ワイルドカードによる多項式バックトラッキングを抑える。正当なパターンは通常これを大きく下回る。
+    /// 照合は線形時間なので ReDoS 防御としては不要だが、極端なパターンを弾く防御的上限として保持する。
     static let maxWildcardsPerPattern = 8
     /// `isIgnored` が照合する相対パスの最大文字数。超過パスは除外判定をスキップ（= 除外しない＝安全側）。
-    /// 実在 FS パスは PATH_MAX 内に収まるため実害はない。攻撃者がマニフェスト経由で長大パスを注入する経路を遮断する。
+    /// 実在 FS パスは PATH_MAX 内に収まるため実害はない（防御的上限）。
     static let maxMatchPathLength = 1024
 
-    private struct Pattern {
-        let regex: NSRegularExpression
+    /// グロブをコンパイルしたトークン。すべて `/` 区切りのパス文字列に対して評価する。
+    private enum Token: Sendable, Equatable {
+        case literal(Character)  // その文字そのもの（`/` を含む）
+        case anyOne              // `?` → `/` 以外の 1 文字
+        case starNonSlash        // `*`（およびセグメント内 `**`）→ `/` 以外の 0 文字以上
+        case slashStarSlash      // `**/` → 0 個以上のディレクトリ（任意文字列 + `/`）。後続の `/` を取り込む
+        case dotStar             // 末尾 `**` → 残り全体（`/` を含む任意の 0 文字以上）
+    }
+
+    private struct Pattern: Sendable {
+        let tokens: [Token]
+        /// 先頭/中間に `/` があり、ルートからアンカーするか。
+        let anchored: Bool
+        /// 末尾 `/`（ディレクトリ配下のファイルにのみマッチ）。
+        let dirOnly: Bool
+        /// 先頭 `!`（再包含）。
         let negated: Bool
     }
 
@@ -96,7 +112,7 @@ struct SyncIgnoreMatcher: @unchecked Sendable {
             if line.isEmpty { continue }
             if line.hasPrefix("#") { continue }
 
-            // ReDoS 速攻ガード (F1): 長すぎる行 / ワイルドカード過多の行は破棄する。
+            // 防御的サニティ上限: 長すぎる行 / ワイルドカード過多の行は破棄する。
             // 否定 `!` は機密網 (HardcodedIgnoreRules) を覆せないため、破棄しても機密が再包含されることはない。
             if line.count > maxPatternLength { continue }
             let wildcardCount = line.reduce(0) { $0 + (($1 == "*" || $1 == "?") ? 1 : 0) }
@@ -130,9 +146,8 @@ struct SyncIgnoreMatcher: @unchecked Sendable {
             }
             if pat.isEmpty { continue }
 
-            let regexStr = Self.globToRegex(pat, anchored: anchored, dirOnly: dirOnly)
-            guard let re = try? NSRegularExpression(pattern: regexStr) else { continue }
-            compiled.append(Pattern(regex: re, negated: negated))
+            let tokens = Self.tokenize(pat)
+            compiled.append(Pattern(tokens: tokens, anchored: anchored, dirOnly: dirOnly, negated: negated))
             sources.append(line)
         }
         return SyncIgnoreMatcher(patterns: compiled, sourceLines: sources)
@@ -142,30 +157,32 @@ struct SyncIgnoreMatcher: @unchecked Sendable {
     /// gitignore と同様、後に書かれたパターンが優先（否定で再包含）。
     func isIgnored(_ relativePath: String) -> Bool {
         guard !patterns.isEmpty else { return false }
-        // ReDoS 速攻ガード (F1): 異常に長い入力は照合せず「除外しない」を返す（安全側）。
-        // 実在 FS パスは PATH_MAX 内なので実害なし。攻撃者注入の長大パスでの照合爆発を防ぐ。
+        // 防御的サニティ上限: 異常に長い入力は照合せず「除外しない」を返す（安全側）。
         guard relativePath.count <= Self.maxMatchPathLength else { return false }
-        let range = NSRange(relativePath.startIndex..., in: relativePath)
+        let pathChars = Array(relativePath)
+        let n = pathChars.count
         var ignored = false
-        for p in patterns where p.regex.firstMatch(in: relativePath, options: [], range: range) != nil {
+        for p in patterns where Self.matches(p, pathChars: pathChars, n: n) {
             ignored = !p.negated
         }
         return ignored
     }
 
-    // MARK: - glob → regex
+    // MARK: - glob → tokens
 
-    /// グロブパターンを、パス全体にマッチする境界付き正規表現へ変換する。
-    /// `dirOnly` のときはディレクトリ配下のファイルにのみ、そうでなければパス自身か祖先ディレクトリにマッチ。
-    private static func globToRegex(_ pat: String, anchored: Bool, dirOnly: Bool) -> String {
+    /// グロブを `/` 区切りパス向けのトークン列へ変換する。`globToRegex` の旧ロジックと 1:1 対応:
+    /// - `*`（単独）/ セグメント内 `**` → `.starNonSlash`（`/` 以外 0 文字以上）
+    /// - スラッシュ境界の `**/` → `.slashStarSlash`（後続 `/` を取り込む）
+    /// - 末尾の `**` → `.dotStar`
+    /// - `?` → `.anyOne`、その他（`/` 含む）→ `.literal`
+    private static func tokenize(_ pat: String) -> [Token] {
         let chars = Array(pat)
         let n = chars.count
-        var re = ""
+        var tokens: [Token] = []
         var i = 0
-        // 隣接する `[^/]*` の縮約（ReDoS 速攻ガード: F1）。`[^/]*[^/]*` は `[^/]*` と等価なので、
-        // 冗長な量化子の重なり（バックトラッキングの曖昧さの源）を取り除く。
-        func appendStarSegment() {
-            if !re.hasSuffix("[^/]*") { re += "[^/]*" }
+        // 隣接する `[^/]*` の縮約に相当。`starNonSlash` が連続しても等価なので 1 個に畳む。
+        func appendStar() {
+            if tokens.last != .starNonSlash { tokens.append(.starNonSlash) }
         }
         while i < n {
             let c = chars[i]
@@ -178,34 +195,84 @@ struct SyncIgnoreMatcher: @unchecked Sendable {
                     let nextIsSlash = (j >= n) || (chars[j] == "/")
                     if prevIsSlash && nextIsSlash {
                         if j < n && chars[j] == "/" {
-                            re += "(?:.*/)?"   // `**/` → 0 個以上のディレクトリ
+                            tokens.append(.slashStarSlash)  // `**/` → 0 個以上のディレクトリ
                             j += 1
                         } else {
-                            re += ".*"          // 末尾 `**`
+                            tokens.append(.dotStar)          // 末尾 `**`
                         }
                     } else {
-                        appendStarSegment()     // セグメント内の `**` は `*` 扱い
+                        appendStar()                         // セグメント内の `**` は `*` 扱い
                     }
                     i = j
                 } else {
-                    appendStarSegment()
+                    appendStar()
                     i += 1
                 }
             case "?":
-                re += "[^/]"
+                tokens.append(.anyOne)
                 i += 1
             default:
-                re += NSRegularExpression.escapedPattern(for: String(c))
+                tokens.append(.literal(c))
                 i += 1
             }
         }
-        var full = anchored ? "^" : "^(?:.*/)?"
-        full += re
-        if dirOnly {
-            full += "/.*$"          // ディレクトリ配下のファイルにマッチ
-        } else {
-            full += "(?:/.*)?$"     // パス自身、または祖先ディレクトリとしてマッチ
+        return tokens
+    }
+
+    // MARK: - 線形時間照合（reachable-set DP）
+
+    /// `tokens` を「パス位置の到達集合」で評価する。各トークンは到達集合を O(n) で更新するので、
+    /// 全体は `O(トークン数 × パス長)` に有界（バックトラッキングが無い＝ReDoS 不能）。
+    /// アンカー/ディレクトリ限定/祖先マッチの境界規則は旧 `globToRegex` の前後置換と同値。
+    private static func matches(_ p: Pattern, pathChars: [Character], n: Int) -> Bool {
+        // 到達集合: cur[k] == true は「パス位置 k まで消費した状態に到達可能」を表す。
+        var cur = [Bool](repeating: false, count: n + 1)
+
+        // 前置: anchored は `^`（{0}）、unanchored は `^(?:.*/)?`（{0} ∪ {各 `/` の直後}）。
+        cur[0] = true
+        if !p.anchored {
+            for k in 0..<n where pathChars[k] == "/" { cur[k + 1] = true }
         }
-        return full
+
+        for tok in p.tokens {
+            var next = [Bool](repeating: false, count: n + 1)
+            switch tok {
+            case .literal(let c):
+                for pos in 0..<n where cur[pos] && pathChars[pos] == c { next[pos + 1] = true }
+            case .anyOne:  // `[^/]`
+                for pos in 0..<n where cur[pos] && pathChars[pos] != "/" { next[pos + 1] = true }
+            case .starNonSlash:  // `[^/]*`: 到達点から次の `/` までの非スラッシュ run を 1 パスで伸ばす
+                var active = false
+                for pos in 0...n {
+                    if cur[pos] { active = true }
+                    if active { next[pos] = true }
+                    if pos < n && pathChars[pos] == "/" { active = false }
+                }
+            case .slashStarSlash:  // `(?:.*/)?`: 空、または「任意文字列 + `/`」
+                // 空のオプション: 現在位置を素通し。
+                for pos in 0...n where cur[pos] { next[pos] = true }
+                // `.*/`: 到達済みの最小位置以降にある各 `/` の直後へ到達できる。
+                if let minP = firstReachable(cur) {
+                    for k in minP..<n where pathChars[k] == "/" { next[k + 1] = true }
+                }
+            case .dotStar:  // `.*`: 到達済みの最小位置から末尾までの任意位置へ到達できる。
+                if let minP = firstReachable(cur) {
+                    for q in minP...n { next[q] = true }
+                }
+            }
+            cur = next
+        }
+
+        // 後置:
+        // - dirOnly: `/.*$` → 到達点に `/` があれば（その配下にマッチ）true。
+        // - 非 dirOnly: `(?:/.*)?$` → パス全体を消費（cur[n]）か、到達点に `/` があれば（祖先一致）true。
+        if !p.dirOnly && cur[n] { return true }
+        for pos in 0..<n where cur[pos] && pathChars[pos] == "/" { return true }
+        return false
+    }
+
+    private static func firstReachable(_ set: [Bool]) -> Int? {
+        for (i, v) in set.enumerated() where v { return i }
+        return nil
     }
 }
