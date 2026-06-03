@@ -76,22 +76,22 @@ SwiftUI の `@State private var secretAccessKey: String = ""` は SetupWizardWin
 
 ## L8. `.syncignore`（リモート由来の除外パターン）の取り扱い
 
-**Status:** 🟡 Partial / Mitigated (2026-06-01) — M3 で `.syncignore` 対応を追加。機密網の否定不可・symlink 非追従・サイズ/件数上限は実装済み。
-当初の「ReDoS 回避」は誤りで、生成された正規表現自体がバックトラッキングで爆発し得た（下記 F1）。**F1 は速攻ガードで Mitigated**（PoC 級を parse で遮断 + 照合入力長の有界化）。構造的な ReDoS 解消（線形時間グロブ照合への置換）は M3 タスクとして残置。
+**Status:** ✅ Fixed (2026-06-04) — M3 で `.syncignore` 対応を追加。機密網の否定不可・symlink 非追従・サイズ/件数上限は実装済み。
+当初の「ReDoS 回避」は誤りで、生成された正規表現自体がバックトラッキングで爆発し得た（下記 F1）。**F1 は線形時間グロブ照合への置換で構造的に解消（2026-06-04）**。`NSRegularExpression` を廃し、トークン列 + reachable-set DP（`O(パターン長 × パス長)`）に置き換えた。残る上限（サイズ 256KB / 件数 10,000 等）は資源消費の有界化として維持。
 
 **該当箇所:** `Tide/Core/SyncIgnoreMatcher.swift` / `Tide/Core/IgnoreDecision.swift` / `Tide/Core/SyncEngine.swift`
 
 - **機密網は否定 `!` で覆せない**: `IgnoreDecision.shouldSkip` はハードコード除外（`HardcodedIgnoreRules`）を最優先で評価し、`.syncignore` のユーザパターン（否定含む）より常に優先する。悪意ある / 壊れたリモート `.syncignore` に `!.env` 等を書かれても、`.env` などの機密ファイルが同期対象に戻ることはない。
 - **DoS（サイズ/件数）回避**: ユーザ正規表現は受け取らず、ファイルサイズ上限 256 KB / パターン数上限 10,000 で巨大・大量パターンによる資源枯渇を防ぐ。
-- **⚠️ ReDoS は速攻ガードで Mitigated（F1）**: グロブから生成する正規表現を `NSRegularExpression`（ICU = バックトラッキング）で照合するため、`[^/]*` / `.*` が連続する正規表現は破滅的バックトラッキングを起こし得る（「境界付き正規表現＝ReDoS 回避」という当初の前提は不成立）。パターン長/ワイルドカード数の上限で PoC 級を parse 破棄し、照合入力長を有界化、隣接 `[^/]*` を縮約して緩和した。これは構造的保証ではない。詳細は下記 F1。
+- **✅ ReDoS は構造的に解消（F1, 2026-06-04）**: `NSRegularExpression`（ICU = バックトラッキング）での照合を廃し、グロブをトークン列へコンパイルして reachable-set DP で評価する線形時間照合（`O(パターン長 × パス長)`）に置換した。`*a*a*…` 系でも破滅的バックトラッキングが起こらない。詳細は下記 F1。
 - **読込経路の安全性**: `.syncignore` の読込は `PathValidator.resolveSafely(relativePath: ".syncignore", syncRoot:)` 経由で、シンボリックリンクは追従しない。
 - **影響の上限**: リモート由来パターンができるのは「除外」か（否定での）「再包含」のみ。再包含してもハードコード除外は覆せないため、最悪でも「同期されるべきファイルが同期されない（可用性）」に留まり、機密漏洩には繋がらない。
 
 ### F1. `.syncignore` グロブ→正規表現の破滅的バックトラッキング（ReDoS）
 
-**Status:** 🟡 Mitigated (2026-06-01) — 速攻ガードを実装。`SyncIgnoreMatcher.parse` で 1 パターンの長さ（`maxPatternLength=256`）と `*`/`?` 個数（`maxWildcardsPerPattern=8`）に上限を設け超過行を破棄（実証 PoC の 15 連 `*` はここで落ちる）、`isIgnored` で照合入力長（`maxMatchPathLength=1024`）超を除外判定スキップ、`globToRegex` で隣接 `[^/]*` を縮約。`TideTests/SyncIgnoreMatcherTests.swift` に「病的パターンが parse 破棄され `isIgnored` が即時返る」回帰を追加。**これは PoC 級の遮断＋入力有界化であって線形時間の構造的保証ではない**。恒久解（`NSRegularExpression` → 線形時間グロブ照合への置換）は M3 タスクとして残置（`docs/07-M3-IMPLEMENTATION-GUIDE.md` 参照）。
+**Status:** ✅ Fixed (2026-06-04) — 恒久解に到達。`SyncIgnoreMatcher` から `NSRegularExpression` を廃し、グロブをトークン列（`literal` / `anyOne`(`?`) / `starNonSlash`(`*`) / `slashStarSlash`(`**/`) / `dotStar`(末尾 `**`)）へコンパイルし、照合を **reachable-set DP** で行う線形時間アルゴリズム（`O(パターン長 × パス長)`、各トークンが到達集合を O(n) で更新、バックトラッキング無し）に置換した。これにより `*a*a*…` 系の多ワイルドカードでも破滅的バックトラッキングが**構造的に起こり得ない**。前段の速攻ガード（パターン長 256 / ワイルドカード数 8 / 照合入力長 1024）は ReDoS 防御の load-bearing ではなくなったが、防御的サニティ上限として保持（資源消費の有界化）。`SyncIgnoreMatcherTests` は既存の意味論テスト全件を回帰オラクルに維持し、`testLinearMatcherMatchesReferenceRegex`（旧 regex 実装との 3,000 ケース differential fuzz）で意味論一致を、`testPathologicalPatternMatchesInLinearTime`（8 ワイルドカード × 1024 文字非一致入力が即時返る）で線形性を担保。
 
-**該当箇所:** `Tide/Core/SyncIgnoreMatcher.swift`（`globToRegex` / `isIgnored`）。評価経路は
+**該当箇所:** `Tide/Core/SyncIgnoreMatcher.swift`（旧 `globToRegex`、現 `tokenize` / `matches` / `isIgnored`）。評価経路は
 `IgnoreDecision.shouldSkip` → `SyncEngine.reconcileRemoteEntry` / `performFullScan` / `processEventToQueue`。
 
 **重要度:** Low〜Medium（可用性のみ・復旧可能。前提は C1/C2 と同じ「攻撃者が S3 バケットを書ける」）。
@@ -112,12 +112,10 @@ SwiftUI の `@State private var secretAccessKey: String = ""` は SetupWizardWin
 **影響:** `Task.detached` ワーカが 100% CPU で無限スピンし、remote pull / full scan が完了しなくなる。
 データ消失・ルート脱出は無い。`.syncignore` から該当行を消せば復旧可能。
 
-**推奨修正（実装スレッド向け）:**
-- (即効・推奨) パターン単位の `*` / `?` 個数と 1 行長に上限を設け、超過パターンは `parse` で破棄する。
-  照合対象パス長にも上限を設ける。隣接 `[^/]*` の縮約も検討。最小変更で確実にハングを防げる。
-- (恒久・将来タスク) `NSRegularExpression` をやめ、線形時間のグロブ照合（two-pointer / DP、gitignore 実装の定番）へ
-  置換し、入力長に比例する計算量を構造的に保証する。`**` / 否定 / アンカー等の既存セマンティクスを正確に移植する。
-- `TideTests/SyncIgnoreMatcherTests.swift` に「病的パターン × 非一致入力が即座に返る」回帰テストを追加。
+**対応（2026-06-04 完了）:**
+- ✅ (恒久) `NSRegularExpression` を廃し、線形時間のグロブ照合（トークン列 + reachable-set DP）へ置換。入力長に比例する計算量を構造的に保証し、`**` / 否定 / アンカー / dirOnly 等の既存セマンティクスを正確に移植した（旧 regex 実装との differential fuzz で同値を確認）。
+- ✅ (防御) パターン単位の `*` / `?` 個数（8）と 1 行長（256）、照合対象パス長（1024）の上限は維持（ReDoS 防御としては不要になったが、資源消費の有界化として保持）。
+- ✅ `TideTests/SyncIgnoreMatcherTests.swift` に「病的パターン × 非一致入力が即座に返る」回帰（`testPathologicalPatternMatchesInLinearTime`）と、旧実装との differential fuzz（`testLinearMatcherMatchesReferenceRegex`）を追加。
 
 ---
 

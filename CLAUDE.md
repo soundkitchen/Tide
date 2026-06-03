@@ -214,8 +214,8 @@
 - **「リモートで消えたファイルをローカル削除するのは、ローカルファイルの SHA が DB 記録（最後にアップロードした内容）と一致するときのみ」**。一致しなければユーザが触っているとみなし、`sync_log` に warning を残してスキップ。`Downloader.applyRemoteDeletion`。
 
 ### `.syncignore` 除外ルール（M3）
-- **構文は gitignore の一般的サブセット**: `*` `**` `?`、先頭 `/` アンカー、末尾 `/` でディレクトリ限定、`!` 否定（再包含）、`#` コメント、空行。`SyncIgnoreMatcher` がグロブを境界付き正規表現に変換する（**ユーザ正規表現は受けない**）。サイズ上限 256 KB / パターン数上限 10,000。
-- **ReDoS は速攻ガードで Mitigated（構造的解消は M3）**: 生成正規表現を `NSRegularExpression`（ICU = バックトラッキング）で照合するため `*a*a*…` 系で破滅的バックトラッキングが起こり得る。`parse` で 1 パターンの長さ（`maxPatternLength`）/ ワイルドカード数（`maxWildcardsPerPattern`）上限超を破棄、`isIgnored` で照合入力長（`maxMatchPathLength`）上限超を判定スキップ、`globToRegex` で隣接 `[^/]*` を縮約。**これは PoC 級遮断＋入力有界化であって線形時間保証ではない**。恒久解＝線形時間グロブ照合への置換は M3（F1 / L8）。
+- **構文は gitignore の一般的サブセット**: `*` `**` `?`、先頭 `/` アンカー、末尾 `/` でディレクトリ限定、`!` 否定（再包含）、`#` コメント、空行。`SyncIgnoreMatcher` がグロブを**トークン列**に変換し、照合は **reachable-set DP**（`O(パターン長 × パス長)`）で行う（**ユーザ正規表現は受けない**）。サイズ上限 256 KB / パターン数上限 10,000。
+- **ReDoS は構造的に解消済み（F1 / L8、2026-06-04）**: 旧来は生成正規表現を `NSRegularExpression`（ICU = バックトラッキング）で照合していたため `*a*a*…` 系で破滅的バックトラッキングが起こり得たが、`NSRegularExpression` を廃して線形時間照合（トークン列 + reachable-set DP、バックトラッキング無し）に置換した。`parse` の上限（`maxPatternLength` / `maxWildcardsPerPattern` / `maxMatchPathLength`）は ReDoS 防御の load-bearing ではなくなったが、**防御的サニティ上限として保持**（資源消費の有界化）。意味論は旧 regex 実装との differential fuzz（`SyncIgnoreMatcherTests.testLinearMatcherMatchesReferenceRegex`）で同値を担保。
 - **ハードコード除外（機密網）は常に最優先**。`.syncignore` の否定 `!` では `.env` 等を再包含できない。「既存は触らない」緩和は**ユーザパターンにのみ**適用し、ハードコード除外には適用しない。
 - **gitignore 純正（既存は触らない）**: `.syncignore` のユーザパターンは**新規ファイル（未追跡 = `FileRecord.lastSyncedAt == nil`）にのみ**適用。既に同期済みのファイルは同期継続、S3 からも自動削除しない。バックアップから外したい時はローカル削除 → 通常の削除伝播。
 - **`.syncignore` 自身は同期対象に含める**（S3 経由で全デバイス・復旧後にも伝播）。`IgnoreDecision.shouldSkip` は `.syncignore` 自身を決して除外しない。
@@ -244,7 +244,7 @@
 - **H3**: 静的 AWS キー → STS / IAM Identity Center への構造的置き換え。M3 以降で要検討。
 - **M5 / F3 (L9)**: ✅ 解消済み（2026-06-02）。M3 マルチパート対応で `NoFollowFileReader`（`O_NOFOLLOW` の単一 FD）に置換し、ハッシュ計算と本体読込/パート送信を同一 FD 化＝2 回 open の TOCTOU を構造的に解消。`O_NOFOLLOW` は最終コンポーネントのみ有効（祖先 symlink は別レイヤ）。
 - **中断・再開（サブタスク D）**: マルチパートは現状 (a) セッション内のパート単位リトライのみ。UploadId の永続化・再起動またぎ再開・Range ダウンロード再開は未実装（`transfer_state` テーブル新設等。別チャンク）。
-- **F1 (L8)**: `.syncignore` ReDoS の構造的解消。現状は速攻ガード（長さ/ワイルドカード数/入力長キャップ + 隣接量化子縮約）で Mitigated。恒久解＝`NSRegularExpression` → 線形時間グロブ照合への置換は M3（`docs/07-M3-IMPLEMENTATION-GUIDE.md` 参照）。
+- **F1 (L8)**: ✅ 解消済み（2026-06-04）。`.syncignore` の照合から `NSRegularExpression` を廃し、グロブをトークン列へコンパイルして reachable-set DP で評価する線形時間照合（`O(パターン長 × パス長)`、バックトラッキング無し）へ置換＝ReDoS を構造的に解消。`parse` の各上限は防御的サニティ上限として保持。意味論は旧 regex 実装との differential fuzz で同値確認（`SyncIgnoreMatcherTests`）。
 - **F4 (H2 UI 残)**: UI の `recentErrors` / `.error` が生 SDK エラー文字列（バケット名・キー・リージョン等のメタデータ。認証情報は含まない）を表示。**意図的に保持**（デバッグで実利が大きく、OS Log は `.private` 化済みで UI が事後コピーの実質唯一ソース。重要度 Low・本人画面のみ）。**他人配布／単一ユーザ開発を抜ける前に再評価**し、是正は単純削除でなく「UI は分類サマリ + 詳細をオンデマンド展開/コピー」案で（`S3ErrorClassifier` / `SyncError.description` 流用。`security/high.md` H2 残存項参照）。
 - **L1**: App Sandbox 化。security-scoped bookmark + entitlement の正規対応は M3+。
 - **L6**: `DebounceQueue.fire` の競合。`upload_queue.UNIQUE(path)` で実害は出ない想定。観察継続。
