@@ -35,15 +35,17 @@ enum TransferDirection: String, Sendable {
 
 // MARK: - プロトコルシーム
 
-/// `transfer_state` への型付きアクセス。中断・再開ロジック（D2 アップロード / D3 ダウンロード）が
-/// テストでフェイクを差し込めるようプロトコルシームにする（`MultipartUploadClient` と同じ流儀）。
-protocol TransferStateStoring: Sendable {
-    // アップロード（マルチパート）
+/// アップロード（マルチパート）再開に必要な checkpoint 操作だけを切り出した最小シーム。
+/// `MultipartUploader` がこれに依存し、テストはフェイクを差し込む（`MultipartUploadClient` と同じ流儀）。
+protocol UploadCheckpointStore: Sendable {
     func loadUpload(path: String) async throws -> UploadResumeState?
     func beginUpload(path: String, uploadId: String, partSize: Int, fileMtime: Double, fileSize: Int64) async throws
     func recordCompletedPart(path: String, part: CompletedPart) async throws
     func clearUpload(path: String) async throws
+}
 
+/// `transfer_state` への型付きアクセス（アップロード checkpoint + ダウンロード + introspection）。
+protocol TransferStateStoring: UploadCheckpointStore {
     // ダウンロード（Range）
     func loadDownload(path: String) async throws -> DownloadResumeState?
     func beginDownload(path: String, tmpPath: String, expectedEtag: String?) async throws

@@ -611,7 +611,10 @@ final class SyncEngine {
     // MARK: - Queue processing loop
 
     private func runQueueLoop() async {
-        let uploader = Uploader(s3: s3, db: db, syncRoot: syncRoot, deviceId: deviceId, config: config)
+        let uploader = Uploader(
+            s3: s3, db: db, syncRoot: syncRoot, deviceId: deviceId, config: config,
+            transferStore: TransferStateStore(db: db)
+        )
         while !Task.isCancelled {
             if paused {
                 try? await Task.sleep(for: .seconds(1))

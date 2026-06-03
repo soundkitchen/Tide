@@ -168,6 +168,177 @@ final class MultipartUploaderTests: XCTestCase {
         let completed = await fake.completedParts
         XCTAssertNil(completed)
     }
+
+    // MARK: - 中断・再開（D2）
+
+    /// resume コンテキスト付きの新規アップロード: begin → 各パートを checkpoint 記録 → 成功で clear。
+    func testResumeFreshUploadPersistsThenClears() async throws {
+        let dir = tempDir()
+        let data = deterministicBytes(4500)            // 5 パート @1024
+        let url = try writeFile(data, in: dir)
+        let fake = FakeMultipartClient()
+        let ckpt = FakeUploadCheckpointStore()
+        let reader = try NoFollowFileReader(path: url.path)
+        defer { reader.close() }
+        let info = try reader.info()
+        let resume = MultipartUploader.ResumeContext(
+            path: "blob.bin", fileMtime: info.mtime.timeIntervalSince1970, fileSize: info.size, store: ckpt
+        )
+
+        let uploader = MultipartUploader(s3: fake, retryPolicy: Self.fastPolicy)
+        let result = try await uploader.upload(
+            key: "files/blob.bin", reader: reader, partSize: 1024, resume: resume
+        )
+
+        // 新規なので create / begin が 1 回ずつ。
+        let createCount = await fake.createCount
+        let beginCount = await ckpt.beginCount
+        XCTAssertEqual(createCount, 1)
+        XCTAssertEqual(beginCount, 1)
+        // 5 パートすべて送信。
+        let bodyKeys = (await fake.bodies).keys.sorted()
+        XCTAssertEqual(bodyKeys, [1, 2, 3, 4, 5])
+        // 5 パートすべて checkpoint 記録。
+        let recorded = await ckpt.recordedParts["blob.bin"]?.map { $0.n }.sorted()
+        XCTAssertEqual(recorded, [1, 2, 3, 4, 5])
+        // 成功で行をクリア（再開状態は残さない）。
+        let clearCount = await ckpt.clearCount
+        XCTAssertEqual(clearCount, 1)
+        let leftover = try await ckpt.loadUpload(path: "blob.bin")
+        XCTAssertNil(leftover)
+        // SHA は全体一致・abort なし。
+        XCTAssertEqual(result.sha256, HashCalculator.hex(SHA256.hash(data: data)))
+        let abortCount = await fake.abortCount
+        XCTAssertEqual(abortCount, 0)
+    }
+
+    /// mtime/size 一致の既存 checkpoint があれば、完了済みパートは送らず未送だけ送る。
+    /// 既送パートも読み順に hash 更新されるので全体 SHA は正しく復元される。
+    func testResumeSkipsCompletedParts() async throws {
+        let dir = tempDir()
+        let data = deterministicBytes(4500)            // 5 パート @1024
+        let url = try writeFile(data, in: dir)
+        let reader = try NoFollowFileReader(path: url.path)
+        defer { reader.close() }
+        let info = try reader.info()
+
+        // パート 1..3 を完了済みとして仕込む（mtime/size は現ファイルと一致）。
+        let seed = UploadResumeState(
+            uploadId: "resume-up", partSize: 1024,
+            completedParts: [
+                CompletedPart(n: 1, etag: "seed-1"),
+                CompletedPart(n: 2, etag: "seed-2"),
+                CompletedPart(n: 3, etag: "seed-3"),
+            ],
+            fileMtime: info.mtime.timeIntervalSince1970, fileSize: info.size
+        )
+        let ckpt = FakeUploadCheckpointStore(seed: ["blob.bin": seed])
+        let fake = FakeMultipartClient()
+        let resume = MultipartUploader.ResumeContext(
+            path: "blob.bin", fileMtime: info.mtime.timeIntervalSince1970, fileSize: info.size, store: ckpt
+        )
+
+        let uploader = MultipartUploader(s3: fake, retryPolicy: Self.fastPolicy)
+        let result = try await uploader.upload(
+            key: "files/blob.bin", reader: reader, partSize: 1024, resume: resume
+        )
+
+        // 既存 MPU を再開＝新規 create も begin もしない。
+        let createCount = await fake.createCount
+        let beginCount = await ckpt.beginCount
+        XCTAssertEqual(createCount, 0)
+        XCTAssertEqual(beginCount, 0)
+        // 未送パート 4,5 のみ送信。
+        let bodyKeys = (await fake.bodies).keys.sorted()
+        XCTAssertEqual(bodyKeys, [4, 5])
+        // Complete は 5 パート（1..3 は seed の etag、4,5 は新規 etag）。
+        let completed = (await fake.completedParts)?.sorted { $0.partNumber < $1.partNumber }
+        XCTAssertEqual(completed?.map { $0.partNumber }, [1, 2, 3, 4, 5])
+        XCTAssertEqual(completed?.map { $0.etag }, ["seed-1", "seed-2", "seed-3", "etag-4", "etag-5"])
+        // 全体 SHA は元データと一致（既送分も読み順に hash 更新したため）。
+        XCTAssertEqual(result.sha256, HashCalculator.hex(SHA256.hash(data: data)))
+        // 成功でクリア・abort なし。
+        let clearCount = await ckpt.clearCount
+        let abortCount = await fake.abortCount
+        XCTAssertEqual(clearCount, 1)
+        XCTAssertEqual(abortCount, 0)
+    }
+
+    /// 既存 checkpoint があっても mtime/size が変わっていれば、古い MPU を abort してフル再開する。
+    func testResumeFileChangedAbortsStaleAndRestarts() async throws {
+        let dir = tempDir()
+        let data = deterministicBytes(4500)
+        let url = try writeFile(data, in: dir)
+        let reader = try NoFollowFileReader(path: url.path)
+        defer { reader.close() }
+        let info = try reader.info()
+
+        // mtime も size も現ファイルと食い違う stale な行。
+        let stale = UploadResumeState(
+            uploadId: "stale-up", partSize: 1024,
+            completedParts: [CompletedPart(n: 1, etag: "old-1")],
+            fileMtime: info.mtime.timeIntervalSince1970 - 1000, fileSize: info.size + 999
+        )
+        let ckpt = FakeUploadCheckpointStore(seed: ["blob.bin": stale])
+        let fake = FakeMultipartClient()
+        let resume = MultipartUploader.ResumeContext(
+            path: "blob.bin", fileMtime: info.mtime.timeIntervalSince1970, fileSize: info.size, store: ckpt
+        )
+
+        let uploader = MultipartUploader(s3: fake, retryPolicy: Self.fastPolicy)
+        let result = try await uploader.upload(
+            key: "files/blob.bin", reader: reader, partSize: 1024, resume: resume
+        )
+
+        // 古い MPU を abort、フル再開（create + begin）。
+        let aborted = await fake.abortedUploadIds
+        let createCount = await fake.createCount
+        let beginCount = await ckpt.beginCount
+        XCTAssertEqual(aborted, ["stale-up"])
+        XCTAssertEqual(createCount, 1)
+        XCTAssertEqual(beginCount, 1)
+        // 全 5 パートを最初から送る。
+        let bodyKeys = (await fake.bodies).keys.sorted()
+        XCTAssertEqual(bodyKeys, [1, 2, 3, 4, 5])
+        XCTAssertEqual(result.sha256, HashCalculator.hex(SHA256.hash(data: data)))
+        let clearCount = await ckpt.clearCount
+        XCTAssertEqual(clearCount, 1)
+    }
+
+    /// resume 付きで恒久失敗したら、abort も clear もせず checkpoint を保持する
+    /// （次回のファイル単位リトライ / 次回起動で再開できるように）。
+    func testResumePreservedOnPermanentFailure() async throws {
+        let dir = tempDir()
+        let data = deterministicBytes(4500)
+        let url = try writeFile(data, in: dir)
+        let reader = try NoFollowFileReader(path: url.path)
+        defer { reader.close() }
+        let info = try reader.info()
+
+        let fake = FakeMultipartClient(alwaysFailParts: [3])   // パート 3 が恒久失敗
+        let ckpt = FakeUploadCheckpointStore()
+        let resume = MultipartUploader.ResumeContext(
+            path: "blob.bin", fileMtime: info.mtime.timeIntervalSince1970, fileSize: info.size, store: ckpt
+        )
+
+        let uploader = MultipartUploader(s3: fake, retryPolicy: Self.fastPolicy)
+        do {
+            _ = try await uploader.upload(key: "files/blob.bin", reader: reader, partSize: 1024, resume: resume)
+            XCTFail("恒久失敗は throw すべき")
+        } catch FakeS3Error.injected {
+            // 期待どおり伝播。
+        }
+
+        // resume あり: abort も clear もしない（MPU と checkpoint を保持）。
+        let abortCount = await fake.abortCount
+        let clearCount = await ckpt.clearCount
+        XCTAssertEqual(abortCount, 0)
+        XCTAssertEqual(clearCount, 0)
+        // 行は残存し、新規 create の UploadId で begin 済み。
+        let surviving = try await ckpt.loadUpload(path: "blob.bin")
+        XCTAssertNotNil(surviving)
+        XCTAssertEqual(surviving?.uploadId, "upload-id-xyz")
+    }
 }
 
 // MARK: - フェイク S3 クライアント
@@ -187,6 +358,7 @@ private actor FakeMultipartClient: MultipartUploadClient {
     private(set) var attemptsByPart: [Int: Int] = [:]     // partNumber -> 試行回数
     private(set) var completedParts: [(partNumber: Int, etag: String)]?
     private(set) var abortCount = 0
+    private(set) var abortedUploadIds: [String] = []
 
     private var failuresByPart: [Int: Int]                // partNumber -> 残り失敗回数（一時障害）
     private let alwaysFailParts: Set<Int>                 // 恒久失敗
@@ -230,5 +402,47 @@ private actor FakeMultipartClient: MultipartUploadClient {
 
     func abortMultipartUpload(key: String, uploadId: String) async throws {
         abortCount += 1
+        abortedUploadIds.append(uploadId)
+    }
+}
+
+// MARK: - フェイク checkpoint ストア（中断・再開）
+
+/// `UploadCheckpointStore` のテスト用フェイク。seed で再開状態を仕込める。
+private actor FakeUploadCheckpointStore: UploadCheckpointStore {
+    private(set) var states: [String: UploadResumeState]
+    private(set) var beginCount = 0
+    private(set) var clearCount = 0
+    private(set) var recordedParts: [String: [CompletedPart]] = [:]
+
+    init(seed: [String: UploadResumeState] = [:]) {
+        self.states = seed
+    }
+
+    func loadUpload(path: String) async throws -> UploadResumeState? {
+        states[path]
+    }
+
+    func beginUpload(path: String, uploadId: String, partSize: Int, fileMtime: Double, fileSize: Int64) async throws {
+        beginCount += 1
+        states[path] = UploadResumeState(
+            uploadId: uploadId, partSize: partSize, completedParts: [],
+            fileMtime: fileMtime, fileSize: fileSize
+        )
+    }
+
+    func recordCompletedPart(path: String, part: CompletedPart) async throws {
+        recordedParts[path, default: []].append(part)
+        if var s = states[path] {
+            if !s.completedParts.contains(where: { $0.n == part.n }) {
+                s.completedParts.append(part)
+            }
+            states[path] = s
+        }
+    }
+
+    func clearUpload(path: String) async throws {
+        clearCount += 1
+        states[path] = nil
     }
 }

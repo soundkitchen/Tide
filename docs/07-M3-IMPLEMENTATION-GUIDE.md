@@ -161,7 +161,7 @@ M2 の単純ルール（`04-SYNC-LOGIC.md`「競合解決」）を **ベース /
 
 ### 実装ステップ（feature/m3-subd-resume・段階コミット）
 - **D1 スキーマ＋ストア（✅ 実装済み）**: migration v2 `transfer_state` / `TransferStateRecord`(GRDB) / `TransferStateStoring` プロトコルシーム + `TransferStateStore`（GRDB 実装）+ `TransferStateStoreTests`（実 DB）。挙動変更なし。スキーマ詳細は `docs/03-LOCAL-DATABASE.md`。
-- **D2 アップロード再開**: `MultipartUploader` に checkpoint シームを注入（resume 読込 / パート完了ごとに etag 永続化 / 完了・恒久失敗で行削除＋古い `upload_id` を abort）。mtime・size 一致なら resume、不一致ならフル再開。
+- **D2 アップロード再開（✅ 実装済み）**: `UploadCheckpointStore` シーム（`TransferStateStoring` から分離）を `MultipartUploader.ResumeContext` 経由で注入。mtime/size 一致なら前回 UploadId・完了パート・partSize を引き継いで未送分だけ送り（既送分も読み順に hash 更新して全体 SHA を復元）、不一致なら古い MPU を best-effort abort してフル再開。パート完了ごとに `recordCompletedPart` で checkpoint、成功で `clearUpload`。**失敗時の方針**: `resume` 指定時は abort も clear もせず MPU と進捗を保持（次回のファイル単位リトライ／プロセス kill 後の次回起動で再開）。恒久失敗の残骸はライフサイクル tide-abort-incomplete-multipart（7日）と D5 起動時掃除に委ねる。`resume` なしの呼びは従来どおり失敗時 best-effort abort（後方互換）。`MultipartUploaderTests` にフェイク checkpoint で 4 ケース追加（新規永続→クリア / 既送スキップ / ファイル変化でフル再開 / 恒久失敗で保持）。
 - **D3 ダウンロード再開**: tmp を決定的パス化。`S3Client` に Range 対応ストリーミング + `DownloadClient` シーム（DL 経路のテスト負債も返済）。永続行が現マニフェストエントリ（etag/sha/size）と一致すれば `bytes_done` から `Range: bytes=N-` で再開。
 - **D4 進捗 UI**: `SyncEngine.activeTransfers`（@Observable）+ `@Sendable` 進捗コールバック → `MenuBarContent` の「Transferring」セクション。
 - **D5 ドキュメント＋セキュリティ＋掃除**: 起動時オーファン掃除（消えたファイル/古い行/宙ぶらりん UploadId の best-effort abort）、`security/` レビュー（新規 DB・Range・tmp 永続化）、`tmp/M3-動作チェックリスト.md`。
