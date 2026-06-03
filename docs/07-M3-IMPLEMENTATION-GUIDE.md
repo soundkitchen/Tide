@@ -146,20 +146,25 @@ M2 の単純ルール（`04-SYNC-LOGIC.md`「競合解決」）を **ベース /
 
 ---
 
-## サブタスク D: 中断・再開
+## サブタスク D: 中断・再開（実装中）
 
 ### 目的
-ダウンロード / アップロードが途中で中断した場合に、次回起動時に途中から再開する。
+ダウンロード / アップロードが途中で中断した場合に、次回起動時に**ファイル内の途中から**再開する。
+`upload_queue` によるファイル単位の再開（再起動後に同じファイルを再処理）は既存。D が足すのは「5GB の 80% まで上げてから kill された時にゼロから再送しない」というファイル内再開。
 
-### 設計の出発点
-- マルチパート（サブタスク A）の延長として実装するのが自然
-- アップロード: 失敗パートだけ再 PutPart（s3-transfer-manager がある程度面倒を見る）
-- ダウンロード: GetObject の Range ヘッダで途中バイトから取得
-- 状態の永続化: `upload_queue` テーブルにパート進捗カラムを追加？ 新規 `transfer_state` テーブル？
+### 確定した設計判断（ユーザ承認済み）
+- **スコープ = アップロード＋ダウンロード両方**。
+- **状態の永続化 = 新規 `transfer_state` テーブル**（`upload_queue` へのカラム追加ではない）。
+  ダウンロードは `upload_queue` を使わない（pull/reconcile 駆動）ので、両方向を 1 機構で扱える `transfer_state` を採用。
+- **kill 時の挙動 = 再開**。checkpoint（パート完了ごと / Range オフセット）を再開起点にし、再送パートは UploadPart 冪等で上書き安全。SHA は streaming で確定するので、再開時は未処理分だけネットワークし既処理分はローカル再読込でハッシュ復元、最後に必ず期待 SHA と突合（不一致＝破棄してフル再送）。
+- **進捗 UI = メニューバーのポップオーバーウィンドウ（`MenuBarContent`）に「Transferring」セクション**。独自の極小バーは作らない。
 
-### ユーザに事前に決めてもらいたい
-- 進捗 UI を出すか（メニューバーの簡易バーで十分か）
-- アプリ killed 時の挙動（再開 or 再アップロード）
+### 実装ステップ（feature/m3-subd-resume・段階コミット）
+- **D1 スキーマ＋ストア（✅ 実装済み）**: migration v2 `transfer_state` / `TransferStateRecord`(GRDB) / `TransferStateStoring` プロトコルシーム + `TransferStateStore`（GRDB 実装）+ `TransferStateStoreTests`（実 DB）。挙動変更なし。スキーマ詳細は `docs/03-LOCAL-DATABASE.md`。
+- **D2 アップロード再開**: `MultipartUploader` に checkpoint シームを注入（resume 読込 / パート完了ごとに etag 永続化 / 完了・恒久失敗で行削除＋古い `upload_id` を abort）。mtime・size 一致なら resume、不一致ならフル再開。
+- **D3 ダウンロード再開**: tmp を決定的パス化。`S3Client` に Range 対応ストリーミング + `DownloadClient` シーム（DL 経路のテスト負債も返済）。永続行が現マニフェストエントリ（etag/sha/size）と一致すれば `bytes_done` から `Range: bytes=N-` で再開。
+- **D4 進捗 UI**: `SyncEngine.activeTransfers`（@Observable）+ `@Sendable` 進捗コールバック → `MenuBarContent` の「Transferring」セクション。
+- **D5 ドキュメント＋セキュリティ＋掃除**: 起動時オーファン掃除（消えたファイル/古い行/宙ぶらりん UploadId の best-effort abort）、`security/` レビュー（新規 DB・Range・tmp 永続化）、`tmp/M3-動作チェックリスト.md`。
 
 ---
 

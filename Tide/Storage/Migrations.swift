@@ -48,6 +48,44 @@ enum DBMigrations {
                 CREATE INDEX idx_log_timestamp ON sync_log(timestamp DESC);
                 """)
         }
+
+        // M3 サブ D（中断・再開）: 転送途中の状態をプロセス再起動を跨いで保持するサイドカー。
+        // upload_queue（ファイル単位のキュー意味論）とは別レイヤで、アップロード（マルチパート）と
+        // ダウンロード（Range 再開）の「ファイル内進捗」を 1 テーブルで扱う。PK は (path, direction)。
+        migrator.registerMigration("v2_transfer_state") { db in
+            try db.execute(sql: """
+                CREATE TABLE transfer_state (
+                    -- 同期ルートからの相対パス（POSIX 区切り）
+                    path TEXT NOT NULL,
+                    -- 転送方向: 'upload' | 'download'
+                    direction TEXT NOT NULL CHECK(direction IN ('upload', 'download')),
+
+                    -- === アップロード（マルチパート）再開用 ===
+                    -- CreateMultipartUpload が返した UploadId
+                    upload_id TEXT,
+                    -- 確定したパートサイズ（再開時にオフセットを揃えるため永続化する）
+                    part_size INTEGER,
+                    -- 完了済みパートの JSON 配列 [{"n":1,"etag":"..."}]
+                    completed_parts TEXT,
+
+                    -- === ダウンロード（Range）再開用 ===
+                    -- 追記していく決定的な一時ファイルパス
+                    tmp_path TEXT,
+                    -- これまでに tmp へ書き込めたバイト数（次回 Range の起点）
+                    bytes_done INTEGER,
+                    -- リモートオブジェクトが変わっていないかの検証（変われば破棄してフル再取得）
+                    expected_etag TEXT,
+
+                    -- === 検証スナップショット ===
+                    -- アップロード: 再開時にローカルファイルが変わっていないかの照合用
+                    file_mtime REAL,
+                    file_size INTEGER,
+
+                    updated_at REAL NOT NULL,
+                    PRIMARY KEY (path, direction)
+                );
+                """)
+        }
         return migrator
     }
 }
