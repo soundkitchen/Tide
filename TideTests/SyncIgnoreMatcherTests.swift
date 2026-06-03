@@ -214,9 +214,16 @@ final class SyncIgnoreMatcherTests: XCTestCase {
         }
     }
 
-    /// `*` / `?` / `**/` / 先頭 `/` / 末尾 `/` を含むランダムグロブ（caps 内）。
+    /// トークン全 5 種（`*`=starNonSlash / `?`=anyOne / 先頭・中間 `**/`=slashStarSlash /
+    /// 末尾 `**`=dotStar / literal）と、先頭 `/`・末尾 `/`（dirOnly）を differential に網羅するランダムグロブ。
+    ///
+    /// `**` は 1 個あたり `*` 2 個ぶんなので、`parse` のワイルドカード上限（8）を超えると `parse` が
+    /// 当該行を破棄して参照オラクル（上限を適用しない）とズレる。そのため各 `**` の追加は予算ガード
+    /// （`wildcards + 2 <= maxWildcardsPerPattern`）付きにし、ループの `*`/`?` も少なめに抑える。
     private func randomPattern(_ rng: inout SeededRNG) -> String {
         var wildcards = 0
+        func canAddDoubleStar() -> Bool { wildcards + 2 <= SyncIgnoreMatcher.maxWildcardsPerPattern }
+
         let segCount = Int.random(in: 1...3, using: &rng)
         var segs: [String] = []
         for _ in 0..<segCount {
@@ -224,18 +231,36 @@ final class SyncIgnoreMatcherTests: XCTestCase {
             var seg = ""
             for _ in 0..<tokCount {
                 switch Int.random(in: 0...4, using: &rng) {
-                case 2 where wildcards < 5: seg += "*"; wildcards += 1
-                case 3 where wildcards < 5: seg += "?"; wildcards += 1
+                case 2 where wildcards < 2: seg += "*"; wildcards += 1
+                case 3 where wildcards < 2: seg += "?"; wildcards += 1
                 case 1: seg += "b"
                 default: seg += "a"
                 }
             }
             segs.append(seg)
         }
+
+        // 中間 `**/`（前後にセグメントがある位置へ `**` セグメントを挿入）。
+        if segs.count >= 2 && canAddDoubleStar() && Bool.random(using: &rng) {
+            segs.insert("**", at: Int.random(in: 1..<segs.count, using: &rng))
+            wildcards += 2
+        }
+
         var pat = segs.joined(separator: "/")
-        if wildcards <= 3 && Bool.random(using: &rng) { pat = "**/" + pat }  // slashStarSlash 経路
-        if Bool.random(using: &rng) { pat = "/" + pat }                      // ルートアンカー
-        if Bool.random(using: &rng) { pat += "/" }                           // dirOnly
+
+        // 先頭 `**/`。
+        if canAddDoubleStar() && Bool.random(using: &rng) {
+            pat = "**/" + pat
+            wildcards += 2
+        }
+        // ルートアンカー。
+        if Bool.random(using: &rng) { pat = "/" + pat }
+        // 末尾: dirOnly（`/`）/ 末尾 `**`（`/**` → dotStar）/ なし のいずれか（排他）。
+        switch Int.random(in: 0...2, using: &rng) {
+        case 0: pat += "/"
+        case 1 where canAddDoubleStar(): pat += "/**"; wildcards += 2
+        default: break
+        }
         return pat
     }
 
