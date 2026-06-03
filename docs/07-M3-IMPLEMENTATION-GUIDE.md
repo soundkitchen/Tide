@@ -69,7 +69,7 @@ M1 で導入した「100 MB を超えたら `sync_log` にエラーを残して�
 - 16 MiB 以下のファイルは従来通り（リグレッションなし）
 
 ### レビュー指摘の据え置き（PR #1 のコードレビュー、将来タスク）
-- **結合部の自動テスト（テスト負債）**: `MultipartUploader`（有界並列・inflight 会計・空 parts ガード・リトライ）と `downloadToFile`（`.stream`/`.data` 分岐・二段 maxBytes）にユニットテストが無い。現状は手動チェックリストが gate。恒久対応は `TideS3Client`（具象 final class）の S3 パート API に **protocol seam を切って fake 注入**できるようにし、inflight 上限・空 parts・リトライ分岐をユニット化する。`PartPlan`/`NoFollowFileReader`/`ConfigStore` の純粋ロジックは既にカバー済み。
+- **結合部の自動テスト（テスト負債）**: `MultipartUploader` は ✅ **解消（2026-06-04）**。`protocol MultipartUploadClient`（4 メソッド）を切って `TideS3Client` を適合させ、actor フェイク + 実一時ファイルで SHA 整合・パート分割・空 parts ガード・一時/恒久リトライ・abort を `MultipartUploaderTests` でユニット化した（リトライ遅延は `MultipartUploader.RetryPolicy` 注入で高速化）。`PartPlan`/`NoFollowFileReader`/`ConfigStore` の純粋ロジックは既にカバー済み。**残**: `downloadToFile`（`.stream`/`.data` 分岐・二段 maxBytes）のユニットテストは未整備（DL 経路の seam は別途）。
 - **`uploadPartWithRetry` のエラー分類**: 現状あらゆるエラーを 3 回リトライする。認証エラー・`EntityTooSmall` 等の恒久失敗は即諦める分類を入れるとリトライ空振り（S3 API 課金含む）を減らせる（`security/low.md` L10 参照）。
 
 ---
