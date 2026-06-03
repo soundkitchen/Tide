@@ -1,13 +1,43 @@
 import Foundation
 import GRDB
+import CryptoKit
+
+/// `Downloader` が必要とする S3 ストリーミング取得の最小シーム。
+/// 本番は `TideS3Client` が適合し、テストはフェイクを差し込んで（ネットワーク無しで）再開ロジックを検証する。
+protocol RangedDownloadClient: Sendable {
+    func streamObject(
+        key: String,
+        rangeStart: Int64?,
+        sink: (Data) throws -> Void
+    ) async throws -> TideS3Client.StreamObjectResult?
+}
+
+extension TideS3Client: RangedDownloadClient {}
+
+/// サイズ上限超過など「破棄して仕切り直すべき」失敗を、ネットワーク失敗（部分を保持して再開）と区別する。
+private enum DownloadAbort: Error {
+    case tooLarge
+
+    func asSyncError(key: String) -> SyncError {
+        switch self {
+        case .tooLarge:
+            return SyncError.ioError(underlying: NSError(
+                domain: "Tide.Downloader", code: -23,
+                userInfo: [NSLocalizedDescriptionKey: "downloaded body exceeds expected size for key \(key)"]
+            ))
+        }
+    }
+}
 
 /// 単一ファイルのダウンロードと、それに伴うローカル書き込み・DB 更新をまとめた処理。
 struct Downloader {
-    let s3: TideS3Client
+    let downloadClient: any RangedDownloadClient
     let db: LocalDatabase
     let syncRoot: URL
     let tmpDir: URL
     let deviceId: String
+    /// 中断・再開（サブ D）の checkpoint 永続化。
+    let transferStore: any TransferStateStoring
 
     /// リモート 1 ファイルをローカルに反映する。
     /// - Returns: 実際に書き込みが行われたら true、スキップなら false。
@@ -36,14 +66,68 @@ struct Downloader {
         }
 
         // 一時ファイルは SyncEngine 起動時に決めた tmpDir に置く
-        // （同一ボリュームが保証されるので、後段の moveItem が atomic な rename になる）
+        // （同一ボリュームが保証されるので、後段の moveItem が atomic な rename になる）。
+        // 再開できるよう、相対パスから決定的な tmp 名を導く（UUID ではない）。
         try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
-        let tmpURL = tmpDir.appendingPathComponent(UUID().uuidString)
+        let tmpURL = Self.resumeTmpURL(in: tmpDir, relativePath: relativePath)
 
-        // S3 からチャンク・ストリーミングで tmp へ取得し、SHA-256 を逐次計算する。メモリはチャンクで有界。
-        // M7: マニフェストの真実サイズ entry.size を maxBytes に渡し、サーバ申告 contentLength と
-        // 受信累積長の両方で弾く（巨大本文による同期ボリュームのディスク枯渇 DoS を防ぐ＝M4 の cap を復元経路でも維持）。
-        guard let result = try await s3.downloadToFile(key: s3Key, into: tmpURL, maxBytes: entry.size) else {
+        // 再開判定: 永続行が現エントリ（etag）と一致し、tmp が部分的に存在すれば bytes_done から再開。
+        // 既送プレフィクスは読み直して hash に前置きし、全体 SHA を復元する（ネットワークは未取得分だけ）。
+        var resumeFrom: Int64 = 0
+        var hasher = SHA256()
+        let persisted = try await transferStore.loadDownload(path: relativePath)
+        if let persisted,
+           persisted.tmpPath == tmpURL.path,
+           persisted.expectedEtag == entry.etag,
+           let existingSize = Self.fileSize(at: tmpURL),
+           existingSize > 0, existingSize < entry.size {
+            resumeFrom = existingSize
+            try Self.hashPrefix(of: tmpURL, into: &hasher)
+        } else {
+            // 行が無い / etag 不一致 / tmp 無し or サイズ不整合 → フル取得を仕切り直す。
+            try? FileManager.default.removeItem(at: tmpURL)
+            FileManager.default.createFile(atPath: tmpURL.path, contents: nil)
+            try await transferStore.beginDownload(
+                path: relativePath, tmpPath: tmpURL.path, expectedEtag: entry.etag
+            )
+        }
+
+        // S3 からチャンク・ストリーミングで tmp へ（resume なら末尾へ追記）取得し、SHA-256 を逐次更新する。
+        // M7: マニフェストの真実サイズ entry.size を上限に、累積長で弾く（巨大本文による同期ボリュームの
+        // ディスク枯渇 DoS を防ぐ＝M4 の cap を復元経路でも維持）。超過は tooLarge ＝破棄して仕切り直す。
+        let maxBytes = entry.size
+        var total: Int64 = resumeFrom
+        let handle = try FileHandle(forWritingTo: tmpURL)
+        let streamResult: TideS3Client.StreamObjectResult?
+        do {
+            if resumeFrom > 0 { try handle.seekToEnd() }
+            streamResult = try await downloadClient.streamObject(
+                key: s3Key, rangeStart: resumeFrom > 0 ? resumeFrom : nil
+            ) { chunk in
+                total += Int64(chunk.count)
+                if total > maxBytes { throw DownloadAbort.tooLarge }
+                hasher.update(data: chunk)
+                try handle.write(contentsOf: chunk)
+            }
+            try handle.synchronize()
+            try handle.close()
+        } catch let abort as DownloadAbort {
+            // サイズ上限超過（マニフェストとリモートのサイズ食い違い）→ 破棄して仕切り直し。
+            try? handle.close()
+            try? FileManager.default.removeItem(at: tmpURL)
+            try? await transferStore.clearDownload(path: relativePath)
+            AppLogger.s3.error("Download exceeded expected size: \(relativePath, privacy: .private)")
+            throw abort.asSyncError(key: s3Key)
+        } catch {
+            // ネットワーク等の失敗 → 部分 tmp と行を保持し、次回 Range 再開に委ねる（abort/clear しない）。
+            try? handle.close()
+            throw error
+        }
+
+        guard streamResult != nil else {
+            // 404: 行と部分 tmp を掃除
+            try? FileManager.default.removeItem(at: tmpURL)
+            try? await transferStore.clearDownload(path: relativePath)
             AppLogger.s3.error("Download object not found on S3: \(relativePath, privacy: .private)")
             throw SyncError.ioError(underlying: NSError(
                 domain: "Tide.Downloader",
@@ -52,9 +136,11 @@ struct Downloader {
             ))
         }
 
-        // SHA 検証（不一致なら書きかけ tmp を捨てて失敗）
-        if result.sha256 != entry.sha256 {
+        // SHA 検証（不一致なら tmp を捨てて行をクリアし失敗＝壊れた内容を再開し続けない）
+        let sha = HashCalculator.hex(hasher.finalize())
+        if sha != entry.sha256 {
             try? FileManager.default.removeItem(at: tmpURL)
+            try? await transferStore.clearDownload(path: relativePath)
             AppLogger.s3.error("SHA mismatch downloading \(relativePath, privacy: .private)")
             throw SyncError.ioError(underlying: NSError(
                 domain: "Tide.Downloader",
@@ -84,9 +170,10 @@ struct Downloader {
         }
         try FileManager.default.moveItem(at: tmpURL, to: fullURL)
 
-        // DB 反映
+        // 再開状態をクリア（完了したので不要）+ DB 反映
+        try await transferStore.clearDownload(path: relativePath)
         try await updateDBEntryAfterDownload(relativePath: relativePath, entry: entry)
-        AppLogger.s3.info("Downloaded (bytes=\(result.bytes)): \(relativePath, privacy: .private)")
+        AppLogger.s3.info("Downloaded (bytes=\(total)): \(relativePath, privacy: .private)")
         return true
     }
 
@@ -206,6 +293,28 @@ struct Downloader {
     }
 
     // MARK: - helpers
+
+    /// 相対パスから決定的な tmp ファイル名を導く（再開で同じ tmp を再発見できるように）。
+    /// 内容（etag）が変わった場合は `transferStore.expectedEtag` の照合で破棄するので、名前は path のみで決める。
+    static func resumeTmpURL(in tmpDir: URL, relativePath: String) -> URL {
+        let h = HashCalculator.hex(SHA256.hash(data: Data(relativePath.utf8)))
+        return tmpDir.appendingPathComponent("dl-\(h).part")
+    }
+
+    static func fileSize(at url: URL) -> Int64? {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let size = attrs[.size] as? NSNumber else { return nil }
+        return size.int64Value
+    }
+
+    /// 既存の部分ファイルを読み切って hasher に前置きする（再開時に全体 SHA を復元するため）。
+    static func hashPrefix(of url: URL, into hasher: inout SHA256) throws {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        while let chunk = try handle.read(upToCount: 1 << 20), !chunk.isEmpty {
+            hasher.update(data: chunk)
+        }
+    }
 
     private func currentLocalSha(at url: URL) throws -> String? {
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }

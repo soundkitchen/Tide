@@ -409,11 +409,12 @@ final class SyncEngine {
         guard let result = try await reader.read() else { return }
         let remoteMap = result.files
         let dl = Downloader(
-            s3: s3,
+            downloadClient: s3,
             db: db,
             syncRoot: syncRoot,
             tmpDir: tmpDir,
-            deviceId: deviceId
+            deviceId: deviceId,
+            transferStore: TransferStateStore(db: db)
         )
 
         // 1) 取り込み（最大 5 並列）

@@ -48,7 +48,7 @@ F4 の据え置き理由: 生エラー文字列は開発中のデバッグで実
 | M4 | getObject サイズ無制限 | ✅ Fixed（簡易: contentLength + 受信長の二段チェック） |
 | M5 | アップロードの TOCTOU | ✅ Fixed（2026-06-02・M3。`NoFollowFileReader` で `O_NOFOLLOW` 単一 FD 化。→ F3 / L9 も同根で一括） |
 | M6 | ダウンロード書込の祖先 symlink によるルート脱出 | ✅ Fixed（2026-06-01・F2。`PathValidator.resolveForWrite`） |
-| M7 | 復元 `downloadToFile` のサイズ無制限（M4 の回帰） | ✅ Fixed（2026-06-02・`downloadToFile(maxBytes: entry.size)`） |
+| M7 | 復元ストリーミングのサイズ無制限（M4 の回帰） | ✅ Fixed（2026-06-02。2026-06-04 サブ D-D3 で機構を `Downloader` sink の `total > entry.size` 判定へ移動） |
 | L1 | App Sandbox 無効 | 🟡 Partial — 死蔵キー除去のみ。Sandbox 化自体は M3+ |
 | L2 | 機密ファイル除外 | ✅ Fixed |
 | L3 | openSyncFolder URL 検証 | ✅ Fixed |
