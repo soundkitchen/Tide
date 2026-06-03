@@ -165,16 +165,30 @@ struct Downloader {
         let dbRec = try await db.pool.read { db in
             try FileRecord.fetchOne(db, key: relativePath)
         }
+        // ここに来た時点でファイルは必ず存在（上の guard）。SHA 取得済み or unreadable のいずれか。
+        // 競合解決は ThreeWayMerge に一本化（remote = nil の削除側）。unreadable は decide() 側で温存に倒れる。
+        let localState: LocalState = (try? HashCalculator.sha256(of: fullURL)).map(LocalState.present) ?? .unreadable
+        let decision = ThreeWayMerge.decide(base: dbRec?.sha256, local: localState, remote: nil)
 
-        let currentSha: String?
-        do {
-            currentSha = try HashCalculator.sha256(of: fullURL)
-        } catch {
-            currentSha = nil
-        }
-
-        guard let dbRec, let currentSha, currentSha == dbRec.sha256 else {
-            // 衝突: ユーザがローカルで触ったあとリモートが消えた → 残す
+        switch decision {
+        case .deleteLocal:
+            try FileManager.default.removeItem(at: fullURL)
+            try await db.pool.write { db in
+                try FileRecord.deleteOne(db, key: relativePath)
+                var log = SyncLogRecord(
+                    id: nil,
+                    timestamp: Date().timeIntervalSince1970,
+                    eventType: "delete",
+                    path: relativePath,
+                    message: "Removed locally (remote deletion)",
+                    details: nil
+                )
+                try log.insert(db)
+            }
+            AppLogger.sync.info("Removed locally (remote deletion): \(relativePath, privacy: .private)")
+            return true
+        default:
+            // .keepLocalRemoteDeleted（ローカル編集/未追跡 or ハッシュ不能）→ 温存し warning。
             try await db.pool.write { db in
                 var log = SyncLogRecord(
                     id: nil,
@@ -189,22 +203,6 @@ struct Downloader {
             AppLogger.sync.info("Skip remote-deletion (local modified): \(relativePath, privacy: .private)")
             return false
         }
-
-        try FileManager.default.removeItem(at: fullURL)
-        try await db.pool.write { db in
-            try FileRecord.deleteOne(db, key: relativePath)
-            var log = SyncLogRecord(
-                id: nil,
-                timestamp: Date().timeIntervalSince1970,
-                eventType: "delete",
-                path: relativePath,
-                message: "Removed locally (remote deletion)",
-                details: nil
-            )
-            try log.insert(db)
-        }
-        AppLogger.sync.info("Removed locally (remote deletion): \(relativePath, privacy: .private)")
-        return true
     }
 
     // MARK: - helpers

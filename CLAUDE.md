@@ -210,8 +210,12 @@
   - 例: `note.txt` → `note (local copy 2026-05-24 12-34-56).txt`
   - 拡張子なしファイル / dotfile (`.gitignore` 等) も対応済み。
 
+### 競合解決（3-way merge・M3 サブ C）
+- **競合解決の判定は純粋関数 `ThreeWayMerge.decide(base:local:remote:) -> MergeDecision` に一本化**（`Tide/Core/ThreeWayMerge.swift`）。`reconcileRemoteEntry`（pull 側）と `applyRemoteDeletion`（削除側）の両方がこれを通す。**ベース = `FileRecord.sha256`（ローカル DB）**、マニフェスト schema は拡張しない。判定ロジックを副作用から切り離し、全分岐を `ThreeWayMergeTests` で網羅（`IgnoreDecision`/`PartPlan` と同じパターン）。挙動は旧 M2 表（`docs/04-SYNC-LOGIC.md`）と 1:1 一致。
+- **アップロード側に並行更新検出は無い（last-writer-wins ギャップ・据え置き）**。競合検出は pull/削除側のみ。詳細は第 8 節。
+
 ### リモート削除の取り扱い
-- **「リモートで消えたファイルをローカル削除するのは、ローカルファイルの SHA が DB 記録（最後にアップロードした内容）と一致するときのみ」**。一致しなければユーザが触っているとみなし、`sync_log` に warning を残してスキップ。`Downloader.applyRemoteDeletion`。
+- **「リモートで消えたファイルをローカル削除するのは、ローカルファイルの SHA が DB 記録（最後にアップロードした内容）と一致するときのみ」**（= `ThreeWayMerge` の `.deleteLocal`）。一致しなければユーザが触っているとみなし（`.keepLocalRemoteDeleted`）、`sync_log` に warning を残してスキップ。`Downloader.applyRemoteDeletion`。
 
 ### `.syncignore` 除外ルール（M3）
 - **構文は gitignore の一般的サブセット**: `*` `**` `?`、先頭 `/` アンカー、末尾 `/` でディレクトリ限定、`!` 否定（再包含）、`#` コメント、空行。`SyncIgnoreMatcher` がグロブを**トークン列**に変換し、照合は **reachable-set DP**（`O(パターン長 × パス長)`）で行う（**ユーザ正規表現は受けない**）。サイズ上限 256 KB / パターン数上限 10,000。
@@ -246,6 +250,8 @@
 - **中断・再開（サブタスク D）**: マルチパートは現状 (a) セッション内のパート単位リトライのみ。UploadId の永続化・再起動またぎ再開・Range ダウンロード再開は未実装（`transfer_state` テーブル新設等。別チャンク）。
 - **F1 (L8)**: ✅ 解消済み（2026-06-04）。`.syncignore` の照合から `NSRegularExpression` を廃し、グロブをトークン列へコンパイルして reachable-set DP で評価する線形時間照合（`O(パターン長 × パス長)`、バックトラッキング無し）へ置換＝ReDoS を構造的に解消。`parse` の各上限は防御的サニティ上限として保持。意味論は旧 regex 実装との differential fuzz で同値確認（`SyncIgnoreMatcherTests`）。
 - **F4 (H2 UI 残)**: UI の `recentErrors` / `.error` が生 SDK エラー文字列（バケット名・キー・リージョン等のメタデータ。認証情報は含まない）を表示。**意図的に保持**（デバッグで実利が大きく、OS Log は `.private` 化済みで UI が事後コピーの実質唯一ソース。重要度 Low・本人画面のみ）。**他人配布／単一ユーザ開発を抜ける前に再評価**し、是正は単純削除でなく「UI は分類サマリ + 詳細をオンデマンド展開/コピー」案で（`S3ErrorClassifier` / `SyncError.description` 流用。`security/high.md` H2 残存項参照）。
+- **アップロード側の並行更新検出（last-writer-wins ギャップ）**: M3 サブ C で競合解決を `ThreeWayMerge` に形式化したが、適用は pull/削除側のみ。同一ベースから 2 台が編集すると後勝ちでマニフェストが上書きされ、先に上げた側は次回 pull で「local == base＝未編集」判定で相手版を取り込み、ローカル編集がワーキングコピーから消える（S3 バージョン履歴には残る）。対称化＝`Uploader.processUpload` 直前にも `ThreeWayMerge` を適用（per-upload リモートマニフェスト読み + アップロード側コンフリクト経路）は別サブタスク。
+- **reconcile/削除の配線部が未結合テスト**: `ThreeWayMerge.decide` の純粋ロジックは `ThreeWayMergeTests` で全分岐網羅したが、`reconcileRemoteEntry` / `applyRemoteDeletion` の「`MergeDecision` → 実 I/O」switch マッピングは結合テストが無い（取り違えを回帰検出できない）。`Downloader` へ最小 S3 シーム（`MultipartUploadClient` 同様）を切れば削除側は temp DB + temp syncRoot で結合テスト可能。別サブタスクに据え置き（PR #3 レビュー指摘 2）。
 - **L1**: App Sandbox 化。security-scoped bookmark + entitlement の正規対応は M3+。
 - **L6**: `DebounceQueue.fire` の競合。`upload_queue.UNIQUE(path)` で実害は出ない想定。観察継続。
 - **ネスト `.syncignore`**: ディレクトリごとの `.syncignore`（git 風の階層的オーバーライド）は未対応。現状はルートの `<syncRoot>/.syncignore` のみ。将来タスク（`docs/07-M3-IMPLEMENTATION-GUIDE.md` サブタスク B「既知の制限 / 将来タスク」参照）。

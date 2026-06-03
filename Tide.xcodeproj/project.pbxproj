@@ -11,6 +11,7 @@
 		0440BDD7584DE6ABF2C5E610 /* Manifest.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86CCB3744E3CE4973CE0ED13 /* Manifest.swift */; };
 		09B21DBA24A84B9EC078A22C /* PartPlan.swift in Sources */ = {isa = PBXBuildFile; fileRef = 985B368E3DE66BEAAE35740C /* PartPlan.swift */; };
 		09E9EF3FC2EF38B4E5289504 /* NoFollowFileReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = AEA12CE95BED997B40130772 /* NoFollowFileReader.swift */; };
+		0B1223F221B8AB1CA0F17D62 /* ThreeWayMerge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E76C927CBAE87426D7B0A4D /* ThreeWayMerge.swift */; };
 		114F8696EC6701E674C97FDA /* TideTmpDirectory.swift in Sources */ = {isa = PBXBuildFile; fileRef = 19BDDA56B819A3F918C424E9 /* TideTmpDirectory.swift */; };
 		1628205A2D702AD28C982B14 /* SyncEvent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52A253BAA0EB5A4D52C3E77A /* SyncEvent.swift */; };
 		34C9CD59AD38354487CAE58D /* SettingsWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC8E5DD109E48D0F8ABF0455 /* SettingsWindow.swift */; };
@@ -54,6 +55,7 @@
 		C5031FFC043FF9929A518931 /* NoFollowFileReaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00F21E2E210A7F9BC778BC5D /* NoFollowFileReaderTests.swift */; };
 		D1730746F1028260C48E2A90 /* SyncStatus.swift in Sources */ = {isa = PBXBuildFile; fileRef = 858DA1ADDCE543AC588ADC2A /* SyncStatus.swift */; };
 		D45DBF8182C8CDB7CDF3ED25 /* PathValidator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D5A3FCD54C910A40D3A0DF3 /* PathValidator.swift */; };
+		D5C8E829DC1C5A1734F300E6 /* ThreeWayMergeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D326FF459D50EF387EBD5E8 /* ThreeWayMergeTests.swift */; };
 		D7A7077860BD170A80B583CB /* KnownRegions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E6C42C9F1EF0B6B378A1D24 /* KnownRegions.swift */; };
 		DB647CF57D16DAD945F3C6C0 /* ConflictNamer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A37D12E34F75BE19B664B46 /* ConflictNamer.swift */; };
 		E62A2A1324F7FB72E560194A /* Migrations.swift in Sources */ = {isa = PBXBuildFile; fileRef = ADC61A4E5F7528718FC1A7C8 /* Migrations.swift */; };
@@ -85,6 +87,7 @@
 		1A9CB8EA6B406E2E0BB8E34C /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
 		1ABF6365546F76EB0474766A /* ConfigStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfigStore.swift; sourceTree = "<group>"; };
 		1BD4B605839107E1638A0D11 /* HardcodedIgnoreRulesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HardcodedIgnoreRulesTests.swift; sourceTree = "<group>"; };
+		1D326FF459D50EF387EBD5E8 /* ThreeWayMergeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreeWayMergeTests.swift; sourceTree = "<group>"; };
 		24840B9F9DE6EE279D82F062 /* SyncIgnoreMatcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncIgnoreMatcher.swift; sourceTree = "<group>"; };
 		2891D2A84ED794803593042D /* SmokeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SmokeTests.swift; sourceTree = "<group>"; };
 		29A0EA5C034CFDEE0E2994AE /* DebounceQueue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebounceQueue.swift; sourceTree = "<group>"; };
@@ -103,6 +106,7 @@
 		69CA39ECA75ABCEDFE4B98D6 /* MultipartUploader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MultipartUploader.swift; sourceTree = "<group>"; };
 		6A37D12E34F75BE19B664B46 /* ConflictNamer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConflictNamer.swift; sourceTree = "<group>"; };
 		6C7D544B462DF81DFB84FC44 /* AppEnvironment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppEnvironment.swift; sourceTree = "<group>"; };
+		6E76C927CBAE87426D7B0A4D /* ThreeWayMerge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreeWayMerge.swift; sourceTree = "<group>"; };
 		721CD940D3929EFD005575FF /* TideTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = TideTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		7D5A3FCD54C910A40D3A0DF3 /* PathValidator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PathValidator.swift; sourceTree = "<group>"; };
 		81A0B0642C4340182C0BDB0A /* AWSCredentials.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AWSCredentials.swift; sourceTree = "<group>"; };
@@ -207,6 +211,7 @@
 				EE08152918F7A54DA6988A54 /* S3ErrorClassifierTests.swift */,
 				2891D2A84ED794803593042D /* SmokeTests.swift */,
 				E0C66E505C9788FC626A5F38 /* SyncIgnoreMatcherTests.swift */,
+				1D326FF459D50EF387EBD5E8 /* ThreeWayMergeTests.swift */,
 			);
 			path = TideTests;
 			sourceTree = "<group>";
@@ -253,6 +258,7 @@
 				075300181A2D09025E384D3B /* SyncEngine.swift */,
 				D9201C0AA706FDFF877045BB /* SyncError.swift */,
 				24840B9F9DE6EE279D82F062 /* SyncIgnoreMatcher.swift */,
+				6E76C927CBAE87426D7B0A4D /* ThreeWayMerge.swift */,
 				19BDDA56B819A3F918C424E9 /* TideTmpDirectory.swift */,
 			);
 			path = Core;
@@ -423,6 +429,7 @@
 				1628205A2D702AD28C982B14 /* SyncEvent.swift in Sources */,
 				FD2E8E0F4E40908FD593E1C6 /* SyncIgnoreMatcher.swift in Sources */,
 				D1730746F1028260C48E2A90 /* SyncStatus.swift in Sources */,
+				0B1223F221B8AB1CA0F17D62 /* ThreeWayMerge.swift in Sources */,
 				A674AB99F3B090F076F6C29B /* TideApp.swift in Sources */,
 				114F8696EC6701E674C97FDA /* TideTmpDirectory.swift in Sources */,
 				5985D271E50C37ABEBE5327A /* Uploader.swift in Sources */,
@@ -447,6 +454,7 @@
 				529B7156361F472B78B3E3AE /* S3ErrorClassifierTests.swift in Sources */,
 				B2DCE996F5CB9F81078CAEC0 /* SmokeTests.swift in Sources */,
 				865CD91F057ABA7320778FCF /* SyncIgnoreMatcherTests.swift in Sources */,
+				D5C8E829DC1C5A1734F300E6 /* ThreeWayMergeTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

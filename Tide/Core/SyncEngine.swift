@@ -488,39 +488,28 @@ final class SyncEngine {
             return
         }
 
-        let exists = FileManager.default.fileExists(atPath: fullURL.path)
-
         do {
-            if !exists {
-                try await dl.download(relativePath: path, entry: entry)
-                return
+            // ローカル状態。不在 / 存在するがハッシュ不能 / SHA 取得済み を区別して decide() へ渡す。
+            let localState: LocalState
+            if FileManager.default.fileExists(atPath: fullURL.path) {
+                localState = (try? HashCalculator.sha256(of: fullURL)).map(LocalState.present) ?? .unreadable
+            } else {
+                localState = .absent
             }
 
-            // ローカル SHA を計算
-            let localSha: String
-            do {
-                localSha = try HashCalculator.sha256(of: fullURL)
-            } catch {
+            // 競合解決は ThreeWayMerge に一本化（remote はここでは常に非 nil）。
+            switch ThreeWayMerge.decide(base: localRec?.sha256, local: localState, remote: entry.sha256) {
+            case .download, .localMatchesRemote:
+                // リモート採用（欠落/上書き）または内容一致（download() の早期 return で DB を最新化）。
                 try await dl.download(relativePath: path, entry: entry)
-                return
-            }
-
-            if localSha == entry.sha256 {
-                // 内容が一致しているのに DB エントリが古い/無い可能性 → download() の早期 return パスで DB を最新化
+            case .conflictThenDownload:
+                // 双方乖離（ローカル編集 / 未追跡 / unreadable）→ ローカルをコンフリクトコピーへ退避してからリモート取得。
+                _ = try dl.renameLocalForConflict(relativePath: path)
                 try await dl.download(relativePath: path, entry: entry)
-                return
+            case .deleteLocal, .keepLocalRemoteDeleted, .noop:
+                // remote が非 nil のここでは到達しない。来たら decide() のロジックバグ。
+                assertionFailure("unreachable: remote is non-nil in reconcileRemoteEntry")
             }
-
-            // SHA が違う
-            if let rec = localRec, rec.sha256 == localSha {
-                // ローカルは前回同期後に触られていない → リモートで更新されたので上書き
-                try await dl.download(relativePath: path, entry: entry)
-                return
-            }
-
-            // ローカルが触られている / DB 記録なし → コンフリクト
-            _ = try dl.renameLocalForConflict(relativePath: path)
-            try await dl.download(relativePath: path, entry: entry)
         } catch {
             AppLogger.sync.error("Remote reconcile \(path, privacy: .private) failed: \(String(describing: error), privacy: .private)")
             await appendError("\(path): \(error)")
