@@ -52,9 +52,9 @@ M1 で導入した「100 MB を超えたら `sync_log` にエラーを残して�
 ### 影響範囲（実績）
 - `project.yml` は変更なし（自前ラッパのため新規パッケージ追加せず）
 - `Uploader.processUpload` をサイズ分岐に改修（≤16MiB は単発、超はマルチパート）。`maxSizeM1` 撤廃
-- `TideS3Client` にマルチパート薄ラッパ + `downloadToFile` を追加。新規 `MultipartUploader` / `NoFollowFileReader` / `PartPlan`
+- `TideS3Client` にマルチパート薄ラッパ + `downloadToFile`（**サブ D-D3 で `streamObject` に置換済み**・下記 D3 参照）を追加。新規 `MultipartUploader` / `NoFollowFileReader` / `PartPlan`
 - `security/medium.md` の **M5 (TOCTOU)** を解消（`O_NOFOLLOW` の単一 FD でハッシュ + 読込を統合）。`security/low.md` L9 も一括解消
-- 大ファイルの **ダウンロード**も `downloadToFile` でストリーミング化（旧 200MiB インメモリ cap を撤廃。復元の round-trip を保つ）
+- 大ファイルの **ダウンロード**も `downloadToFile`（→ D3 で `streamObject`）でストリーミング化（旧 200MiB インメモリ cap を撤廃。復元の round-trip を保つ）
 
 ### 確定した設計判断（ユーザ承認済み）
 - アップロード上限は **1 ファイルあたり**（バケット総量ではない）。**UI 設定可能・既定 1GiB**・`-1`=無制限。`ConfigStore.uploadSizeLimitBytes`。

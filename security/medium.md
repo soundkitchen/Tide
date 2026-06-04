@@ -52,7 +52,7 @@ for (shardId, etag) in remoteShardEtags { ... }
 
 ## M4. `getObject` のレスポンス本文サイズ無制限
 
-**Status:** ✅ Fixed (2026-05-24) — `S3Client.getObject(key:maxBytes:)` を追加。サーバ申告の `contentLength` で事前に弾き、受信完了後にも `data.count` を再チェックする二段構え。`getIndex` / `getShard` は 16 MiB、通常ダウンロードは既定 200 MiB（M1 上限の倍）。
+**Status:** ✅ Fixed (2026-05-24) — `S3Client.getObject(key:maxBytes:)` を追加。サーバ申告の `contentLength` で事前に弾き、受信完了後にも `data.count` を再チェックする二段構え。**現状 `getObject` の呼び出しはマニフェスト経路（`getIndex`/`getShard`）の 16 MiB のみ**で、ファイル本体のダウンロードは M3 サブ D-D3 で `streamObject` へ移行済み（サイズ上限は `Downloader` 側の sink で `entry.size` と突合＝M7 参照）。よって `getObject` の 200 MiB 既定値は実質未使用（防御的に残置）。
 
 **該当箇所:** `Tide/S3/S3Client.swift:219-242`
 
