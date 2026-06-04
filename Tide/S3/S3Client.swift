@@ -365,70 +365,46 @@ final class TideS3Client: @unchecked Sendable {
 
     // MARK: - Streaming download
 
-    struct DownloadResult: Sendable {
-        let sha256: String
-        let bytes: Int64
+    struct StreamObjectResult: Sendable {
+        /// クォート除去済みの ETag。
         let etag: String
+        /// サーバ申告の本体長（Range 指定時は残り長。あくまで参考値）。
+        let contentLength: Int64?
     }
 
-    /// オブジェクトをチャンク・ストリーミングで `tmpURL` へ書き込みつつ SHA-256 を逐次計算する。
-    /// 大ファイル（files/...）の復元用。マニフェスト経路（`getObject(maxBytes:)` の 16MiB cap）とは別物で、
-    /// こちらは原則サイズ無制限（メモリはチャンクで有界）。404 のとき nil を返す。
-    /// 失敗時は書きかけの tmpURL を掃除する。SHA の検証（期待値との突合）は呼び出し側で行う。
-    func downloadToFile(
+    /// `key` を GetObject（`rangeStart` 指定時は `Range: bytes=rangeStart-`）し、本体チャンクを
+    /// 順に `sink` へ渡す。ファイル書込・SHA 計算・サイズ上限の判定は呼び出し側（`Downloader`）が
+    /// `sink` の中で行う（再開のためのハッシュ前置きと進捗 checkpoint を呼び出し側で握りやすくするため）。
+    /// 404 のとき nil。`sink` が throw したらそのまま伝播する（tmp の後始末は呼び出し側）。
+    func streamObject(
         key: String,
-        into tmpURL: URL,
-        maxBytes: Int64? = nil
-    ) async throws -> DownloadResult? {
-        let input = GetObjectInput(bucket: bucket, key: key)
+        rangeStart: Int64?,
+        sink: (Data) throws -> Void
+    ) async throws -> StreamObjectResult? {
+        var input = GetObjectInput(bucket: bucket, key: key)
+        if let rangeStart, rangeStart > 0 {
+            input.range = "bytes=\(rangeStart)-"
+        }
         do {
             let output = try await client.getObject(input: input)
-            if let maxBytes, let len = output.contentLength, Int64(len) > maxBytes {
-                throw SyncError.ioError(underlying: NSError(
-                    domain: "Tide.S3", code: -22,
-                    userInfo: [NSLocalizedDescriptionKey: "object too large: \(len) > \(maxBytes) bytes for key \(key)"]
-                ))
-            }
             let etag = Self.cleanETag(output.eTag)
-
-            FileManager.default.createFile(atPath: tmpURL.path, contents: nil)
-            let handle = try FileHandle(forWritingTo: tmpURL)
-            defer { try? handle.close() }
-
-            var hasher = SHA256()
-            var total: Int64 = 0
-            func consume(_ data: Data) throws {
-                guard !data.isEmpty else { return }
-                total += Int64(data.count)
-                if let maxBytes, total > maxBytes {
-                    throw SyncError.ioError(underlying: NSError(
-                        domain: "Tide.S3", code: -23,
-                        userInfo: [NSLocalizedDescriptionKey: "downloaded body exceeds maxBytes: \(total) > \(maxBytes)"]
-                    ))
-                }
-                hasher.update(data: data)
-                try handle.write(contentsOf: data)
-            }
-
+            let contentLength = output.contentLength.map(Int64.init)
             switch output.body {
             case .some(.stream(let stream)):
                 while let chunk = try await stream.readAsync(upToCount: 1 << 20) {
                     if chunk.isEmpty { break }
-                    try consume(chunk)
+                    try sink(chunk)
                 }
             case .some(.data(let data)):
-                if let data { try consume(data) }
+                if let data, !data.isEmpty { try sink(data) }
             case .some(.noStream), .none:
                 break
             }
-            try handle.synchronize()
-            return DownloadResult(sha256: HashCalculator.hex(hasher.finalize()), bytes: total, etag: etag)
+            return StreamObjectResult(etag: etag, contentLength: contentLength)
         } catch let error as NoSuchKey {
             _ = error
-            try? FileManager.default.removeItem(at: tmpURL)
             return nil
         } catch {
-            try? FileManager.default.removeItem(at: tmpURL)
             // 404 系は nil（判定は S3ErrorClassifier.isNotFound に集約）
             if S3ErrorClassifier.isNotFound(error) { return nil }
             throw error

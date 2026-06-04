@@ -171,3 +171,23 @@ symlink を辿り、リンク先（例: `~/.ssh/id_rsa`）の中身を S3 へ送
 **推奨修正（実装スレッド向け）:**
 - `partSize` に上限（例: 64〜128 MiB）を設け、巨大ファイルは part 数を 10,000 上限まで増やす方向にする。常駐メモリが概ね 5〜10 倍下がる。
 - 付随して `PartPlan.plan` 末尾の防御 `while partCount > maxPartCount { partSize += 1MiB }` は**現設計ではデッドコード**（partCount は最大 8,993 で上限に達しない）。partSize 上限を入れるとこのループが実際に機能し始めるので、同時に整理する。
+
+---
+
+## L12. 中断・再開（transfer_state / Range / 決定的 tmp）の攻撃面
+
+**Status:** ✅ Reviewed — Hardening 込みで対応済み (2026-06-05・M3 サブ D)。新規の攻撃面を洗い、下記の緩和を入れた。残る露出は Low（ローカル攻撃者が Caches 配下に書ける前提）。
+
+**該当箇所:** `Tide/Storage/Migrations.swift`（`transfer_state`）、`Tide/Storage/TransferStateStore.swift`、`Tide/S3/Downloader.swift`（`streamObject` / 決定的 tmp / 再開）、`Tide/S3/MultipartUploader.swift`（`ResumeContext`）、`Tide/Core/SyncEngine.swift`（`pruneOrphanTransfers`）。
+
+**重要度:** Low（機密漏えいではなく、ローカル前提の整合性・可用性ハードニング）。
+
+**レビュー観点と結論:**
+- **Range ヘッダのインジェクション**: `Range: bytes=<N>-` の `N` は**自前で算出した `Int64`**（再開元の tmp 実サイズ）のみ。リモート由来文字列を入れないので注入余地なし。
+- **DB の `tmp_path` を盲信しない**: 再開時は `tmpDir + sha256(relativePath)` から **tmpURL を再計算**し、`persisted.tmpPath == tmpURL.path` のときだけ再開する。DB が改ざんされても tmpDir 外へ書く経路にならない（`relativePath` は事前に `resolveForWrite` で検証済み）。
+- **決定的 tmp 名の予測可能性 / 事前設置**: tmp 名は `sha256(relativePath)` で予測可能だが、書込はすべて **symlink 非追従**で行う（PR #4 レビューで fresh 側の追従窓を解消・2026-06-05）。(1) 新規取得は `Downloader.openTmpForWriting(append:false)` が `open(O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW)` で作る（既存 or symlink なら失敗＝追従しない。旧 `createFile` の `removeItem`→作成の TOCTOU を解消）、(2) 再開は `O_WRONLY|O_NOFOLLOW`（加えて開く前に `PathValidator.isSymbolicLink` でも弾く）、(3) 最終的に**マニフェスト SHA と突合**してから `resolveForWrite` 済みパスへ `moveItem`。よって攻撃者が tmp を事前設置しても、内容注入は SHA ゲートで弾かれ、symlink 経由の任意箇所書込は open の `O_NOFOLLOW` で構造的に塞がれる（アップロード側 `NoFollowFileReader` と対称）。
+- **サイズ上限（M7 DoS）**: 再開分（既存プレフィクス長）を含む累積長を `entry.size` と突合し超過は破棄（[medium.md](medium.md) M7 参照）。
+- **宙ぶらりんリソースの蓄積**: `SyncEngine.start()` 冒頭の `pruneOrphanTransfers()` が、ローカルファイルの消えた upload 行（宙ぶらりん MPU を best-effort `abortMultipartUpload`）、tmp の消えた download 行、7 日より古い行を掃除する。S3 側の `tide-abort-incomplete-multipart`（7 日）と歩調を合わせる。
+- **secret 非保持**: `transfer_state` は path / UploadId / etag / partSize / mtime / size のみ。認証情報・本文は持たない。
+
+**残ロジック上の据え置き:** `pruneOrphanTransfers` の判定（存在/失効）は結合的ユニットテスト未整備（`SyncEngine` が実 `TideS3Client` を要するため）。store 操作自体は `TransferStateStoreTests` でカバー済み。

@@ -122,6 +122,36 @@ CREATE TABLE sync_log (
 CREATE INDEX idx_log_timestamp ON sync_log(timestamp DESC);
 ```
 
+### transfer_state（M3 サブ D・中断/再開）
+
+転送途中の状態をプロセス再起動を跨いで保持するサイドカー。`upload_queue`（ファイル単位のキュー意味論）とは別レイヤで、アップロード（マルチパート）の `UploadId`＋完了パートと、ダウンロード（Range）の途中バイト数を **1 テーブルで両方向**扱う。PK は `(path, direction)` で、方向ごとに片側の列群が NULL になり得る。`completed_parts` は `[{"n":Int,"etag":String}]` の JSON。型付きアクセスは `TransferStateStore`。
+
+```sql
+CREATE TABLE transfer_state (
+    path TEXT NOT NULL,
+    direction TEXT NOT NULL CHECK(direction IN ('upload', 'download')),
+
+    -- アップロード（マルチパート）再開用
+    upload_id TEXT,          -- CreateMultipartUpload が返した UploadId
+    part_size INTEGER,       -- 確定したパートサイズ（再開時にオフセットを揃える）
+    completed_parts TEXT,    -- 完了済みパートの JSON 配列
+
+    -- ダウンロード（Range）再開用
+    tmp_path TEXT,           -- 追記していく決定的な一時ファイルパス
+    bytes_done INTEGER,      -- 直近に把握した進捗バイト数（失敗時に記録＝updated_at の heartbeat。再開起点は tmp 実サイズを真実とする）
+    expected_etag TEXT,      -- リモートが変わっていないかの検証（変われば破棄して再取得）
+
+    -- 検証スナップショット（アップロード: 再開時にローカルが変わっていないか照合）
+    file_mtime REAL,
+    file_size INTEGER,
+
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (path, direction)
+);
+```
+
+再開の整合性: SHA は両経路とも streaming で確定するため、再開時は**未処理分だけネットワークし、既処理分はローカル再読込でハッシュを復元**し、最後に必ず期待 SHA と突合する（不一致なら破棄してフル再送＝自己回復）。アップロードは `recordCompletedPart`（完了パートの etag）を再開起点に使う。ダウンロードは **tmp の実サイズ**を再開起点の真実とし（`bytes_done` 列は失敗時に `recordDownloadProgress` で更新する `updated_at` の heartbeat 兼 introspection）、`expected_etag` の照合と最終 SHA 突合で妥当性を担保する。完了・恒久失敗で行は削除し、起動時に消えたファイル/古い行/宙ぶらりんの `upload_id` を best-effort で掃除する（D5）。
+
 ## マイグレーション戦略
 
 GRDB.swift の `DatabaseMigrator` を使用。
@@ -139,8 +169,12 @@ migrator.registerMigration("v1_initial") { db in
     """)
 }
 
+// M3 サブ D で追加
+migrator.registerMigration("v2_transfer_state") { db in
+    try db.execute(sql: "CREATE TABLE transfer_state ( ... );")
+}
+
 // 将来の変更はここに追加
-// migrator.registerMigration("v2_add_xxx") { db in ... }
 ```
 
 ## Swift モデル定義

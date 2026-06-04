@@ -105,9 +105,9 @@ C2 はアップロード走査（symlink スキップ）と最終書込先は守
 
 ## M7. ストリーミングダウンロードのレスポンスサイズ無制限（M4 の回帰）
 
-**Status:** ✅ Fixed (2026-06-02) — `Downloader.download` が `downloadToFile(key:into:maxBytes:)` に**マニフェストの真実サイズ `entry.size`** を渡すように変更。`downloadToFile` 内の二段チェック（サーバ申告 `contentLength` を事前に弾く + 受信累積長が `maxBytes` 超で打ち切り、書きかけ tmp を掃除して throw）が効くようになり、M4 が `getObject` で塞いだ「巨大本文によるローカルディスク枯渇 DoS」を復元経路でも維持する。復元方向はユーザのアップロード上限（`uploadSizeLimitBytes`）ではなく**真実値であるマニフェスト `size`** を基準にする（アップロード上限はアップロード方向のみ）。あわせて L9 関連の litter も解消（下記）。`xhigh` コードレビュー（2026-06-02）で検出。
+**Status:** ✅ Fixed (2026-06-02、2026-06-04 にサブ D-D3 で機構を更新) — 当初は `Downloader.download` が `downloadToFile(key:into:maxBytes: entry.size)` を呼ぶ形で塞いだ。**サブ D-D3（中断・再開）で `downloadToFile` を Range 対応の `TideS3Client.streamObject(key:rangeStart:sink:)` に置換**したため、DoS ガードは **`Downloader` 側の sink へ移動**: ストリーミングの sink で受信累積長（再開時は既存プレフィクス長を含む `total`）を**マニフェストの真実サイズ `entry.size`** と突合し、超過したら `DownloadAbort.tooLarge` で打ち切り、**部分 tmp を破棄し `transfer_state` 行をクリアして throw**（＝サイズ食い違いは「保持して再開」に倒さず仕切り直す）。M4 が `getObject` で塞いだ「巨大本文によるローカルディスク枯渇 DoS」を復元経路でも維持する。復元方向はユーザのアップロード上限（`uploadSizeLimitBytes`）ではなく真実値であるマニフェスト `size` を基準にする。`DownloaderTests` でフェイク seam による回帰確認。`xhigh` コードレビュー（2026-06-02）で検出。
 
-**該当箇所:** `Tide/S3/S3Client.swift` `downloadToFile`、`Tide/S3/Downloader.swift` `download`（`maxBytes: entry.size` を渡す）。
+**該当箇所:** `Tide/S3/S3Client.swift` `streamObject`（旧 `downloadToFile`）、`Tide/S3/Downloader.swift` `download`（sink で `total > entry.size` を弾く）。
 
 **重要度:** Medium（前提は C1 / M4 と同じ＝マニフェスト改ざん or バケットを書ける第三者。機密漏えいではなく**可用性＝ローカルディスク枯渇**）。
 

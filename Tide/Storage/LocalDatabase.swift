@@ -91,6 +91,39 @@ struct SyncLogRecord: Codable, FetchableRecord, MutablePersistableRecord, Sendab
     }
 }
 
+/// M3 サブ D（中断・再開）: 転送途中の状態を永続化するサイドカー行。
+/// アップロード（マルチパート）とダウンロード（Range）で共有し、PK は (path, direction)。
+/// 列はどちらの方向でも片側が NULL になり得る。型付き API は `TransferStateStore` 側に置く。
+struct TransferStateRecord: Codable, FetchableRecord, MutablePersistableRecord, Sendable {
+    var path: String
+    var direction: String          // "upload" | "download"
+    var uploadId: String?
+    var partSize: Int?
+    var completedParts: String?    // JSON [{"n":Int,"etag":String}]
+    var tmpPath: String?
+    var bytesDone: Int64?
+    var expectedEtag: String?
+    var fileMtime: Double?
+    var fileSize: Int64?
+    var updatedAt: Double
+
+    static let databaseTableName = "transfer_state"
+
+    enum CodingKeys: String, CodingKey {
+        case path
+        case direction
+        case uploadId = "upload_id"
+        case partSize = "part_size"
+        case completedParts = "completed_parts"
+        case tmpPath = "tmp_path"
+        case bytesDone = "bytes_done"
+        case expectedEtag = "expected_etag"
+        case fileMtime = "file_mtime"
+        case fileSize = "file_size"
+        case updatedAt = "updated_at"
+    }
+}
+
 // MARK: - Database
 
 /// GRDB の DatabasePool をラップ。Sendable に出来ないので @unchecked Sendable

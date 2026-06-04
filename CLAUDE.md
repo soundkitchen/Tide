@@ -188,15 +188,15 @@
 - **プロビジョニング時に `enforcePublicAccessBlock()`** で 4 設定すべて true を投入。
 
 ### マルチパートアップロード / サイズ上限（M3、2026-06-02）
-- **自前ラッパ方式**。`aws-sdk-swift-s3-transfer-manager` パッケージは採用しない（新規依存なし）。`TideS3Client` に `createMultipartUpload`/`uploadPart`/`completeMultipartUpload`/`abortMultipartUpload` の薄いラッパと `downloadToFile`（ストリーミング DL）を持つ。
+- **自前ラッパ方式**。`aws-sdk-swift-s3-transfer-manager` パッケージは採用しない（新規依存なし）。`TideS3Client` に `createMultipartUpload`/`uploadPart`/`completeMultipartUpload`/`abortMultipartUpload` の薄いラッパと `streamObject`（Range 対応のチャンク・ストリーミング DL。サブ D-D3 で旧 `downloadToFile` を置換）を持つ。
 - **`Uploader.processUpload` はサイズで分岐**: `PartPlan.shouldUseMultipart`（閾値 16MiB）。以下は単発 `putObject`、超は `MultipartUploader`。`maxSizeM1`（旧 100MiB ハード上限）は撤廃。
 - **アダプティブパートサイズ** `PartPlan.plan`: 目標パート数 9,000 基準値を `[5MiB, maxPartSize(64MiB)]` にクランプ（常駐メモリ ≈ partSize×(inflight+1) を抑える＝L11）。10,000 パートに収まらない超巨大ファイル（〜640GiB 超）だけ必要分まで partSize を引き上げる（MiB 境界切り上げで `partCount ≤ 10,000` は常に成立）。
-- **`MultipartUploader` は順次読込＆ハッシュ + 有界並列(3) UploadPart**。読む順序＝ハッシュ更新順序を保つ（並列でも全体 SHA は正しい）。パート単位リトライ 3 回（指数バックオフ）でセッション内瞬断を吸収（中断・再開 (a)）。恒久失敗は best-effort `abortMultipartUpload` → throw（ファイル単位リトライへ）。永続再開（UploadId 永続化 / Range DL）はサブタスク D。
+- **`MultipartUploader` は順次読込＆ハッシュ + 有界並列(3) UploadPart**。読む順序＝ハッシュ更新順序を保つ（並列でも全体 SHA は正しい）。パート単位リトライ 3 回（指数バックオフ）でセッション内瞬断を吸収（中断・再開 (a)）。**再起動またぎの再開はサブ D-D2 で実装済み**（`ResumeContext` 経由で `transfer_state` に UploadId と完了パートを checkpoint。`resume` 指定時は失敗しても abort/clear せず MPU と進捗を保持して次回再開に委ね、`resume` なしの従来呼びは失敗時に best-effort `abortMultipartUpload`）。Range DL 再開はサブ D-D3 で実装済み（下記ダウンロード節）。
 - **object metadata に `sha256` を付けない**（両経路）。create 時点で sha256 未確定 ＆ 参照経路が無いため。整合性の真実は `ManifestFileEntry.sha256`。metadata は `mtime`/`device`/`size` のみ。
 - **マニフェスト `etag` は S3 返値をそのまま格納**（単発=MD5、マルチ=`<md5>-<partcount>`）。整合性は sha256 ベースなので etag パーサ不要。
 - **アップロード上限は「1 ファイルあたり」**（バケット総量ではない）。`ConfigStore.uploadSizeLimitBytes`（既定 1GiB、`-1`=無制限）。**Uploader は周回ごとに `config` から読み直す**（Settings 変更が次の処理で反映）。上限はアップロード方向のみ＝ダウンロード（復元）は常に許可。
 - **上限超過は黙ってスキップしない**: `SyncError.fileTooLarge` を投げ、`SyncEngine.handleProcessingFailure` がリトライせずに `recentErrors` へ明示 + `sync_log` error + キュー除去（「このファイルはバックアップされていない」を可視化）。バックアップツールでサイレントな取りこぼしは最悪なので必ず見せる。
-- **大ファイルのダウンロードも `downloadToFile` でストリーミング書込**（旧 200MiB インメモリ cap を撤廃。メモリはチャンク有界）。マニフェスト経路の 16MiB cap は厳守。**復元経路は `maxBytes` にマニフェストの真実サイズ `entry.size` を渡し**、巨大本文によるローカルディスク枯渇 DoS を防ぐ（M4 を復元でも維持。M7）。親ディレクトリ作成は SHA 検証後に行い、不一致時の空ディレクトリ litter を残さない。
+- **大ファイルのダウンロードも `streamObject` でチャンク・ストリーミング書込**（旧 200MiB インメモリ cap を撤廃。メモリはチャンク有界）。マニフェスト経路の 16MiB cap は厳守。**復元の DoS ガード（M7）は `Downloader` 側に移動**: streaming の sink で受信累積長を `entry.size` と突合し、超過は `DownloadAbort.tooLarge` → 部分 tmp を破棄して仕切り直す（巨大本文によるローカルディスク枯渇を復元経路でも防ぐ。M4 を復元でも維持）。サイズ基準は**真実値であるマニフェスト `entry.size`**（アップロード上限は適用しない）。親ディレクトリ作成は SHA 検証後に行い、不一致時の空ディレクトリ litter を残さない。
 - **Settings の上限 UI**: `SettingsWindow` の Sync セクションに **スライダ**「Upload size limit」（1〜100GB・1GB 刻み）と **Toggle「No upload size limit」**（無制限=-1）。`ConfigStore` は @Observable でないので `@State`（`noLimit` / `limitGB`）で持ち `onAppear` で読込・`onChange` で書込（write-through）。**既定 1GB より大きい or 無制限を選ぶと課金注意 caption を表示**（ストレージ容量だけでなく**通信量（転送・egress）**の課金も増える旨を明記）。新規 xcstrings キーは `extractionState:"manual"`。
 
 ### リセット / クリーンアップ
@@ -237,6 +237,10 @@
 ### UI 起動・遷移
 - **`MenuBarExtra(.window)` のポップオーバー内ボタンから `openWindow(id:)` を呼ぶときは、`NSApp.activate(ignoringOtherApps: true)` を必ず前置**。LSUIElement = YES のアプリだとアプリがフォアグラウンドに来ておらず、新しいウィンドウが obscured になる。
 
+### 転送進捗 UI（サブ D-D4）
+- **進行中の大ファイル転送はメニューバーのポップオーバー（`MenuBarContent`）に「Transferring」セクションで表示**（方向アイコン + ファイル名 + % + `ProgressView`）。状態は `SyncEngine.activeTransfers: [TransferProgress]`（@Observable・MainActor）。
+- **進捗の流れ**: off-main の `Uploader`/`Downloader` が `@Sendable TransferProgressReporter`（`begin`/`update`/`end`）を発行 → `SyncEngine` が `Task { @MainActor }` で `applyProgress` に集約。**reporter が生む Task の到着順は前後し得る**ので、`update` は既存エントリの**増加方向のみ**適用し、`begin` で作成・`end` で除去する（(path, direction) で一意）。MainActor へのホップを抑えるため、アップロードはパート完了ごと、ダウンロードは ~4MiB ごとに coalesce して報告する。シングルパート（≤16MiB）は進捗を出さない。`stop()` で `activeTransfers` をクリア。
+
 ### Bootstrap 失敗時の挙動
 - **`AppEnvironment.bootstrapFailure` に詳細理由（どのフィールド / Keychain 読みでコケたか）を入れる**。`MenuBarContent` はその値を見て自動的にセットアップウィザードを再表示する。
 
@@ -247,7 +251,8 @@
 - **C3 後半**: HTTPS 強制バケットポリシー（`PutBucketPolicy` で `aws:SecureTransport=true`）。SDK 自体は HTTPS 既定で送るので緊急度は低い。
 - **H3**: 静的 AWS キー → STS / IAM Identity Center への構造的置き換え。M3 以降で要検討。
 - **M5 / F3 (L9)**: ✅ 解消済み（2026-06-02）。M3 マルチパート対応で `NoFollowFileReader`（`O_NOFOLLOW` の単一 FD）に置換し、ハッシュ計算と本体読込/パート送信を同一 FD 化＝2 回 open の TOCTOU を構造的に解消。`O_NOFOLLOW` は最終コンポーネントのみ有効（祖先 symlink は別レイヤ）。
-- **中断・再開（サブタスク D）**: マルチパートは現状 (a) セッション内のパート単位リトライのみ。UploadId の永続化・再起動またぎ再開・Range ダウンロード再開は未実装（`transfer_state` テーブル新設等。別チャンク）。
+- **中断・再開（サブタスク D・進行中）**: D1（`transfer_state` + `TransferStateStore`）/ D2（アップロードの再起動またぎ再開）/ D3（ダウンロードの Range 再開）は ✅ 実装済み（2026-06-04）。アップロードは `MultipartUploader.ResumeContext` で UploadId と完了パートを checkpoint。ダウンロードは `Downloader` が決定的 tmp（`dl-<sha(path)>.part`）＋ `transfer_state`（tmp_path/expected_etag）で、永続行が現エントリ etag と一致すれば `streamObject(rangeStart:)` で `Range: bytes=N-` 再開し、既存プレフィクスを読み直して全体 SHA を復元、最後に必ず期待 SHA と突合。ネットワーク失敗は部分 tmp と行を保持して次回再開、etag 不一致/SHA 不一致/サイズ超過/404 は破棄して仕切り直す。D4 進捗 UI（下記「転送進捗 UI」）と D5（`SyncEngine.start()` 冒頭の `pruneOrphanTransfers` で消えたファイル/古い行/宙ぶらりん UploadId を best-effort 掃除 + `security/low.md` L12 レビュー）も ✅ 実装済み。**PR #4 レビュー反映（2026-06-05）**: download 失敗時に `recordDownloadProgress` を配線して `bytes_done`/`updated_at` を前進（prune の stale 判定が実活動を反映）、fresh の tmp 書込を `O_NOFOLLOW|O_EXCL` 化（symlink 追従窓を解消）、空 etag では再開しないガード、`applyProgress` を純粋関数 `TransferProgress.reduce` に切り出して `TransferProgressTests` で out-of-order 耐性を固定。**サブタスク D は実機での動作チェックリスト（`tmp/M3-動作チェックリスト.md`）消化を残すのみ**。詳細は `docs/07-M3-IMPLEMENTATION-GUIDE.md` サブタスク D。
+- **サブD PR #4 レビューの据え置き（Low/nit）**: (a) **complete 直後クラッシュで stale UploadId 残**: `completeMultipartUpload` 成功 → `clearUpload` の間（DB 書込 1 回分の窓）で kill されると、完了済み UploadId の行が残り、次回 resume の `completeMultipartUpload` が `NoSuchUpload` で空振り（7 日の stale prune or ファイル mtime 変化まで）。本体は S3 に安全に上がっているので Low・自己回復。正しく塞ぐには「complete 時の `NoSuchUpload` は成功扱い」だが、その時 `PutObjectResult`（etag/versionId）が無くマニフェスト更新に `HeadObject` 復旧が要る（一行では塞げない）。(b) **進捗 begin/end 再順序のゴースト**: 最初の `.begin` Task が最後の `.end` Task より後に実行されると 0% エントリが `stop()` まで残る（純粋 reducer では本質的に塞げない Task 順序問題・ほぼ起きない nit）。
 - **F1 (L8)**: ✅ 解消済み（2026-06-04）。`.syncignore` の照合から `NSRegularExpression` を廃し、グロブをトークン列へコンパイルして reachable-set DP で評価する線形時間照合（`O(パターン長 × パス長)`、バックトラッキング無し）へ置換＝ReDoS を構造的に解消。`parse` の各上限は防御的サニティ上限として保持。意味論は旧 regex 実装との differential fuzz で同値確認（`SyncIgnoreMatcherTests`）。
 - **F4 (H2 UI 残)**: UI の `recentErrors` / `.error` が生 SDK エラー文字列（バケット名・キー・リージョン等のメタデータ。認証情報は含まない）を表示。**意図的に保持**（デバッグで実利が大きく、OS Log は `.private` 化済みで UI が事後コピーの実質唯一ソース。重要度 Low・本人画面のみ）。**他人配布／単一ユーザ開発を抜ける前に再評価**し、是正は単純削除でなく「UI は分類サマリ + 詳細をオンデマンド展開/コピー」案で（`S3ErrorClassifier` / `SyncError.description` 流用。`security/high.md` H2 残存項参照）。
 - **アップロード側の並行更新検出（last-writer-wins ギャップ）**: M3 サブ C で競合解決を `ThreeWayMerge` に形式化したが、適用は pull/削除側のみ。同一ベースから 2 台が編集すると後勝ちでマニフェストが上書きされ、先に上げた側は次回 pull で「local == base＝未編集」判定で相手版を取り込み、ローカル編集がワーキングコピーから消える（S3 バージョン履歴には残る）。対称化＝`Uploader.processUpload` 直前にも `ThreeWayMerge` を適用（per-upload リモートマニフェスト読み + アップロード側コンフリクト経路）は別サブタスク。

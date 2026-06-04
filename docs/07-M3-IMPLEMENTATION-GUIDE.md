@@ -69,7 +69,7 @@ M1 で導入した「100 MB を超えたら `sync_log` にエラーを残して�
 - 16 MiB 以下のファイルは従来通り（リグレッションなし）
 
 ### レビュー指摘の据え置き（PR #1 のコードレビュー、将来タスク）
-- **結合部の自動テスト（テスト負債）**: `MultipartUploader` は ✅ **解消（2026-06-04）**。`protocol MultipartUploadClient`（4 メソッド）を切って `TideS3Client` を適合させ、actor フェイク + 実一時ファイルで SHA 整合・パート分割・空 parts ガード・一時/恒久リトライ・abort を `MultipartUploaderTests` でユニット化した（リトライ遅延は `MultipartUploader.RetryPolicy` 注入で高速化）。`PartPlan`/`NoFollowFileReader`/`ConfigStore` の純粋ロジックは既にカバー済み。**残**: `downloadToFile`（`.stream`/`.data` 分岐・二段 maxBytes）のユニットテストは未整備（DL 経路の seam は別途）。
+- **結合部の自動テスト（テスト負債）**: `MultipartUploader` は ✅ **解消（2026-06-04）**。`protocol MultipartUploadClient`（4 メソッド）を切って `TideS3Client` を適合させ、actor フェイク + 実一時ファイルで SHA 整合・パート分割・空 parts ガード・一時/恒久リトライ・abort を `MultipartUploaderTests` でユニット化した（リトライ遅延は `MultipartUploader.RetryPolicy` 注入で高速化）。`PartPlan`/`NoFollowFileReader`/`ConfigStore` の純粋ロジックは既にカバー済み。DL 経路は ✅ **解消（2026-06-04・サブ D-D3）**: `downloadToFile` を `streamObject` + `RangedDownloadClient` シームに置換し、`DownloaderTests`（実 DB + フェイク seam）で fresh/resume/etag 不一致/ネットワーク失敗保持/SHA 不一致/404 を網羅。
 - **`uploadPartWithRetry` のエラー分類**: 現状あらゆるエラーを 3 回リトライする。認証エラー・`EntityTooSmall` 等の恒久失敗は即諦める分類を入れるとリトライ空振り（S3 API 課金含む）を減らせる（`security/low.md` L10 参照）。
 
 ---
@@ -146,20 +146,33 @@ M2 の単純ルール（`04-SYNC-LOGIC.md`「競合解決」）を **ベース /
 
 ---
 
-## サブタスク D: 中断・再開
+## サブタスク D: 中断・再開（✅ 実装済み 2026-06-05）
 
 ### 目的
-ダウンロード / アップロードが途中で中断した場合に、次回起動時に途中から再開する。
+ダウンロード / アップロードが途中で中断した場合に、次回起動時に**ファイル内の途中から**再開する。
+`upload_queue` によるファイル単位の再開（再起動後に同じファイルを再処理）は既存。D が足すのは「5GB の 80% まで上げてから kill された時にゼロから再送しない」というファイル内再開。
 
-### 設計の出発点
-- マルチパート（サブタスク A）の延長として実装するのが自然
-- アップロード: 失敗パートだけ再 PutPart（s3-transfer-manager がある程度面倒を見る）
-- ダウンロード: GetObject の Range ヘッダで途中バイトから取得
-- 状態の永続化: `upload_queue` テーブルにパート進捗カラムを追加？ 新規 `transfer_state` テーブル？
+### 確定した設計判断（ユーザ承認済み）
+- **スコープ = アップロード＋ダウンロード両方**。
+- **状態の永続化 = 新規 `transfer_state` テーブル**（`upload_queue` へのカラム追加ではない）。
+  ダウンロードは `upload_queue` を使わない（pull/reconcile 駆動）ので、両方向を 1 機構で扱える `transfer_state` を採用。
+- **kill 時の挙動 = 再開**。checkpoint（パート完了ごと / Range オフセット）を再開起点にし、再送パートは UploadPart 冪等で上書き安全。SHA は streaming で確定するので、再開時は未処理分だけネットワークし既処理分はローカル再読込でハッシュ復元、最後に必ず期待 SHA と突合（不一致＝破棄してフル再送）。
+- **進捗 UI = メニューバーのポップオーバーウィンドウ（`MenuBarContent`）に「Transferring」セクション**。独自の極小バーは作らない。
 
-### ユーザに事前に決めてもらいたい
-- 進捗 UI を出すか（メニューバーの簡易バーで十分か）
-- アプリ killed 時の挙動（再開 or 再アップロード）
+### 実装ステップ（feature/m3-subd-resume・段階コミット）
+- **D1 スキーマ＋ストア（✅ 実装済み）**: migration v2 `transfer_state` / `TransferStateRecord`(GRDB) / `TransferStateStoring` プロトコルシーム + `TransferStateStore`（GRDB 実装）+ `TransferStateStoreTests`（実 DB）。挙動変更なし。スキーマ詳細は `docs/03-LOCAL-DATABASE.md`。
+- **D2 アップロード再開（✅ 実装済み）**: `UploadCheckpointStore` シーム（`TransferStateStoring` から分離）を `MultipartUploader.ResumeContext` 経由で注入。mtime/size 一致なら前回 UploadId・完了パート・partSize を引き継いで未送分だけ送り（既送分も読み順に hash 更新して全体 SHA を復元）、不一致なら古い MPU を best-effort abort してフル再開。パート完了ごとに `recordCompletedPart` で checkpoint、成功で `clearUpload`。**失敗時の方針**: `resume` 指定時は abort も clear もせず MPU と進捗を保持（次回のファイル単位リトライ／プロセス kill 後の次回起動で再開）。恒久失敗の残骸はライフサイクル tide-abort-incomplete-multipart（7日）と D5 起動時掃除に委ねる。`resume` なしの呼びは従来どおり失敗時 best-effort abort（後方互換）。`MultipartUploaderTests` にフェイク checkpoint で 4 ケース追加（新規永続→クリア / 既送スキップ / ファイル変化でフル再開 / 恒久失敗で保持）。
+- **D3 ダウンロード再開（✅ 実装済み）**: 旧 `downloadToFile` を Range 対応の `TideS3Client.streamObject(key:rangeStart:sink:)` に置換し、`RangedDownloadClient` シーム（`TideS3Client` 適合 + テストでフェイク差込）を新設。`Downloader` は決定的 tmp（`dl-<sha(path)>.part`）を使い、`transfer_state` の download 行が現エントリ etag と一致し tmp が `0 < size < entry.size` なら既存プレフィクスを読み直して hash に前置きし `Range: bytes=size-` で再開、無効なら作り直してフル取得。M7 の DoS ガードは sink で受信累積長を `entry.size` と突合（超過は破棄）。ネットワーク失敗は部分 tmp + 行を保持して次回再開、etag/SHA 不一致・サイズ超過・404 は破棄して仕切り直す。`DownloaderTests`（実 DB + フェイク seam）で fresh/resume/etag 不一致/ネットワーク失敗保持/SHA 不一致/404 を網羅＝DL 経路のテスト負債も返済。
+- **D4 進捗 UI（✅ 実装済み）**: `SyncEngine.activeTransfers: [TransferProgress]`（@Observable）を追加。off-main の `Uploader`/`Downloader` が `@Sendable` な `TransferProgressReporter`（`begin`/`update`/`end`）を発行し、`SyncEngine` が `Task { @MainActor }` で `applyProgress` に集約（到着順は前後し得るので update は既存エントリの増加方向のみ適用、(path, direction) で一意）。アップロードはパート完了ごと（既送分も即時加算）、ダウンロードは ~4MiB ごとに coalesce。`MenuBarContent` のポップオーバーに「Transferring」セクション（方向アイコン + ファイル名 + % + `ProgressView`）を追加。新規 xcstrings キー `"Transferring"`（`extractionState:"manual"`）。`stop()` で `activeTransfers` をクリア。視覚確認は D5 の動作チェックリストで実機実施。
+- **D5 ドキュメント＋セキュリティ＋掃除（✅ 実装済み）**: `SyncEngine.start()` 冒頭で `pruneOrphanTransfers()`（キュー/プル開始前に awaited＝再開ロジックと競合させない）。ローカルファイルの消えた upload 行は宙ぶらりんの MPU を best-effort `abortMultipartUpload` して削除、tmp の消えた download 行は削除、両方向とも 7 日より古い行は失効扱い（S3 `tide-abort-incomplete-multipart` と歩調を合わせる）。セキュリティは `security/low.md` L12（攻撃面レビュー＝Range 注入なし / tmp_path 再計算照合 / 再開時 symlink 破棄ガード / SHA ゲート / オーファン掃除）。受け入れは `tmp/M3-動作チェックリスト.md`（大ファイル round-trip・kill→再開 up/down・進捗 UI を実機で確認後に削除）。
+
+### PR #4 レビュー反映（2026-06-05）
+soundkitchen のレビュー（ブロッカー無し）を受けて 4 点を対応、2 点を据え置き。
+- **#1 配線**: `Downloader` のネットワーク失敗 catch で `recordDownloadProgress(total)` を呼び、`bytes_done` を最新化＋`updated_at` を前進。これで本番未使用だった同メソッドが意味を持ち、`pruneOrphanTransfers` の 7 日 stale 判定が「実活動」を反映する（進捗のある tmp を誤って消さない）。
+- **#3 symlink 追従窓**: fresh の tmp 書込を `Downloader.openTmpForWriting`（`O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW`）へ。旧 `removeItem`→`createFile` の TOCTOU を解消し、アップロード側 `NoFollowFileReader` と対称化。
+- **#4 空 etag ガード**: `ManifestFileEntry.etag` は `s3Etag ?? ""` で空になり得るので、空のときは再開 etag 照合が no-op になる。空 etag では resume せずフル取得に倒す（`!entry.etag.isEmpty` 条件）。
+- **#6 進捗集約のテスト**: `applyProgress` を純粋関数 `TransferProgress.reduce` に切り出し、`TransferProgressTests` で begin/update（増加方向のみ）/end と out-of-order（end 後の遅延 update で復活しない等）を固定。
+- **据え置き（Low/nit）**: #2 complete 直後クラッシュの stale UploadId（`NoSuchUpload` 空振り。正しく塞ぐには `HeadObject` 復旧が要る）、#5 進捗 begin/end の Task 再順序ゴースト（純粋 reducer では塞げない・ほぼ起きない）。CLAUDE.md §8 に記録。
 
 ---
 

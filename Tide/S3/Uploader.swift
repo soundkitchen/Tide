@@ -9,6 +9,10 @@ struct Uploader {
     let deviceId: String
     /// 1 ファイルあたりのアップロード上限を都度参照する（Settings 変更を次の処理で反映）。
     let config: ConfigStore
+    /// 中断・再開（サブ D）の checkpoint 永続化。マルチパート経路でのみ使う。
+    let transferStore: any TransferStateStoring
+    /// 進捗報告（メニューバー表示用）。マルチパート経路でのみ発行する。nil 可。
+    var progressReporter: TransferProgressReporter? = nil
 
     /// upload_queue の 1 件を処理する。
     func process(_ item: UploadQueueRecord) async throws {
@@ -90,11 +94,29 @@ struct Uploader {
         let result: TideS3Client.PutObjectResult
         if PartPlan.shouldUseMultipart(fileSize: size) {
             let plan = PartPlan.plan(forFileSize: size)
+            // 中断・再開: 同一ファイル（mtime/size 一致）なら前回の途中から再開する。
+            let resume = MultipartUploader.ResumeContext(
+                path: path, fileMtime: mtime, fileSize: size, store: transferStore
+            )
+            // 進捗報告（大ファイルのマルチパートのみ。begin → パート完了ごと update → end）。
+            let reporter = progressReporter
+            reporter?(.begin(path: path, direction: .upload, totalBytes: size))
+            defer { reporter?(.end(path: path, direction: .upload)) }
+            let onProgress: (@Sendable (Int64) -> Void)?
+            if let reporter {
+                onProgress = { @Sendable bytes in
+                    reporter(.update(path: path, direction: .upload, transferredBytes: bytes))
+                }
+            } else {
+                onProgress = nil
+            }
             let mp = try await MultipartUploader(s3: s3).upload(
                 key: s3Key,
                 reader: reader,
                 partSize: plan.partSize,
-                metadata: metadata
+                metadata: metadata,
+                resume: resume,
+                onProgress: onProgress
             )
             sha256 = mp.sha256
             result = mp.put

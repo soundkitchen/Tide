@@ -478,15 +478,20 @@ struct ReadResult {
 1. PathValidator.resolveForWrite で path 検証 + syncRoot 配下確認（祖先ディレクトリの symlink 経由のルート脱出も拒否 / F2）
 2. 既存ローカルファイル（最終コンポーネント）がシンボリックリンクなら拒否（実体書換防止）
 3. ローカル SHA == manifest SHA ならスキップ（DB のみ最新化）
-4. GetObject（content-length / 受信長を maxBytes でチェック）
-5. SHA-256 検証（manifest と byte 不一致なら abort）
-6. 親ディレクトリ作成
-7. tmpDir 配下に書き込み（TideTmpDirectory が同一ボリュームを保証）
-8. mtime をマニフェストの値で復元
+4. 中断・再開（サブ D-D3）: 決定的 tmp（dl-<sha(path)>.part）を使う。transfer_state の download 行があり
+   expected_etag == entry.etag かつ tmp が 0 < size < entry.size なら、その既存プレフィクスを読み直して
+   hasher に前置きし resumeFrom = size とする。無効（行なし / etag 不一致 / サイズ不整合）なら tmp を作り直し begin
+5. streamObject(rangeStart:)（resumeFrom > 0 なら Range: bytes=resumeFrom-）で tmp へ追記しつつ SHA-256 を逐次更新。
+   sink で受信累積長を entry.size と突合し、超過は tooLarge で破棄（M7 の DoS ガード）
+6. SHA-256 検証（manifest と byte 不一致なら tmp を破棄し行をクリアして abort＝壊れた内容を再開し続けない）
+7. mtime をマニフェストの値で復元
+8. 親ディレクトリ作成（SHA 検証後＝不一致で捨てるとき空ディレクトリの litter を残さない）
 9. 既存ファイルがあれば removeItem → moveItem で atomic に置換
    （replaceItemAt は .sb-* 中間ファイルを作って FSEvents を汚すので使わない）
-10. DB を更新 + sync_log 記録
+10. transfer_state の行をクリア + DB を更新 + sync_log 記録
 ```
+
+> ストリーミング途中のネットワーク失敗は **部分 tmp と transfer_state 行を保持**し、次回 pull で同じ tmp を `Range: bytes=N-` で再開する（N は実際の tmp サイズ＝プロセス kill 後も確実）。実 DB + フェイク `RangedDownloadClient` での結合的ユニットテストは `DownloaderTests`。
 
 ## 競合解決（3-way merge）
 
@@ -513,7 +518,7 @@ M3 サブ C で **ベース / ローカル / リモートの 3 SHA による 3-w
 ## セキュリティゲート
 
 - マニフェスト由来の `relativePath` / `shardId` は **すべて** `PathValidator` を通す（`..` / 絶対パス / NUL / バックスラッシュ等を拒否し、解決後 URL が syncRoot 配下にあることまで確認）
-- マニフェスト系の `getObject` は `maxBytes` 16 MiB（OOM 自己防衛）。通常ファイルの DL は `downloadToFile` でチャンク・ストリーミング書込（メモリ有界）。旧 200MiB インメモリ cap は撤廃したが、**`maxBytes` にマニフェストの真実サイズ `entry.size` を渡し**、サーバ申告 contentLength と受信累積長の両方で弾く（巨大本文によるローカルディスク枯渇 DoS 防止＝M4 を復元経路でも維持。M7）。アップロード上限とは別物（復元方向はユーザ上限を適用しない）
+- マニフェスト系の `getObject` は `maxBytes` 16 MiB（OOM 自己防衛）。通常ファイルの DL は `streamObject` でチャンク・ストリーミング書込（メモリ有界）。旧 200MiB インメモリ cap は撤廃。**復元の DoS ガード（M7）は `Downloader` 側**: streaming の sink で受信累積長を**マニフェストの真実サイズ `entry.size`** と突合し、超過は破棄して仕切り直す（巨大本文によるローカルディスク枯渇を復元経路でも防ぐ＝M4 を復元でも維持）。アップロード上限とは別物（復元方向はユーザ上限を適用しない）
 - フルスキャンの enumerator はシンボリックリンクを skipDescendants して追従しない
 - Downloader の書き込み先（最終コンポーネント）がシンボリックリンクなら拒否
 - 書込・削除経路（Downloader の `download` / `applyRemoteDeletion` / `renameLocalForConflict`）は `PathValidator.resolveForWrite` を通し、**祖先ディレクトリの symlink 経由のルート脱出**も拒否する（F2 / M6）

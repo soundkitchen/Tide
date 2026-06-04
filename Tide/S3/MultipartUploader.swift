@@ -44,38 +44,109 @@ struct MultipartUploader {
         let sha256: String
     }
 
+    /// 中断・再開（サブ D）の文脈。これを渡すと checkpoint を `transfer_state` へ永続化し、
+    /// プロセス再起動を跨いだファイル内再開を行う。nil なら従来挙動（永続化・再開なし）。
+    struct ResumeContext: Sendable {
+        /// `transfer_state` のキー（同期ルートからの相対パス）。
+        let path: String
+        /// 再開時にローカルファイルが変わっていないか照合するスナップショット。
+        let fileMtime: Double
+        let fileSize: Int64
+        let store: any UploadCheckpointStore
+    }
+
     /// `reader` からファイルを読み切ってマルチパートアップロードする。
-    /// 恒久失敗時は best-effort で abort してから throw（呼び出し側のファイル単位リトライに委ねる）。
+    ///
+    /// `resume` を渡すと:
+    /// - 既存 checkpoint があり mtime/size が一致すれば、その UploadId と完了パートを引き継いで
+    ///   **未送パートだけ送る**（既送パートも読み順に hash 更新して全体 SHA を復元する）。
+    /// - mtime/size が変わっていれば古い MPU を best-effort abort してフル再開する。
+    /// - 失敗（throw）時は **abort も checkpoint クリアもしない**＝MPU と進捗を保持し、次回の
+    ///   ファイル単位リトライ／次回起動で再開できるようにする（恒久失敗の残骸は
+    ///   ライフサイクル tide-abort-incomplete-multipart と起動時掃除に委ねる）。
+    ///
+    /// `resume` が nil のときは従来挙動: 失敗時に best-effort abort してから throw する。
     func upload(
         key: String,
         reader: NoFollowFileReader,
-        partSize: Int,
+        partSize requestedPartSize: Int,
         contentType: String = "application/octet-stream",
-        metadata: [String: String] = [:]
+        metadata: [String: String] = [:],
+        resume: ResumeContext? = nil,
+        onProgress: (@Sendable (Int64) -> Void)? = nil
     ) async throws -> Result {
         let client = s3
         let policy = retryPolicy
-        let uploadId = try await client.createMultipartUpload(
-            key: key, contentType: contentType, metadata: metadata
-        )
+
+        // 再開判定。mtime/size 一致なら既存 UploadId・完了パート・partSize を引き継ぐ。
+        var partSize = requestedPartSize
+        var completedByNumber: [Int: String] = [:]
+        let uploadId: String
+
+        if let resume {
+            let existing = try await resume.store.loadUpload(path: resume.path)
+            if let existing,
+               existing.fileMtime == resume.fileMtime,
+               existing.fileSize == resume.fileSize {
+                uploadId = existing.uploadId
+                partSize = existing.partSize     // 永続値を使う（オフセット境界を揃える）
+                for p in existing.completedParts { completedByNumber[p.n] = p.etag }
+            } else {
+                // 行が無い or ファイルが変わった → 古い MPU を掃除してフル再開。
+                if let existing {
+                    try? await client.abortMultipartUpload(key: key, uploadId: existing.uploadId)
+                }
+                uploadId = try await client.createMultipartUpload(
+                    key: key, contentType: contentType, metadata: metadata
+                )
+                try await resume.store.beginUpload(
+                    path: resume.path, uploadId: uploadId,
+                    partSize: partSize, fileMtime: resume.fileMtime, fileSize: resume.fileSize
+                )
+            }
+        } else {
+            uploadId = try await client.createMultipartUpload(
+                key: key, contentType: contentType, metadata: metadata
+            )
+        }
 
         do {
             var hasher = SHA256()
             var parts: [(partNumber: Int, etag: String)] = []
             var partNumber = 0
+            // 進捗報告（パート完了ごと）。既送パートは即時、未送パートは UploadPart 完了時に加算する。
+            var uploadedBytes: Int64 = 0
+            var partBytes: [Int: Int] = [:]
 
-            // body 内は @Sendable でないので reader / hasher / parts を直接キャプチャしてよい。
+            // body 内は @Sendable でないので reader / hasher / parts / resume を直接キャプチャしてよい。
             // addTask の子クロージャは @Sendable なので、Sendable な値（client / String / Int / Data / policy）だけを渡す。
             try await withThrowingTaskGroup(of: (Int, String).self) { group in
                 var inflight = 0
                 while let chunk = try reader.readChunk(partSize) {
-                    hasher.update(data: chunk)         // 直列更新（読む順＝正しい全体ハッシュ）
+                    hasher.update(data: chunk)         // 既送/未送に関わらず読み順に更新（全体ハッシュを復元）
                     partNumber += 1
                     let n = partNumber
+
+                    // 既に完了済み（前回セッション）→ アップロードせず parts にだけ反映。即進捗加算。
+                    if let etag = completedByNumber[n] {
+                        parts.append((partNumber: n, etag: etag))
+                        uploadedBytes += Int64(chunk.count)
+                        onProgress?(uploadedBytes)
+                        continue
+                    }
+
                     let body = chunk
+                    partBytes[n] = chunk.count
                     if inflight >= Self.maxInflightParts {
                         let done = try await group.next()!
                         parts.append((partNumber: done.0, etag: done.1))
+                        uploadedBytes += Int64(partBytes[done.0] ?? 0)
+                        onProgress?(uploadedBytes)
+                        if let resume {
+                            try await resume.store.recordCompletedPart(
+                                path: resume.path, part: CompletedPart(n: done.0, etag: done.1)
+                            )
+                        }
                         inflight -= 1
                     }
                     group.addTask {
@@ -88,6 +159,13 @@ struct MultipartUploader {
                 }
                 for try await done in group {
                     parts.append((partNumber: done.0, etag: done.1))
+                    uploadedBytes += Int64(partBytes[done.0] ?? 0)
+                    onProgress?(uploadedBytes)
+                    if let resume {
+                        try await resume.store.recordCompletedPart(
+                            path: resume.path, part: CompletedPart(n: done.0, etag: done.1)
+                        )
+                    }
                 }
             }
 
@@ -106,10 +184,16 @@ struct MultipartUploader {
             let put = try await client.completeMultipartUpload(
                 key: key, uploadId: uploadId, parts: parts
             )
+            if let resume {
+                try await resume.store.clearUpload(path: resume.path)
+            }
             return Result(put: put, sha256: sha)
         } catch {
-            // best-effort で中止（失敗してもライフサイクル tide-abort-incomplete-multipart が 7 日後に掃除）。
-            try? await client.abortMultipartUpload(key: key, uploadId: uploadId)
+            if resume == nil {
+                // 従来挙動: best-effort で中止（残骸はライフサイクル tide-abort-incomplete-multipart が掃除）。
+                try? await client.abortMultipartUpload(key: key, uploadId: uploadId)
+            }
+            // resume あり: MPU と checkpoint を保持して次回再開に委ねる（abort/clear しない）。
             throw error
         }
     }

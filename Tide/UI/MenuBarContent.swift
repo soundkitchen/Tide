@@ -43,6 +43,35 @@ struct MenuBarContent: View {
     }
 
     @ViewBuilder
+    private func transfersSection(_ transfers: [TransferProgress]) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Transferring")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            ForEach(transfers) { t in
+                VStack(alignment: .leading, spacing: 1) {
+                    HStack(spacing: 4) {
+                        Image(systemName: t.direction == .upload ? "arrow.up.circle" : "arrow.down.circle")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        Text(verbatim: (t.path as NSString).lastPathComponent)
+                            .font(.caption2)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Spacer(minLength: 4)
+                        Text(verbatim: "\(Int(t.fraction * 100))%")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                    ProgressView(value: t.fraction)
+                        .progressViewStyle(.linear)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
     private var statusSection: some View {
         if let engine = env.engine {
             VStack(alignment: .leading, spacing: 4) {
@@ -64,6 +93,9 @@ struct MenuBarContent: View {
                 Text("Queue: \(engine.queueDepth)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if !engine.activeTransfers.isEmpty {
+                    transfersSection(engine.activeTransfers)
+                }
                 if !engine.recentErrors.isEmpty {
                     DisclosureGroup("Recent errors (\(engine.recentErrors.count))") {
                         ScrollView {
