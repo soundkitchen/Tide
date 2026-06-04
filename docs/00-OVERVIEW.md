@@ -78,16 +78,16 @@ macOS のクリーンインストール後の復旧を主目的とした、Dropb
 
 **M2 完了時点でクリーンインストール復旧が機能する。これが本プロジェクトの MVP ゴール。**
 
-### M3: 双方向同期と競合解決、大ファイル対応（未着手）
+### M3: 双方向同期と競合解決、大ファイル対応（サブ A〜D 実装済み・E 未着手）
 
-詳細な設計メモは `07-M3-IMPLEMENTATION-GUIDE.md` を参照。
+詳細な設計メモと実装状況は `07-M3-IMPLEMENTATION-GUIDE.md`、確定した実装判断は `CLAUDE.md` 第 7 節を参照。
 
-- 3-way merge による双方向同期
-- 競合検出と `(conflicted copy from <device> <timestamp>)` リネーム
-- S3 Transfer Manager 統合（マルチパートアップロード、レンジダウンロード）
-- 中断・再開機能
-- `.syncignore` 対応
-- 帯域制御（オプション）
+- ✅ 3-way merge による双方向同期（サブ C・`ThreeWayMerge`）
+- ✅ 競合検出と `<stem> (local copy YYYY-MM-DD HH-MM-SS).<ext>` リネーム（`ConflictNamer`）
+- ✅ マルチパートアップロード / レンジダウンロード（サブ A・D。**自前ラッパ方式**で実装。`aws-sdk-swift-s3-transfer-manager` は不採用）
+- ✅ 中断・再開機能（サブ D・`transfer_state` + Range 再開）
+- ✅ `.syncignore` 対応（サブ B）
+- ⬜ 帯域制御（オプション・サブ E・未着手）
 
 ### M4: 運用機能と磨き込み
 
