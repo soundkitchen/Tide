@@ -72,7 +72,8 @@ struct MultipartUploader {
         partSize requestedPartSize: Int,
         contentType: String = "application/octet-stream",
         metadata: [String: String] = [:],
-        resume: ResumeContext? = nil
+        resume: ResumeContext? = nil,
+        onProgress: (@Sendable (Int64) -> Void)? = nil
     ) async throws -> Result {
         let client = s3
         let policy = retryPolicy
@@ -113,6 +114,9 @@ struct MultipartUploader {
             var hasher = SHA256()
             var parts: [(partNumber: Int, etag: String)] = []
             var partNumber = 0
+            // 進捗報告（パート完了ごと）。既送パートは即時、未送パートは UploadPart 完了時に加算する。
+            var uploadedBytes: Int64 = 0
+            var partBytes: [Int: Int] = [:]
 
             // body 内は @Sendable でないので reader / hasher / parts / resume を直接キャプチャしてよい。
             // addTask の子クロージャは @Sendable なので、Sendable な値（client / String / Int / Data / policy）だけを渡す。
@@ -123,16 +127,21 @@ struct MultipartUploader {
                     partNumber += 1
                     let n = partNumber
 
-                    // 既に完了済み（前回セッション）→ アップロードせず parts にだけ反映。
+                    // 既に完了済み（前回セッション）→ アップロードせず parts にだけ反映。即進捗加算。
                     if let etag = completedByNumber[n] {
                         parts.append((partNumber: n, etag: etag))
+                        uploadedBytes += Int64(chunk.count)
+                        onProgress?(uploadedBytes)
                         continue
                     }
 
                     let body = chunk
+                    partBytes[n] = chunk.count
                     if inflight >= Self.maxInflightParts {
                         let done = try await group.next()!
                         parts.append((partNumber: done.0, etag: done.1))
+                        uploadedBytes += Int64(partBytes[done.0] ?? 0)
+                        onProgress?(uploadedBytes)
                         if let resume {
                             try await resume.store.recordCompletedPart(
                                 path: resume.path, part: CompletedPart(n: done.0, etag: done.1)
@@ -150,6 +159,8 @@ struct MultipartUploader {
                 }
                 for try await done in group {
                     parts.append((partNumber: done.0, etag: done.1))
+                    uploadedBytes += Int64(partBytes[done.0] ?? 0)
+                    onProgress?(uploadedBytes)
                     if let resume {
                         try await resume.store.recordCompletedPart(
                             path: resume.path, part: CompletedPart(n: done.0, etag: done.1)

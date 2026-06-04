@@ -20,6 +20,10 @@ final class SyncEngine {
     /// 現在有効な `.syncignore` のパターン行（Settings 表示用）。
     var activeIgnorePatterns: [String] = []
 
+    /// 進行中の転送（メニューバーのポップオーバー表示用）。off-main の Uploader / Downloader が
+    /// `@Sendable` reporter を通じて MainActor で更新する。(path, direction) で一意。
+    var activeTransfers: [TransferProgress] = []
+
     // MARK: - Dependencies
 
     private let db: LocalDatabase
@@ -143,7 +147,39 @@ final class SyncEngine {
         watcher?.stop()
         watcher = nil
         debouncer = nil
+        activeTransfers = []
         status = .notConfigured
+    }
+
+    // MARK: - 転送進捗（メニューバー表示）
+
+    /// off-main の Uploader / Downloader へ渡す進捗シンク。MainActor へホップして集約する。
+    private func makeProgressReporter() -> TransferProgressReporter {
+        { [weak self] event in
+            Task { @MainActor in self?.applyProgress(event) }
+        }
+    }
+
+    /// 進捗イベントを `activeTransfers` に反映する。MainActor 上で直列実行されるが、
+    /// reporter が生む Task の到着順は前後し得るので、update は既存エントリの増加方向のみ適用する。
+    private func applyProgress(_ event: TransferProgressEvent) {
+        switch event {
+        case let .begin(path, direction, total):
+            if let i = activeTransfers.firstIndex(where: { $0.path == path && $0.direction == direction }) {
+                activeTransfers[i].totalBytes = total
+            } else {
+                activeTransfers.append(TransferProgress(
+                    path: path, direction: direction, transferredBytes: 0, totalBytes: total
+                ))
+            }
+        case let .update(path, direction, transferred):
+            if let i = activeTransfers.firstIndex(where: { $0.path == path && $0.direction == direction }),
+               transferred > activeTransfers[i].transferredBytes {
+                activeTransfers[i].transferredBytes = transferred
+            }
+        case let .end(path, direction):
+            activeTransfers.removeAll { $0.path == path && $0.direction == direction }
+        }
     }
 
     // MARK: - Triggers (timer / wake / network)
@@ -414,7 +450,8 @@ final class SyncEngine {
             syncRoot: syncRoot,
             tmpDir: tmpDir,
             deviceId: deviceId,
-            transferStore: TransferStateStore(db: db)
+            transferStore: TransferStateStore(db: db),
+            progressReporter: makeProgressReporter()
         )
 
         // 1) 取り込み（最大 5 並列）
@@ -614,7 +651,8 @@ final class SyncEngine {
     private func runQueueLoop() async {
         let uploader = Uploader(
             s3: s3, db: db, syncRoot: syncRoot, deviceId: deviceId, config: config,
-            transferStore: TransferStateStore(db: db)
+            transferStore: TransferStateStore(db: db),
+            progressReporter: makeProgressReporter()
         )
         while !Task.isCancelled {
             if paused {

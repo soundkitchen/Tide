@@ -38,6 +38,8 @@ struct Downloader {
     let deviceId: String
     /// 中断・再開（サブ D）の checkpoint 永続化。
     let transferStore: any TransferStateStoring
+    /// 進捗報告（メニューバー表示用）。nil 可。
+    var progressReporter: TransferProgressReporter? = nil
 
     /// リモート 1 ファイルをローカルに反映する。
     /// - Returns: 実際に書き込みが行われたら true、スキップなら false。
@@ -92,11 +94,20 @@ struct Downloader {
             )
         }
 
+        // 進捗報告（begin → ストリーム中に coalesce して update → 関数脱出で end）。
+        let reporter = progressReporter
+        reporter?(.begin(path: relativePath, direction: .download, totalBytes: entry.size))
+        defer { reporter?(.end(path: relativePath, direction: .download)) }
+        if resumeFrom > 0 {
+            reporter?(.update(path: relativePath, direction: .download, transferredBytes: resumeFrom))
+        }
+
         // S3 からチャンク・ストリーミングで tmp へ（resume なら末尾へ追記）取得し、SHA-256 を逐次更新する。
         // M7: マニフェストの真実サイズ entry.size を上限に、累積長で弾く（巨大本文による同期ボリュームの
         // ディスク枯渇 DoS を防ぐ＝M4 の cap を復元経路でも維持）。超過は tooLarge ＝破棄して仕切り直す。
         let maxBytes = entry.size
         var total: Int64 = resumeFrom
+        var lastReported: Int64 = resumeFrom
         let handle = try FileHandle(forWritingTo: tmpURL)
         let streamResult: TideS3Client.StreamObjectResult?
         do {
@@ -108,6 +119,11 @@ struct Downloader {
                 if total > maxBytes { throw DownloadAbort.tooLarge }
                 hasher.update(data: chunk)
                 try handle.write(contentsOf: chunk)
+                // 進捗は ~4MiB ごとに coalesce して報告（MainActor へのホップを抑える）。
+                if total - lastReported >= 4 * 1024 * 1024 {
+                    lastReported = total
+                    reporter?(.update(path: relativePath, direction: .download, transferredBytes: total))
+                }
             }
             try handle.synchronize()
             try handle.close()

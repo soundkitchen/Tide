@@ -237,6 +237,10 @@
 ### UI 起動・遷移
 - **`MenuBarExtra(.window)` のポップオーバー内ボタンから `openWindow(id:)` を呼ぶときは、`NSApp.activate(ignoringOtherApps: true)` を必ず前置**。LSUIElement = YES のアプリだとアプリがフォアグラウンドに来ておらず、新しいウィンドウが obscured になる。
 
+### 転送進捗 UI（サブ D-D4）
+- **進行中の大ファイル転送はメニューバーのポップオーバー（`MenuBarContent`）に「Transferring」セクションで表示**（方向アイコン + ファイル名 + % + `ProgressView`）。状態は `SyncEngine.activeTransfers: [TransferProgress]`（@Observable・MainActor）。
+- **進捗の流れ**: off-main の `Uploader`/`Downloader` が `@Sendable TransferProgressReporter`（`begin`/`update`/`end`）を発行 → `SyncEngine` が `Task { @MainActor }` で `applyProgress` に集約。**reporter が生む Task の到着順は前後し得る**ので、`update` は既存エントリの**増加方向のみ**適用し、`begin` で作成・`end` で除去する（(path, direction) で一意）。MainActor へのホップを抑えるため、アップロードはパート完了ごと、ダウンロードは ~4MiB ごとに coalesce して報告する。シングルパート（≤16MiB）は進捗を出さない。`stop()` で `activeTransfers` をクリア。
+
 ### Bootstrap 失敗時の挙動
 - **`AppEnvironment.bootstrapFailure` に詳細理由（どのフィールド / Keychain 読みでコケたか）を入れる**。`MenuBarContent` はその値を見て自動的にセットアップウィザードを再表示する。
 
@@ -247,7 +251,7 @@
 - **C3 後半**: HTTPS 強制バケットポリシー（`PutBucketPolicy` で `aws:SecureTransport=true`）。SDK 自体は HTTPS 既定で送るので緊急度は低い。
 - **H3**: 静的 AWS キー → STS / IAM Identity Center への構造的置き換え。M3 以降で要検討。
 - **M5 / F3 (L9)**: ✅ 解消済み（2026-06-02）。M3 マルチパート対応で `NoFollowFileReader`（`O_NOFOLLOW` の単一 FD）に置換し、ハッシュ計算と本体読込/パート送信を同一 FD 化＝2 回 open の TOCTOU を構造的に解消。`O_NOFOLLOW` は最終コンポーネントのみ有効（祖先 symlink は別レイヤ）。
-- **中断・再開（サブタスク D・進行中）**: D1（`transfer_state` + `TransferStateStore`）/ D2（アップロードの再起動またぎ再開）/ D3（ダウンロードの Range 再開）は ✅ 実装済み（2026-06-04）。アップロードは `MultipartUploader.ResumeContext` で UploadId と完了パートを checkpoint。ダウンロードは `Downloader` が決定的 tmp（`dl-<sha(path)>.part`）＋ `transfer_state`（tmp_path/expected_etag）で、永続行が現エントリ etag と一致すれば `streamObject(rangeStart:)` で `Range: bytes=N-` 再開し、既存プレフィクスを読み直して全体 SHA を復元、最後に必ず期待 SHA と突合。ネットワーク失敗は部分 tmp と行を保持して次回再開、etag 不一致/SHA 不一致/サイズ超過/404 は破棄して仕切り直す。**残**: D4 進捗 UI（メニューバーポップオーバー） / D5 起動時オーファン掃除 + セキュリティレビュー。詳細は `docs/07-M3-IMPLEMENTATION-GUIDE.md` サブタスク D。
+- **中断・再開（サブタスク D・進行中）**: D1（`transfer_state` + `TransferStateStore`）/ D2（アップロードの再起動またぎ再開）/ D3（ダウンロードの Range 再開）は ✅ 実装済み（2026-06-04）。アップロードは `MultipartUploader.ResumeContext` で UploadId と完了パートを checkpoint。ダウンロードは `Downloader` が決定的 tmp（`dl-<sha(path)>.part`）＋ `transfer_state`（tmp_path/expected_etag）で、永続行が現エントリ etag と一致すれば `streamObject(rangeStart:)` で `Range: bytes=N-` 再開し、既存プレフィクスを読み直して全体 SHA を復元、最後に必ず期待 SHA と突合。ネットワーク失敗は部分 tmp と行を保持して次回再開、etag 不一致/SHA 不一致/サイズ超過/404 は破棄して仕切り直す。D4 進捗 UI も ✅ 実装済み（下記「転送進捗 UI」）。**残**: D5 起動時オーファン掃除 + セキュリティレビュー + 動作チェックリスト。詳細は `docs/07-M3-IMPLEMENTATION-GUIDE.md` サブタスク D。
 - **F1 (L8)**: ✅ 解消済み（2026-06-04）。`.syncignore` の照合から `NSRegularExpression` を廃し、グロブをトークン列へコンパイルして reachable-set DP で評価する線形時間照合（`O(パターン長 × パス長)`、バックトラッキング無し）へ置換＝ReDoS を構造的に解消。`parse` の各上限は防御的サニティ上限として保持。意味論は旧 regex 実装との differential fuzz で同値確認（`SyncIgnoreMatcherTests`）。
 - **F4 (H2 UI 残)**: UI の `recentErrors` / `.error` が生 SDK エラー文字列（バケット名・キー・リージョン等のメタデータ。認証情報は含まない）を表示。**意図的に保持**（デバッグで実利が大きく、OS Log は `.private` 化済みで UI が事後コピーの実質唯一ソース。重要度 Low・本人画面のみ）。**他人配布／単一ユーザ開発を抜ける前に再評価**し、是正は単純削除でなく「UI は分類サマリ + 詳細をオンデマンド展開/コピー」案で（`S3ErrorClassifier` / `SyncError.description` 流用。`security/high.md` H2 残存項参照）。
 - **アップロード側の並行更新検出（last-writer-wins ギャップ）**: M3 サブ C で競合解決を `ThreeWayMerge` に形式化したが、適用は pull/削除側のみ。同一ベースから 2 台が編集すると後勝ちでマニフェストが上書きされ、先に上げた側は次回 pull で「local == base＝未編集」判定で相手版を取り込み、ローカル編集がワーキングコピーから消える（S3 バージョン履歴には残る）。対称化＝`Uploader.processUpload` 直前にも `ThreeWayMerge` を適用（per-upload リモートマニフェスト読み + アップロード側コンフリクト経路）は別サブタスク。

@@ -26,6 +26,7 @@
 		5985D271E50C37ABEBE5327A /* Uploader.swift in Sources */ = {isa = PBXBuildFile; fileRef = D04EABECEE4BD6B84BAC341A /* Uploader.swift */; };
 		5BE0DB13AD7C865881AA99AF /* LocalDatabase.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C08DD3532C0C011010E53F2 /* LocalDatabase.swift */; };
 		5F924B1D5938B20402709207 /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA3C0DA079E4E103465665CD /* KeychainStore.swift */; };
+		61DB11E9448AB80DC1C16813 /* TransferProgress.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8365D23DF63BE91A08BA2396 /* TransferProgress.swift */; };
 		6713D52E474D2DE81405414C /* ManifestShardingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57ED617F25861D75B21F4EE8 /* ManifestShardingTests.swift */; };
 		682CA6BBC7DAB4A2AF4DBE1C /* PartPlanTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F70D2AA788DB745DCCCD3F01 /* PartPlanTests.swift */; };
 		694216A7F3CCAD5B026C98A1 /* AWSCredentials.swift in Sources */ = {isa = PBXBuildFile; fileRef = 81A0B0642C4340182C0BDB0A /* AWSCredentials.swift */; };
@@ -117,6 +118,7 @@
 		7D5A3FCD54C910A40D3A0DF3 /* PathValidator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PathValidator.swift; sourceTree = "<group>"; };
 		81A0B0642C4340182C0BDB0A /* AWSCredentials.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AWSCredentials.swift; sourceTree = "<group>"; };
 		82D4E74A4850C7BA2FAD0EA3 /* FileEntry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileEntry.swift; sourceTree = "<group>"; };
+		8365D23DF63BE91A08BA2396 /* TransferProgress.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TransferProgress.swift; sourceTree = "<group>"; };
 		858DA1ADDCE543AC588ADC2A /* SyncStatus.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncStatus.swift; sourceTree = "<group>"; };
 		85B8648A9E5391D4725A0EE7 /* ManifestSharding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManifestSharding.swift; sourceTree = "<group>"; };
 		86CCB3744E3CE4973CE0ED13 /* Manifest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Manifest.swift; sourceTree = "<group>"; };
@@ -163,6 +165,7 @@
 				82D4E74A4850C7BA2FAD0EA3 /* FileEntry.swift */,
 				52A253BAA0EB5A4D52C3E77A /* SyncEvent.swift */,
 				858DA1ADDCE543AC588ADC2A /* SyncStatus.swift */,
+				8365D23DF63BE91A08BA2396 /* TransferProgress.swift */,
 			);
 			path = Models;
 			sourceTree = "<group>";
@@ -441,6 +444,7 @@
 				0B1223F221B8AB1CA0F17D62 /* ThreeWayMerge.swift in Sources */,
 				A674AB99F3B090F076F6C29B /* TideApp.swift in Sources */,
 				114F8696EC6701E674C97FDA /* TideTmpDirectory.swift in Sources */,
+				61DB11E9448AB80DC1C16813 /* TransferProgress.swift in Sources */,
 				85F79DB89C0366427949BD07 /* TransferStateStore.swift in Sources */,
 				5985D271E50C37ABEBE5327A /* Uploader.swift in Sources */,
 			);
