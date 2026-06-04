@@ -138,7 +138,7 @@ CREATE TABLE transfer_state (
 
     -- ダウンロード（Range）再開用
     tmp_path TEXT,           -- 追記していく決定的な一時ファイルパス
-    bytes_done INTEGER,      -- これまでに書き込めたバイト数（次回 Range の起点）
+    bytes_done INTEGER,      -- 直近に把握した進捗バイト数（失敗時に記録＝updated_at の heartbeat。再開起点は tmp 実サイズを真実とする）
     expected_etag TEXT,      -- リモートが変わっていないかの検証（変われば破棄して再取得）
 
     -- 検証スナップショット（アップロード: 再開時にローカルが変わっていないか照合）
@@ -150,7 +150,7 @@ CREATE TABLE transfer_state (
 );
 ```
 
-再開の整合性: SHA は両経路とも streaming で確定するため、再開時は**未処理分だけネットワークし、既処理分はローカル再読込でハッシュを復元**し、最後に必ず期待 SHA と突合する（不一致なら破棄してフル再送＝自己回復）。`recordCompletedPart` / `recordDownloadProgress` の checkpoint をプロセス kill 後の再開起点に使う。完了・恒久失敗で行は削除し、起動時に消えたファイル/古い行/宙ぶらりんの `upload_id` を best-effort で掃除する（D5）。
+再開の整合性: SHA は両経路とも streaming で確定するため、再開時は**未処理分だけネットワークし、既処理分はローカル再読込でハッシュを復元**し、最後に必ず期待 SHA と突合する（不一致なら破棄してフル再送＝自己回復）。アップロードは `recordCompletedPart`（完了パートの etag）を再開起点に使う。ダウンロードは **tmp の実サイズ**を再開起点の真実とし（`bytes_done` 列は失敗時に `recordDownloadProgress` で更新する `updated_at` の heartbeat 兼 introspection）、`expected_etag` の照合と最終 SHA 突合で妥当性を担保する。完了・恒久失敗で行は削除し、起動時に消えたファイル/古い行/宙ぶらりんの `upload_id` を best-effort で掃除する（D5）。
 
 ## マイグレーション戦略
 

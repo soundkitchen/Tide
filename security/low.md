@@ -185,7 +185,7 @@ symlink を辿り、リンク先（例: `~/.ssh/id_rsa`）の中身を S3 へ送
 **レビュー観点と結論:**
 - **Range ヘッダのインジェクション**: `Range: bytes=<N>-` の `N` は**自前で算出した `Int64`**（再開元の tmp 実サイズ）のみ。リモート由来文字列を入れないので注入余地なし。
 - **DB の `tmp_path` を盲信しない**: 再開時は `tmpDir + sha256(relativePath)` から **tmpURL を再計算**し、`persisted.tmpPath == tmpURL.path` のときだけ再開する。DB が改ざんされても tmpDir 外へ書く経路にならない（`relativePath` は事前に `resolveForWrite` で検証済み）。
-- **決定的 tmp 名の予測可能性 / 事前設置**: tmp 名は `sha256(relativePath)` で予測可能だが、(1) 新規取得は `removeItem`→`createFile` で既存（symlink 含む）を消してから作る、(2) **再開は tmp が symlink なら破棄してフル取得**（`PathValidator.isSymbolicLink` ガード）、(3) 最終的に**マニフェスト SHA と突合**してから `resolveForWrite` 済みパスへ `moveItem`。よって攻撃者が tmp を事前設置しても、内容注入は SHA ゲートで弾かれ、symlink 経由の任意箇所書込は (2) で塞ぐ。
+- **決定的 tmp 名の予測可能性 / 事前設置**: tmp 名は `sha256(relativePath)` で予測可能だが、書込はすべて **symlink 非追従**で行う（PR #4 レビューで fresh 側の追従窓を解消・2026-06-05）。(1) 新規取得は `Downloader.openTmpForWriting(append:false)` が `open(O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW)` で作る（既存 or symlink なら失敗＝追従しない。旧 `createFile` の `removeItem`→作成の TOCTOU を解消）、(2) 再開は `O_WRONLY|O_NOFOLLOW`（加えて開く前に `PathValidator.isSymbolicLink` でも弾く）、(3) 最終的に**マニフェスト SHA と突合**してから `resolveForWrite` 済みパスへ `moveItem`。よって攻撃者が tmp を事前設置しても、内容注入は SHA ゲートで弾かれ、symlink 経由の任意箇所書込は open の `O_NOFOLLOW` で構造的に塞がれる（アップロード側 `NoFollowFileReader` と対称）。
 - **サイズ上限（M7 DoS）**: 再開分（既存プレフィクス長）を含む累積長を `entry.size` と突合し超過は破棄（[medium.md](medium.md) M7 参照）。
 - **宙ぶらりんリソースの蓄積**: `SyncEngine.start()` 冒頭の `pruneOrphanTransfers()` が、ローカルファイルの消えた upload 行（宙ぶらりん MPU を best-effort `abortMultipartUpload`）、tmp の消えた download 行、7 日より古い行を掃除する。S3 側の `tide-abort-incomplete-multipart`（7 日）と歩調を合わせる。
 - **secret 非保持**: `transfer_state` は path / UploadId / etag / partSize / mtime / size のみ。認証情報・本文は持たない。

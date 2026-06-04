@@ -79,6 +79,7 @@ struct Downloader {
         var hasher = SHA256()
         let persisted = try await transferStore.loadDownload(path: relativePath)
         if let persisted,
+           !entry.etag.isEmpty,                          // 空 etag だと == 照合が no-op になるので resume しない（#4）
            persisted.tmpPath == tmpURL.path,
            persisted.expectedEtag == entry.etag,
            !PathValidator.isSymbolicLink(at: tmpURL),   // tmp が symlink に差し替わっていたら resume せず破棄
@@ -87,9 +88,10 @@ struct Downloader {
             resumeFrom = existingSize
             try Self.hashPrefix(of: tmpURL, into: &hasher)
         } else {
-            // 行が無い / etag 不一致 / tmp 無し or サイズ不整合 → フル取得を仕切り直す。
+            // 行が無い / etag 不一致(or 空) / tmp 無し or サイズ不整合 → フル取得を仕切り直す。
+            // #3: createFile は symlink を追従するため使わず、下の openTmpForWriting(O_CREAT|O_EXCL|O_NOFOLLOW)
+            //     で新規作成する。ここでは古い tmp（symlink 含む）を消すだけ。
             try? FileManager.default.removeItem(at: tmpURL)
-            FileManager.default.createFile(atPath: tmpURL.path, contents: nil)
             try await transferStore.beginDownload(
                 path: relativePath, tmpPath: tmpURL.path, expectedEtag: entry.etag
             )
@@ -109,10 +111,11 @@ struct Downloader {
         let maxBytes = entry.size
         var total: Int64 = resumeFrom
         var lastReported: Int64 = resumeFrom
-        let handle = try FileHandle(forWritingTo: tmpURL)
+        // #3: tmp 書込先の symlink 追従を防ぐ。fresh は O_CREAT|O_EXCL|O_NOFOLLOW で新規作成、
+        //     resume は O_WRONLY|O_NOFOLLOW で開いて末尾へ seek（追従窓を構造的に閉じる）。
+        let handle = try Self.openTmpForWriting(at: tmpURL, append: resumeFrom > 0)
         let streamResult: TideS3Client.StreamObjectResult?
         do {
-            if resumeFrom > 0 { try handle.seekToEnd() }
             streamResult = try await downloadClient.streamObject(
                 key: s3Key, rangeStart: resumeFrom > 0 ? resumeFrom : nil
             ) { chunk in
@@ -137,7 +140,10 @@ struct Downloader {
             throw abort.asSyncError(key: s3Key)
         } catch {
             // ネットワーク等の失敗 → 部分 tmp と行を保持し、次回 Range 再開に委ねる（abort/clear しない）。
+            // #1: 進捗を記録して bytes_done を最新化 + updated_at を前進させる
+            //     （起動時 prune の stale 判定が「実活動」を反映し、進捗のある tmp を 7 日で誤って消さない）。
             try? handle.close()
+            try? await transferStore.recordDownloadProgress(path: relativePath, bytesDone: total)
             throw error
         }
 
@@ -316,6 +322,26 @@ struct Downloader {
     static func resumeTmpURL(in tmpDir: URL, relativePath: String) -> URL {
         let h = HashCalculator.hex(SHA256.hash(data: Data(relativePath.utf8)))
         return tmpDir.appendingPathComponent("dl-\(h).part")
+    }
+
+    /// tmp を **symlink 非追従**で書込用に開く。`append=false`（fresh）は `O_CREAT|O_EXCL|O_NOFOLLOW`
+    /// で新規作成（既存 or symlink なら失敗＝追従しない）、`append=true`（resume）は `O_WRONLY|O_NOFOLLOW`
+    /// で開いて末尾へ seek。アップロード側の `NoFollowFileReader` と対称に、書込側の symlink 追従窓を閉じる（#3）。
+    static func openTmpForWriting(at url: URL, append: Bool) throws -> FileHandle {
+        let flags: Int32 = append
+            ? (O_WRONLY | O_NOFOLLOW)
+            : (O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW)
+        let fd = url.path.withCString { open($0, flags, 0o600) }
+        if fd < 0 {
+            let err = errno
+            throw SyncError.ioError(underlying: NSError(
+                domain: "Tide.Downloader", code: -14,
+                userInfo: [NSLocalizedDescriptionKey: "failed to open tmp for writing (errno \(err))"]
+            ))
+        }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        if append { try handle.seekToEnd() }
+        return handle
     }
 
     static func fileSize(at url: URL) -> Int64? {

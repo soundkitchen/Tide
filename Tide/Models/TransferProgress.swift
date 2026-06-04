@@ -27,3 +27,36 @@ enum TransferProgressEvent: Sendable {
 /// 進捗を報告するためのシンク。`@Sendable` なので off-main のタスクから安全に呼べる
 /// （実体は `SyncEngine` が MainActor へホップして `activeTransfers` を更新する）。
 typealias TransferProgressReporter = @Sendable (TransferProgressEvent) -> Void
+
+extension TransferProgress {
+    /// 進捗イベントを現在のリストへ適用した新リストを返す（純粋関数）。
+    ///
+    /// reporter が生む Task の到着順は前後し得るため、out-of-order 耐性を持たせる:
+    /// - `begin`: (path, direction) のエントリを作成（既存なら total のみ更新）。
+    /// - `update`: **既存エントリの増加方向のみ**適用（不在＝end 済み or begin 前なら no-op＝復活させない）。
+    /// - `end`: 該当エントリを除去。
+    static func reduce(
+        _ transfers: [TransferProgress],
+        applying event: TransferProgressEvent
+    ) -> [TransferProgress] {
+        var list = transfers
+        switch event {
+        case let .begin(path, direction, total):
+            if let i = list.firstIndex(where: { $0.path == path && $0.direction == direction }) {
+                list[i].totalBytes = total
+            } else {
+                list.append(TransferProgress(
+                    path: path, direction: direction, transferredBytes: 0, totalBytes: total
+                ))
+            }
+        case let .update(path, direction, transferred):
+            if let i = list.firstIndex(where: { $0.path == path && $0.direction == direction }),
+               transferred > list[i].transferredBytes {
+                list[i].transferredBytes = transferred
+            }
+        case let .end(path, direction):
+            list.removeAll { $0.path == path && $0.direction == direction }
+        }
+        return list
+    }
+}

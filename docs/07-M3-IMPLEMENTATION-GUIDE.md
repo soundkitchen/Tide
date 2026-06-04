@@ -166,6 +166,14 @@ M2 の単純ルール（`04-SYNC-LOGIC.md`「競合解決」）を **ベース /
 - **D4 進捗 UI（✅ 実装済み）**: `SyncEngine.activeTransfers: [TransferProgress]`（@Observable）を追加。off-main の `Uploader`/`Downloader` が `@Sendable` な `TransferProgressReporter`（`begin`/`update`/`end`）を発行し、`SyncEngine` が `Task { @MainActor }` で `applyProgress` に集約（到着順は前後し得るので update は既存エントリの増加方向のみ適用、(path, direction) で一意）。アップロードはパート完了ごと（既送分も即時加算）、ダウンロードは ~4MiB ごとに coalesce。`MenuBarContent` のポップオーバーに「Transferring」セクション（方向アイコン + ファイル名 + % + `ProgressView`）を追加。新規 xcstrings キー `"Transferring"`（`extractionState:"manual"`）。`stop()` で `activeTransfers` をクリア。視覚確認は D5 の動作チェックリストで実機実施。
 - **D5 ドキュメント＋セキュリティ＋掃除（✅ 実装済み）**: `SyncEngine.start()` 冒頭で `pruneOrphanTransfers()`（キュー/プル開始前に awaited＝再開ロジックと競合させない）。ローカルファイルの消えた upload 行は宙ぶらりんの MPU を best-effort `abortMultipartUpload` して削除、tmp の消えた download 行は削除、両方向とも 7 日より古い行は失効扱い（S3 `tide-abort-incomplete-multipart` と歩調を合わせる）。セキュリティは `security/low.md` L12（攻撃面レビュー＝Range 注入なし / tmp_path 再計算照合 / 再開時 symlink 破棄ガード / SHA ゲート / オーファン掃除）。受け入れは `tmp/M3-動作チェックリスト.md`（大ファイル round-trip・kill→再開 up/down・進捗 UI を実機で確認後に削除）。
 
+### PR #4 レビュー反映（2026-06-05）
+soundkitchen のレビュー（ブロッカー無し）を受けて 4 点を対応、2 点を据え置き。
+- **#1 配線**: `Downloader` のネットワーク失敗 catch で `recordDownloadProgress(total)` を呼び、`bytes_done` を最新化＋`updated_at` を前進。これで本番未使用だった同メソッドが意味を持ち、`pruneOrphanTransfers` の 7 日 stale 判定が「実活動」を反映する（進捗のある tmp を誤って消さない）。
+- **#3 symlink 追従窓**: fresh の tmp 書込を `Downloader.openTmpForWriting`（`O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW`）へ。旧 `removeItem`→`createFile` の TOCTOU を解消し、アップロード側 `NoFollowFileReader` と対称化。
+- **#4 空 etag ガード**: `ManifestFileEntry.etag` は `s3Etag ?? ""` で空になり得るので、空のときは再開 etag 照合が no-op になる。空 etag では resume せずフル取得に倒す（`!entry.etag.isEmpty` 条件）。
+- **#6 進捗集約のテスト**: `applyProgress` を純粋関数 `TransferProgress.reduce` に切り出し、`TransferProgressTests` で begin/update（増加方向のみ）/end と out-of-order（end 後の遅延 update で復活しない等）を固定。
+- **据え置き（Low/nit）**: #2 complete 直後クラッシュの stale UploadId（`NoSuchUpload` 空振り。正しく塞ぐには `HeadObject` 復旧が要る）、#5 進捗 begin/end の Task 再順序ゴースト（純粋 reducer では塞げない・ほぼ起きない）。CLAUDE.md §8 に記録。
+
 ---
 
 ## サブタスク E: 帯域制御（オプション）

@@ -163,26 +163,10 @@ final class SyncEngine {
         }
     }
 
-    /// 進捗イベントを `activeTransfers` に反映する。MainActor 上で直列実行されるが、
-    /// reporter が生む Task の到着順は前後し得るので、update は既存エントリの増加方向のみ適用する。
+    /// 進捗イベントを `activeTransfers` に反映する。集約ロジックは純粋関数
+    /// `TransferProgress.reduce` に切り出し（out-of-order 耐性を `TransferProgressTests` で固定）。
     private func applyProgress(_ event: TransferProgressEvent) {
-        switch event {
-        case let .begin(path, direction, total):
-            if let i = activeTransfers.firstIndex(where: { $0.path == path && $0.direction == direction }) {
-                activeTransfers[i].totalBytes = total
-            } else {
-                activeTransfers.append(TransferProgress(
-                    path: path, direction: direction, transferredBytes: 0, totalBytes: total
-                ))
-            }
-        case let .update(path, direction, transferred):
-            if let i = activeTransfers.firstIndex(where: { $0.path == path && $0.direction == direction }),
-               transferred > activeTransfers[i].transferredBytes {
-                activeTransfers[i].transferredBytes = transferred
-            }
-        case let .end(path, direction):
-            activeTransfers.removeAll { $0.path == path && $0.direction == direction }
-        }
+        activeTransfers = TransferProgress.reduce(activeTransfers, applying: event)
     }
 
     // MARK: - 起動時のオーファン掃除（サブ D-D5）
