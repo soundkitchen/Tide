@@ -93,6 +93,9 @@ final class SyncEngine {
         running = true
         status = .idle
 
+        // 起動時のオーファン掃除（キュー/プル開始前に awaited で実施＝再開ロジックと競合させない）。
+        await pruneOrphanTransfers()
+
         // FileWatcher
         let watcher = FileWatcher(rootURL: syncRoot)
         self.watcher = watcher
@@ -179,6 +182,50 @@ final class SyncEngine {
             }
         case let .end(path, direction):
             activeTransfers.removeAll { $0.path == path && $0.direction == direction }
+        }
+    }
+
+    // MARK: - 起動時のオーファン掃除（サブ D-D5）
+
+    /// 不要になった `transfer_state` 行を片付ける。best-effort（失敗しても起動は続行）。
+    /// - upload: ローカルファイルが消えた行は宙ぶらりんの MPU を best-effort abort して削除。
+    /// - download: tmp が消えた行は削除（再開対象が無い）。
+    /// - 両方向とも 7 日より古い行は失効扱い（S3 の `tide-abort-incomplete-multipart` と歩調を合わせる）。
+    private func pruneOrphanTransfers() async {
+        let store = TransferStateStore(db: db)
+        let rows: [TransferStateRecord]
+        do {
+            rows = try await store.allEntries()
+        } catch {
+            AppLogger.sync.error("Transfer-state prune: list failed: \(String(describing: error), privacy: .private)")
+            return
+        }
+        guard !rows.isEmpty else { return }
+
+        let staleCutoff = Date().addingTimeInterval(-7 * 86_400).timeIntervalSince1970
+        for row in rows {
+            let isStale = row.updatedAt < staleCutoff
+            switch row.direction {
+            case TransferDirection.upload.rawValue:
+                let fileExists = (try? PathValidator.resolveSafely(relativePath: row.path, syncRoot: syncRoot))
+                    .map { FileManager.default.fileExists(atPath: $0.path) } ?? false
+                guard !fileExists || isStale else { continue }
+                if let uploadId = row.uploadId {
+                    try? await s3.abortMultipartUpload(key: "files/\(row.path)", uploadId: uploadId)
+                }
+                try? await store.clearUpload(path: row.path)
+                AppLogger.sync.info("Pruned orphan upload transfer: \(row.path, privacy: .private)")
+            case TransferDirection.download.rawValue:
+                let tmpMissing = row.tmpPath.map { !FileManager.default.fileExists(atPath: $0) } ?? true
+                guard tmpMissing || isStale else { continue }
+                if let tmp = row.tmpPath { try? FileManager.default.removeItem(atPath: tmp) }
+                try? await store.clearDownload(path: row.path)
+                AppLogger.sync.info("Pruned orphan download transfer: \(row.path, privacy: .private)")
+            default:
+                // 未知の direction は安全側で除去（両系を試みる）。
+                try? await store.clearUpload(path: row.path)
+                try? await store.clearDownload(path: row.path)
+            }
         }
     }
 

@@ -81,6 +81,7 @@ struct Downloader {
         if let persisted,
            persisted.tmpPath == tmpURL.path,
            persisted.expectedEtag == entry.etag,
+           !PathValidator.isSymbolicLink(at: tmpURL),   // tmp が symlink に差し替わっていたら resume せず破棄
            let existingSize = Self.fileSize(at: tmpURL),
            existingSize > 0, existingSize < entry.size {
             resumeFrom = existingSize

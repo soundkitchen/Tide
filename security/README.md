@@ -60,6 +60,7 @@ F4 の据え置き理由: 生エラー文字列は開発中のデバッグで実
 | L9 | アップロード読込が symlink 追従（読込時の再チェック無し） | ✅ Fixed（2026-06-02・M3。`NoFollowFileReader` で `O_NOFOLLOW` 単一 FD 化） |
 | L10 | マルチパート中の切り詰めで CompleteMultipartUpload 失敗 | ✅ Fixed（2026-06-02・空 parts ガード × 2） |
 | L11 | 巨大ファイルのパート肥大による常駐メモリ増 | ✅ Fixed（2026-06-02・`maxPartSize` 64MiB cap + デッドコード整理） |
+| L12 | 中断・再開（transfer_state / Range / 決定的 tmp）の攻撃面 | ✅ Reviewed（2026-06-05・M3 サブ D。tmp_path 再計算照合 / 再開時 symlink 破棄 / SHA ゲート / 起動時オーファン掃除） |
 
 凡例: ✅ Fixed / 🟡 Partial / ⏸ Deferred / 🔴 未対応
 
@@ -70,7 +71,7 @@ F4 の据え置き理由: 生エラー文字列は開発中のデバッグで実
 | 🔴 Critical | [critical.md](critical.md) | 3 |
 | 🟠 High | [high.md](high.md) | 3 |
 | 🟡 Medium | [medium.md](medium.md) | 7（M6 Fixed / M7 は 2026-06-02 検出・未対応） |
-| 🟢 Low / Hardening | [low.md](low.md) | 11（L9 Fixed / L10・L11 は 2026-06-02 検出・未対応） |
+| 🟢 Low / Hardening | [low.md](low.md) | 12（L12 = M3 サブ D 中断・再開の攻撃面・2026-06-05 Reviewed） |
 
 ## 当初の推奨対応順（参考）
 
