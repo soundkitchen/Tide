@@ -129,7 +129,9 @@ final class SyncEngine {
         Task { [weak self] in
             await self?.reloadIgnoreMatcher()
             await self?.triggerFullScan()
-            await self?.triggerRemotePull()
+            // 起動時 pull も他経路（poll/wake/network/手動）と同じ単一ゲートを通す
+            // （triggerRemotePull 内の remotePullInFlight で排他＝並行 DL を防止）。
+            await self?.triggerRemotePullSafely(reason: "startup")
         }
 
         startPollingTimer()
@@ -255,9 +257,8 @@ final class SyncEngine {
     }
 
     private func triggerRemotePullSafely(reason: String) async {
-        if remotePullInFlight { return }
-        remotePullInFlight = true
-        defer { remotePullInFlight = false }
+        // 再入ガードは triggerRemotePull() 側へ移設済み（全経路を単一ゲートで排他）。
+        // ここでは契機（reason）をログするだけ。
         AppLogger.sync.info("Triggering remote pull (\(reason, privacy: .private))")
         await triggerRemotePull()
     }
@@ -461,6 +462,14 @@ final class SyncEngine {
     /// - ローカル無しならダウンロード / SHA 衝突ならリネームしてからダウンロード
     /// - 変更があったシャードに属していたが remoteMap から消えたファイルは applyRemoteDeletion
     func triggerRemotePull() async {
+        // 並行 pull を構造的に禁止する単一ゲート。start()（起動時）・メニューの「S3 から取得」・
+        // poll / wake / network のすべてがこの公開メソッドを通るので、ここで排他すれば
+        // 同一ファイルが複数の reconcile から同時にダウンロードされ、決定的 tmp
+        // （dl-<sha(path)>.part）への並行追記で破損するのを防げる。
+        // @MainActor なので check と set の間に await が無く、2 つの呼びが割り込まずに直列化される。
+        if remotePullInFlight { return }
+        remotePullInFlight = true
+        defer { remotePullInFlight = false }
         AppLogger.sync.info("Starting remote pull")
         do {
             try await performRemotePull()

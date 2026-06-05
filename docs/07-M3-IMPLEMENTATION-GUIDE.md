@@ -174,6 +174,14 @@ soundkitchen のレビュー（ブロッカー無し）を受けて 4 点を対�
 - **#6 進捗集約のテスト**: `applyProgress` を純粋関数 `TransferProgress.reduce` に切り出し、`TransferProgressTests` で begin/update（増加方向のみ）/end と out-of-order（end 後の遅延 update で復活しない等）を固定。
 - **据え置き（Low/nit）**: #2 complete 直後クラッシュの stale UploadId（`NoSuchUpload` 空振り。正しく塞ぐには `HeadObject` 復旧が要る）、#5 進捗 begin/end の Task 再順序ゴースト（純粋 reducer では塞げない・ほぼ起きない）。CLAUDE.md §8 に記録。
 
+### 受け入れテストで発見・修正（2026-06-05）
+実機チェックリスト消化中に **重大なダウンロード破損バグ**を発見し修正した。
+- **症状**: kill→再開のダウンロードで、復元ファイルが `entry.size` より過大（全ゼロのテストファイルで +4〜5MB）になり、しかも整合性ゲートをすり抜けて commit → 監視経由で再アップロードされ**リモートのマニフェストまで汚染**した。
+- **原因**: リモート pull の並行。再入ガード `remotePullInFlight` は `triggerRemotePullSafely`（poll/wake/network）にしか無く、**`SyncEngine.start()`（起動時）と「S3 から取得」ボタンが `triggerRemotePull()` を無防備に直呼び**していた。起動時 pull と初回 network-up 等が並行すると、同一ファイルを 2 つの reconcile が**決定的 tmp `dl-<sha(path)>.part`（ファイル別ロック無し）へ並行追記** → 過大化。各 DL は自分の論理 SHA でゲート通過、`updateDBEntryAfterDownload` が `entry.size` を記録するので見逃された。**普通の起動操作で再現**（ユーザ操作不要）。
+- **修正（多層）**: (1) **pull の単一ゲート化**＝再入ガードを `triggerRemotePull()` 本体へ移設し、start()・ボタン・poll/wake/network の全経路を直列化（@MainActor で check→set 間に await が無く安全）。(2) **`Downloader.download` の commit 前に実 tmp サイズ == `entry.size` を検証**し不一致は破棄（論理 `total` でなく実ファイルサイズを突合する防御）。
+- **検証**: 修正版で kill→再開すると復元ファイルが size+sha ともマニフェスト記載値にぴったり一致・過大化なしを実機確認。`make build && make test` 通過。
+- **関連で発見した別バグ（別途対応）**: 中断したダウンロードは**再起動だけでは自動再開しない**（`ManifestReader` が DL 完了前にシャードを `shard_state` へ「取得済み」記録するため、次回 pull が当該シャードをスキップ＋未完で DB レコードも無い→ reconcile されず `Downloader.download` に到達しない）。Range 再開機構自体は正しいが**到達経路が無い**。クリーンインストール復旧が中断すると一部ファイルが取り残されうる。CLAUDE.md §8 に記録。
+
 ---
 
 ## サブタスク E: 帯域制御（オプション）
