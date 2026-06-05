@@ -17,6 +17,11 @@ final class AppEnvironment {
     /// 起動失敗を bootstrap が記録する。UI 側で「ウィザード強制表示」のヒントに使う。
     var bootstrapFailure: String?
 
+    /// bootstrap の再入ガード。eager（AppDelegate）と遅延（MenuBarContent.task）の 2 経路が
+    /// 並行して呼ばれ得るため、`engine` がまだ nil の `await launchEngineFromCurrentConfig()` 実行中に
+    /// もう一方が guard を抜けて二重に SyncEngine を起動するのを防ぐ。
+    @ObservationIgnored private var isBootstrapping = false
+
     init() {
         self.config = ConfigStore()
         self.keychain = KeychainStore()
@@ -24,14 +29,17 @@ final class AppEnvironment {
 
     /// アプリ起動時のブートストラップ。設定済みなら SyncEngine を立ち上げる。
     /// 失敗した場合は bootstrapFailure に詳細を書いて UI 側にウィザード再表示を促す。
+    /// 冪等: 既に起動済み（`engine != nil`）または起動処理進行中（`isBootstrapping`）なら何もしない。
     func bootstrap() async {
+        if engine != nil || isBootstrapping {
+            return  // 既に動いている / 起動処理中
+        }
+        isBootstrapping = true
+        defer { isBootstrapping = false }
         bootstrapFailure = nil
         guard config.setupCompleted else {
             AppLogger.ui.info("Setup not completed; awaiting wizard.")
             return
-        }
-        if engine != nil {
-            return  // 既に動いている
         }
         do {
             try await launchEngineFromCurrentConfig()
