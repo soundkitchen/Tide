@@ -203,7 +203,19 @@ final class SyncEngine {
                 AppLogger.sync.info("Pruned orphan upload transfer: \(row.path, privacy: .private)")
             case TransferDirection.download.rawValue:
                 let tmpMissing = row.tmpPath.map { !FileManager.default.fileExists(atPath: $0) } ?? true
-                guard tmpMissing || isStale else { continue }
+                if !tmpMissing && !isStale {
+                    // 再開可能（tmp あり・新しい）: 次回 pull で確実に reconcile されるよう、この path の
+                    // シャードの shard_state を無効化する。さもないと「シャードは取得済み（DL 完了前に
+                    // ManifestReader が記録）＋ DL 未完で FileRecord 無し」のため pull が当該ファイルを
+                    // 見落とし、Downloader の Range 再開に到達しない（中断ダウンロードの取り残し）。
+                    // シャードを invalidate すれば pull が S3 から再取得 → reconcile → 既存 tmp で Range 再開。
+                    let sid = ManifestSharding.shardId(for: row.path)
+                    try? await db.pool.write { db in
+                        _ = try ShardStateRecord.filter(Column("shard_id") == sid).deleteAll(db)
+                    }
+                    AppLogger.sync.info("Re-arm resumable download (invalidated shard cache): \(row.path, privacy: .private)")
+                    continue
+                }
                 if let tmp = row.tmpPath { try? FileManager.default.removeItem(atPath: tmp) }
                 try? await store.clearDownload(path: row.path)
                 AppLogger.sync.info("Pruned orphan download transfer: \(row.path, privacy: .private)")
