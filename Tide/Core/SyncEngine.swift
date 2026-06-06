@@ -24,6 +24,10 @@ final class SyncEngine {
     /// `@Sendable` reporter を通じて MainActor で更新する。(path, direction) で一意。
     var activeTransfers: [TransferProgress] = []
 
+    /// リモート pull が進行中か。並行 pull を禁止する単一ゲート（triggerRemotePull）の実体であり、
+    /// メニューバーの「Pull from S3」ボタンの進行表示（スピナー + Pulling…）にも使う（PR #9 レビュー ④）。
+    private(set) var isRemotePulling: Bool = false
+
     // MARK: - Dependencies
 
     private let db: LocalDatabase
@@ -42,7 +46,8 @@ final class SyncEngine {
     private var pollTask: Task<Void, Never>?
     private var wakeObserverTask: Task<Void, Never>?
     private var pathMonitor: NWPathMonitor?
-    private var remotePullInFlight: Bool = false
+    /// pull 進行中に手動「Pull from S3」が押されたら立て、現 pull 終了後にもう 1 周する（coalescing）。
+    @ObservationIgnored private var pendingManualPull: Bool = false
     private var paused: Bool = false
     private var running: Bool = false
     private var ignoreMatcher: SyncIgnoreMatcher = .empty
@@ -130,8 +135,8 @@ final class SyncEngine {
             await self?.reloadIgnoreMatcher()
             await self?.triggerFullScan()
             // 起動時 pull も他経路（poll/wake/network/手動）と同じ単一ゲートを通す
-            // （triggerRemotePull 内の remotePullInFlight で排他＝並行 DL を防止）。
-            await self?.triggerRemotePull(reason: "startup")
+            // （triggerRemotePull 内の isRemotePulling で排他＝並行 DL を防止）。
+            await self?.triggerRemotePull(reason: .startup)
         }
 
         startPollingTimer()
@@ -208,18 +213,10 @@ final class SyncEngine {
                     // シャードの shard_state キャッシュを「無効化」する。さもないと「シャードは取得済み（DL 完了前に
                     // ManifestReader が記録）＋ DL 未完で FileRecord 無し」のため pull が当該ファイルを
                     // 見落とし、Downloader の Range 再開に到達しない（中断ダウンロードの取り残し）。
-                    // 行は削除せず etag を空 sentinel に更新する（PR #9 レビュー ③）: `cached[S] = "" ≠ remote etag`
-                    // で必ず再 fetch させつつ、S がリモートから丸ごと消えた場合の removed-shard 検出
-                    // （`removed = cached − remote`）も温存する（行を消すと S が cached から消え、S 配下の
-                    // ローカルファイルへの削除伝播が永久に飛ぶ）。空 etag は実 S3 etag と衝突しない。
-                    let sid = ManifestSharding.shardId(for: row.path)
+                    // sentinel 化（空 etag・行は削除しない）の理由は LocalDatabase.invalidateShardCache の
+                    // doc コメント参照（セッション中の DL 失敗時の再 arm と共通機構。PR #9 レビュー ②③）。
                     do {
-                        try await db.pool.write { db in
-                            if var rec = try ShardStateRecord.fetchOne(db, key: sid) {
-                                rec.etag = ""
-                                try rec.update(db)
-                            }
-                        }
+                        try await db.invalidateShardCache(forPath: row.path)
                         AppLogger.sync.info("Re-arm resumable download (invalidated shard cache): \(row.path, privacy: .private)")
                     } catch {
                         // 失敗するとバグ②③の前提（次回 pull で再 fetch される）が崩れ取り残しが再発するので
@@ -247,7 +244,7 @@ final class SyncEngine {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(Double(interval)))
                 if Task.isCancelled { return }
-                await self?.triggerRemotePull(reason: "poll")
+                await self?.triggerRemotePull(reason: .poll)
             }
         }
     }
@@ -258,7 +255,7 @@ final class SyncEngine {
             let center = NSWorkspace.shared.notificationCenter
             for await _ in center.notifications(named: NSWorkspace.didWakeNotification) {
                 if Task.isCancelled { return }
-                await self?.triggerRemotePull(reason: "wake")
+                await self?.triggerRemotePull(reason: .wake)
             }
         }
         #endif
@@ -273,7 +270,7 @@ final class SyncEngine {
             let prev = lastSatisfied.swap(now)
             if now && !prev {
                 Task { @MainActor [weak self] in
-                    await self?.triggerRemotePull(reason: "network-up")
+                    await self?.triggerRemotePull(reason: .networkUp)
                 }
             }
         }
@@ -475,30 +472,55 @@ final class SyncEngine {
 
     // MARK: - Remote pull
 
+    /// リモート pull の契機。PR #9 ⑥ まではログ専用の文字列だったが、coalescing（PR #9 レビュー ④）で
+    /// 「manual のみ pending 化」という制御フローを持ったため enum 化（PR #10 レビュー Low-2）:
+    /// タイポや将来の呼び元追加で coalescing が黙って効かなくなる事故をコンパイル時に防ぐ。
+    /// ログには `rawValue` を出す。`manualCoalesced` は coalesced ラウンドのログ専用（呼び元は渡さない）。
+    enum PullReason: String, Sendable {
+        case startup
+        case poll
+        case wake
+        case networkUp = "network-up"
+        case manual
+        case manualCoalesced = "manual-coalesced"
+    }
+
     /// リモート（S3）の変更をローカルに取り込む。
     /// - シャード etag キャッシュ (`shard_state`) で差分のみ処理
     /// - ローカル無しならダウンロード / SHA 衝突ならリネームしてからダウンロード
     /// - 変更があったシャードに属していたが remoteMap から消えたファイルは applyRemoteDeletion
-    /// `reason` は契機ログ用（startup / poll / wake / network-up / 既定 manual）。**ゲート通過後にのみ**
+    /// `reason` は契機ログ + coalescing 分岐用（既定 `.manual`）。**ゲート通過後にのみ**
     /// ログするので、並行で弾かれた契機を「triggered」と誤記録しない（PR #9 レビュー ⑥。
     /// 旧 `triggerRemotePullSafely` ラッパを本メソッドへ畳み込んで廃止した）。
-    func triggerRemotePull(reason: String = "manual") async {
+    func triggerRemotePull(reason: PullReason = .manual) async {
         // 並行 pull を構造的に禁止する単一ゲート。start()（起動時）・メニューの「S3 から取得」・
         // poll / wake / network のすべてがこの公開メソッドを通るので、ここで排他すれば
         // 同一ファイルが複数の reconcile から同時にダウンロードされ、決定的 tmp
         // （dl-<sha(path)>.part）への並行追記で破損するのを防げる。
         // @MainActor なので check と set の間に await が無く、2 つの呼びが割り込まずに直列化される。
-        if remotePullInFlight { return }
-        remotePullInFlight = true
-        defer { remotePullInFlight = false }
-        AppLogger.sync.info("Starting remote pull (\(reason, privacy: .private))")
-        do {
-            try await performRemotePull()
-            lastRemoteCheckedAt = Date()
-        } catch {
-            AppLogger.sync.error("Remote pull failed: \(String(describing: error), privacy: .private)")
-            await appendError("Remote pull failed: \(error)")
+        if isRemotePulling {
+            // 手動押下だけはドロップせず pending 化して、現 pull 終了後にもう 1 周する（coalescing・
+            // PR #9 レビュー ④）。poll/wake/network は次の周期が必ず来るので従来どおりドロップで良い。
+            if reason == .manual { pendingManualPull = true }
+            return
         }
+        isRemotePulling = true
+        defer { isRemotePulling = false }
+        var currentReason = reason
+        repeat {
+            pendingManualPull = false
+            AppLogger.sync.info("Starting remote pull (\(currentReason.rawValue, privacy: .private))")
+            do {
+                try await performRemotePull()
+                lastRemoteCheckedAt = Date()
+            } catch {
+                AppLogger.sync.error("Remote pull failed: \(String(describing: error), privacy: .private)")
+                await appendError("Remote pull failed: \(error)")
+            }
+            currentReason = .manualCoalesced
+            // stop()（pause / factory reset 経路）後や呼び元タスクの cancel 後に新ラウンドを
+            // *開始* しない（PR #10 レビュー Low-1）。in-flight の 1 周は既存挙動どおり走り切る。
+        } while pendingManualPull && running && !Task.isCancelled
     }
 
     private func performRemotePull() async throws {

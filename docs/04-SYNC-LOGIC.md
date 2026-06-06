@@ -451,7 +451,9 @@ M2 で **S3 → ローカルの取り込み** が追加された。ローカル 
 2. **wake 復帰**: `NSWorkspace.didWakeNotification` を購読
 3. **network 復帰**: `NWPathMonitor` で `unsatisfied → satisfied` を検出
 
-これら 3 つに加え、起動時 pull（`start()`）とメニューの「S3 から取得」も含め、**すべて `triggerRemotePull(reason:)` の単一ゲートを通り、`remotePullInFlight` フラグで直列化される**（並行 pull を構造的に禁止＝同一ファイルの並行ダウンロードによる共有 tmp 破損を防ぐ）。`reason` はログ用で、ゲート通過後にのみ出力する。
+これら 3 つに加え、起動時 pull（`start()`）とメニューの「S3 から取得」も含め、**すべて `triggerRemotePull(reason:)` の単一ゲートを通り、`isRemotePulling` フラグで直列化される**（並行 pull を構造的に禁止＝同一ファイルの並行ダウンロードによる共有 tmp 破損を防ぐ）。`reason` はログ用で、ゲート通過後にのみ出力する。
+
+pull 進行中の再入は原則ドロップだが、**手動（`reason == .manual`）だけは pending 化し、現 pull 終了後にもう 1 周する**（coalescing・PR #9 レビュー ④。長い復元 pull 中の押下でも「最新を取得したい」意図が確実に反映される。reason は `.manualCoalesced`＝ログには `manual-coalesced`）。`reason` は coalescing の分岐条件を持ったため `SyncEngine.PullReason` enum（ログは rawValue）。poll/wake/network は次の周期が必ず来るので従来どおりドロップ。coalesced ラウンドは `running && !Task.isCancelled` も条件に含み、**`stop()` 後や呼び元タスク cancel 後に新ラウンドを開始しない**（in-flight の 1 周は走り切る）。`isRemotePulling` は `@Observable` な公開状態で、メニューバーの「Pull from S3」ボタンが pull 中はスピナー + 「Pulling…」表示に切り替わる（ボタンは enabled のまま＝押下が coalescing の入口）。
 
 ## ManifestReader: 変更差分の効率取得
 
@@ -491,7 +493,7 @@ struct ReadResult {
 10. transfer_state の行をクリア + DB を更新 + sync_log 記録
 ```
 
-> ストリーミング途中のネットワーク失敗は **部分 tmp と transfer_state 行を保持**し、次回 pull で同じ tmp を `Range: bytes=N-` で再開する（N は実際の tmp サイズ＝プロセス kill 後も確実）。実 DB + フェイク `RangedDownloadClient` での結合的ユニットテストは `DownloaderTests`。
+> ストリーミング途中のネットワーク失敗は **部分 tmp と transfer_state 行を保持**し、次回 pull で同じ tmp を `Range: bytes=N-` で再開する（N は実際の tmp サイズ＝プロセス kill 後も確実）。さらに **当該シャードの `shard_state` を sentinel 化（空 etag・`LocalDatabase.invalidateShardCache`）** する。`ManifestReader` は fetch 時点（DL 完了前）でシャードを「取得済み」記録するため、これを欠くと同一セッション中の poll/wake/network-up pull が当該シャードをキャッシュ済み扱いし、再開経路に到達しない（PR #9 レビュー ②）。再 arm はこの resumable 失敗のみで、**破棄系（SHA 不一致 / 実サイズ不一致 / サイズ超過 / 404）は再 arm しない**（決定的に再失敗するためリトライストームを避け、リモートのシャード etag 変化による自然回復に委ねる）。実 DB + フェイク `RangedDownloadClient` での結合的ユニットテストは `DownloaderTests`。
 
 ## 競合解決（3-way merge）
 

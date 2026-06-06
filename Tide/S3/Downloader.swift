@@ -140,10 +140,23 @@ struct Downloader {
             throw abort.asSyncError(key: s3Key)
         } catch {
             // ネットワーク等の失敗 → 部分 tmp と行を保持し、次回 Range 再開に委ねる（abort/clear しない）。
+            // 「等」にはローカル I/O 失敗（handle.write のディスクフル等）も含む: 決定的な破棄系とは違い
+            // Range 再開で再試行コストが小さく、空き容量回復で自己回復するため、同様に保持 + 再 arm する。
             // #1: 進捗を記録して bytes_done を最新化 + updated_at を前進させる
             //     （起動時 prune の stale 判定が「実活動」を反映し、進捗のある tmp を 7 日で誤って消さない）。
             try? handle.close()
             try? await transferStore.recordDownloadProgress(path: relativePath, bytesDone: total)
+            // PR #9 レビュー ②: ManifestReader は fetch 時点（DL 完了前）で shard_state を「取得済み」記録
+            // するため、ここで sentinel 化しないと同一セッション中の poll/wake/network-up pull が当該
+            // シャードをキャッシュ済み扱いし、再開経路（reconcile → Range 再開）に到達しない。
+            // 再 arm するのはこの resumable 失敗（部分 tmp 保持）のみ。破棄系（SHA/サイズ不一致・404）は
+            // 決定的に再失敗するため再 arm せず、リモートのシャード etag 変化による自然回復に委ねる。
+            do {
+                try await db.invalidateShardCache(forPath: relativePath)
+            } catch {
+                // 失敗すると「シャード変化 or 再起動まで取り残し」が再発するので無音にしない（PR #9 レビュー ⑤）。
+                AppLogger.s3.error("Re-arm in-session download failed for \(relativePath, privacy: .private): \(String(describing: error), privacy: .private)")
+            }
             throw error
         }
 

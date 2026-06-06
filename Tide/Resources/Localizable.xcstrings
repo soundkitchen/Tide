@@ -717,6 +717,17 @@
         }
       }
     },
+    "Pulling…" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "取得中…"
+          }
+        }
+      }
+    },
     "Queue: %lld" : {
       "extractionState" : "manual",
       "localizations" : {
