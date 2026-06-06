@@ -177,4 +177,24 @@ final class LocalDatabase: @unchecked Sendable {
                 .deleteAll(db)
         }
     }
+
+    // MARK: - shard_state
+
+    /// path が属するシャードの `shard_state` キャッシュを sentinel 化（空 etag）し、次回 pull に
+    /// 必ず再 fetch させる。中断・再開（サブ D）の「再 arm」共通機構: 起動時の
+    /// `SyncEngine.pruneOrphanTransfers` と、セッション中の DL 失敗（`Downloader.download` の
+    /// ネットワーク失敗 catch）の両方から呼ばれる。
+    /// 行は削除しない（PR #9 レビュー ③）: `cached[S] = "" ≠ remote etag` で必ず再 fetch させつつ、
+    /// S がリモートから丸ごと消えた場合の removed-shard 検出（`removed = cached − remote`）も温存する
+    /// （行を消すと S が cached から消え、S 配下の削除伝播が永久に飛ぶ）。空 etag は実 S3 etag と
+    /// 衝突しない。行が無ければ no-op（そのシャードは次回 pull で必ず fetch される）。
+    func invalidateShardCache(forPath relativePath: String) async throws {
+        let sid = ManifestSharding.shardId(for: relativePath)
+        try await pool.write { db in
+            if var rec = try ShardStateRecord.fetchOne(db, key: sid) {
+                rec.etag = ""
+                try rec.update(db)
+            }
+        }
+    }
 }

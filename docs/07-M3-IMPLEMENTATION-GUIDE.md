@@ -181,6 +181,7 @@ soundkitchen のレビュー（ブロッカー無し）を受けて 4 点を対�
 - **修正（多層）**: (1) **pull の単一ゲート化**＝再入ガードを `triggerRemotePull()` 本体へ移設し、start()・ボタン・poll/wake/network の全経路を直列化（@MainActor で check→set 間に await が無く安全）。(2) **`Downloader.download` の commit 前に実 tmp サイズ == `entry.size` を検証**し不一致は破棄（論理 `total` でなく実ファイルサイズを突合する防御）。
 - **検証**: 修正版で kill→再開すると復元ファイルが size+sha ともマニフェスト記載値にぴったり一致・過大化なしを実機確認。`make build && make test` 通過。
 - **関連で発見した別バグ（✅ 修正済み）**: 中断したダウンロードが**再起動だけでは自動再開しなかった**（`ManifestReader` が DL 完了前にシャードを `shard_state` へ「取得済み」記録するため、次回 pull が当該シャードをスキップ＋未完で DB レコードも無い→ reconcile されず `Downloader.download` に到達しない）。Range 再開機構自体は正しいが到達経路が無かった。**修正**: `SyncEngine.pruneOrphanTransfers` で再開可能な download 行（tmp あり・新しい）の path のシャードの `shard_state` を invalidate し、起動 pull に再取得→reconcile→Range 再開させる（既存機構の再利用）。実機で「再起動のみで自動 Range 再開・SHA 一致」を確認。CLAUDE.md §8 参照。
+- **セッション中の再 arm（PR #9 レビュー ②・✅ 修正済み 2026-06-07）**: 上記の再 arm は当初**起動時 prune でのみ**走り、セッション中に DL がネットワーク断等で失敗すると、シャードがリモートで変化するか再起動するまで取り残された。**修正**: sentinel 化を `LocalDatabase.invalidateShardCache(forPath:)` に共通化し、`Downloader.download` のネットワーク失敗 catch（部分 tmp を保持する resumable 失敗）からも呼ぶ。次の poll/wake/network-up pull が再取得→reconcile→Range 再開する。破棄系（SHA/サイズ不一致・404）は決定的に再失敗するため再 arm しない（`DownloaderTests` で両スコープを回帰固定）。
 
 ---
 

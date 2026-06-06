@@ -208,18 +208,10 @@ final class SyncEngine {
                     // シャードの shard_state キャッシュを「無効化」する。さもないと「シャードは取得済み（DL 完了前に
                     // ManifestReader が記録）＋ DL 未完で FileRecord 無し」のため pull が当該ファイルを
                     // 見落とし、Downloader の Range 再開に到達しない（中断ダウンロードの取り残し）。
-                    // 行は削除せず etag を空 sentinel に更新する（PR #9 レビュー ③）: `cached[S] = "" ≠ remote etag`
-                    // で必ず再 fetch させつつ、S がリモートから丸ごと消えた場合の removed-shard 検出
-                    // （`removed = cached − remote`）も温存する（行を消すと S が cached から消え、S 配下の
-                    // ローカルファイルへの削除伝播が永久に飛ぶ）。空 etag は実 S3 etag と衝突しない。
-                    let sid = ManifestSharding.shardId(for: row.path)
+                    // sentinel 化（空 etag・行は削除しない）の理由は LocalDatabase.invalidateShardCache の
+                    // doc コメント参照（セッション中の DL 失敗時の再 arm と共通機構。PR #9 レビュー ②③）。
                     do {
-                        try await db.pool.write { db in
-                            if var rec = try ShardStateRecord.fetchOne(db, key: sid) {
-                                rec.etag = ""
-                                try rec.update(db)
-                            }
-                        }
+                        try await db.invalidateShardCache(forPath: row.path)
                         AppLogger.sync.info("Re-arm resumable download (invalidated shard cache): \(row.path, privacy: .private)")
                     } catch {
                         // 失敗するとバグ②③の前提（次回 pull で再 fetch される）が崩れ取り残しが再発するので

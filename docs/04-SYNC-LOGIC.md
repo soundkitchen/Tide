@@ -491,7 +491,7 @@ struct ReadResult {
 10. transfer_state の行をクリア + DB を更新 + sync_log 記録
 ```
 
-> ストリーミング途中のネットワーク失敗は **部分 tmp と transfer_state 行を保持**し、次回 pull で同じ tmp を `Range: bytes=N-` で再開する（N は実際の tmp サイズ＝プロセス kill 後も確実）。実 DB + フェイク `RangedDownloadClient` での結合的ユニットテストは `DownloaderTests`。
+> ストリーミング途中のネットワーク失敗は **部分 tmp と transfer_state 行を保持**し、次回 pull で同じ tmp を `Range: bytes=N-` で再開する（N は実際の tmp サイズ＝プロセス kill 後も確実）。さらに **当該シャードの `shard_state` を sentinel 化（空 etag・`LocalDatabase.invalidateShardCache`）** する。`ManifestReader` は fetch 時点（DL 完了前）でシャードを「取得済み」記録するため、これを欠くと同一セッション中の poll/wake/network-up pull が当該シャードをキャッシュ済み扱いし、再開経路に到達しない（PR #9 レビュー ②）。再 arm はこの resumable 失敗のみで、**破棄系（SHA 不一致 / 実サイズ不一致 / サイズ超過 / 404）は再 arm しない**（決定的に再失敗するためリトライストームを避け、リモートのシャード etag 変化による自然回復に委ねる）。実 DB + フェイク `RangedDownloadClient` での結合的ユニットテストは `DownloaderTests`。
 
 ## 競合解決（3-way merge）
 

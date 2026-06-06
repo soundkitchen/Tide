@@ -42,6 +42,24 @@ final class DownloaderTests: XCTestCase {
         Downloader(downloadClient: client, db: db, syncRoot: root, tmpDir: tmp, deviceId: "devL", transferStore: store)
     }
 
+    /// path が属するシャードの shard_state 行を seed する（ManifestReader が fetch 時点で記録する状況の模擬）。
+    private func seedShardState(db: LocalDatabase, path: String, etag: String) async throws {
+        try await db.pool.write { dbq in
+            var rec = ShardStateRecord(
+                shardId: ManifestSharding.shardId(for: path),
+                etag: etag,
+                fetchedAt: Date().timeIntervalSince1970
+            )
+            try rec.save(dbq)
+        }
+    }
+
+    private func shardEtag(db: LocalDatabase, path: String) async throws -> String? {
+        try await db.pool.read { dbq in
+            try ShardStateRecord.fetchOne(dbq, key: ManifestSharding.shardId(for: path))?.etag
+        }
+    }
+
     // MARK: - テスト
 
     func testFreshDownloadWritesFileAndClears() async throws {
@@ -145,11 +163,44 @@ final class DownloaderTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: env.root.appendingPathComponent(rp).path))
     }
 
+    func testNetworkFailureRearmsShardCache() async throws {
+        // PR #9 レビュー ②: ネットワーク失敗（resumable・部分 tmp 保持）は当該シャードの shard_state を
+        // 空 etag に sentinel 化し、同一セッション中の次の poll/wake/network-up pull に再 fetch させる。
+        let env = try makeEnv()
+        let data = deterministicBytes(5000)
+        let rp = "rearm.bin"
+        try await seedShardState(db: env.db, path: rp, etag: "remote-abc")
+
+        let fake = FakeRangedDownloadClient(fullData: data, failAfterBytes: 2048)
+        let dl = makeDownloader(client: fake, db: env.db, store: env.store, root: env.root, tmp: env.tmp)
+
+        do {
+            _ = try await dl.download(relativePath: rp, entry: entry(for: data))
+            XCTFail("ネットワーク失敗は throw すべき")
+        } catch FakeDownloadError.injected {
+            // 期待どおり。
+        }
+
+        // 行は残したまま etag だけ空 sentinel（removed-shard 検出の温存）。
+        let etag = try await shardEtag(db: env.db, path: rp)
+        XCTAssertEqual(etag, "")
+    }
+
+    func testInvalidateShardCacheWithoutRowIsNoop() async throws {
+        // shard_state 行が無い（そのシャードは未 fetch）場合は no-op で成功する。
+        let env = try makeEnv()
+        let rp = "never-fetched.bin"
+        try await env.db.invalidateShardCache(forPath: rp)
+        let etag = try await shardEtag(db: env.db, path: rp)
+        XCTAssertNil(etag, "行を新規作成してはならない")
+    }
+
     func testShaMismatchDiscardsAndClears() async throws {
         let env = try makeEnv()
         let expected = deterministicBytes(5000, salt: 0)
         let served = deterministicBytes(5000, salt: 7)   // 同じ長さだが中身が違う
         let rp = "c.bin"
+        try await seedShardState(db: env.db, path: rp, etag: "remote-abc")
         let fake = FakeRangedDownloadClient(fullData: served)
         let dl = makeDownloader(client: fake, db: env.db, store: env.store, root: env.root, tmp: env.tmp)
 
@@ -166,6 +217,9 @@ final class DownloaderTests: XCTestCase {
         let row = try await env.store.loadDownload(path: rp)
         XCTAssertNil(row)
         XCTAssertFalse(FileManager.default.fileExists(atPath: env.root.appendingPathComponent(rp).path))
+        // 破棄系は再 arm しない（決定的に再失敗するのでリトライストームを避け、シャード etag 変化に委ねる）。
+        let etag = try await shardEtag(db: env.db, path: rp)
+        XCTAssertEqual(etag, "remote-abc")
     }
 
     func testOversizedTmpFromConcurrentAppendDiscardsAndClears() async throws {
@@ -200,6 +254,7 @@ final class DownloaderTests: XCTestCase {
         let env = try makeEnv()
         let data = deterministicBytes(3000)
         let rp = "missing.bin"
+        try await seedShardState(db: env.db, path: rp, etag: "remote-abc")
         let fake = FakeRangedDownloadClient(fullData: data, notFound: true)
         let dl = makeDownloader(client: fake, db: env.db, store: env.store, root: env.root, tmp: env.tmp)
 
@@ -214,6 +269,9 @@ final class DownloaderTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: tmpURL.path))
         let row = try await env.store.loadDownload(path: rp)
         XCTAssertNil(row)
+        // 404 も破棄系＝再 arm しない（削除の伝播はシャード etag 変化で届く）。
+        let etag = try await shardEtag(db: env.db, path: rp)
+        XCTAssertEqual(etag, "remote-abc")
     }
 }
 
