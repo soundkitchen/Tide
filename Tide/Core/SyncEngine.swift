@@ -505,7 +505,9 @@ final class SyncEngine {
                 await appendError("Remote pull failed: \(error)")
             }
             currentReason = "manual-coalesced"
-        } while pendingManualPull
+            // stop()（pause / factory reset 経路）後や呼び元タスクの cancel 後に新ラウンドを
+            // *開始* しない（PR #10 レビュー Low-1）。in-flight の 1 周は既存挙動どおり走り切る。
+        } while pendingManualPull && running && !Task.isCancelled
     }
 
     private func performRemotePull() async throws {

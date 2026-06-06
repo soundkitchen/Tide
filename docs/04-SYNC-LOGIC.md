@@ -453,7 +453,7 @@ M2 で **S3 → ローカルの取り込み** が追加された。ローカル 
 
 これら 3 つに加え、起動時 pull（`start()`）とメニューの「S3 から取得」も含め、**すべて `triggerRemotePull(reason:)` の単一ゲートを通り、`isRemotePulling` フラグで直列化される**（並行 pull を構造的に禁止＝同一ファイルの並行ダウンロードによる共有 tmp 破損を防ぐ）。`reason` はログ用で、ゲート通過後にのみ出力する。
 
-pull 進行中の再入は原則ドロップだが、**手動（`reason == "manual"`）だけは pending 化し、現 pull 終了後にもう 1 周する**（coalescing・PR #9 レビュー ④。長い復元 pull 中の押下でも「最新を取得したい」意図が確実に反映される。reason は `manual-coalesced` でログ）。poll/wake/network は次の周期が必ず来るので従来どおりドロップ。`isRemotePulling` は `@Observable` な公開状態で、メニューバーの「Pull from S3」ボタンが pull 中はスピナー + 「Pulling…」表示に切り替わる（ボタンは enabled のまま＝押下が coalescing の入口）。
+pull 進行中の再入は原則ドロップだが、**手動（`reason == "manual"`）だけは pending 化し、現 pull 終了後にもう 1 周する**（coalescing・PR #9 レビュー ④。長い復元 pull 中の押下でも「最新を取得したい」意図が確実に反映される。reason は `manual-coalesced` でログ）。poll/wake/network は次の周期が必ず来るので従来どおりドロップ。coalesced ラウンドは `running && !Task.isCancelled` も条件に含み、**`stop()` 後や呼び元タスク cancel 後に新ラウンドを開始しない**（in-flight の 1 周は走り切る）。`isRemotePulling` は `@Observable` な公開状態で、メニューバーの「Pull from S3」ボタンが pull 中はスピナー + 「Pulling…」表示に切り替わる（ボタンは enabled のまま＝押下が coalescing の入口）。
 
 ## ManifestReader: 変更差分の効率取得
 

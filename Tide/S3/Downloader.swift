@@ -140,6 +140,8 @@ struct Downloader {
             throw abort.asSyncError(key: s3Key)
         } catch {
             // ネットワーク等の失敗 → 部分 tmp と行を保持し、次回 Range 再開に委ねる（abort/clear しない）。
+            // 「等」にはローカル I/O 失敗（handle.write のディスクフル等）も含む: 決定的な破棄系とは違い
+            // Range 再開で再試行コストが小さく、空き容量回復で自己回復するため、同様に保持 + 再 arm する。
             // #1: 進捗を記録して bytes_done を最新化 + updated_at を前進させる
             //     （起動時 prune の stale 判定が「実活動」を反映し、進捗のある tmp を 7 日で誤って消さない）。
             try? handle.close()
