@@ -17,6 +17,11 @@ final class AppEnvironment {
     /// 起動失敗を bootstrap が記録する。UI 側で「ウィザード強制表示」のヒントに使う。
     var bootstrapFailure: String?
 
+    /// bootstrap の再入ガード。eager（AppDelegate）と遅延（MenuBarContent.task）の 2 経路が
+    /// 並行して呼ばれ得るため、`engine` がまだ nil の `await launchEngineFromCurrentConfig()` 実行中に
+    /// もう一方が guard を抜けて二重に SyncEngine を起動するのを防ぐ。
+    @ObservationIgnored private var isBootstrapping = false
+
     init() {
         self.config = ConfigStore()
         self.keychain = KeychainStore()
@@ -24,14 +29,25 @@ final class AppEnvironment {
 
     /// アプリ起動時のブートストラップ。設定済みなら SyncEngine を立ち上げる。
     /// 失敗した場合は bootstrapFailure に詳細を書いて UI 側にウィザード再表示を促す。
+    /// 冪等: 既に起動済み（`engine != nil`）なら bootstrapFailure をクリアして即 return（自己修復）、
+    /// 起動処理進行中（`isBootstrapping`）なら bootstrapFailure を触らず即 return。
     func bootstrap() async {
+        if engine != nil {
+            // 既に動いている＝失敗状態は解消済み。早期 return でも bootstrapFailure をクリアして
+            // 旧来の「毎回先頭でクリア」自己修復を温存する。さもないと「失敗→ウィザードで復旧→正常稼働」後も
+            // bootstrapFailure が残り、ポップオーバーを開くたびにウィザードが再表示され続ける（PR #7 レビュー Medium）。
+            bootstrapFailure = nil
+            return
+        }
+        if isBootstrapping {
+            return  // 起動処理進行中（bootstrapFailure は触らない＝進行中の launch に委ねる）
+        }
+        isBootstrapping = true
+        defer { isBootstrapping = false }
         bootstrapFailure = nil
         guard config.setupCompleted else {
             AppLogger.ui.info("Setup not completed; awaiting wizard.")
             return
-        }
-        if engine != nil {
-            return  // 既に動いている
         }
         do {
             try await launchEngineFromCurrentConfig()
@@ -110,6 +126,12 @@ final class AppEnvironment {
         config.syncRootPath = syncRootPath
         config.setupCompleted = true
 
+        // 二重起動防止（PR #7 レビュー Low）: setupCompleted を立てた後の seed/launch の await 中に、
+        // ポップオーバーから走る MenuBarContent.task → bootstrap() が engine==nil で通過して
+        // 2 つ目の SyncEngine を起動するのを防ぐ（bootstrap() は isBootstrapping を見て即 return する）。
+        isBootstrapping = true
+        defer { isBootstrapping = false }
+
         // 新規バケットのときだけ既定 .syncignore を置く（既存バケット参加時は競合回避のため作らない）
         let syncRoot = URL(fileURLWithPath: syncRootPath, isDirectory: true)
         await Self.seedDefaultSyncIgnoreIfNewBucket(
@@ -118,6 +140,8 @@ final class AppEnvironment {
         )
 
         try await launchEngineFromCurrentConfig()
+        // 復旧成功＝失敗状態を解消（PR #7 レビュー Medium）。これ以降は engine != nil 経路でも維持される。
+        bootstrapFailure = nil
     }
 
     /// ローカルに `.syncignore` が無く、かつリモートにマニフェストも無い（＝まだ誰も同期していない

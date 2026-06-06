@@ -262,6 +262,8 @@ struct PutObjectResult {
 [メニューバーアイコン表示]
 ```
 
+**bootstrap の起動契機（eager）**: 上記「設定あり → `SyncEngine.start()`」は **`@NSApplicationDelegateAdaptor` の `AppDelegate.applicationDidFinishLaunching` から eager に実行**する（`AppEnvironment` も `AppDelegate` が保持）。`MenuBarExtra(.window)` のポップオーバーコンテンツは初回オープン時に初めて生成されるため、bootstrap を `MenuBarContent.task` だけに置くと「メニューを開くまで同期/再開が始まらない」（ログイン自動起動後やアプリ再起動後に無同期になる）。`MenuBarContent.task` にも冪等な bootstrap 呼びを残し（未設定時のウィザード表示の保険）、`AppEnvironment.bootstrap()` は `engine != nil` と `isBootstrapping` で再入ガード済みなので 2 経路から呼ばれても二重起動しない。
+
 ## 同期処理フロー（M1: 一方向）
 
 ```
