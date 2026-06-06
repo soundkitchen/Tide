@@ -136,7 +136,7 @@ final class SyncEngine {
             await self?.triggerFullScan()
             // 起動時 pull も他経路（poll/wake/network/手動）と同じ単一ゲートを通す
             // （triggerRemotePull 内の isRemotePulling で排他＝並行 DL を防止）。
-            await self?.triggerRemotePull(reason: "startup")
+            await self?.triggerRemotePull(reason: .startup)
         }
 
         startPollingTimer()
@@ -244,7 +244,7 @@ final class SyncEngine {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(Double(interval)))
                 if Task.isCancelled { return }
-                await self?.triggerRemotePull(reason: "poll")
+                await self?.triggerRemotePull(reason: .poll)
             }
         }
     }
@@ -255,7 +255,7 @@ final class SyncEngine {
             let center = NSWorkspace.shared.notificationCenter
             for await _ in center.notifications(named: NSWorkspace.didWakeNotification) {
                 if Task.isCancelled { return }
-                await self?.triggerRemotePull(reason: "wake")
+                await self?.triggerRemotePull(reason: .wake)
             }
         }
         #endif
@@ -270,7 +270,7 @@ final class SyncEngine {
             let prev = lastSatisfied.swap(now)
             if now && !prev {
                 Task { @MainActor [weak self] in
-                    await self?.triggerRemotePull(reason: "network-up")
+                    await self?.triggerRemotePull(reason: .networkUp)
                 }
             }
         }
@@ -472,14 +472,27 @@ final class SyncEngine {
 
     // MARK: - Remote pull
 
+    /// リモート pull の契機。PR #9 ⑥ まではログ専用の文字列だったが、coalescing（PR #9 レビュー ④）で
+    /// 「manual のみ pending 化」という制御フローを持ったため enum 化（PR #10 レビュー Low-2）:
+    /// タイポや将来の呼び元追加で coalescing が黙って効かなくなる事故をコンパイル時に防ぐ。
+    /// ログには `rawValue` を出す。`manualCoalesced` は coalesced ラウンドのログ専用（呼び元は渡さない）。
+    enum PullReason: String, Sendable {
+        case startup
+        case poll
+        case wake
+        case networkUp = "network-up"
+        case manual
+        case manualCoalesced = "manual-coalesced"
+    }
+
     /// リモート（S3）の変更をローカルに取り込む。
     /// - シャード etag キャッシュ (`shard_state`) で差分のみ処理
     /// - ローカル無しならダウンロード / SHA 衝突ならリネームしてからダウンロード
     /// - 変更があったシャードに属していたが remoteMap から消えたファイルは applyRemoteDeletion
-    /// `reason` は契機ログ用（startup / poll / wake / network-up / 既定 manual）。**ゲート通過後にのみ**
+    /// `reason` は契機ログ + coalescing 分岐用（既定 `.manual`）。**ゲート通過後にのみ**
     /// ログするので、並行で弾かれた契機を「triggered」と誤記録しない（PR #9 レビュー ⑥。
     /// 旧 `triggerRemotePullSafely` ラッパを本メソッドへ畳み込んで廃止した）。
-    func triggerRemotePull(reason: String = "manual") async {
+    func triggerRemotePull(reason: PullReason = .manual) async {
         // 並行 pull を構造的に禁止する単一ゲート。start()（起動時）・メニューの「S3 から取得」・
         // poll / wake / network のすべてがこの公開メソッドを通るので、ここで排他すれば
         // 同一ファイルが複数の reconcile から同時にダウンロードされ、決定的 tmp
@@ -488,7 +501,7 @@ final class SyncEngine {
         if isRemotePulling {
             // 手動押下だけはドロップせず pending 化して、現 pull 終了後にもう 1 周する（coalescing・
             // PR #9 レビュー ④）。poll/wake/network は次の周期が必ず来るので従来どおりドロップで良い。
-            if reason == "manual" { pendingManualPull = true }
+            if reason == .manual { pendingManualPull = true }
             return
         }
         isRemotePulling = true
@@ -496,7 +509,7 @@ final class SyncEngine {
         var currentReason = reason
         repeat {
             pendingManualPull = false
-            AppLogger.sync.info("Starting remote pull (\(currentReason, privacy: .private))")
+            AppLogger.sync.info("Starting remote pull (\(currentReason.rawValue, privacy: .private))")
             do {
                 try await performRemotePull()
                 lastRemoteCheckedAt = Date()
@@ -504,7 +517,7 @@ final class SyncEngine {
                 AppLogger.sync.error("Remote pull failed: \(String(describing: error), privacy: .private)")
                 await appendError("Remote pull failed: \(error)")
             }
-            currentReason = "manual-coalesced"
+            currentReason = .manualCoalesced
             // stop()（pause / factory reset 経路）後や呼び元タスクの cancel 後に新ラウンドを
             // *開始* しない（PR #10 レビュー Low-1）。in-flight の 1 周は既存挙動どおり走り切る。
         } while pendingManualPull && running && !Task.isCancelled
