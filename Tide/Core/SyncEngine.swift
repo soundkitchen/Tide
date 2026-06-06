@@ -24,6 +24,10 @@ final class SyncEngine {
     /// `@Sendable` reporter を通じて MainActor で更新する。(path, direction) で一意。
     var activeTransfers: [TransferProgress] = []
 
+    /// リモート pull が進行中か。並行 pull を禁止する単一ゲート（triggerRemotePull）の実体であり、
+    /// メニューバーの「Pull from S3」ボタンの進行表示（スピナー + Pulling…）にも使う（PR #9 レビュー ④）。
+    private(set) var isRemotePulling: Bool = false
+
     // MARK: - Dependencies
 
     private let db: LocalDatabase
@@ -42,7 +46,8 @@ final class SyncEngine {
     private var pollTask: Task<Void, Never>?
     private var wakeObserverTask: Task<Void, Never>?
     private var pathMonitor: NWPathMonitor?
-    private var remotePullInFlight: Bool = false
+    /// pull 進行中に手動「Pull from S3」が押されたら立て、現 pull 終了後にもう 1 周する（coalescing）。
+    @ObservationIgnored private var pendingManualPull: Bool = false
     private var paused: Bool = false
     private var running: Bool = false
     private var ignoreMatcher: SyncIgnoreMatcher = .empty
@@ -130,7 +135,7 @@ final class SyncEngine {
             await self?.reloadIgnoreMatcher()
             await self?.triggerFullScan()
             // 起動時 pull も他経路（poll/wake/network/手動）と同じ単一ゲートを通す
-            // （triggerRemotePull 内の remotePullInFlight で排他＝並行 DL を防止）。
+            // （triggerRemotePull 内の isRemotePulling で排他＝並行 DL を防止）。
             await self?.triggerRemotePull(reason: "startup")
         }
 
@@ -480,17 +485,27 @@ final class SyncEngine {
         // 同一ファイルが複数の reconcile から同時にダウンロードされ、決定的 tmp
         // （dl-<sha(path)>.part）への並行追記で破損するのを防げる。
         // @MainActor なので check と set の間に await が無く、2 つの呼びが割り込まずに直列化される。
-        if remotePullInFlight { return }
-        remotePullInFlight = true
-        defer { remotePullInFlight = false }
-        AppLogger.sync.info("Starting remote pull (\(reason, privacy: .private))")
-        do {
-            try await performRemotePull()
-            lastRemoteCheckedAt = Date()
-        } catch {
-            AppLogger.sync.error("Remote pull failed: \(String(describing: error), privacy: .private)")
-            await appendError("Remote pull failed: \(error)")
+        if isRemotePulling {
+            // 手動押下だけはドロップせず pending 化して、現 pull 終了後にもう 1 周する（coalescing・
+            // PR #9 レビュー ④）。poll/wake/network は次の周期が必ず来るので従来どおりドロップで良い。
+            if reason == "manual" { pendingManualPull = true }
+            return
         }
+        isRemotePulling = true
+        defer { isRemotePulling = false }
+        var currentReason = reason
+        repeat {
+            pendingManualPull = false
+            AppLogger.sync.info("Starting remote pull (\(currentReason, privacy: .private))")
+            do {
+                try await performRemotePull()
+                lastRemoteCheckedAt = Date()
+            } catch {
+                AppLogger.sync.error("Remote pull failed: \(String(describing: error), privacy: .private)")
+                await appendError("Remote pull failed: \(error)")
+            }
+            currentReason = "manual-coalesced"
+        } while pendingManualPull
     }
 
     private func performRemotePull() async throws {

@@ -146,8 +146,20 @@ struct MenuBarContent: View {
                     Button("Force scan") {
                         Task { await engine.triggerFullScan() }
                     }
-                    Button("Pull from S3") {
+                    // pull 中もボタンは enabled のまま（押下は pending 化され、現 pull 終了後に
+                    // もう 1 周走る = SyncEngine.triggerRemotePull の coalescing。PR #9 レビュー ④）。
+                    Button {
                         Task { await engine.triggerRemotePull() }
+                    } label: {
+                        if engine.isRemotePulling {
+                            HStack(spacing: 4) {
+                                ProgressView()
+                                    .controlSize(.small)
+                                Text("Pulling…")
+                            }
+                        } else {
+                            Text("Pull from S3")
+                        }
                     }
                 }
             }

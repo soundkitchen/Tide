@@ -182,6 +182,7 @@ soundkitchen のレビュー（ブロッカー無し）を受けて 4 点を対�
 - **検証**: 修正版で kill→再開すると復元ファイルが size+sha ともマニフェスト記載値にぴったり一致・過大化なしを実機確認。`make build && make test` 通過。
 - **関連で発見した別バグ（✅ 修正済み）**: 中断したダウンロードが**再起動だけでは自動再開しなかった**（`ManifestReader` が DL 完了前にシャードを `shard_state` へ「取得済み」記録するため、次回 pull が当該シャードをスキップ＋未完で DB レコードも無い→ reconcile されず `Downloader.download` に到達しない）。Range 再開機構自体は正しいが到達経路が無かった。**修正**: `SyncEngine.pruneOrphanTransfers` で再開可能な download 行（tmp あり・新しい）の path のシャードの `shard_state` を invalidate し、起動 pull に再取得→reconcile→Range 再開させる（既存機構の再利用）。実機で「再起動のみで自動 Range 再開・SHA 一致」を確認。CLAUDE.md §8 参照。
 - **セッション中の再 arm（PR #9 レビュー ②・✅ 修正済み 2026-06-07）**: 上記の再 arm は当初**起動時 prune でのみ**走り、セッション中に DL がネットワーク断等で失敗すると、シャードがリモートで変化するか再起動するまで取り残された。**修正**: sentinel 化を `LocalDatabase.invalidateShardCache(forPath:)` に共通化し、`Downloader.download` のネットワーク失敗 catch（部分 tmp を保持する resumable 失敗）からも呼ぶ。次の poll/wake/network-up pull が再取得→reconcile→Range 再開する。破棄系（SHA/サイズ不一致・404）は決定的に再失敗するため再 arm しない（`DownloaderTests` で両スコープを回帰固定）。
+- **手動 pull の coalescing（PR #9 レビュー ④・✅ 修正済み 2026-06-07）**: 単一ゲート化の副作用で、pull 進行中の手動「S3 から取得」が無反応・無表示でドロップされていた。**修正**: 手動（`reason == "manual"`）のみ pending 化して現 pull 終了後にもう 1 周（`manual-coalesced`）。ゲートフラグは `isRemotePulling`（@Observable・`private(set)`）に改名・公開し、ボタンは pull 中スピナー + 「Pulling…」表示（enabled のまま＝押下が coalescing の入口）。`docs/04-SYNC-LOGIC.md` トリガー節参照。
 
 ---
 
