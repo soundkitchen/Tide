@@ -451,7 +451,7 @@ M2 で **S3 → ローカルの取り込み** が追加された。ローカル 
 2. **wake 復帰**: `NSWorkspace.didWakeNotification` を購読
 3. **network 復帰**: `NWPathMonitor` で `unsatisfied → satisfied` を検出
 
-3 つすべて `triggerRemotePullSafely(reason:)` を呼び、`remotePullInFlight` フラグで多重起動を抑制。
+これら 3 つに加え、起動時 pull（`start()`）とメニューの「S3 から取得」も含め、**すべて `triggerRemotePull(reason:)` の単一ゲートを通り、`remotePullInFlight` フラグで直列化される**（並行 pull を構造的に禁止＝同一ファイルの並行ダウンロードによる共有 tmp 破損を防ぐ）。`reason` はログ用で、ゲート通過後にのみ出力する。
 
 ## ManifestReader: 変更差分の効率取得
 

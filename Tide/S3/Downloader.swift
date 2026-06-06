@@ -159,6 +159,24 @@ struct Downloader {
             ))
         }
 
+        // 実ファイルサイズ検証（防御的・並行追記対策）:
+        // ストリームの `total` は「この呼び出しが論理的に処理したバイト数」で、共有 tmp
+        // （dl-<sha(path)>.part）へ別経路が並行追記しても捕捉できない。commit 前に **実 tmp サイズ**を
+        // 期待 `entry.size` と必ず突合し、不一致なら破棄して仕切り直す。これを欠くと、過大化した tmp が
+        // SHA ゲート（論理ハッシュ）をすり抜けて commit され、監視経由で再アップロードされてリモートの
+        // マニフェストまで汚染する事故が起きる。pull の単一ゲート化（SyncEngine 側）と二段で防ぐ。
+        let actualSize = Self.fileSize(at: tmpURL) ?? -1
+        if actualSize != entry.size {
+            try? FileManager.default.removeItem(at: tmpURL)
+            try? await transferStore.clearDownload(path: relativePath)
+            AppLogger.s3.error("Downloaded size mismatch (\(actualSize) != \(entry.size)): \(relativePath, privacy: .private)")
+            throw SyncError.ioError(underlying: NSError(
+                domain: "Tide.Downloader",
+                code: -15,
+                userInfo: [NSLocalizedDescriptionKey: "downloaded file size mismatch"]
+            ))
+        }
+
         // SHA 検証（不一致なら tmp を捨てて行をクリアし失敗＝壊れた内容を再開し続けない）
         let sha = HashCalculator.hex(hasher.finalize())
         if sha != entry.sha256 {

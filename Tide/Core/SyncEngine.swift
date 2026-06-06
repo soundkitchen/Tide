@@ -129,7 +129,9 @@ final class SyncEngine {
         Task { [weak self] in
             await self?.reloadIgnoreMatcher()
             await self?.triggerFullScan()
-            await self?.triggerRemotePull()
+            // 起動時 pull も他経路（poll/wake/network/手動）と同じ単一ゲートを通す
+            // （triggerRemotePull 内の remotePullInFlight で排他＝並行 DL を防止）。
+            await self?.triggerRemotePull(reason: "startup")
         }
 
         startPollingTimer()
@@ -201,7 +203,31 @@ final class SyncEngine {
                 AppLogger.sync.info("Pruned orphan upload transfer: \(row.path, privacy: .private)")
             case TransferDirection.download.rawValue:
                 let tmpMissing = row.tmpPath.map { !FileManager.default.fileExists(atPath: $0) } ?? true
-                guard tmpMissing || isStale else { continue }
+                if !tmpMissing && !isStale {
+                    // 再開可能（tmp あり・新しい）: 次回 pull で確実に reconcile されるよう、この path の
+                    // シャードの shard_state キャッシュを「無効化」する。さもないと「シャードは取得済み（DL 完了前に
+                    // ManifestReader が記録）＋ DL 未完で FileRecord 無し」のため pull が当該ファイルを
+                    // 見落とし、Downloader の Range 再開に到達しない（中断ダウンロードの取り残し）。
+                    // 行は削除せず etag を空 sentinel に更新する（PR #9 レビュー ③）: `cached[S] = "" ≠ remote etag`
+                    // で必ず再 fetch させつつ、S がリモートから丸ごと消えた場合の removed-shard 検出
+                    // （`removed = cached − remote`）も温存する（行を消すと S が cached から消え、S 配下の
+                    // ローカルファイルへの削除伝播が永久に飛ぶ）。空 etag は実 S3 etag と衝突しない。
+                    let sid = ManifestSharding.shardId(for: row.path)
+                    do {
+                        try await db.pool.write { db in
+                            if var rec = try ShardStateRecord.fetchOne(db, key: sid) {
+                                rec.etag = ""
+                                try rec.update(db)
+                            }
+                        }
+                        AppLogger.sync.info("Re-arm resumable download (invalidated shard cache): \(row.path, privacy: .private)")
+                    } catch {
+                        // 失敗するとバグ②③の前提（次回 pull で再 fetch される）が崩れ取り残しが再発するので
+                        // 無音にせず必ず可視化する（PR #9 レビュー ⑤）。
+                        AppLogger.sync.error("Re-arm resumable download failed for \(row.path, privacy: .private): \(String(describing: error), privacy: .private)")
+                    }
+                    continue
+                }
                 if let tmp = row.tmpPath { try? FileManager.default.removeItem(atPath: tmp) }
                 try? await store.clearDownload(path: row.path)
                 AppLogger.sync.info("Pruned orphan download transfer: \(row.path, privacy: .private)")
@@ -221,7 +247,7 @@ final class SyncEngine {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(Double(interval)))
                 if Task.isCancelled { return }
-                await self?.triggerRemotePullSafely(reason: "poll")
+                await self?.triggerRemotePull(reason: "poll")
             }
         }
     }
@@ -232,7 +258,7 @@ final class SyncEngine {
             let center = NSWorkspace.shared.notificationCenter
             for await _ in center.notifications(named: NSWorkspace.didWakeNotification) {
                 if Task.isCancelled { return }
-                await self?.triggerRemotePullSafely(reason: "wake")
+                await self?.triggerRemotePull(reason: "wake")
             }
         }
         #endif
@@ -247,20 +273,13 @@ final class SyncEngine {
             let prev = lastSatisfied.swap(now)
             if now && !prev {
                 Task { @MainActor [weak self] in
-                    await self?.triggerRemotePullSafely(reason: "network-up")
+                    await self?.triggerRemotePull(reason: "network-up")
                 }
             }
         }
         monitor.start(queue: DispatchQueue.global(qos: .utility))
     }
 
-    private func triggerRemotePullSafely(reason: String) async {
-        if remotePullInFlight { return }
-        remotePullInFlight = true
-        defer { remotePullInFlight = false }
-        AppLogger.sync.info("Triggering remote pull (\(reason, privacy: .private))")
-        await triggerRemotePull()
-    }
 
     func pause() {
         paused = true
@@ -460,8 +479,19 @@ final class SyncEngine {
     /// - シャード etag キャッシュ (`shard_state`) で差分のみ処理
     /// - ローカル無しならダウンロード / SHA 衝突ならリネームしてからダウンロード
     /// - 変更があったシャードに属していたが remoteMap から消えたファイルは applyRemoteDeletion
-    func triggerRemotePull() async {
-        AppLogger.sync.info("Starting remote pull")
+    /// `reason` は契機ログ用（startup / poll / wake / network-up / 既定 manual）。**ゲート通過後にのみ**
+    /// ログするので、並行で弾かれた契機を「triggered」と誤記録しない（PR #9 レビュー ⑥。
+    /// 旧 `triggerRemotePullSafely` ラッパを本メソッドへ畳み込んで廃止した）。
+    func triggerRemotePull(reason: String = "manual") async {
+        // 並行 pull を構造的に禁止する単一ゲート。start()（起動時）・メニューの「S3 から取得」・
+        // poll / wake / network のすべてがこの公開メソッドを通るので、ここで排他すれば
+        // 同一ファイルが複数の reconcile から同時にダウンロードされ、決定的 tmp
+        // （dl-<sha(path)>.part）への並行追記で破損するのを防げる。
+        // @MainActor なので check と set の間に await が無く、2 つの呼びが割り込まずに直列化される。
+        if remotePullInFlight { return }
+        remotePullInFlight = true
+        defer { remotePullInFlight = false }
+        AppLogger.sync.info("Starting remote pull (\(reason, privacy: .private))")
         do {
             try await performRemotePull()
             lastRemoteCheckedAt = Date()

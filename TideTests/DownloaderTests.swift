@@ -168,6 +168,34 @@ final class DownloaderTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: env.root.appendingPathComponent(rp).path))
     }
 
+    func testOversizedTmpFromConcurrentAppendDiscardsAndClears() async throws {
+        let env = try makeEnv()
+        let data = deterministicBytes(4096)
+        let rp = "over/size.bin"
+        let tmpURL = Downloader.resumeTmpURL(in: env.tmp, relativePath: rp)
+        // sink 経由の論理量は data 通り（hasher == entry.sha256 で SHA ゲートは通過する）が、
+        // 別経路が tmp へ 64 バイト余分に追記して実ファイルが entry.size を超える状況を模擬。
+        // commit 前の実サイズ検証（code -15）だけがこの破損を捕えるべき＝バグ①（並行 pull 破損）の防御線の回帰テスト。
+        let fake = FakeRangedDownloadClient(fullData: data, corruptTmpURL: tmpURL, corruptExtraBytes: 64)
+        let dl = makeDownloader(client: fake, db: env.db, store: env.store, root: env.root, tmp: env.tmp)
+
+        do {
+            _ = try await dl.download(relativePath: rp, entry: entry(for: data))
+            XCTFail("過大サイズの tmp は破棄されるべき")
+        } catch {
+            guard case SyncError.ioError(let underlying) = error else {
+                return XCTFail("想定外のエラー: \(error)")
+            }
+            XCTAssertEqual((underlying as NSError).code, -15, "実サイズ不一致ゲート（-15）で弾かれるべき")
+        }
+
+        // tmp 破棄・行クリア・完成ファイルなし。
+        XCTAssertFalse(FileManager.default.fileExists(atPath: tmpURL.path))
+        let row = try await env.store.loadDownload(path: rp)
+        XCTAssertNil(row)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: env.root.appendingPathComponent(rp).path))
+    }
+
     func testNotFoundClearsAndThrows() async throws {
         let env = try makeEnv()
         let data = deterministicBytes(3000)
@@ -202,15 +230,21 @@ final class FakeRangedDownloadClient: RangedDownloadClient, @unchecked Sendable 
     let failAfterBytes: Int?
     let notFound: Bool
     let chunkSize: Int
+    /// 並行追記の模擬（PR #9 レビュー ⑦）: 全チャンク送出後に、別経路（並行 reconcile / DL）が
+    /// 共有 tmp へ余分なバイトを書き足したことにして、実ファイルを `entry.size` より過大にする。
+    let corruptTmpURL: URL?
+    let corruptExtraBytes: Int
     private(set) var lastRangeStart: Int64?
     private(set) var callCount = 0
 
-    init(fullData: Data, etag: String = "etag-x", failAfterBytes: Int? = nil, notFound: Bool = false, chunkSize: Int = 1024) {
+    init(fullData: Data, etag: String = "etag-x", failAfterBytes: Int? = nil, notFound: Bool = false, chunkSize: Int = 1024, corruptTmpURL: URL? = nil, corruptExtraBytes: Int = 0) {
         self.fullData = fullData
         self.etag = etag
         self.failAfterBytes = failAfterBytes
         self.notFound = notFound
         self.chunkSize = chunkSize
+        self.corruptTmpURL = corruptTmpURL
+        self.corruptExtraBytes = corruptExtraBytes
     }
 
     func streamObject(
@@ -234,6 +268,15 @@ final class FakeRangedDownloadClient: RangedDownloadClient, @unchecked Sendable 
             delivered += (end - idx)
             if let fa = failAfterBytes, delivered >= fa { throw FakeDownloadError.injected }
             idx = end
+        }
+        // 並行追記の模擬: 全チャンク送出後（sink 経由の論理量は正しい＝SHA は一致する）に、
+        // 別経路が共有 tmp へ余分なバイトを直接書き足したことにする。Downloader の commit 前
+        // 実サイズ検証だけがこの過大化を捕えるべき（SHA ゲートは通過する）。
+        if let url = corruptTmpURL, corruptExtraBytes > 0,
+           let h = try? FileHandle(forWritingTo: url) {
+            try? h.seekToEnd()
+            try? h.write(contentsOf: Data(repeating: 0xEE, count: corruptExtraBytes))
+            try? h.close()
         }
         return TideS3Client.StreamObjectResult(etag: etag, contentLength: Int64(slice.count))
     }
