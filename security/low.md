@@ -56,7 +56,7 @@ NSWorkspace.shared.open(URL(fileURLWithPath: path))
 
 ## L6. `DebounceQueue.fire` の競合
 
-**Status:** ⏸ Deferred — `upload_queue` テーブルの `UNIQUE(path)` 制約により、同一パスの並列処理が衝突しても DB レベルで重複が collapse される。実害（DB 整合性破壊）は出ない想定。観察を継続し、再現したら handler 側に in-flight 集約を入れる。
+**Status:** ⚠ 実害を確認（2026-06-07・M3 サブ D 受け入れテスト中）— 要対応。旧想定「`UNIQUE(path)` collapse で実害は出ない」が覆った: 書き込み途中のファイル（`mkfile` で成長中の 1.2GB）を watcher が拾い、Uploader が 850MiB 時点の千切れた内容をアップロード。書き込み完了後の再 enqueue が**処理中の行**との `UNIQUE(path)` collapse で飲み込まれ（処理完了時の行削除で消失）、ローカル ≠ DB ≠ リモートの**無エラー乖離**が次回フルスキャンまで残存した。バックアップツールとしてサイレントな取りこぼしは最悪クラスの症状。対策（handler 側の in-flight 集約・書込安定化待ち・処理開始時の行スナップショット比較等）は設計相談のうえ別タスクで実施。それまでのワークアラウンド: 大ファイルは同期ルート外で作成して `mv` で atomic に入れる。
 
 **該当箇所:** `Tide/Core/DebounceQueue.swift:45-52`
 

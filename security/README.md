@@ -54,7 +54,7 @@ F4 の据え置き理由: 生エラー文字列は開発中のデバッグで実
 | L3 | openSyncFolder URL 検証 | ✅ Fixed |
 | L4 | UI 経由のエラー詳細 | ✅ Fixed（H2 と一括） |
 | L5 | SHA1 のコメント | ✅ Fixed |
-| L6 | DebounceQueue 競合 | ⏸ Deferred — `UPLOAD_QUEUE.UNIQUE(path)` で実害なしの想定で観察 |
+| L6 | DebounceQueue 競合 | ⚠ 実害確認（2026-06-07）— 書込中ファイルの千切れアップロード + 再 enqueue 消失で無エラー乖離。要対応 |
 | L7 | secretAccessKey の生存期間 | ✅ Fixed |
 | L8 | `.syncignore`（リモート由来の除外パターン）の取り扱い | ✅ Fixed — 機密網は否定で覆せない / symlink 非追従 / サイズ上限は維持。生成正規表現の ReDoS は線形時間グロブ照合への置換で構造的に解消（2026-06-04。→ F1） |
 | L9 | アップロード読込が symlink 追従（読込時の再チェック無し） | ✅ Fixed（2026-06-02・M3。`NoFollowFileReader` で `O_NOFOLLOW` 単一 FD 化） |

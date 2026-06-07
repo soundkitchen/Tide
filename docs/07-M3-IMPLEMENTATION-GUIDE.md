@@ -61,7 +61,7 @@ M1 で導入した「100 MB を超えたら `sync_log` にエラーを残して�
   上限超過は黙ってスキップせず `recentErrors` に明示 + `sync_log` error + キュー除去（リトライしない）。Settings で 1GiB 超を選ぶと課金注意を表示。
 - 失敗時リトライ: **パート単位（セッション内、指数バックオフ 3 回）** + 既存のファイル単位リトライ（最大 5 回）。永続再開はサブD。
 
-### 受け入れ確認（手動チェックリスト `tmp/M3-動作チェックリスト.md`）
+### 受け入れ確認（手動チェックリスト `tmp/M3-動作チェックリスト.md`・✅ 全項目消化済み 2026-06-07）
 - `~/TideSandbox/big.bin`（例: 500 MB）を up → S3 → down で SHA 一致（round-trip）
 - ネットワーク瞬断 → 失敗パートのみ再送で完走
 - 上限超過ファイルが `recentErrors` に明示される（黙ってスキップしない）
@@ -164,7 +164,7 @@ M2 の単純ルール（`04-SYNC-LOGIC.md`「競合解決」）を **ベース /
 - **D2 アップロード再開（✅ 実装済み）**: `UploadCheckpointStore` シーム（`TransferStateStoring` から分離）を `MultipartUploader.ResumeContext` 経由で注入。mtime/size 一致なら前回 UploadId・完了パート・partSize を引き継いで未送分だけ送り（既送分も読み順に hash 更新して全体 SHA を復元）、不一致なら古い MPU を best-effort abort してフル再開。パート完了ごとに `recordCompletedPart` で checkpoint、成功で `clearUpload`。**失敗時の方針**: `resume` 指定時は abort も clear もせず MPU と進捗を保持（次回のファイル単位リトライ／プロセス kill 後の次回起動で再開）。恒久失敗の残骸はライフサイクル tide-abort-incomplete-multipart（7日）と D5 起動時掃除に委ねる。`resume` なしの呼びは従来どおり失敗時 best-effort abort（後方互換）。`MultipartUploaderTests` にフェイク checkpoint で 4 ケース追加（新規永続→クリア / 既送スキップ / ファイル変化でフル再開 / 恒久失敗で保持）。
 - **D3 ダウンロード再開（✅ 実装済み）**: 旧 `downloadToFile` を Range 対応の `TideS3Client.streamObject(key:rangeStart:sink:)` に置換し、`RangedDownloadClient` シーム（`TideS3Client` 適合 + テストでフェイク差込）を新設。`Downloader` は決定的 tmp（`dl-<sha(path)>.part`）を使い、`transfer_state` の download 行が現エントリ etag と一致し tmp が `0 < size < entry.size` なら既存プレフィクスを読み直して hash に前置きし `Range: bytes=size-` で再開、無効なら作り直してフル取得。M7 の DoS ガードは sink で受信累積長を `entry.size` と突合（超過は破棄）。ネットワーク失敗は部分 tmp + 行を保持して次回再開、etag/SHA 不一致・サイズ超過・404 は破棄して仕切り直す。`DownloaderTests`（実 DB + フェイク seam）で fresh/resume/etag 不一致/ネットワーク失敗保持/SHA 不一致/404 を網羅＝DL 経路のテスト負債も返済。
 - **D4 進捗 UI（✅ 実装済み）**: `SyncEngine.activeTransfers: [TransferProgress]`（@Observable）を追加。off-main の `Uploader`/`Downloader` が `@Sendable` な `TransferProgressReporter`（`begin`/`update`/`end`）を発行し、`SyncEngine` が `Task { @MainActor }` で `applyProgress` に集約（到着順は前後し得るので update は既存エントリの増加方向のみ適用、(path, direction) で一意）。アップロードはパート完了ごと（既送分も即時加算）、ダウンロードは ~4MiB ごとに coalesce。`MenuBarContent` のポップオーバーに「Transferring」セクション（方向アイコン + ファイル名 + % + `ProgressView`）を追加。新規 xcstrings キー `"Transferring"`（`extractionState:"manual"`）。`stop()` で `activeTransfers` をクリア。視覚確認は D5 の動作チェックリストで実機実施。
-- **D5 ドキュメント＋セキュリティ＋掃除（✅ 実装済み）**: `SyncEngine.start()` 冒頭で `pruneOrphanTransfers()`（キュー/プル開始前に awaited＝再開ロジックと競合させない）。ローカルファイルの消えた upload 行は宙ぶらりんの MPU を best-effort `abortMultipartUpload` して削除、tmp の消えた download 行は削除、両方向とも 7 日より古い行は失効扱い（S3 `tide-abort-incomplete-multipart` と歩調を合わせる）。セキュリティは `security/low.md` L12（攻撃面レビュー＝Range 注入なし / tmp_path 再計算照合 / 再開時 symlink 破棄ガード / SHA ゲート / オーファン掃除）。受け入れは `tmp/M3-動作チェックリスト.md`（大ファイル round-trip・kill→再開 up/down・進捗 UI を実機で確認後に削除）。
+- **D5 ドキュメント＋セキュリティ＋掃除（✅ 実装済み）**: `SyncEngine.start()` 冒頭で `pruneOrphanTransfers()`（キュー/プル開始前に awaited＝再開ロジックと競合させない）。ローカルファイルの消えた upload 行は宙ぶらりんの MPU を best-effort `abortMultipartUpload` して削除、tmp の消えた download 行は削除、両方向とも 7 日より古い行は失効扱い（S3 `tide-abort-incomplete-multipart` と歩調を合わせる）。セキュリティは `security/low.md` L12（攻撃面レビュー＝Range 注入なし / tmp_path 再計算照合 / 再開時 symlink 破棄ガード / SHA ゲート / オーファン掃除）。受け入れは `tmp/M3-動作チェックリスト.md`（大ファイル round-trip・kill→再開 up/down・進捗 UI を実機で確認後に削除）→ **✅ 全項目消化済み（2026-06-07・チェックリストは運用どおり削除）＝サブタスク D 完了**。消化中に発見した未修正項目（L6 実害化＝torn-write アップロード／prune clear 分岐の `invalidateShardCache` 漏れ／毎起動再アップロード）は `CLAUDE.md §8` と `security/low.md` L6 に記録。
 
 ### PR #4 レビュー反映（2026-06-05）
 soundkitchen のレビュー（ブロッカー無し）を受けて 4 点を対応、2 点を据え置き。
