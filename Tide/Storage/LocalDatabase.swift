@@ -178,6 +178,29 @@ final class LocalDatabase: @unchecked Sendable {
         }
     }
 
+    // MARK: - files（mtime 修復）
+
+    /// SHA ゲート（`ChangeDetector.postHash` → `.refreshMtimeOnly`）用の CAS 更新。
+    /// 単一 write Tx 内で再フェッチし、`sha256` が判定時の値と一致するときだけ `mtime` /
+    /// `updatedAt` を更新する。判定（read → hash）と書込の間に並行 pull の download が
+    /// 同 path を更新し得るため、無条件 save だと新しい sha / s3VersionId / s3Etag を
+    /// 巻き戻してしまう。`lastSyncedAt` は保持する（tracked 判定・`IgnoreDecision` の
+    /// isAlreadyTracked が崩れるため）。
+    /// - Returns: 更新したら true（sha 不一致・行消失なら false = no-op）。
+    @discardableResult
+    func refreshMtimeIfShaUnchanged(
+        path: String, expectedSha: String, newMtime: Double
+    ) async throws -> Bool {
+        try await pool.write { db in
+            guard var rec = try FileRecord.fetchOne(db, key: path),
+                  rec.sha256 == expectedSha else { return false }
+            rec.mtime = newMtime
+            rec.updatedAt = Date().timeIntervalSince1970
+            try rec.update(db)
+            return true
+        }
+    }
+
     // MARK: - shard_state
 
     /// path が属するシャードの `shard_state` キャッシュを sentinel 化（空 etag）し、次回 pull に

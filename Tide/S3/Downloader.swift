@@ -61,9 +61,15 @@ struct Downloader {
 
         let s3Key = "files/\(relativePath)"
 
-        // 既に同じ SHA がローカルにあるならスキップ
+        // 既に同じ SHA がローカルにあるならスキップ。
+        // mtime は sha 計算の「前」に stat する: ハッシュ中に書き換わっても「旧 mtime + 旧 sha」の
+        // 組で残り、次回スキャンの mtime 差から再検出される（安全方向）。後 stat だと
+        // 「新 mtime + 旧 sha」の組になり、変更の取りこぼしが恒久化し得る。
+        let localStatMtime = Self.fileMtime(at: fullURL)
         if let localSha = try currentLocalSha(at: fullURL), localSha == entry.sha256 {
-            try await updateDBEntryWithoutWrite(relativePath: relativePath, entry: entry)
+            try await updateDBEntryWithoutWrite(
+                relativePath: relativePath, entry: entry, localMtime: localStatMtime
+            )
             return false
         }
 
@@ -433,12 +439,26 @@ struct Downloader {
         }
     }
 
+    /// scan の mtime 取得（`.contentModificationDateKey`）と同じ API 系で stat する。
+    private static func fileMtime(at url: URL) -> Double? {
+        (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+            .contentModificationDate?.timeIntervalSince1970
+    }
+
+    /// 実書込なしの DB 最新化（ローカル内容がリモートと一致した早期 return 用）。
+    /// mtime は**ローカル stat 実値**を記録する（不変条件: 「DB.mtime = 最後に同期した時点の
+    /// ローカル stat mtime」）。マニフェスト mtime は ISO8601 秒精度（fractional なし）に
+    /// 切り捨てられており、これで上書きすると次回フルスキャンの `< 0.001` 比較が必ず外れ、
+    /// 無変更ファイルが毎起動再アップロードされる自己持続サイクルになる（pull は未変化シャードでも
+    /// 全 entry をここに通すため、毎 pull で汚染されていた）。stat 失敗時のみマニフェスト値へ
+    /// フォールバック（従来挙動）。
     private func updateDBEntryWithoutWrite(
         relativePath: String,
-        entry: ManifestFileEntry
+        entry: ManifestFileEntry,
+        localMtime: Double?
     ) async throws {
         let now = Date().timeIntervalSince1970
-        let mtime = parseISO8601(entry.mtime)?.timeIntervalSince1970 ?? now
+        let mtime = localMtime ?? parseISO8601(entry.mtime)?.timeIntervalSince1970 ?? now
         try await db.pool.write { db in
             var rec = FileRecord(
                 path: relativePath,
