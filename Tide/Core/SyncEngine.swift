@@ -252,6 +252,8 @@ final class SyncEngine {
                 // pull が当該ファイルを見落とし続け、シャードがリモートで変化するまで永久に再 DL されない
                 // （受け入れテスト §6-2 で発見）。invalidate に失敗したら行を消さずに continue
                 // （行が残れば次回起動の prune が再試行＝自己回復。先に行を消すと取り残しが再発する）。
+                // トレードオフ: invalidate が恒久失敗し続けると stale tmp も残り続けるが、取り残し防止 >
+                // tmp litter で許容（DB 恒久失敗時はより大きい問題が先に顕在化し、DB 回復で自己解消。PR #11 nit-3）。
                 do {
                     try await db.invalidateShardCache(forPath: row.path)
                 } catch {
@@ -259,12 +261,29 @@ final class SyncEngine {
                     continue
                 }
                 if let tmp = row.tmpPath { try? FileManager.default.removeItem(atPath: tmp) }
-                try? await store.clearDownload(path: row.path)
-                AppLogger.sync.info("Pruned orphan download transfer: \(row.path, privacy: .private)")
+                // 行の有無が自己回復（次回 prune の再試行）の判定材料なので、clear の成否どおりに
+                // log を出し分ける（resumable 分岐と同じ流儀。PR #11 レビュー nit-2）。
+                do {
+                    try await store.clearDownload(path: row.path)
+                    AppLogger.sync.info("Pruned orphan download transfer: \(row.path, privacy: .private)")
+                } catch {
+                    AppLogger.sync.error("Prune orphan download: clear failed for \(row.path, privacy: .private): \(String(describing: error), privacy: .private)")
+                }
             default:
-                // 未知の direction は安全側で除去（両系を試みる）。
-                try? await store.clearUpload(path: row.path)
-                try? await store.clearDownload(path: row.path)
+                // 未知の direction は安全側で除去する。direction は TransferDirection enum と DB の
+                // CHECK 制約の二重で 'upload' | 'download' に限定されるため実際には到達不能だが、
+                // （将来スキーマや破損 DB で）到達した場合も「download 行を落とす前に必ず invalidate」の
+                // 不変条件を保つ（PR #11 レビュー Low-1。invalidate 失敗なら行を温存して次回再試行）。
+                // 除去は clearUnknownDirections で行う（clearUpload/clearDownload は direction
+                // フィルタ付きなので未知 direction 行にはマッチしない）。同一 path の正当な行は
+                // それぞれ自分のイテレーションで処理されるのでここでは触らない。
+                do {
+                    try await db.invalidateShardCache(forPath: row.path)
+                } catch {
+                    AppLogger.sync.error("Prune unknown-direction transfer: invalidate failed for \(row.path, privacy: .private): \(String(describing: error), privacy: .private)")
+                    continue
+                }
+                try? await store.clearUnknownDirections(path: row.path)
             }
         }
     }

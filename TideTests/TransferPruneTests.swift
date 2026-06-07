@@ -134,6 +134,38 @@ final class TransferPruneTests: XCTestCase {
         XCTAssertNil(row, "オーファン upload 行は削除される")
     }
 
+    // MARK: - default 分岐（未知 direction）
+
+    /// 未知 direction の行も「download 行を落とす前に必ず invalidate」の不変条件を保つ（PR #11 レビュー Low-1）。
+    /// direction は enum + DB の CHECK 制約の二重で到達不能だが、将来スキーマ・破損 DB を
+    /// `PRAGMA ignore_check_constraints` で模擬して安全側除去の配線を固定する。
+    /// 同一 path の正当な行（resumable download）が巻き添え削除されないことも検証する。
+    func testUnknownDirectionInvalidatesAndClearsOnlyUnknownRow() async throws {
+        let env = try makeEnv()
+        let rp = "docs/unknown.bin"
+        try await env.db.pool.writeWithoutTransaction { dbq in
+            try dbq.execute(sql: "PRAGMA ignore_check_constraints = ON")
+            try dbq.execute(
+                sql: "INSERT INTO transfer_state (path, direction, updated_at) VALUES (?, 'sideways', ?)",
+                arguments: [rp, Date().timeIntervalSince1970]
+            )
+            try dbq.execute(sql: "PRAGMA ignore_check_constraints = OFF")
+        }
+        // 同一 path に正当な resumable download 行（tmp 実在・新しい）も置く。
+        let tmpFile = env.tmp.appendingPathComponent("dl-unknown.part")
+        try Data([7, 7]).write(to: tmpFile)
+        try await env.store.beginDownload(path: rp, tmpPath: tmpFile.path, expectedEtag: "etag-r")
+        try await seedShardState(db: env.db, path: rp, etag: "real-etag")
+
+        await runPrune(env: env)
+
+        let directions = try await env.store.allEntries().filter { $0.path == rp }.map(\.direction)
+        XCTAssertEqual(directions, [TransferDirection.download.rawValue],
+                       "未知 direction の行だけが除去され、正当な download 行は温存される")
+        let etag = try await shardEtag(db: env.db, path: rp)
+        XCTAssertEqual(etag, "", "未知 direction でも行を落とす前にシャードキャッシュが sentinel 化される")
+    }
+
     /// ローカルファイルが実在し新しい upload 行は温存される（abort も呼ばれない）。
     func testUploadWithLocalFileIsKept() async throws {
         let env = try makeEnv()
