@@ -476,10 +476,13 @@ final class SyncEngine {
                     case .refreshMtimeOnly:
                         // CAS: 判定〜書込の間に並行 pull が同 path を更新していたら no-op
                         // （新しい sha / s3VersionId / s3Etag を巻き戻さない）。
-                        try await db.refreshMtimeIfShaUnchanged(
+                        // カウントは返値どおり = 実際に修復した行のみ（ログ "repaired N mtimes" は
+                        // 自己修復の観測点なので no-op を数えない。PR #12 レビュー Low-1）。
+                        if try await db.refreshMtimeIfShaUnchanged(
                             path: relative, expectedSha: knownSha, newMtime: mtime
-                        )
-                        mtimesRepaired += 1
+                        ) {
+                            mtimesRepaired += 1
+                        }
                         needsEnqueue = false
                     case .enqueue:
                         needsEnqueue = true
