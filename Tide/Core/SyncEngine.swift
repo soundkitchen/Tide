@@ -179,11 +179,33 @@ final class SyncEngine {
     // MARK: - 起動時のオーファン掃除（サブ D-D5）
 
     /// 不要になった `transfer_state` 行を片付ける。best-effort（失敗しても起動は続行）。
-    /// - upload: ローカルファイルが消えた行は宙ぶらりんの MPU を best-effort abort して削除。
-    /// - download: tmp が消えた行は削除（再開対象が無い）。
-    /// - 両方向とも 7 日より古い行は失効扱い（S3 の `tide-abort-incomplete-multipart` と歩調を合わせる）。
+    /// 本体は配線（分岐 → 実 I/O）まで回帰テストできるよう、依存を引数で受ける static 関数に
+    /// 切り出してある（`TransferPruneTests`）。
     private func pruneOrphanTransfers() async {
-        let store = TransferStateStore(db: db)
+        let s3 = self.s3
+        await Self.pruneOrphanTransfers(
+            db: db,
+            store: TransferStateStore(db: db),
+            syncRoot: syncRoot,
+            now: Date(),
+            abortUpload: { key, uploadId in
+                try? await s3.abortMultipartUpload(key: key, uploadId: uploadId)
+            }
+        )
+    }
+
+    /// `pruneOrphanTransfers()` の本体。
+    /// - upload: ローカルファイルが消えた行は宙ぶらりんの MPU を best-effort abort して削除。
+    /// - download: tmp が消えた（または stale な）行は、シャードキャッシュを invalidate してから削除。
+    ///   tmp あり・新しい行は再開可能として温存し、シャードキャッシュの invalidate のみ行う（再 arm）。
+    /// - 両方向とも 7 日より古い行は失効扱い（S3 の `tide-abort-incomplete-multipart` と歩調を合わせる）。
+    nonisolated static func pruneOrphanTransfers(
+        db: LocalDatabase,
+        store: TransferStateStore,
+        syncRoot: URL,
+        now: Date,
+        abortUpload: @Sendable (_ key: String, _ uploadId: String) async -> Void
+    ) async {
         let rows: [TransferStateRecord]
         do {
             rows = try await store.allEntries()
@@ -193,7 +215,7 @@ final class SyncEngine {
         }
         guard !rows.isEmpty else { return }
 
-        let staleCutoff = Date().addingTimeInterval(-7 * 86_400).timeIntervalSince1970
+        let staleCutoff = now.addingTimeInterval(-7 * 86_400).timeIntervalSince1970
         for row in rows {
             let isStale = row.updatedAt < staleCutoff
             switch row.direction {
@@ -202,7 +224,7 @@ final class SyncEngine {
                     .map { FileManager.default.fileExists(atPath: $0.path) } ?? false
                 guard !fileExists || isStale else { continue }
                 if let uploadId = row.uploadId {
-                    try? await s3.abortMultipartUpload(key: "files/\(row.path)", uploadId: uploadId)
+                    await abortUpload("files/\(row.path)", uploadId)
                 }
                 try? await store.clearUpload(path: row.path)
                 AppLogger.sync.info("Pruned orphan upload transfer: \(row.path, privacy: .private)")
@@ -225,13 +247,43 @@ final class SyncEngine {
                     }
                     continue
                 }
+                // clear 分岐（tmp 消失 or stale）でも、行を落とす前にシャードキャッシュを invalidate する
+                // （resumable 分岐と対称）。再開対象は無いが FileRecord も無いため、invalidate を欠くと
+                // pull が当該ファイルを見落とし続け、シャードがリモートで変化するまで永久に再 DL されない
+                // （受け入れテスト §6-2 で発見）。invalidate に失敗したら行を消さずに continue
+                // （行が残れば次回起動の prune が再試行＝自己回復。先に行を消すと取り残しが再発する）。
+                // トレードオフ: invalidate が恒久失敗し続けると stale tmp も残り続けるが、取り残し防止 >
+                // tmp litter で許容（DB 恒久失敗時はより大きい問題が先に顕在化し、DB 回復で自己解消。PR #11 nit-3）。
+                do {
+                    try await db.invalidateShardCache(forPath: row.path)
+                } catch {
+                    AppLogger.sync.error("Prune orphan download: invalidate failed for \(row.path, privacy: .private): \(String(describing: error), privacy: .private)")
+                    continue
+                }
                 if let tmp = row.tmpPath { try? FileManager.default.removeItem(atPath: tmp) }
-                try? await store.clearDownload(path: row.path)
-                AppLogger.sync.info("Pruned orphan download transfer: \(row.path, privacy: .private)")
+                // 行の有無が自己回復（次回 prune の再試行）の判定材料なので、clear の成否どおりに
+                // log を出し分ける（resumable 分岐と同じ流儀。PR #11 レビュー nit-2）。
+                do {
+                    try await store.clearDownload(path: row.path)
+                    AppLogger.sync.info("Pruned orphan download transfer: \(row.path, privacy: .private)")
+                } catch {
+                    AppLogger.sync.error("Prune orphan download: clear failed for \(row.path, privacy: .private): \(String(describing: error), privacy: .private)")
+                }
             default:
-                // 未知の direction は安全側で除去（両系を試みる）。
-                try? await store.clearUpload(path: row.path)
-                try? await store.clearDownload(path: row.path)
+                // 未知の direction は安全側で除去する。direction は TransferDirection enum と DB の
+                // CHECK 制約の二重で 'upload' | 'download' に限定されるため実際には到達不能だが、
+                // （将来スキーマや破損 DB で）到達した場合も「download 行を落とす前に必ず invalidate」の
+                // 不変条件を保つ（PR #11 レビュー Low-1。invalidate 失敗なら行を温存して次回再試行）。
+                // 除去は clearUnknownDirections で行う（clearUpload/clearDownload は direction
+                // フィルタ付きなので未知 direction 行にはマッチしない）。同一 path の正当な行は
+                // それぞれ自分のイテレーションで処理されるのでここでは触らない。
+                do {
+                    try await db.invalidateShardCache(forPath: row.path)
+                } catch {
+                    AppLogger.sync.error("Prune unknown-direction transfer: invalidate failed for \(row.path, privacy: .private): \(String(describing: error), privacy: .private)")
+                    continue
+                }
+                try? await store.clearUnknownDirections(path: row.path)
             }
         }
     }

@@ -200,6 +200,20 @@ struct TransferStateStore: TransferStateStoring {
         }
     }
 
+    /// 未知 direction（'upload' | 'download' 以外）の行を path 単位で除去する。同一 path の正当な
+    /// upload / download 行は触らない。direction は `TransferDirection` enum + DB の CHECK 制約の
+    /// 二重で既知値に限定されるため実際には到達不能だが、prune の安全側除去（`default:` 分岐）が使う。
+    /// `clearUpload`/`clearDownload` は direction フィルタ付きなので未知 direction 行にはマッチせず、
+    /// このメソッド無しでは「安全側で除去」が実際には何も消せない（PR #11 レビュー Low-1 のテストで判明）。
+    func clearUnknownDirections(path: String) async throws {
+        let known = [TransferDirection.upload.rawValue, TransferDirection.download.rawValue]
+        try await db.pool.write { db in
+            _ = try TransferStateRecord
+                .filter(Column("path") == path && !known.contains(Column("direction")))
+                .deleteAll(db)
+        }
+    }
+
     // MARK: - 全行
 
     func allEntries() async throws -> [TransferStateRecord] {

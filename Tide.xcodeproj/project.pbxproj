@@ -56,6 +56,7 @@
 		B4526FDEB3B4C457DF3F76D6 /* S3Client.swift in Sources */ = {isa = PBXBuildFile; fileRef = C01FAB16EDCECA8698C1E5CF /* S3Client.swift */; };
 		B54010E5DAE38474C6EE3409 /* SyncEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 075300181A2D09025E384D3B /* SyncEngine.swift */; };
 		BACC401E33B0D4F9983A990D /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 1A9CB8EA6B406E2E0BB8E34C /* Localizable.xcstrings */; };
+		BBFF23668817A804F38D4ACF /* TransferPruneTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 91F4AD8CE93628B2C74331DC /* TransferPruneTests.swift */; };
 		C1113CE816B5451E65B63071 /* HashCalculator.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0A0C2B81618658098C69DC2 /* HashCalculator.swift */; };
 		C5031FFC043FF9929A518931 /* NoFollowFileReaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00F21E2E210A7F9BC778BC5D /* NoFollowFileReaderTests.swift */; };
 		D1730746F1028260C48E2A90 /* SyncStatus.swift in Sources */ = {isa = PBXBuildFile; fileRef = 858DA1ADDCE543AC588ADC2A /* SyncStatus.swift */; };
@@ -124,6 +125,7 @@
 		858DA1ADDCE543AC588ADC2A /* SyncStatus.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncStatus.swift; sourceTree = "<group>"; };
 		85B8648A9E5391D4725A0EE7 /* ManifestSharding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManifestSharding.swift; sourceTree = "<group>"; };
 		86CCB3744E3CE4973CE0ED13 /* Manifest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Manifest.swift; sourceTree = "<group>"; };
+		91F4AD8CE93628B2C74331DC /* TransferPruneTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TransferPruneTests.swift; sourceTree = "<group>"; };
 		9387D07371DA25AF234841AA /* Downloader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Downloader.swift; sourceTree = "<group>"; };
 		985B368E3DE66BEAAE35740C /* PartPlan.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PartPlan.swift; sourceTree = "<group>"; };
 		ADC61A4E5F7528718FC1A7C8 /* Migrations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Migrations.swift; sourceTree = "<group>"; };
@@ -225,6 +227,7 @@
 				E0C66E505C9788FC626A5F38 /* SyncIgnoreMatcherTests.swift */,
 				1D326FF459D50EF387EBD5E8 /* ThreeWayMergeTests.swift */,
 				28C008109E7A3765EE5A18E7 /* TransferProgressTests.swift */,
+				91F4AD8CE93628B2C74331DC /* TransferPruneTests.swift */,
 				0B1FCEBC900F68780C8C5561 /* TransferStateStoreTests.swift */,
 			);
 			path = TideTests;
@@ -474,6 +477,7 @@
 				865CD91F057ABA7320778FCF /* SyncIgnoreMatcherTests.swift in Sources */,
 				D5C8E829DC1C5A1734F300E6 /* ThreeWayMergeTests.swift in Sources */,
 				A3DD7D936C5EB50A1769BC5E /* TransferProgressTests.swift in Sources */,
+				BBFF23668817A804F38D4ACF /* TransferPruneTests.swift in Sources */,
 				828EBD9EFC5BF9E0DB2276DC /* TransferStateStoreTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
