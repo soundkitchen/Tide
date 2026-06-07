@@ -62,6 +62,40 @@ final class DownloaderTests: XCTestCase {
 
     // MARK: - テスト
 
+    /// 早期 return（ローカル内容がリモートと一致）は DB mtime に「ローカル stat 実値」を記録し、
+    /// マニフェスト由来の秒切捨て値で上書きしない。これを欠くと、次回フルスキャンの
+    /// `abs(DB.mtime - stat) < 0.001` 比較が必ず外れ、無変更ファイルが毎起動再アップロードされる
+    /// （pull 汚染 → スキャン誤検出 → 再アップロード → シャード変化 → 再 pull の自己持続サイクル）。
+    func testEarlyReturnRecordsLocalStatMtimeNotManifestTruncated() async throws {
+        let env = try makeEnv()
+        let data = deterministicBytes(2048)
+        let rp = "docs/synced.bin"
+        let local = env.root.appendingPathComponent(rp)
+        try FileManager.default.createDirectory(
+            at: local.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        try data.write(to: local)
+        // サブ秒精度の mtime を付与（ローカル発でアップロードされた直後のファイルを模擬）。
+        // entry() のマニフェスト mtime "2026-06-04T00:00:00Z"（秒精度）とは大きく異なる値にして、
+        // 「どちらが DB に記録されたか」を曖昧さなく判別できるようにする。
+        let statMtime = Date(timeIntervalSince1970: 1_780_000_000.789)
+        try FileManager.default.setAttributes(
+            [.modificationDate: statMtime], ofItemAtPath: local.path
+        )
+
+        let fake = FakeRangedDownloadClient(fullData: data)
+        let dl = makeDownloader(client: fake, db: env.db, store: env.store, root: env.root, tmp: env.tmp)
+        let wrote = try await dl.download(relativePath: rp, entry: entry(for: data))
+
+        XCTAssertFalse(wrote, "内容一致なので実書込しない（早期 return）")
+        let rec = try await env.db.pool.read { db in try FileRecord.fetchOne(db, key: rp) }
+        let recorded = try XCTUnwrap(rec).mtime
+        XCTAssertEqual(
+            recorded, statMtime.timeIntervalSince1970, accuracy: 0.0005,
+            "DB.mtime はローカル stat 実値を記録する（マニフェスト切捨て値で上書きしない）"
+        )
+    }
+
     func testFreshDownloadWritesFileAndClears() async throws {
         let env = try makeEnv()
         let data = deterministicBytes(5000)

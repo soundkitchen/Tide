@@ -397,10 +397,11 @@ final class SyncEngine {
         let matcher = self.ignoreMatcher
         let now = Date().timeIntervalSince1970
 
-        let result: (newEnqueued: Int, deletedEnqueued: Int) = try await Task.detached(priority: .utility) { () -> (Int, Int) in
+        let result: (newEnqueued: Int, deletedEnqueued: Int, mtimesRepaired: Int) = try await Task.detached(priority: .utility) { () -> (Int, Int, Int) in
             var foundPaths: Set<String> = []
             var newEnqueued = 0
             var deletedEnqueued = 0
+            var mtimesRepaired = 0
 
             let fm = FileManager.default
             // hidden files (e.g. .git) はデフォルトで含める。skipsHiddenFiles を指定しない。
@@ -451,17 +452,38 @@ final class SyncEngine {
 
                 foundPaths.insert(relative)
 
+                // 変更判定は ChangeDetector（純粋関数）に集約。size 一致 + mtime 不一致は SHA で
+                // 「実変更か mtime ドリフトか」を判定し、ドリフトなら DB の mtime を修復して
+                // 再アップロードしない（docs/04 仕様の SHA ゲート。マニフェスト秒精度 mtime での
+                // DB 汚染や setAttributes 失敗の残差を自己修復する安全網）。
+                let known = existing.map {
+                    ChangeDetector.Known(
+                        size: $0.size, mtime: $0.mtime,
+                        sha256: $0.sha256, isSynced: $0.lastSyncedAt != nil
+                    )
+                }
                 let needsEnqueue: Bool
-                if let existing {
-                    let sizeMatches = existing.size == size
-                    let mtimeMatches = abs(existing.mtime - mtime) < 0.001
-                    if sizeMatches && mtimeMatches && existing.lastSyncedAt != nil {
+                switch ChangeDetector.preDecision(known: known, size: size, mtime: mtime) {
+                case .skip:
+                    needsEnqueue = false
+                case .enqueue:
+                    needsEnqueue = true
+                case .verifyHash:
+                    // verifyHash は known 非 nil のときのみ返る（空 sha フォールバックは常に enqueue 側）。
+                    let knownSha = known?.sha256 ?? ""
+                    let computed = try? HashCalculator.sha256(of: next)
+                    switch ChangeDetector.postHash(knownSha: knownSha, computedSha: computed) {
+                    case .refreshMtimeOnly:
+                        // CAS: 判定〜書込の間に並行 pull が同 path を更新していたら no-op
+                        // （新しい sha / s3VersionId / s3Etag を巻き戻さない）。
+                        try await db.refreshMtimeIfShaUnchanged(
+                            path: relative, expectedSha: knownSha, newMtime: mtime
+                        )
+                        mtimesRepaired += 1
                         needsEnqueue = false
-                    } else {
+                    case .enqueue:
                         needsEnqueue = true
                     }
-                } else {
-                    needsEnqueue = true
                 }
 
                 if needsEnqueue {
@@ -506,10 +528,10 @@ final class SyncEngine {
                 deletedEnqueued = missing.count
             }
 
-            return (newEnqueued, deletedEnqueued)
+            return (newEnqueued, deletedEnqueued, mtimesRepaired)
         }.value
 
-        AppLogger.sync.info("Full scan: enqueued \(result.newEnqueued) uploads, \(result.deletedEnqueued) deletes")
+        AppLogger.sync.info("Full scan: enqueued \(result.newEnqueued) uploads, \(result.deletedEnqueued) deletes, repaired \(result.mtimesRepaired) mtimes")
         await refreshQueueDepth()
     }
 
@@ -728,11 +750,34 @@ final class SyncEngine {
             let existing = try await db.pool.read { db in
                 try FileRecord.fetchOne(db, key: path)
             }
-            if let existing,
-               existing.size == size,
-               abs(existing.mtime - mtime) < 0.001,
-               existing.lastSyncedAt != nil {
+            // 変更判定はフルスキャンと同じ ChangeDetector（SHA ゲート込み）に集約。
+            let known = existing.map {
+                ChangeDetector.Known(
+                    size: $0.size, mtime: $0.mtime,
+                    sha256: $0.sha256, isSynced: $0.lastSyncedAt != nil
+                )
+            }
+            switch ChangeDetector.preDecision(known: known, size: size, mtime: mtime) {
+            case .skip:
                 return  // unchanged
+            case .enqueue:
+                break
+            case .verifyHash:
+                // @MainActor なので hash は detached で（メインスレッドをブロックしない）。
+                let knownSha = known?.sha256 ?? ""
+                let computed = await Task.detached(priority: .utility) {
+                    try? HashCalculator.sha256(of: fullURL)
+                }.value
+                switch ChangeDetector.postHash(knownSha: knownSha, computedSha: computed) {
+                case .refreshMtimeOnly:
+                    // mtime ドリフトのみ → CAS で修復してアップロードしない（performFullScan と同じ）。
+                    try await db.refreshMtimeIfShaUnchanged(
+                        path: path, expectedSha: knownSha, newMtime: mtime
+                    )
+                    return
+                case .enqueue:
+                    break
+                }
             }
 
             // 除外判定（新規被マッチはスキップ。既存追跡・.syncignore 自身は通す）
