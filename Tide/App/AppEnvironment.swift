@@ -32,6 +32,13 @@ final class AppEnvironment {
     /// 冪等: 既に起動済み（`engine != nil`）なら bootstrapFailure をクリアして即 return（自己修復）、
     /// 起動処理進行中（`isBootstrapping`）なら bootstrapFailure を触らず即 return。
     func bootstrap() async {
+        // XCTest 実行中は実 SyncEngine を起動しない。テストは本体アプリ（Tide.app）にホストされて
+        // 起動するため、ここを抑止しないとテストのたびに実 S3 と同期してしまう。
+        // eager 経路（AppDelegate）・遅延経路（MenuBarContent.task）の両方がこのチョークポイントを通る。
+        guard !ProcessInfo.processInfo.isRunningXCTests else {
+            AppLogger.ui.info("Skipping bootstrap under XCTest.")
+            return
+        }
         if engine != nil {
             // 既に動いている＝失敗状態は解消済み。早期 return でも bootstrapFailure をクリアして
             // 旧来の「毎回先頭でクリア」自己修復を温存する。さもないと「失敗→ウィザードで復旧→正常稼働」後も
@@ -194,5 +201,14 @@ final class AppEnvironment {
         config.resetIncludingDeviceId()
         try? keychain.delete()
         bootstrapFailure = nil
+    }
+}
+
+extension ProcessInfo {
+    /// XCTest 実行中か。テストは本体アプリ（Tide.app）をテストホストとして起動するため、
+    /// この判定で eager bootstrap を抑止し、テスト中に実 S3 と同期しないようにする。
+    /// `XCTestConfigurationFilePath` は XCTest が起動時に必ずセットする（XCTest をリンク不要）。
+    var isRunningXCTests: Bool {
+        environment["XCTestConfigurationFilePath"] != nil
     }
 }
