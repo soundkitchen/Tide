@@ -46,6 +46,17 @@
         }
       }
     },
+    "%@ keeps changing and has not been backed up yet. It will be uploaded once it stops changing." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ は変更され続けているため、まだバックアップされていません。変更が止まればアップロードされます。"
+          }
+        }
+      }
+    },
     "%lld GB" : {
       "extractionState" : "manual",
       "localizations" : {

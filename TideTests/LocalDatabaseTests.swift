@@ -76,11 +76,14 @@ final class LocalDatabaseTests: XCTestCase {
     // MARK: - L6: upload_queue 行の id 基準ライフサイクル（in-flight collapse 回帰）
 
     @discardableResult
-    private func enqueueUpload(_ db: LocalDatabase, path: String) async throws -> Int64 {
+    private func enqueueUpload(
+        _ db: LocalDatabase, path: String,
+        attempts: Int = 0, enqueuedAt: Double = 1_780_000_000
+    ) async throws -> Int64 {
         try await db.pool.write { dbq in
             var rec = UploadQueueRecord(
                 id: nil, path: path, operation: "upload",
-                enqueuedAt: 1_780_000_000, attempts: 0, nextRetryAt: nil, lastError: nil
+                enqueuedAt: enqueuedAt, attempts: attempts, nextRetryAt: nil, lastError: nil
             )
             try rec.insert(dbq, onConflict: .replace)
             return rec.id!
@@ -126,5 +129,31 @@ final class LocalDatabaseTests: XCTestCase {
         let r2 = try await db.pool.read { dbq in try UploadQueueRecord.fetchOne(dbq, key: id2) }
         XCTAssertEqual(total, 1)
         XCTAssertEqual(r2?.path, "big.bin")
+    }
+
+    // MARK: - L6 (3/3): 不安定ファイルの延期（deferUnstableQueueItem）
+
+    /// 延期は give-up カウント（attempts）と enqueuedAt を保持し、nextRetryAt だけ前進させる。
+    func testDeferUnstableKeepsAttemptsAndEnqueuedAt() async throws {
+        let db = try makeDB()
+        let id = try await enqueueUpload(db, path: "log.bin", attempts: 3, enqueuedAt: 1000)
+
+        let ok = try await db.deferUnstableQueueItem(id: id, nextRetryAt: 1234, lastError: "changing")
+        XCTAssertTrue(ok)
+
+        let row = try await db.pool.read { dbq in try UploadQueueRecord.fetchOne(dbq, key: id) }
+        XCTAssertEqual(row?.attempts, 3, "give-up カウントに載せない＝attempts 不変")
+        XCTAssertEqual(row?.nextRetryAt, 1234.0)
+        XCTAssertEqual(row?.enqueuedAt, 1000.0, "enqueuedAt 据え置き（保留経過の基準）")
+    }
+
+    /// 処理中に置換された（新 id の）行には触れない（no-op で false を返す）。
+    func testDeferUnstableNoopWhenRowReplaced() async throws {
+        let db = try makeDB()
+        let id1 = try await enqueueUpload(db, path: "log.bin")
+        _ = try await enqueueUpload(db, path: "log.bin")    // REPLACE → 新 id、id1 は消える
+
+        let ok = try await db.deferUnstableQueueItem(id: id1, nextRetryAt: 1234, lastError: "x")
+        XCTAssertFalse(ok, "置換済み行（id1 不在）には触れない")
     }
 }

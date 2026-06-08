@@ -201,6 +201,28 @@ final class LocalDatabase: @unchecked Sendable {
         }
     }
 
+    // MARK: - upload_queue（L6: 不安定ファイルの延期）
+
+    /// 読込中に変化し続けるファイル（L6 A-detect）の再検査を延期する。`nextRetryAt` だけを前進させ、
+    /// **`attempts` と `enqueuedAt` は保持する**: attempts を増やさないことで give-up カウント（5 回で除去）に
+    /// 載せず恒久的に未バックアップにしない。enqueuedAt 据え置きは「この保留が安定待ちで何秒経過したか」を
+    /// 測る基準（呼び元が再検査間隔を保留経過に比例させる）。処理中に同 path へ新イベントが届いて
+    /// INSERT OR REPLACE で新 id 行に置換されていれば fetch で nil → no-op（新行が次周回で処理される）。
+    /// 戻り値は更新できたか（行が存在し更新したら true、置換済み/不在なら false）。
+    @discardableResult
+    func deferUnstableQueueItem(id: Int64?, nextRetryAt: Double, lastError: String) async throws -> Bool {
+        guard let id else { return false }
+        return try await pool.write { db in
+            guard var rec = try UploadQueueRecord.filter(Column("id") == id).fetchOne(db) else {
+                return false
+            }
+            rec.nextRetryAt = nextRetryAt
+            rec.lastError = lastError
+            try rec.update(db)
+            return true
+        }
+    }
+
     // MARK: - shard_state
 
     /// path が属するシャードの `shard_state` キャッシュを sentinel 化（空 etag）し、次回 pull に

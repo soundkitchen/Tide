@@ -54,13 +54,21 @@ NSWorkspace.shared.open(URL(fileURLWithPath: path))
 
 ---
 
-## L6. `DebounceQueue.fire` の競合
+## L6. 書込中ファイルの torn upload と in-flight collapse
 
-**Status:** ⚠ 実害を確認（2026-06-07・M3 サブ D 受け入れテスト中）— 要対応。旧想定「`UNIQUE(path)` collapse で実害は出ない」が覆った: 書き込み途中のファイル（`mkfile` で成長中の 1.2GB）を watcher が拾い、Uploader が 850MiB 時点の千切れた内容をアップロード。書き込み完了後の再 enqueue が**処理中の行**との `UNIQUE(path)` collapse で飲み込まれ（処理完了時の行削除で消失）、ローカル ≠ DB ≠ リモートの**無エラー乖離**が次回フルスキャンまで残存した。バックアップツールとしてサイレントな取りこぼしは最悪クラスの症状。対策（handler 側の in-flight 集約・書込安定化待ち・処理開始時の行スナップショット比較等）は設計相談のうえ別タスクで実施。それまでのワークアラウンド: 大ファイルは同期ルート外で作成して `mv` で atomic に入れる。
+**Status:** ✅ Fixed（2026-06-09・PR で 3 コミット）。症状: 書き込み途中のファイル（`mkfile` で成長中の 1.2GB）を watcher が拾い、Uploader が 850MiB 時点の千切れた内容をアップロード。書き込み完了後の再 enqueue が**処理中の行**との `UNIQUE(path)` collapse で飲み込まれ（処理完了時の行削除で消失）、ローカル ≠ DB ≠ リモートの**無エラー乖離**が次回フルスキャンまで残存した（バックアップツールとして最悪クラス）。
 
-**該当箇所:** `Tide/Core/DebounceQueue.swift:45-52`
+**真因は 2 つの独立欠陥**（当初疑った `DebounceQueue.fire` の並行は無関係＝enqueue 側 `handleDebounced` は `@MainActor` + GRDB 単一ライタで直列化されており、同 path の enqueue が並行することはない）:
 
-actor 内で `Task.detached` を `for` ループから発火している。`emitter` 側で長時間ブロックすると同時実行が起きるため、SyncEngine 側で同じ key の処理が**並列に走り得る**ことを念頭に置く必要がある（Uploader は同じ path への upload/delete が 5 並列タスクから同時に走るケース）。実害（= DB 整合性破壊）はなさそうだが、UploadQueueRecord に対する `.replace`/`.delete` の order が崩れる可能性は要確認。
+1. **in-flight collapse**: enqueue は `INSERT OR REPLACE`（`UNIQUE(path)`）で、処理中に届いた新イベントを**新しい AUTOINCREMENT id の行**へ置換する（＝完全版を上げ直せという正当な指示）。一方、完了/失敗処理がキュー行を **`path` 基準**で削除・更新していたため、旧 in-flight 行の完了がこの新行まで巻き込み消去していた。→ **修正: キュー行のライフサイクルを `item.id` 基準に統一**（`Uploader.processUpload/processDelete`、`SyncEngine.handleProcessingFailure` の retry/give-up/size-limit、`convertQueueItemToDelete`）。新行は旧行の完了/失敗に巻き込まれず次周回で再処理されて自己修復する。
+
+2. **torn read**: そもそも成長中ファイルを読んで torn な内容をコミットしていた。→ **修正: 安定化ゲート（A-detect）**。単一 `O_NOFOLLOW` FD で読み終えた後に同 FD を再 `fstat` し、開始時の (size, mtime) と変化（size 変化 or mtime 前進）があれば不安定とみなす（純粋関数 `StabilityCheck.isStable`）。シングルパートは `putObject` 前に判定して**不安定なら PUT しない**（現行 S3 版を torn で上書きしない）、マルチパートは `completeMultipartUpload` 前に判定して**不安定なら abort + (resume 時) checkpoint クリア**（complete しないので現行版は無傷、新 mtime でフル再開）。いずれも `SyncError.fileChangedDuringUpload` を投げる。
+
+書込が落ち着くまで安定しないファイル（ログ/DB 等）は、`handleProcessingFailure` が `fileChangedDuringUpload` を **give-up カウント（attempts）に載せず**安定するまで延期（`LocalDatabase.deferUnstableQueueItem`、再検査間隔は保留経過に比例・上限 300s）。一定時間安定しなければ「まだバックアップされていない」を `recentErrors` / `sync_log` に **1 回だけ**可視化（dedup）。＝torn を出さず、取りこぼしも黙らせない。
+
+**該当箇所:** `Tide/S3/Uploader.swift`（id 基準削除・シングルパート安定化ゲート）／`Tide/S3/MultipartUploader.swift`（`expectedStat`・complete 前判定）／`Tide/Core/StabilityCheck.swift`（判定）／`Tide/Core/SyncEngine.swift`（id 基準失敗処理・`handleUnstableFile`・`pruneUnstableWarned`）／`Tide/Storage/LocalDatabase.swift`（`deferUnstableQueueItem`）。回帰: `LocalDatabaseTests`（id 基準削除・defer）／`StabilityCheckTests`／`MultipartUploaderTests`（安定→complete・不安定→abort）。
+
+**据え置き**: `reconcile/削除の配線部が未結合テスト`（CLAUDE.md §8）と同様、`processUpload`/`MultipartUploader` の「不安定 → abort/PUT 見送り」I/O 配線は結合テスト未整備（純粋判定と DB 操作は固定済み・S3 シームの注入面が processUpload 側に無い）。`StabilityCheck` の差し替え可能化と合わせて将来タスク。
 
 ---
 
