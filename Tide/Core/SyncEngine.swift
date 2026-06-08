@@ -899,8 +899,9 @@ final class SyncEngine {
             await appendError(String(localized: "\(item.path) exceeds the upload size limit and was not backed up. Increase the limit in Settings."))
             do {
                 try await db.pool.write { db in
+                    // L6: 処理したこの行 (item.id) だけを消す（path 基準だと処理中に置換された新 id 行を巻き込む）。
                     try UploadQueueRecord
-                        .filter(Column("path") == item.path)
+                        .filter(Column("id") == item.id)
                         .deleteAll(db)
                     var log = SyncLogRecord(
                         id: nil,
@@ -928,8 +929,9 @@ final class SyncEngine {
         if attempts >= 5 {
             do {
                 try await db.pool.write { db in
+                    // L6: 処理したこの行 (item.id) だけを消す（path 基準だと処理中に置換された新 id 行を巻き込む）。
                     try UploadQueueRecord
-                        .filter(Column("path") == item.path)
+                        .filter(Column("id") == item.id)
                         .deleteAll(db)
                     var log = SyncLogRecord(
                         id: nil,
@@ -952,8 +954,11 @@ final class SyncEngine {
 
         do {
             try await db.pool.write { db in
+                // L6: この行 (item.id) のリトライ状態だけを更新する。処理中に同 path へ新イベントが
+                // 届いて INSERT OR REPLACE で新 id 行に置換されていれば、ここは fetch で nil → no-op となり、
+                // 新行（attempts=0・即 ready）が次周回でそのまま処理される（古い失敗のバックオフを被せない）。
                 if var existing = try UploadQueueRecord
-                    .filter(Column("path") == item.path)
+                    .filter(Column("id") == item.id)
                     .fetchOne(db) {
                     existing.attempts = attempts
                     existing.nextRetryAt = nextRetry

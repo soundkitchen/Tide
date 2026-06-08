@@ -148,8 +148,8 @@ func processUpload(_ queueItem: UploadQueueRecord) async throws {
             updatedAt: Date().timeIntervalSince1970
         ).save(db)
         
-        try UploadQueueRecord
-            .filter(Column("path") == path)
+        try UploadQueueRecord                       // L6: path ではなく id 基準（後述）
+            .filter(Column("id") == queueItem.id)
             .deleteAll(db)
         
         try SyncLog.insert(db, type: "upload", path: path, message: "Uploaded \(size) bytes")
@@ -254,13 +254,15 @@ func processDelete(_ queueItem: UploadQueueRecord) async throws {
     // 3. ローカル DB から削除
     try await database.write { db in
         try FileRecord.deleteOne(db, key: path)
-        try UploadQueueRecord
-            .filter(Column("path") == path)
+        try UploadQueueRecord                       // L6: path ではなく id 基準（後述）
+            .filter(Column("id") == queueItem.id)
             .deleteAll(db)
         try SyncLog.insert(db, type: "delete", path: path, message: "Deleted")
     }
 }
 ```
+
+> **キュー行は id 基準で消す（L6・2026-06-09）**: 上記 4. / 3. の `upload_queue` 削除は、`path` ではなく **処理したこの行 (`queueItem.id`)** を対象にする。アップロード/削除の処理中に同 path へ新イベントが届くと、enqueue 側の `INSERT OR REPLACE`（`UNIQUE(path)`）で**新しい AUTOINCREMENT id の行に置換**される（＝「完全版を上げ直せ」という正当な指示）。完了/失敗処理を `path` 基準で消すとその新行まで巻き込み、ローカル≠DB≠リモートの**無エラー乖離**が次回フルスキャンまで残る。id 基準なら旧行の完了/失敗は新行に触れず、次周回で再処理されて自己修復する。同じ理由で `handleProcessingFailure` の retry 更新・give-up 削除・size-limit 削除もすべて `id` 基準。
 
 ## リトライ戦略
 

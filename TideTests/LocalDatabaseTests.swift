@@ -72,4 +72,59 @@ final class LocalDatabaseTests: XCTestCase {
         )
         XCTAssertFalse(updated)
     }
+
+    // MARK: - L6: upload_queue 行の id 基準ライフサイクル（in-flight collapse 回帰）
+
+    @discardableResult
+    private func enqueueUpload(_ db: LocalDatabase, path: String) async throws -> Int64 {
+        try await db.pool.write { dbq in
+            var rec = UploadQueueRecord(
+                id: nil, path: path, operation: "upload",
+                enqueuedAt: 1_780_000_000, attempts: 0, nextRetryAt: nil, lastError: nil
+            )
+            try rec.insert(dbq, onConflict: .replace)
+            return rec.id!
+        }
+    }
+
+    /// アップロード処理中に同 path へ新イベントが届くと INSERT OR REPLACE で新 id 行に置換される。
+    /// 完了時の削除を path ではなく **id 基準**で行えば、その新行（＝完全版の再アップロード指示）が残り、
+    /// 次周回で再処理される。path 基準だと新行まで巻き込み消去し、ローカル≠DB≠リモートの
+    /// 無エラー乖離になっていた（L6）。ここでは REPLACE が新 id を振ること＋ id 基準削除が新行を
+    /// 残すことを固定する。
+    func testDeleteByIdPreservesRowReplacedDuringProcessing() async throws {
+        let db = try makeDB()
+
+        // R1: in-flight としてフェッチ済みのつもりの行。
+        let id1 = try await enqueueUpload(db, path: "big.bin")
+        // 書込完了イベント → INSERT OR REPLACE で R2（新 id）へ置換。
+        let id2 = try await enqueueUpload(db, path: "big.bin")
+        XCTAssertNotEqual(id1, id2, "INSERT OR REPLACE は新しい AUTOINCREMENT id を振る")
+
+        // 完了処理：処理した行 id1 だけを削除（production の filter(id == item.id) 相当）。
+        let deleted = try await db.pool.write { dbq in
+            try UploadQueueRecord.deleteOne(dbq, key: id1)
+        }
+        XCTAssertFalse(deleted, "id1 は既に REPLACE で消えている → 削除対象なし（新行を巻き込まない）")
+
+        let r1 = try await db.pool.read { dbq in try UploadQueueRecord.fetchOne(dbq, key: id1) }
+        let r2 = try await db.pool.read { dbq in try UploadQueueRecord.fetchOne(dbq, key: id2) }
+        let total = try await db.pool.read { dbq in try UploadQueueRecord.fetchCount(dbq) }
+        XCTAssertNil(r1)
+        XCTAssertEqual(r2?.path, "big.bin", "id 基準なら置換後の新行が残る")
+        XCTAssertEqual(total, 1)
+    }
+
+    /// 削除（id1）が先・再 enqueue（R2）が後の順序でも、id 基準なら R2 は消えない。
+    func testDeleteByIdBeforeReplacePreservesNewRow() async throws {
+        let db = try makeDB()
+        let id1 = try await enqueueUpload(db, path: "big.bin")
+        _ = try await db.pool.write { dbq in try UploadQueueRecord.deleteOne(dbq, key: id1) }
+        let id2 = try await enqueueUpload(db, path: "big.bin")
+
+        let total = try await db.pool.read { dbq in try UploadQueueRecord.fetchCount(dbq) }
+        let r2 = try await db.pool.read { dbq in try UploadQueueRecord.fetchOne(dbq, key: id2) }
+        XCTAssertEqual(total, 1)
+        XCTAssertEqual(r2?.path, "big.bin")
+    }
 }
