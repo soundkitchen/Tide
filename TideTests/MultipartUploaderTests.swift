@@ -169,6 +169,97 @@ final class MultipartUploaderTests: XCTestCase {
         XCTAssertNil(completed)
     }
 
+    // MARK: - L6 (A-detect): 読込中にファイルが変化したら complete せず abort
+
+    /// 安定なら従来どおり complete する（expectedStat を渡しても happy path を壊さない）。
+    func testStableExpectedStatStillCompletes() async throws {
+        let dir = tempDir()
+        let data = deterministicBytes(4500)
+        let url = try writeFile(data, in: dir)
+        let fake = FakeMultipartClient()
+        let reader = try NoFollowFileReader(path: url.path)
+        defer { reader.close() }
+        let real = try reader.info()                    // 現ファイルの stat（= 読み終え後も不変）
+
+        let uploader = MultipartUploader(s3: fake, retryPolicy: Self.fastPolicy)
+        let result = try await uploader.upload(
+            key: "files/blob.bin", reader: reader, partSize: 1024, expectedStat: real
+        )
+
+        XCTAssertEqual(result.sha256, HashCalculator.hex(SHA256.hash(data: data)))
+        let completed = await fake.completedParts
+        let abortCount = await fake.abortCount
+        XCTAssertNotNil(completed, "安定なら complete する")
+        XCTAssertEqual(abortCount, 0)
+    }
+
+    /// 不安定なら complete せず abort + throw（現行 S3 オブジェクトを torn で上書きしない）。
+    /// 読込中の変化は、現ファイルと食い違う expectedStat を渡して模す
+    /// （読み終え後の reader.info() = 現ファイルと一致しない → 不安定判定）。
+    func testFileChangedDuringUploadAbortsAndThrows() async throws {
+        let dir = tempDir()
+        let data = deterministicBytes(4500)
+        let url = try writeFile(data, in: dir)
+        let fake = FakeMultipartClient()
+        let reader = try NoFollowFileReader(path: url.path)
+        defer { reader.close() }
+        let real = try reader.info()
+        let expected = NoFollowFileReader.FileInfo(size: real.size + 1, mtime: real.mtime)
+
+        let uploader = MultipartUploader(s3: fake, retryPolicy: Self.fastPolicy)
+        do {
+            _ = try await uploader.upload(
+                key: "files/blob.bin", reader: reader, partSize: 1024, expectedStat: expected
+            )
+            XCTFail("不安定なら throw すべき")
+        } catch {
+            guard case SyncError.fileChangedDuringUpload = error else {
+                return XCTFail("想定外のエラー: \(error)")
+            }
+        }
+
+        let completed = await fake.completedParts
+        let abortCount = await fake.abortCount
+        XCTAssertNil(completed, "complete は呼ばれない")
+        XCTAssertEqual(abortCount, 1, "不安定なら 1 回だけ abort（catch の二重 abort を起こさない）")
+    }
+
+    /// resume 付きでも不安定なら abort + checkpoint クリア（stale MPU を残さずフル再開に委ねる）。
+    func testFileChangedWithResumeAbortsAndClearsCheckpoint() async throws {
+        let dir = tempDir()
+        let data = deterministicBytes(4500)
+        let url = try writeFile(data, in: dir)
+        let fake = FakeMultipartClient()
+        let ckpt = FakeUploadCheckpointStore()
+        let reader = try NoFollowFileReader(path: url.path)
+        defer { reader.close() }
+        let real = try reader.info()
+        let resume = MultipartUploader.ResumeContext(
+            path: "blob.bin", fileMtime: real.mtime.timeIntervalSince1970, fileSize: real.size, store: ckpt
+        )
+        let expected = NoFollowFileReader.FileInfo(size: real.size, mtime: real.mtime.addingTimeInterval(5))
+
+        let uploader = MultipartUploader(s3: fake, retryPolicy: Self.fastPolicy)
+        do {
+            _ = try await uploader.upload(
+                key: "files/blob.bin", reader: reader, partSize: 1024,
+                resume: resume, expectedStat: expected
+            )
+            XCTFail("不安定なら throw すべき")
+        } catch {
+            guard case SyncError.fileChangedDuringUpload = error else {
+                return XCTFail("想定外のエラー: \(error)")
+            }
+        }
+
+        let abortCount = await fake.abortCount
+        let clearCount = await ckpt.clearCount
+        XCTAssertEqual(abortCount, 1, "resume でも不安定なら abort")
+        XCTAssertEqual(clearCount, 1, "stale checkpoint をクリアして次回フル再開に委ねる")
+        let leftover = try await ckpt.loadUpload(path: "blob.bin")
+        XCTAssertNil(leftover)
+    }
+
     // MARK: - 中断・再開（D2）
 
     /// resume コンテキスト付きの新規アップロード: begin → 各パートを checkpoint 記録 → 成功で clear。

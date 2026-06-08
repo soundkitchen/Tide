@@ -6,6 +6,9 @@ enum SyncError: Error, CustomStringConvertible {
     case versioningNotEnabled
     case manifestUpdateFailed(String)
     case fileTooLarge(path: String, size: Int64)
+    /// 読込中にローカルファイルが変化した（torn read を避けてコミットを見送った）。L6。
+    /// リトライ扱いだが give-up カウントには載せず、安定するまで延期する。
+    case fileChangedDuringUpload(path: String)
     case awsError(underlying: Error)
     case databaseError(underlying: Error)
     case ioError(underlying: Error)
@@ -24,6 +27,8 @@ enum SyncError: Error, CustomStringConvertible {
             return "Manifest update failed: \(msg)"
         case .fileTooLarge(let path, let size):
             return "File exceeds the per-file upload size limit (\(size) bytes); not backed up. Adjust the limit in Settings: \(path)"
+        case .fileChangedDuringUpload(let path):
+            return "File changed during upload (torn read avoided); will retry when it settles: \(path)"
         case .awsError(let err):
             return "AWS error: \(err)"
         case .databaseError(let err):

@@ -112,12 +112,15 @@ struct Uploader {
             } else {
                 onProgress = nil
             }
+            // L6 (A-detect): 開始時 stat（info）を渡し、complete 前に再 stat させる。読込中に変化していたら
+            // torn なので complete せず abort + 再開に委ね、fileChangedDuringUpload を投げる。
             let mp = try await MultipartUploader(s3: s3).upload(
                 key: s3Key,
                 reader: reader,
                 partSize: plan.partSize,
                 metadata: metadata,
                 resume: resume,
+                expectedStat: info,
                 onProgress: onProgress
             )
             sha256 = mp.sha256
@@ -125,6 +128,12 @@ struct Uploader {
         } else {
             // シングルパート: 同一 FD から 1 回読んだバッファでハッシュも本体も賄う（2 回 open を畳む）。
             let (data, sha) = try HashCalculator.readAllAndHash(reader)
+            // L6 (A-detect): PUT 前に再 stat。読込中にローカルが変化していたら torn なので PUT しない
+            // （現行 S3 オブジェクトを torn で上書きしない）。fileChangedDuringUpload を投げ、安定後に上げ直す。
+            let afterInfo = try reader.info()
+            guard StabilityCheck.isStable(expected: info, final: afterInfo) else {
+                throw SyncError.fileChangedDuringUpload(path: path)
+            }
             sha256 = sha
             result = try await s3.putObject(
                 key: s3Key,

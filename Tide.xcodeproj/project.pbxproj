@@ -24,6 +24,7 @@
 		48857F592AA1ED7ED938C372 /* ChangeDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = 228CB9307607736CAE07F2B2 /* ChangeDetector.swift */; };
 		4A8930AD2D0AE9A529E0478C /* FileWatcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = DDB67AE63D5670BED8543EBA /* FileWatcher.swift */; };
 		529B7156361F472B78B3E3AE /* S3ErrorClassifierTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE08152918F7A54DA6988A54 /* S3ErrorClassifierTests.swift */; };
+		541C356ED2F55E5CF1379093 /* StabilityCheckTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20F5F66DB9903E0F42061DAA /* StabilityCheckTests.swift */; };
 		59403A709AC7BCBD0A22D194 /* AWSClientRuntime in Frameworks */ = {isa = PBXBuildFile; productRef = A50D20ED5B5AEECF1F032839 /* AWSClientRuntime */; };
 		5985D271E50C37ABEBE5327A /* Uploader.swift in Sources */ = {isa = PBXBuildFile; fileRef = D04EABECEE4BD6B84BAC341A /* Uploader.swift */; };
 		5BE0DB13AD7C865881AA99AF /* LocalDatabase.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C08DD3532C0C011010E53F2 /* LocalDatabase.swift */; };
@@ -49,6 +50,7 @@
 		97804E5C6115352D58467D1A /* IgnoreDecision.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3598608EB5993E7770BA6922 /* IgnoreDecision.swift */; };
 		9B793A724C6B1B17CE22B11F /* HashCalculatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 16ED0B8D39615582C0CD3596 /* HashCalculatorTests.swift */; };
 		9FF79ED9D02C034D4A29C8CB /* AWSS3 in Frameworks */ = {isa = PBXBuildFile; productRef = 9D164DF37935E502C6D53EB6 /* AWSS3 */; };
+		A0279BD004FB2346C6566F49 /* StabilityCheck.swift in Sources */ = {isa = PBXBuildFile; fileRef = DCFA3DA2A1A742EFCCADC9FC /* StabilityCheck.swift */; };
 		A3DD7D936C5EB50A1769BC5E /* TransferProgressTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28C008109E7A3765EE5A18E7 /* TransferProgressTests.swift */; };
 		A674AB99F3B090F076F6C29B /* TideApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45BAEBEBA92C44451EB1201D /* TideApp.swift */; };
 		AB1A5B88ADF447432ED53A27 /* ConfigStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 072BB5906CEE32216B72ACD9 /* ConfigStoreTests.swift */; };
@@ -98,6 +100,7 @@
 		1ABF6365546F76EB0474766A /* ConfigStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfigStore.swift; sourceTree = "<group>"; };
 		1BD4B605839107E1638A0D11 /* HardcodedIgnoreRulesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HardcodedIgnoreRulesTests.swift; sourceTree = "<group>"; };
 		1D326FF459D50EF387EBD5E8 /* ThreeWayMergeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreeWayMergeTests.swift; sourceTree = "<group>"; };
+		20F5F66DB9903E0F42061DAA /* StabilityCheckTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StabilityCheckTests.swift; sourceTree = "<group>"; };
 		228CB9307607736CAE07F2B2 /* ChangeDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChangeDetector.swift; sourceTree = "<group>"; };
 		24840B9F9DE6EE279D82F062 /* SyncIgnoreMatcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncIgnoreMatcher.swift; sourceTree = "<group>"; };
 		2891D2A84ED794803593042D /* SmokeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SmokeTests.swift; sourceTree = "<group>"; };
@@ -147,6 +150,7 @@
 		D28D69119A7668A0A23BDB57 /* IgnoreRules.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IgnoreRules.swift; sourceTree = "<group>"; };
 		D9201C0AA706FDFF877045BB /* SyncError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncError.swift; sourceTree = "<group>"; };
 		DA3C0DA079E4E103465665CD /* KeychainStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainStore.swift; sourceTree = "<group>"; };
+		DCFA3DA2A1A742EFCCADC9FC /* StabilityCheck.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StabilityCheck.swift; sourceTree = "<group>"; };
 		DDB67AE63D5670BED8543EBA /* FileWatcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileWatcher.swift; sourceTree = "<group>"; };
 		E0C66E505C9788FC626A5F38 /* SyncIgnoreMatcherTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncIgnoreMatcherTests.swift; sourceTree = "<group>"; };
 		EE08152918F7A54DA6988A54 /* S3ErrorClassifierTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = S3ErrorClassifierTests.swift; sourceTree = "<group>"; };
@@ -232,6 +236,7 @@
 				B664427DD4577E4CDF8BCAE8 /* PathValidatorTests.swift */,
 				EE08152918F7A54DA6988A54 /* S3ErrorClassifierTests.swift */,
 				2891D2A84ED794803593042D /* SmokeTests.swift */,
+				20F5F66DB9903E0F42061DAA /* StabilityCheckTests.swift */,
 				E0C66E505C9788FC626A5F38 /* SyncIgnoreMatcherTests.swift */,
 				1D326FF459D50EF387EBD5E8 /* ThreeWayMergeTests.swift */,
 				28C008109E7A3765EE5A18E7 /* TransferProgressTests.swift */,
@@ -282,6 +287,7 @@
 				D28D69119A7668A0A23BDB57 /* IgnoreRules.swift */,
 				AEA12CE95BED997B40130772 /* NoFollowFileReader.swift */,
 				7D5A3FCD54C910A40D3A0DF3 /* PathValidator.swift */,
+				DCFA3DA2A1A742EFCCADC9FC /* StabilityCheck.swift */,
 				075300181A2D09025E384D3B /* SyncEngine.swift */,
 				D9201C0AA706FDFF877045BB /* SyncError.swift */,
 				24840B9F9DE6EE279D82F062 /* SyncIgnoreMatcher.swift */,
@@ -452,6 +458,7 @@
 				B4526FDEB3B4C457DF3F76D6 /* S3Client.swift in Sources */,
 				34C9CD59AD38354487CAE58D /* SettingsWindow.swift in Sources */,
 				90A6EB78AF3A3DD31CF27760 /* SetupWizardWindow.swift in Sources */,
+				A0279BD004FB2346C6566F49 /* StabilityCheck.swift in Sources */,
 				B54010E5DAE38474C6EE3409 /* SyncEngine.swift in Sources */,
 				FC518B2002C4E7EE05A72567 /* SyncError.swift in Sources */,
 				1628205A2D702AD28C982B14 /* SyncEvent.swift in Sources */,
@@ -486,6 +493,7 @@
 				3BC2C69B981F941D2727FF08 /* PathValidatorTests.swift in Sources */,
 				529B7156361F472B78B3E3AE /* S3ErrorClassifierTests.swift in Sources */,
 				B2DCE996F5CB9F81078CAEC0 /* SmokeTests.swift in Sources */,
+				541C356ED2F55E5CF1379093 /* StabilityCheckTests.swift in Sources */,
 				865CD91F057ABA7320778FCF /* SyncIgnoreMatcherTests.swift in Sources */,
 				D5C8E829DC1C5A1734F300E6 /* ThreeWayMergeTests.swift in Sources */,
 				A3DD7D936C5EB50A1769BC5E /* TransferProgressTests.swift in Sources */,

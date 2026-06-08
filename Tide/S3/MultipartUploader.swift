@@ -73,6 +73,7 @@ struct MultipartUploader {
         contentType: String = "application/octet-stream",
         metadata: [String: String] = [:],
         resume: ResumeContext? = nil,
+        expectedStat: NoFollowFileReader.FileInfo? = nil,
         onProgress: (@Sendable (Int64) -> Void)? = nil
     ) async throws -> Result {
         let client = s3
@@ -180,6 +181,16 @@ struct MultipartUploader {
                 ))
             }
 
+            // L6 (A-detect): completeMultipartUpload の前に再 stat し、読込中にローカルが変化していたら
+            // torn なので complete しない（現行 S3 オブジェクトは未差し替えのまま保全される）。下の catch が
+            // abort + (resume) checkpoint クリアして、新 mtime でのフル再開に委ねる。
+            if let expectedStat {
+                let finalStat = try reader.info()
+                if !StabilityCheck.isStable(expected: expectedStat, final: finalStat) {
+                    throw SyncError.fileChangedDuringUpload(path: resume?.path ?? key)
+                }
+            }
+
             let sha = HashCalculator.hex(hasher.finalize())
             let put = try await client.completeMultipartUpload(
                 key: key, uploadId: uploadId, parts: parts
@@ -189,11 +200,21 @@ struct MultipartUploader {
             }
             return Result(put: put, sha256: sha)
         } catch {
-            if resume == nil {
-                // 従来挙動: best-effort で中止（残骸はライフサイクル tide-abort-incomplete-multipart が掃除）。
+            // 不安定（読込中に内容が変化＝L6 A-detect）は、この MPU が stale なので resume 有無に関わらず
+            // abort + checkpoint クリアして、新 mtime でのフル再開に委ねる（保持して再開すると stale な
+            // 旧パートを使い続けてしまう）。
+            let fileChanged: Bool
+            if case SyncError.fileChangedDuringUpload = error { fileChanged = true } else { fileChanged = false }
+
+            if resume == nil || fileChanged {
+                // resume なしの従来挙動 or 不安定: best-effort で中止
+                // （残骸はライフサイクル tide-abort-incomplete-multipart が掃除）。
                 try? await client.abortMultipartUpload(key: key, uploadId: uploadId)
             }
-            // resume あり: MPU と checkpoint を保持して次回再開に委ねる（abort/clear しない）。
+            if fileChanged, let resume {
+                try? await resume.store.clearUpload(path: resume.path)
+            }
+            // resume あり & 不安定でない（瞬断等）: MPU と checkpoint を保持して次回再開に委ねる（abort/clear しない）。
             throw error
         }
     }
