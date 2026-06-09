@@ -54,6 +54,7 @@
 		A3DD7D936C5EB50A1769BC5E /* TransferProgressTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28C008109E7A3765EE5A18E7 /* TransferProgressTests.swift */; };
 		A674AB99F3B090F076F6C29B /* TideApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45BAEBEBA92C44451EB1201D /* TideApp.swift */; };
 		AB1A5B88ADF447432ED53A27 /* ConfigStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 072BB5906CEE32216B72ACD9 /* ConfigStoreTests.swift */; };
+		AC11D15A3CCAF6E52AE0AED9 /* SyncEngineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57FF9CFEBE36BD67A66E1223 /* SyncEngineTests.swift */; };
 		AEEB1FD5D33DD25EADD1B5DD /* Downloader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9387D07371DA25AF234841AA /* Downloader.swift */; };
 		AF9E6F2F13CAA4421223A22B /* MultipartUploaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 308E6D6F3A4FF092DFB36BB4 /* MultipartUploaderTests.swift */; };
 		B2DCE996F5CB9F81078CAEC0 /* SmokeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2891D2A84ED794803593042D /* SmokeTests.swift */; };
@@ -116,6 +117,7 @@
 		45BAEBEBA92C44451EB1201D /* TideApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TideApp.swift; sourceTree = "<group>"; };
 		52A253BAA0EB5A4D52C3E77A /* SyncEvent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncEvent.swift; sourceTree = "<group>"; };
 		57ED617F25861D75B21F4EE8 /* ManifestShardingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManifestShardingTests.swift; sourceTree = "<group>"; };
+		57FF9CFEBE36BD67A66E1223 /* SyncEngineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncEngineTests.swift; sourceTree = "<group>"; };
 		5BA27A7A23E75B745DD484D3 /* Tide.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Tide.entitlements; sourceTree = "<group>"; };
 		5BFBDECCFCF00DE9860A9C1F /* ManifestReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManifestReader.swift; sourceTree = "<group>"; };
 		5C2D339D3AFFD0E9867884CF /* TransferStateStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TransferStateStore.swift; sourceTree = "<group>"; };
@@ -237,6 +239,7 @@
 				EE08152918F7A54DA6988A54 /* S3ErrorClassifierTests.swift */,
 				2891D2A84ED794803593042D /* SmokeTests.swift */,
 				20F5F66DB9903E0F42061DAA /* StabilityCheckTests.swift */,
+				57FF9CFEBE36BD67A66E1223 /* SyncEngineTests.swift */,
 				E0C66E505C9788FC626A5F38 /* SyncIgnoreMatcherTests.swift */,
 				1D326FF459D50EF387EBD5E8 /* ThreeWayMergeTests.swift */,
 				28C008109E7A3765EE5A18E7 /* TransferProgressTests.swift */,
@@ -494,6 +497,7 @@
 				529B7156361F472B78B3E3AE /* S3ErrorClassifierTests.swift in Sources */,
 				B2DCE996F5CB9F81078CAEC0 /* SmokeTests.swift in Sources */,
 				541C356ED2F55E5CF1379093 /* StabilityCheckTests.swift in Sources */,
+				AC11D15A3CCAF6E52AE0AED9 /* SyncEngineTests.swift in Sources */,
 				865CD91F057ABA7320778FCF /* SyncIgnoreMatcherTests.swift in Sources */,
 				D5C8E829DC1C5A1734F300E6 /* ThreeWayMergeTests.swift in Sources */,
 				A3DD7D936C5EB50A1769BC5E /* TransferProgressTests.swift in Sources */,

@@ -57,9 +57,10 @@ final class SyncEngine {
     @ObservationIgnored private var unstableWarned: Set<String> = []
 
     /// 不安定ファイルの再検査の最小間隔（秒）。書込が落ち着くまでの最短待ち。
-    private static let unstableQuiescenceSeconds: TimeInterval = 3
+    /// nonisolated: 純粋ヘルパ `unstableRetryDelay`（テスト用に nonisolated）から参照するため。
+    nonisolated private static let unstableQuiescenceSeconds: TimeInterval = 3
     /// この秒数を超えて安定しない（保留が続く）ら「未バックアップ」を 1 回ユーザに見せる。
-    private static let unstableWarnThresholdSeconds: TimeInterval = 30
+    nonisolated private static let unstableWarnThresholdSeconds: TimeInterval = 30
 
     let pollIntervalSeconds: Int
 
@@ -996,8 +997,7 @@ final class SyncEngine {
     private func handleUnstableFile(item: UploadQueueRecord) async {
         let now = Date().timeIntervalSince1970
         let pendingAge = max(0, now - item.enqueuedAt)
-        let delay = min(max(Self.unstableQuiescenceSeconds, pendingAge), 300)
-        let nextRetry = now + delay
+        let nextRetry = now + Self.unstableRetryDelay(pendingAge: pendingAge)
 
         do {
             // deferUnstableQueueItem は attempts/enqueuedAt を保持し nextRetryAt だけ前進させる。
@@ -1011,7 +1011,7 @@ final class SyncEngine {
         }
 
         // 可視化: 安定しないまま閾値を超えたら 1 回だけ「未バックアップ」を見せる（retry ごとの重複は出さない）。
-        if pendingAge >= Self.unstableWarnThresholdSeconds, !unstableWarned.contains(item.path) {
+        if Self.shouldWarnUnstable(pendingAge: pendingAge), !unstableWarned.contains(item.path) {
             unstableWarned.insert(item.path)
             await appendError(String(localized: "\(item.path) keeps changing and has not been backed up yet. It will be uploaded once it stops changing."))
             do {
@@ -1045,6 +1045,19 @@ final class SyncEngine {
         } catch {
             // 間引き失敗は致命的でない（次のアイドル周回で再試行）。
         }
+    }
+
+    /// 不安定ファイル（L6 A-detect の延期）の再検査間隔（秒）。**保留経過 `pendingAge` に比例**させ、
+    /// 最小 `unstableQuiescenceSeconds`（書込が落ち着く最短待ち）・上限 300s でクランプする。give-up カウント
+    /// （`attempts`）には載せないので、`backoffDelay` と違い attempts ではなく pendingAge を基準にする。
+    /// 比例設計のため pendingAge は ~ 3,6,12,24,48… と倍々に増え、初回警告（30s 閾値超え）は実際 ~48s 付近。
+    nonisolated static func unstableRetryDelay(pendingAge: TimeInterval) -> TimeInterval {
+        min(max(unstableQuiescenceSeconds, pendingAge), 300)
+    }
+
+    /// 不安定のまま保留がこの閾値を超えたら「まだバックアップされていない」を 1 回だけユーザに見せる。
+    nonisolated static func shouldWarnUnstable(pendingAge: TimeInterval) -> Bool {
+        pendingAge >= unstableWarnThresholdSeconds
     }
 
     static func backoffDelay(attempts: Int) -> TimeInterval {

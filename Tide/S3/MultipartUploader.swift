@@ -118,6 +118,8 @@ struct MultipartUploader {
             // 進捗報告（パート完了ごと）。既送パートは即時、未送パートは UploadPart 完了時に加算する。
             var uploadedBytes: Int64 = 0
             var partBytes: [Int: Int] = [:]
+            // L6 (A-detect early-bail): これまでに読んだ累積バイト。開始時 size 超過＝成長を逐次検知する。
+            var bytesRead: Int64 = 0
 
             // body 内は @Sendable でないので reader / hasher / parts / resume を直接キャプチャしてよい。
             // addTask の子クロージャは @Sendable なので、Sendable な値（client / String / Int / Data / policy）だけを渡す。
@@ -125,8 +127,25 @@ struct MultipartUploader {
                 var inflight = 0
                 while let chunk = try reader.readChunk(partSize) {
                     hasher.update(data: chunk)         // 既送/未送に関わらず読み順に更新（全体ハッシュを復元）
+                    bytesRead += Int64(chunk.count)
                     partNumber += 1
                     let n = partNumber
+
+                    // L6 (A-detect early-bail): 「全パート PUT 後」ではなく逐次に変化を検知し、成長/変化し続ける
+                    // 大ファイルで「満額 PUT → 不安定検知 → 全 abort」を毎リトライ繰り返す無駄（PUT 課金・帯域）を避ける。
+                    // ① 読了量が開始時 size 超過 ＝ 成長（append / DL 中 / 追記ログ）。② mtime 前進 ＝ in-place 同サイズ
+                    // 書換（DB 等）。どちらも次パートを PUT する前に throw（catch が abort + (resume) clear し、
+                    // 安定後のフル再開に委ねる）。常時書込ファイルは最初の数パートで弾ける。
+                    if let expectedStat {
+                        // ① 成長（読了量が開始時 size 超過）。② mtime 前進（in-place 同サイズ書換）。
+                        // 成長で確定なら fstat は省く（短絡）。どちらも次パートの PUT 前に弾く。
+                        if bytesRead > expectedStat.size {
+                            throw SyncError.fileChangedDuringUpload(path: resume?.path ?? key)
+                        }
+                        if try reader.info().mtime != expectedStat.mtime {
+                            throw SyncError.fileChangedDuringUpload(path: resume?.path ?? key)
+                        }
+                    }
 
                     // 既に完了済み（前回セッション）→ アップロードせず parts にだけ反映。即進捗加算。
                     if let etag = completedByNumber[n] {

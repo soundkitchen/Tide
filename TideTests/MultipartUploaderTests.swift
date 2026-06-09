@@ -260,6 +260,73 @@ final class MultipartUploaderTests: XCTestCase {
         XCTAssertNil(leftover)
     }
 
+    /// 成長検知の early-bail: 読了量が開始時 size を超えた時点で、全パートを上げ切る前に throw する
+    /// （満額 PUT → abort の浪費を避ける）。開始時 size を実ファイルより小さく渡して成長を模す。
+    func testEarlyBailOnGrowthBeforeUploadingAllParts() async throws {
+        let dir = tempDir()
+        let data = deterministicBytes(4500)             // partSize 1024 → 本来 5 パート
+        let url = try writeFile(data, in: dir)
+        let fake = FakeMultipartClient()
+        let reader = try NoFollowFileReader(path: url.path)
+        defer { reader.close() }
+        let real = try reader.info()
+        // size を 2000 に偽装（mtime は一致させ、成長条件だけを発火させる）。
+        // 読了量がパート2で 2048 > 2000 → パート2を PUT する前に throw。
+        let expected = NoFollowFileReader.FileInfo(size: 2000, mtime: real.mtime)
+
+        let uploader = MultipartUploader(s3: fake, retryPolicy: Self.fastPolicy)
+        do {
+            _ = try await uploader.upload(
+                key: "files/blob.bin", reader: reader, partSize: 1024, expectedStat: expected
+            )
+            XCTFail("成長検知で throw すべき")
+        } catch {
+            guard case SyncError.fileChangedDuringUpload = error else {
+                return XCTFail("想定外のエラー: \(error)")
+            }
+        }
+
+        let bodies = await fake.bodies
+        let completed = await fake.completedParts
+        let abortCount = await fake.abortCount
+        XCTAssertTrue(bodies.keys.allSatisfy { $0 <= 1 }, "全 5 パートは上げない（早期 bail）。アップロード済みはパート1まで")
+        XCTAssertNil(completed, "complete は呼ばれない")
+        XCTAssertEqual(abortCount, 1)
+    }
+
+    /// in-place 同サイズ書換の early-bail: mtime 前進を逐次検知し、最初のパートを PUT する前に throw する。
+    /// 開始時 mtime を実ファイルより過去に渡して「読込中に mtime が前進した」状況を模す。
+    func testEarlyBailOnMtimeAdvanceBeforeAnyPart() async throws {
+        let dir = tempDir()
+        let data = deterministicBytes(4500)
+        let url = try writeFile(data, in: dir)
+        let fake = FakeMultipartClient()
+        let reader = try NoFollowFileReader(path: url.path)
+        defer { reader.close() }
+        let real = try reader.info()
+        // size は一致（成長条件は発火しない）、mtime だけ過去 → 1 パート目の検査で mtime 不一致 → 即 throw。
+        let expected = NoFollowFileReader.FileInfo(size: real.size, mtime: real.mtime.addingTimeInterval(-5))
+
+        let uploader = MultipartUploader(s3: fake, retryPolicy: Self.fastPolicy)
+        do {
+            _ = try await uploader.upload(
+                key: "files/blob.bin", reader: reader, partSize: 1024, expectedStat: expected
+            )
+            XCTFail("mtime 前進で throw すべき")
+        } catch {
+            guard case SyncError.fileChangedDuringUpload = error else {
+                return XCTFail("想定外のエラー: \(error)")
+            }
+        }
+
+        let bodies = await fake.bodies
+        let completed = await fake.completedParts
+        let abortCount = await fake.abortCount
+        XCTAssertTrue(bodies.isEmpty, "1 パートも上げずに bail する")
+        XCTAssertNil(completed)
+        XCTAssertEqual(abortCount, 1)
+    }
+
     // MARK: - 中断・再開（D2）
 
     /// resume コンテキスト付きの新規アップロード: begin → 各パートを checkpoint 記録 → 成功で clear。
