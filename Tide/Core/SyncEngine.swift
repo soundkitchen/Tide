@@ -56,6 +56,12 @@ final class SyncEngine {
     /// （= 安定して同期完了 or 除去されたら再エピソードでまた警告できる）。
     @ObservationIgnored private var unstableWarned: Set<String> = []
 
+    /// 帯域制御（サブ E）。アップロード／ダウンロードでそれぞれ 1 つ保持し、全並行転送
+    /// （複数ファイル並行・マルチパート並列）が**同一インスタンスを共有**して合計が上限に収まる。
+    /// レートは `refreshBandwidthLimits()` が config から周回ごとに更新する（Settings 変更を次周回で反映）。
+    private let uploadLimiter: RateLimiter
+    private let downloadLimiter: RateLimiter
+
     /// 不安定ファイルの再検査の最小間隔（秒）。書込が落ち着くまでの最短待ち。
     /// nonisolated: 純粋ヘルパ `unstableRetryDelay`（テスト用に nonisolated）から参照するため。
     nonisolated private static let unstableQuiescenceSeconds: TimeInterval = 3
@@ -78,6 +84,9 @@ final class SyncEngine {
         self.deviceId = deviceId
         self.config = config
         self.pollIntervalSeconds = max(30, pollIntervalSeconds)
+        // 帯域制御（サブ E）: config の bytes/sec で初期化（既定 -1 = 無制限）。
+        self.uploadLimiter = RateLimiter(ratePerSec: Double(config.uploadBandwidthBytesPerSec))
+        self.downloadLimiter = RateLimiter(ratePerSec: Double(config.downloadBandwidthBytesPerSec))
 
         let (tmp, usedFallback) = TideTmpDirectory.resolve(for: syncRoot)
         self.tmpDir = tmp
@@ -611,6 +620,8 @@ final class SyncEngine {
     }
 
     private func performRemotePull() async throws {
+        // Settings のダウンロード帯域上限を共有 limiter に反映（次の DL から効く）。
+        await refreshBandwidthLimits()
         let reader = ManifestReader(s3: s3, db: db)
         guard let result = try await reader.read() else { return }
         let remoteMap = result.files
@@ -621,7 +632,8 @@ final class SyncEngine {
             tmpDir: tmpDir,
             deviceId: deviceId,
             transferStore: TransferStateStore(db: db),
-            progressReporter: makeProgressReporter()
+            progressReporter: makeProgressReporter(),
+            downloadLimiter: downloadLimiter
         )
 
         // 1) 取り込み（最大 5 並列）
@@ -839,19 +851,31 @@ final class SyncEngine {
         await refreshQueueDepth()
     }
 
+    // MARK: - Bandwidth (サブ E)
+
+    /// Settings の帯域上限（bytes/sec、`<= 0` = 無制限）を共有 limiter に反映する。
+    /// `uploadSizeLimitBytes` と同じく config を読み直す流儀で、転送周回の冒頭から呼ぶ。
+    private func refreshBandwidthLimits() async {
+        await uploadLimiter.setRate(Double(config.uploadBandwidthBytesPerSec))
+        await downloadLimiter.setRate(Double(config.downloadBandwidthBytesPerSec))
+    }
+
     // MARK: - Queue processing loop
 
     private func runQueueLoop() async {
         let uploader = Uploader(
             s3: s3, db: db, syncRoot: syncRoot, deviceId: deviceId, config: config,
             transferStore: TransferStateStore(db: db),
-            progressReporter: makeProgressReporter()
+            progressReporter: makeProgressReporter(),
+            uploadLimiter: uploadLimiter
         )
         while !Task.isCancelled {
             if paused {
                 try? await Task.sleep(for: .seconds(1))
                 continue
             }
+            // Settings の帯域上限を共有 limiter に反映（uploader が保持する参照に効く）。
+            await refreshBandwidthLimits()
             let items: [UploadQueueRecord]
             do {
                 items = try await fetchReadyItems()

@@ -25,6 +25,7 @@
 		4A8930AD2D0AE9A529E0478C /* FileWatcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = DDB67AE63D5670BED8543EBA /* FileWatcher.swift */; };
 		529B7156361F472B78B3E3AE /* S3ErrorClassifierTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE08152918F7A54DA6988A54 /* S3ErrorClassifierTests.swift */; };
 		541C356ED2F55E5CF1379093 /* StabilityCheckTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20F5F66DB9903E0F42061DAA /* StabilityCheckTests.swift */; };
+		54582D1A90D493B8A49F7392 /* RateLimiterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 55A63530A904BB8A91710C73 /* RateLimiterTests.swift */; };
 		59403A709AC7BCBD0A22D194 /* AWSClientRuntime in Frameworks */ = {isa = PBXBuildFile; productRef = A50D20ED5B5AEECF1F032839 /* AWSClientRuntime */; };
 		5985D271E50C37ABEBE5327A /* Uploader.swift in Sources */ = {isa = PBXBuildFile; fileRef = D04EABECEE4BD6B84BAC341A /* Uploader.swift */; };
 		5BE0DB13AD7C865881AA99AF /* LocalDatabase.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C08DD3532C0C011010E53F2 /* LocalDatabase.swift */; };
@@ -62,6 +63,7 @@
 		B54010E5DAE38474C6EE3409 /* SyncEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 075300181A2D09025E384D3B /* SyncEngine.swift */; };
 		BACC401E33B0D4F9983A990D /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 1A9CB8EA6B406E2E0BB8E34C /* Localizable.xcstrings */; };
 		BBFF23668817A804F38D4ACF /* TransferPruneTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 91F4AD8CE93628B2C74331DC /* TransferPruneTests.swift */; };
+		C04DAF629454E3C7FEC700C7 /* RateLimiter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00B6282F69A7E9AC81A74334 /* RateLimiter.swift */; };
 		C1113CE816B5451E65B63071 /* HashCalculator.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0A0C2B81618658098C69DC2 /* HashCalculator.swift */; };
 		C5031FFC043FF9929A518931 /* NoFollowFileReaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00F21E2E210A7F9BC778BC5D /* NoFollowFileReaderTests.swift */; };
 		CC223B1F855BCDBB5CA5310E /* LocalDatabaseTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF88A6EE0AAE77A740A190A9 /* LocalDatabaseTests.swift */; };
@@ -89,6 +91,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		00B6282F69A7E9AC81A74334 /* RateLimiter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RateLimiter.swift; sourceTree = "<group>"; };
 		00F21E2E210A7F9BC778BC5D /* NoFollowFileReaderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoFollowFileReaderTests.swift; sourceTree = "<group>"; };
 		026AC3AAA816DBF9DF595080 /* MenuBarContent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarContent.swift; sourceTree = "<group>"; };
 		072BB5906CEE32216B72ACD9 /* ConfigStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfigStoreTests.swift; sourceTree = "<group>"; };
@@ -116,6 +119,7 @@
 		4292EC731F5D275D86CFDAE2 /* SetupWizardWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SetupWizardWindow.swift; sourceTree = "<group>"; };
 		45BAEBEBA92C44451EB1201D /* TideApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TideApp.swift; sourceTree = "<group>"; };
 		52A253BAA0EB5A4D52C3E77A /* SyncEvent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncEvent.swift; sourceTree = "<group>"; };
+		55A63530A904BB8A91710C73 /* RateLimiterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RateLimiterTests.swift; sourceTree = "<group>"; };
 		57ED617F25861D75B21F4EE8 /* ManifestShardingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManifestShardingTests.swift; sourceTree = "<group>"; };
 		57FF9CFEBE36BD67A66E1223 /* SyncEngineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncEngineTests.swift; sourceTree = "<group>"; };
 		5BA27A7A23E75B745DD484D3 /* Tide.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Tide.entitlements; sourceTree = "<group>"; };
@@ -236,6 +240,7 @@
 				00F21E2E210A7F9BC778BC5D /* NoFollowFileReaderTests.swift */,
 				F70D2AA788DB745DCCCD3F01 /* PartPlanTests.swift */,
 				B664427DD4577E4CDF8BCAE8 /* PathValidatorTests.swift */,
+				55A63530A904BB8A91710C73 /* RateLimiterTests.swift */,
 				EE08152918F7A54DA6988A54 /* S3ErrorClassifierTests.swift */,
 				2891D2A84ED794803593042D /* SmokeTests.swift */,
 				20F5F66DB9903E0F42061DAA /* StabilityCheckTests.swift */,
@@ -290,6 +295,7 @@
 				D28D69119A7668A0A23BDB57 /* IgnoreRules.swift */,
 				AEA12CE95BED997B40130772 /* NoFollowFileReader.swift */,
 				7D5A3FCD54C910A40D3A0DF3 /* PathValidator.swift */,
+				00B6282F69A7E9AC81A74334 /* RateLimiter.swift */,
 				DCFA3DA2A1A742EFCCADC9FC /* StabilityCheck.swift */,
 				075300181A2D09025E384D3B /* SyncEngine.swift */,
 				D9201C0AA706FDFF877045BB /* SyncError.swift */,
@@ -458,6 +464,7 @@
 				09E9EF3FC2EF38B4E5289504 /* NoFollowFileReader.swift in Sources */,
 				09B21DBA24A84B9EC078A22C /* PartPlan.swift in Sources */,
 				D45DBF8182C8CDB7CDF3ED25 /* PathValidator.swift in Sources */,
+				C04DAF629454E3C7FEC700C7 /* RateLimiter.swift in Sources */,
 				B4526FDEB3B4C457DF3F76D6 /* S3Client.swift in Sources */,
 				34C9CD59AD38354487CAE58D /* SettingsWindow.swift in Sources */,
 				90A6EB78AF3A3DD31CF27760 /* SetupWizardWindow.swift in Sources */,
@@ -494,6 +501,7 @@
 				C5031FFC043FF9929A518931 /* NoFollowFileReaderTests.swift in Sources */,
 				682CA6BBC7DAB4A2AF4DBE1C /* PartPlanTests.swift in Sources */,
 				3BC2C69B981F941D2727FF08 /* PathValidatorTests.swift in Sources */,
+				54582D1A90D493B8A49F7392 /* RateLimiterTests.swift in Sources */,
 				529B7156361F472B78B3E3AE /* S3ErrorClassifierTests.swift in Sources */,
 				B2DCE996F5CB9F81078CAEC0 /* SmokeTests.swift in Sources */,
 				541C356ED2F55E5CF1379093 /* StabilityCheckTests.swift in Sources */,

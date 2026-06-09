@@ -12,6 +12,8 @@ final class ConfigStore: @unchecked Sendable {
         static let pollingIntervalSeconds = "tide.pollingIntervalSeconds"
         static let setupCompleted = "tide.setupCompleted"
         static let uploadSizeLimitBytes = "tide.uploadSizeLimitBytes"
+        static let uploadBandwidthBytesPerSec = "tide.uploadBandwidthBytesPerSec"
+        static let downloadBandwidthBytesPerSec = "tide.downloadBandwidthBytesPerSec"
     }
 
     /// 1 ファイルあたりのアップロードサイズ上限の既定値（1 GiB）。
@@ -64,6 +66,26 @@ final class ConfigStore: @unchecked Sendable {
         set { defaults.set(Int(newValue), forKey: Key.uploadSizeLimitBytes) }
     }
 
+    /// アップロードの帯域上限（bytes/sec）。`<= 0` = 無制限。既定（キー未設定）は無制限（`-1`）。
+    /// この上限は file 本体の転送（`files/*`）だけに効き、マニフェスト・シャード等の小さな
+    /// メタデータ PUT/GET には掛けない。Uploader が周回ごとに読み直して反映する。
+    var uploadBandwidthBytesPerSec: Int64 {
+        get {
+            guard defaults.object(forKey: Key.uploadBandwidthBytesPerSec) != nil else { return -1 }
+            return Int64(defaults.integer(forKey: Key.uploadBandwidthBytesPerSec))
+        }
+        set { defaults.set(Int(newValue), forKey: Key.uploadBandwidthBytesPerSec) }
+    }
+
+    /// ダウンロード（復元）の帯域上限（bytes/sec）。`<= 0` = 無制限。既定は無制限（`-1`）。
+    var downloadBandwidthBytesPerSec: Int64 {
+        get {
+            guard defaults.object(forKey: Key.downloadBandwidthBytesPerSec) != nil else { return -1 }
+            return Int64(defaults.integer(forKey: Key.downloadBandwidthBytesPerSec))
+        }
+        set { defaults.set(Int(newValue), forKey: Key.downloadBandwidthBytesPerSec) }
+    }
+
     /// 初回アクセス時に UUID を自動生成して保存する。以降不変。
     var deviceId: String {
         if let existing = defaults.string(forKey: Key.deviceId), !existing.isEmpty {
@@ -81,7 +103,8 @@ final class ConfigStore: @unchecked Sendable {
     func reset() {
         for key in [Key.bucketName, Key.region, Key.syncRootPath,
                     Key.pollingIntervalSeconds, Key.setupCompleted,
-                    Key.uploadSizeLimitBytes] {
+                    Key.uploadSizeLimitBytes,
+                    Key.uploadBandwidthBytesPerSec, Key.downloadBandwidthBytesPerSec] {
             defaults.removeObject(forKey: key)
         }
     }

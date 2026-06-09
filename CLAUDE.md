@@ -52,7 +52,7 @@
 - **マイルストーン**: 
   - M1 ローカル → S3 一方向アップロード（実装済み）
   - M2 ダウンロード / 復元 / ポーリング（実装済み・MVP ゴール）
-  - M3 双方向同期 / 競合解決 / マルチパート（サブ A〜D 実装済み: マルチパート / `.syncignore` / 3-way merge / 中断・再開。帯域制御 E と据え置き数件が残る）
+  - M3 双方向同期 / 競合解決 / マルチパート（サブ A〜E 実装済み: マルチパート / `.syncignore` / 3-way merge / 中断・再開 / 帯域制御。**M3 完了**。§8 の据え置き数件あり）
   - M4 運用機能と磨き込み（未着手）
 
 ### 主要な確定パラメータ
@@ -199,6 +199,13 @@
 - **上限超過は黙ってスキップしない**: `SyncError.fileTooLarge` を投げ、`SyncEngine.handleProcessingFailure` がリトライせずに `recentErrors` へ明示 + `sync_log` error + キュー除去（「このファイルはバックアップされていない」を可視化）。バックアップツールでサイレントな取りこぼしは最悪なので必ず見せる。
 - **大ファイルのダウンロードも `streamObject` でチャンク・ストリーミング書込**（旧 200MiB インメモリ cap を撤廃。メモリはチャンク有界）。マニフェスト経路の 16MiB cap は厳守。**復元の DoS ガード（M7）は `Downloader` 側に移動**: streaming の sink で受信累積長を `entry.size` と突合し、超過は `DownloadAbort.tooLarge` → 部分 tmp を破棄して仕切り直す（巨大本文によるローカルディスク枯渇を復元経路でも防ぐ。M4 を復元でも維持）。サイズ基準は**真実値であるマニフェスト `entry.size`**（アップロード上限は適用しない）。親ディレクトリ作成は SHA 検証後に行い、不一致時の空ディレクトリ litter を残さない。
 - **Settings の上限 UI**: `SettingsWindow` の Sync セクションに **スライダ**「Upload size limit」（1〜100GB・1GB 刻み）と **Toggle「No upload size limit」**（無制限=-1）。`ConfigStore` は @Observable でないので `@State`（`noLimit` / `limitGB`）で持ち `onAppear` で読込・`onChange` で書込（write-through）。**既定 1GB より大きい or 無制限を選ぶと課金注意 caption を表示**（ストレージ容量だけでなく**通信量（転送・egress）**の課金も増える旨を明記）。新規 xcstrings キーは `extractionState:"manual"`。
+
+### 帯域制御（サブ E・2026-06-10）
+- **方式はトークンバケット**（`Tide/Core/RateLimiter.swift`）。aws-sdk-swift の高レベル `S3Client` には公開の帯域制御ノブが無い（`S3ClientConfiguration` にレート設定なし＝URLSession/CRT に委譲して全速送信）ため、アプリの送受信フィード層で律速する。レート計算は純粋関数 **`TokenBucket`**（`StabilityCheck`/`PartPlan` と同じく `RateLimiterTests` で全分岐網羅）、**`RateLimiter` actor** が単調時計（`DispatchTime`）と `Task.sleep` を担当。
+- **予約（負残高許容）方式**: `acquire(n)` は `n` を即座に残高から差し引き、「残高が 0 以上へ回復するまでの待ち秒」だけ待つ。先に差し引くので並行 acquire でも公平（到着順で後続は先行分の負債も含めて待つ）に総スループットが収束する。`rate <= 0` は無制限（即返る）。`n > burst` でもデッドロックせず比例待ち。バーストはアイドル蓄積 1 秒ぶんで cap。
+- **スロットル点**: マルチパート＝各 `uploadPart` スケジュール前に `acquire(part.count)`／ダウンロード＝`streamObject` の async 読みループで `sink` 前に `acquire(chunk.count)`（読込を遅らせると TCP フロー制御でサーバ送出も絞られる）／単発 PUT（≤16MiB）＝送出前に `acquire(size)`（粒度は粗いが平均は収束）。**マニフェスト・シャード・index 等の小さなメタデータ PUT/GET は律速しない**（`files/*` 本体のみ）。
+- **共有リミッタ**: 同時並行転送（複数ファイル並行 UL/DL＋パート並列）が **`SyncEngine` 保持の 1 インスタンス**（upload 用／download 用）を共有して初めて合計が上限に収まる。`Uploader.uploadLimiter` / `Downloader.downloadLimiter` / `streamObject(limiter:)` に注入。**レートは config から周回ごとに `SyncEngine.refreshBandwidthLimits()` で更新**（`uploadSizeLimitBytes` と同じ「都度読み直し」流儀＝Settings 変更が次の転送周回で効く）。
+- **Settings UI**: `SettingsWindow` の **「Bandwidth」セクション**に「No upload/download bandwidth limit」トグル＋ MB/s スライダ（1〜100・1 刻み・トグル off で表示）。`ConfigStore.uploadBandwidthBytesPerSec` / `downloadBandwidthBytesPerSec`（bytes/sec、**`<= 0`=無制限・既定 `-1`**）。MB/s は decimal（1 MB/s = 1,000,000 bytes/s）。`@State` + `onAppear`/`onChange` write-through。新規 xcstrings キーは `extractionState:"manual"`。**既定は無制限**（オプトイン）。
 
 ### リセット / クリーンアップ
 - **`AppEnvironment.factoryReset` は `make reset` と同じ振る舞いに揃える**: Application Support / Caches / UserDefaults / Keychain を全部消す。deviceId も含めて消す（`ConfigStore.resetIncludingDeviceId`）。

@@ -74,6 +74,7 @@ struct MultipartUploader {
         metadata: [String: String] = [:],
         resume: ResumeContext? = nil,
         expectedStat: NoFollowFileReader.FileInfo? = nil,
+        limiter: RateLimiter? = nil,
         onProgress: (@Sendable (Int64) -> Void)? = nil
     ) async throws -> Result {
         let client = s3
@@ -169,6 +170,9 @@ struct MultipartUploader {
                         }
                         inflight -= 1
                     }
+                    // 帯域制御（サブ E）: このパートのバイト数ぶん、設定レートに見合うまで待つ。
+                    // 複数ファイル並行 UL とパート並列が同一 limiter を共有して合計が上限に収まる。
+                    await limiter?.acquire(body.count)
                     group.addTask {
                         let etag = try await Self.uploadPartWithRetry(
                             s3: client, key: key, uploadId: uploadId, partNumber: n, body: body, policy: policy

@@ -342,6 +342,7 @@ final class FakeRangedDownloadClient: RangedDownloadClient, @unchecked Sendable 
     func streamObject(
         key: String,
         rangeStart: Int64?,
+        limiter: RateLimiter?,
         sink: (Data) throws -> Void
     ) async throws -> TideS3Client.StreamObjectResult? {
         callCount += 1
