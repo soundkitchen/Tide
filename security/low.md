@@ -56,7 +56,7 @@ NSWorkspace.shared.open(URL(fileURLWithPath: path))
 
 ## L6. 書込中ファイルの torn upload と in-flight collapse
 
-**Status:** ✅ Fixed（2026-06-09・PR で 3 コミット）。症状: 書き込み途中のファイル（`mkfile` で成長中の 1.2GB）を watcher が拾い、Uploader が 850MiB 時点の千切れた内容をアップロード。書き込み完了後の再 enqueue が**処理中の行**との `UNIQUE(path)` collapse で飲み込まれ（処理完了時の行削除で消失）、ローカル ≠ DB ≠ リモートの**無エラー乖離**が次回フルスキャンまで残存した（バックアップツールとして最悪クラス）。
+**Status:** ✅ Fixed（2026-06-09・PR #14 で 3 コミット）・**実機検証済み（2026-06-10）**。症状: 書き込み途中のファイル（`mkfile` で成長中の 1.2GB）を watcher が拾い、Uploader が 850MiB 時点の千切れた内容をアップロード。書き込み完了後の再 enqueue が**処理中の行**との `UNIQUE(path)` collapse で飲み込まれ（処理完了時の行削除で消失）、ローカル ≠ DB ≠ リモートの**無エラー乖離**が次回フルスキャンまで残存した（バックアップツールとして最悪クラス）。
 
 **真因は 2 つの独立欠陥**（当初疑った `DebounceQueue.fire` の並行は無関係＝enqueue 側 `handleDebounced` は `@MainActor` + GRDB 単一ライタで直列化されており、同 path の enqueue が並行することはない）:
 
@@ -67,6 +67,8 @@ NSWorkspace.shared.open(URL(fileURLWithPath: path))
 書込が落ち着くまで安定しないファイル（ログ/DB 等）は、`handleProcessingFailure` が `fileChangedDuringUpload` を **give-up カウント（attempts）に載せず**安定するまで延期（`LocalDatabase.deferUnstableQueueItem`、再検査間隔は保留経過に比例・上限 300s）。一定時間安定しなければ「まだバックアップされていない」を `recentErrors` / `sync_log` に **1 回だけ**可視化（dedup）。＝torn を出さず、取りこぼしも黙らせない。
 
 **該当箇所:** `Tide/S3/Uploader.swift`（id 基準削除・シングルパート安定化ゲート）／`Tide/S3/MultipartUploader.swift`（`expectedStat`・complete 前判定）／`Tide/Core/StabilityCheck.swift`（判定）／`Tide/Core/SyncEngine.swift`（id 基準失敗処理・`handleUnstableFile`・`pruneUnstableWarned`）／`Tide/Storage/LocalDatabase.swift`（`deferUnstableQueueItem`）。回帰: `LocalDatabaseTests`（id 基準削除・defer）／`StabilityCheckTests`／`MultipartUploaderTests`（安定→complete・不安定→abort）。
+
+**実機検証（2026-06-10・バケット `dev-tide`・同期ルート `/Users/hige/Tide`）:** 成長し続ける大ファイルを 2 パターンで投入して統合挙動を確認した。① バースト＋休止（~440MiB）＝デバウンス再発火でキュー行 id が次々置換（89→91→92→94）。成長中に `Uploaded` ログは一切出ず（torn 未コミット）、安定化後に完全版が載った。古い in-flight 行の完了が新 id 行を巻き込み消去しない証拠として **完全版の二重アップロード（自己修復）** を観測。② 連続書込（~324MiB）＝単一行が置換されず滞留し、`attempts` は 0 のまま延期（`File changed during upload; deferring`）、**経過 ~30s で「未バックアップ」警告が 1 回だけ**発火（dedup）。両パターンとも安定後に完全版が上がり、**ローカル == DB == S3 の SHA-256 が一致**、残置マルチパートなし（abort 済み）、削除は S3 delete marker 経由で伝播。＝torn を出さず取りこぼしもしないことを実機で確認。
 
 **据え置き**: `reconcile/削除の配線部が未結合テスト`（CLAUDE.md §8）と同様、`processUpload`/`MultipartUploader` の「不安定 → abort/PUT 見送り」I/O 配線は結合テスト未整備（純粋判定と DB 操作は固定済み・S3 シームの注入面が processUpload 側に無い）。`StabilityCheck` の差し替え可能化と合わせて将来タスク。
 
