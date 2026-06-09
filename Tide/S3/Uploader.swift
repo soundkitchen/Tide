@@ -45,9 +45,11 @@ struct Uploader {
             reader = try NoFollowFileReader(path: fullURL.path)
         } catch FileOpenError.isSymbolicLink {
             // symlink への差し替えを検知 → キュー除去に留める（誤ってリモートの正データを消さない）。
+            // L6: 処理した行 (id) だけを消す。処理中に新イベントが INSERT OR REPLACE で作った
+            // 新 id の行（別内容の再アップロード指示）を path 基準で巻き込み削除しないため。
             try await db.pool.write { db in
                 try UploadQueueRecord
-                    .filter(Column("path") == path)
+                    .filter(Column("id") == item.id)
                     .deleteAll(db)
                 var log = SyncLogRecord(
                     id: nil,
@@ -110,12 +112,15 @@ struct Uploader {
             } else {
                 onProgress = nil
             }
+            // L6 (A-detect): 開始時 stat（info）を渡し、complete 前に再 stat させる。読込中に変化していたら
+            // torn なので complete せず abort + 再開に委ね、fileChangedDuringUpload を投げる。
             let mp = try await MultipartUploader(s3: s3).upload(
                 key: s3Key,
                 reader: reader,
                 partSize: plan.partSize,
                 metadata: metadata,
                 resume: resume,
+                expectedStat: info,
                 onProgress: onProgress
             )
             sha256 = mp.sha256
@@ -123,6 +128,12 @@ struct Uploader {
         } else {
             // シングルパート: 同一 FD から 1 回読んだバッファでハッシュも本体も賄う（2 回 open を畳む）。
             let (data, sha) = try HashCalculator.readAllAndHash(reader)
+            // L6 (A-detect): PUT 前に再 stat。読込中にローカルが変化していたら torn なので PUT しない
+            // （現行 S3 オブジェクトを torn で上書きしない）。fileChangedDuringUpload を投げ、安定後に上げ直す。
+            let afterInfo = try reader.info()
+            guard StabilityCheck.isStable(expected: info, final: afterInfo) else {
+                throw SyncError.fileChangedDuringUpload(path: path)
+            }
             sha256 = sha
             result = try await s3.putObject(
                 key: s3Key,
@@ -162,8 +173,12 @@ struct Uploader {
                 updatedAt: now
             )
             try rec.save(db)
+            // L6: 完了したこの行 (item.id) だけを消す。アップロード中に同 path へ新イベントが届くと
+            // INSERT OR REPLACE で新 id の行に置換される（＝完全版を上げ直せ、という正当な指示）。
+            // path 基準で消すとその新行まで巻き込み、ローカル≠DB≠リモートの無エラー乖離になっていた。
+            // id 基準なら新行は残り、次周回で再アップロードされて自己修復する。
             try UploadQueueRecord
-                .filter(Column("path") == path)
+                .filter(Column("id") == item.id)
                 .deleteAll(db)
             var log = SyncLogRecord(
                 id: nil,
@@ -192,8 +207,10 @@ struct Uploader {
         let now = Date().timeIntervalSince1970
         try await db.pool.write { db in
             try FileRecord.deleteOne(db, key: path)
+            // L6: 処理したこの行 (item.id) だけを消す（path 基準だと、削除処理中に再作成されて
+            // 置換された新 id の upload 行を巻き込んでしまう）。
             try UploadQueueRecord
-                .filter(Column("path") == path)
+                .filter(Column("id") == item.id)
                 .deleteAll(db)
             var log = SyncLogRecord(
                 id: nil,
@@ -209,9 +226,15 @@ struct Uploader {
 
     private func convertQueueItemToDelete(_ item: UploadQueueRecord) async throws {
         try await db.pool.write { db in
-            var updated = item
-            updated.operation = "delete"
-            try updated.update(db)
+            // L6: この行 (item.id) が処理中に新イベントで置換されている場合は、新 id の行が既に
+            // 正しい次の指示を表しているので何もしない（古い item をそのまま update すると
+            // recordNotFound になる、または置換された新行を取り違えて上書きしてしまう）。
+            if var existing = try UploadQueueRecord
+                .filter(Column("id") == item.id)
+                .fetchOne(db) {
+                existing.operation = "delete"
+                try existing.update(db)
+            }
         }
         AppLogger.sync.info("Converted queue item to delete: \(item.path, privacy: .private)")
     }

@@ -51,6 +51,16 @@ final class SyncEngine {
     private var paused: Bool = false
     private var running: Bool = false
     private var ignoreMatcher: SyncIgnoreMatcher = .empty
+    /// 読込中に変化し続けて安定しないファイル（L6 A-detect の延期対象）で、既に「未バックアップ」警告を
+    /// 出した path。recentErrors への重複表示を防ぐ。キューから消えた path はアイドル周回で間引く
+    /// （= 安定して同期完了 or 除去されたら再エピソードでまた警告できる）。
+    @ObservationIgnored private var unstableWarned: Set<String> = []
+
+    /// 不安定ファイルの再検査の最小間隔（秒）。書込が落ち着くまでの最短待ち。
+    /// nonisolated: 純粋ヘルパ `unstableRetryDelay`（テスト用に nonisolated）から参照するため。
+    nonisolated private static let unstableQuiescenceSeconds: TimeInterval = 3
+    /// この秒数を超えて安定しない（保留が続く）ら「未バックアップ」を 1 回ユーザに見せる。
+    nonisolated private static let unstableWarnThresholdSeconds: TimeInterval = 30
 
     let pollIntervalSeconds: Int
 
@@ -853,6 +863,7 @@ final class SyncEngine {
 
             if items.isEmpty {
                 status = .idle
+                await pruneUnstableWarned()
                 try? await Task.sleep(for: .seconds(2))
                 continue
             }
@@ -893,14 +904,23 @@ final class SyncEngine {
     }
 
     private func handleProcessingFailure(item: UploadQueueRecord, error: Error) async {
+        // L6 (A-detect): 読込中にファイルが変化していた＝torn を避けてコミットを見送った。これは「エラー」では
+        // なく「まだ安定していない」なので、give-up カウント（attempts）に載せず安定するまで延期する
+        // （恒久的に未バックアップにしない）。延期しても安定しない場合は別途ユーザに可視化する。
+        if case SyncError.fileChangedDuringUpload = error {
+            await handleUnstableFile(item: item)
+            return
+        }
+
         // サイズ上限超過は恒久的失敗（リトライしても無駄）。黙ってスキップせず、ユーザ向けに
         // ローカライズしたメッセージを recentErrors に出す（生エラー文字列ではなく一級 UX 状態として扱う）。
         if case SyncError.fileTooLarge = error {
             await appendError(String(localized: "\(item.path) exceeds the upload size limit and was not backed up. Increase the limit in Settings."))
             do {
                 try await db.pool.write { db in
+                    // L6: 処理したこの行 (item.id) だけを消す（path 基準だと処理中に置換された新 id 行を巻き込む）。
                     try UploadQueueRecord
-                        .filter(Column("path") == item.path)
+                        .filter(Column("id") == item.id)
                         .deleteAll(db)
                     var log = SyncLogRecord(
                         id: nil,
@@ -928,8 +948,9 @@ final class SyncEngine {
         if attempts >= 5 {
             do {
                 try await db.pool.write { db in
+                    // L6: 処理したこの行 (item.id) だけを消す（path 基準だと処理中に置換された新 id 行を巻き込む）。
                     try UploadQueueRecord
-                        .filter(Column("path") == item.path)
+                        .filter(Column("id") == item.id)
                         .deleteAll(db)
                     var log = SyncLogRecord(
                         id: nil,
@@ -952,8 +973,11 @@ final class SyncEngine {
 
         do {
             try await db.pool.write { db in
+                // L6: この行 (item.id) のリトライ状態だけを更新する。処理中に同 path へ新イベントが
+                // 届いて INSERT OR REPLACE で新 id 行に置換されていれば、ここは fetch で nil → no-op となり、
+                // 新行（attempts=0・即 ready）が次周回でそのまま処理される（古い失敗のバックオフを被せない）。
                 if var existing = try UploadQueueRecord
-                    .filter(Column("path") == item.path)
+                    .filter(Column("id") == item.id)
                     .fetchOne(db) {
                     existing.attempts = attempts
                     existing.nextRetryAt = nextRetry
@@ -964,6 +988,76 @@ final class SyncEngine {
         } catch {
             AppLogger.db.error("Failed to update retry state: \(String(describing: error), privacy: .private)")
         }
+    }
+
+    /// 読込中に変化し続けるファイル（L6 A-detect の不安定）を、安定するまで延期する。
+    /// attempts は触らない（give-up に載せない＝恒久的に未バックアップにしない）。再検査間隔は保留経過に
+    /// 比例して伸ばし、巨大ファイルの無駄な全読みを抑える（最小 unstableQuiescenceSeconds・上限 300s）。
+    /// 一定時間安定しなければ「まだバックアップされていない」を 1 回だけユーザに見せる（dedup）。
+    private func handleUnstableFile(item: UploadQueueRecord) async {
+        let now = Date().timeIntervalSince1970
+        let pendingAge = max(0, now - item.enqueuedAt)
+        let nextRetry = now + Self.unstableRetryDelay(pendingAge: pendingAge)
+
+        do {
+            // deferUnstableQueueItem は attempts/enqueuedAt を保持し nextRetryAt だけ前進させる。
+            // 処理中に置換された新 id 行があれば no-op（新行が次周回で処理される）。
+            _ = try await db.deferUnstableQueueItem(
+                id: item.id, nextRetryAt: nextRetry,
+                lastError: "File changed during upload; deferring until it settles"
+            )
+        } catch {
+            AppLogger.db.error("Failed to defer unstable item: \(String(describing: error), privacy: .private)")
+        }
+
+        // 可視化: 安定しないまま閾値を超えたら 1 回だけ「未バックアップ」を見せる（retry ごとの重複は出さない）。
+        if Self.shouldWarnUnstable(pendingAge: pendingAge), !unstableWarned.contains(item.path) {
+            unstableWarned.insert(item.path)
+            await appendError(String(localized: "\(item.path) keeps changing and has not been backed up yet. It will be uploaded once it stops changing."))
+            do {
+                try await db.pool.write { db in
+                    var log = SyncLogRecord(
+                        id: nil,
+                        timestamp: now,
+                        eventType: "info",
+                        path: item.path,
+                        message: "File keeps changing during upload; deferring until it settles (not backed up yet).",
+                        details: nil
+                    )
+                    try log.insert(db)
+                }
+            } catch {
+                AppLogger.db.error("Failed to record unstable-defer log: \(String(describing: error), privacy: .private)")
+            }
+        }
+    }
+
+    /// キューから消えた（安定して同期完了 or 除去された）path を unstableWarned から間引く。
+    /// これで同じ path が後で再び不安定化したとき、また 1 回だけ「未バックアップ」を見せられる。
+    /// アイドル周回で呼ぶ（このとき残るのは延期中の不安定行だけなので intersection が安全）。
+    private func pruneUnstableWarned() async {
+        guard !unstableWarned.isEmpty else { return }
+        do {
+            let queued = try await db.pool.read { db in
+                Set(try UploadQueueRecord.fetchAll(db).map(\.path))
+            }
+            unstableWarned.formIntersection(queued)
+        } catch {
+            // 間引き失敗は致命的でない（次のアイドル周回で再試行）。
+        }
+    }
+
+    /// 不安定ファイル（L6 A-detect の延期）の再検査間隔（秒）。**保留経過 `pendingAge` に比例**させ、
+    /// 最小 `unstableQuiescenceSeconds`（書込が落ち着く最短待ち）・上限 300s でクランプする。give-up カウント
+    /// （`attempts`）には載せないので、`backoffDelay` と違い attempts ではなく pendingAge を基準にする。
+    /// 比例設計のため pendingAge は ~ 3,6,12,24,48… と倍々に増え、初回警告（30s 閾値超え）は実際 ~48s 付近。
+    nonisolated static func unstableRetryDelay(pendingAge: TimeInterval) -> TimeInterval {
+        min(max(unstableQuiescenceSeconds, pendingAge), 300)
+    }
+
+    /// 不安定のまま保留がこの閾値を超えたら「まだバックアップされていない」を 1 回だけユーザに見せる。
+    nonisolated static func shouldWarnUnstable(pendingAge: TimeInterval) -> Bool {
+        pendingAge >= unstableWarnThresholdSeconds
     }
 
     static func backoffDelay(attempts: Int) -> TimeInterval {

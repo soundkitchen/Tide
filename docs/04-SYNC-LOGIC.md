@@ -148,8 +148,8 @@ func processUpload(_ queueItem: UploadQueueRecord) async throws {
             updatedAt: Date().timeIntervalSince1970
         ).save(db)
         
-        try UploadQueueRecord
-            .filter(Column("path") == path)
+        try UploadQueueRecord                       // L6: path ではなく id 基準（後述）
+            .filter(Column("id") == queueItem.id)
             .deleteAll(db)
         
         try SyncLog.insert(db, type: "upload", path: path, message: "Uploaded \(size) bytes")
@@ -254,13 +254,19 @@ func processDelete(_ queueItem: UploadQueueRecord) async throws {
     // 3. ローカル DB から削除
     try await database.write { db in
         try FileRecord.deleteOne(db, key: path)
-        try UploadQueueRecord
-            .filter(Column("path") == path)
+        try UploadQueueRecord                       // L6: path ではなく id 基準（後述）
+            .filter(Column("id") == queueItem.id)
             .deleteAll(db)
         try SyncLog.insert(db, type: "delete", path: path, message: "Deleted")
     }
 }
 ```
+
+> **キュー行は id 基準で消す（L6・2026-06-09）**: 上記 4. / 3. の `upload_queue` 削除は、`path` ではなく **処理したこの行 (`queueItem.id`)** を対象にする。アップロード/削除の処理中に同 path へ新イベントが届くと、enqueue 側の `INSERT OR REPLACE`（`UNIQUE(path)`）で**新しい AUTOINCREMENT id の行に置換**される（＝「完全版を上げ直せ」という正当な指示）。完了/失敗処理を `path` 基準で消すとその新行まで巻き込み、ローカル≠DB≠リモートの**無エラー乖離**が次回フルスキャンまで残る。id 基準なら旧行の完了/失敗は新行に触れず、次周回で再処理されて自己修復する。同じ理由で `handleProcessingFailure` の retry 更新・give-up 削除・size-limit 削除もすべて `id` 基準。
+
+> **torn read を“コミット”しない安定化ゲート（L6・A-detect・2026-06-09）**: アップロードは単一 `O_NOFOLLOW` FD から読むが、読込中にローカルが書き換えられると torn（千切れ）な内容を S3 にコミットし得る。**読み終えた後に同 FD を再 `fstat`** し、開始時の (size, mtime) と size 変化 or mtime 前進があれば「不安定」とみなす（純粋関数 `StabilityCheck.isStable`）。シングルパートは上記 2. の `putObject` の**前**に判定し、不安定なら **PUT しない**（現行 S3 オブジェクトを torn で上書きしない）。マルチパートは `completeMultipartUpload` の**前**に判定し、不安定なら **abort +（resume 時）checkpoint クリア**（complete しないので現行版は無傷・新 mtime でフル再開）。いずれも `SyncError.fileChangedDuringUpload` を投げる。加えてマルチパートは **read ループ内で逐次 early-bail**（読了量が開始時 size 超過＝成長／`reader.info()` の mtime 前進＝in-place 書換）し、次パートを PUT する前に throw する＝成長/変化し続ける大ファイルで「満額 PUT → 全 abort」を毎リトライ繰り返す PUT 課金・帯域の浪費を避ける。
+>
+> 書込が落ち着くまで安定しないファイル（ログ/DB 等）は、`handleProcessingFailure` が `fileChangedDuringUpload` を **give-up カウント（`attempts`）に載せず**、`LocalDatabase.deferUnstableQueueItem` で安定するまで延期する（再検査間隔は保留経過に比例・上限 300s、`enqueuedAt`/`attempts` は保持）。一定時間（30s）安定しなければ「まだバックアップされていない」を `recentErrors`/`sync_log` に **1 回だけ**可視化する（＝torn を出さず、取りこぼしも黙らせない）。
 
 ## リトライ戦略
 

@@ -73,6 +73,7 @@ struct MultipartUploader {
         contentType: String = "application/octet-stream",
         metadata: [String: String] = [:],
         resume: ResumeContext? = nil,
+        expectedStat: NoFollowFileReader.FileInfo? = nil,
         onProgress: (@Sendable (Int64) -> Void)? = nil
     ) async throws -> Result {
         let client = s3
@@ -117,6 +118,8 @@ struct MultipartUploader {
             // 進捗報告（パート完了ごと）。既送パートは即時、未送パートは UploadPart 完了時に加算する。
             var uploadedBytes: Int64 = 0
             var partBytes: [Int: Int] = [:]
+            // L6 (A-detect early-bail): これまでに読んだ累積バイト。開始時 size 超過＝成長を逐次検知する。
+            var bytesRead: Int64 = 0
 
             // body 内は @Sendable でないので reader / hasher / parts / resume を直接キャプチャしてよい。
             // addTask の子クロージャは @Sendable なので、Sendable な値（client / String / Int / Data / policy）だけを渡す。
@@ -124,8 +127,25 @@ struct MultipartUploader {
                 var inflight = 0
                 while let chunk = try reader.readChunk(partSize) {
                     hasher.update(data: chunk)         // 既送/未送に関わらず読み順に更新（全体ハッシュを復元）
+                    bytesRead += Int64(chunk.count)
                     partNumber += 1
                     let n = partNumber
+
+                    // L6 (A-detect early-bail): 「全パート PUT 後」ではなく逐次に変化を検知し、成長/変化し続ける
+                    // 大ファイルで「満額 PUT → 不安定検知 → 全 abort」を毎リトライ繰り返す無駄（PUT 課金・帯域）を避ける。
+                    // ① 読了量が開始時 size 超過 ＝ 成長（append / DL 中 / 追記ログ）。② mtime 前進 ＝ in-place 同サイズ
+                    // 書換（DB 等）。どちらも次パートを PUT する前に throw（catch が abort + (resume) clear し、
+                    // 安定後のフル再開に委ねる）。常時書込ファイルは最初の数パートで弾ける。
+                    if let expectedStat {
+                        // ① 成長（読了量が開始時 size 超過）。② mtime 前進（in-place 同サイズ書換）。
+                        // 成長で確定なら fstat は省く（短絡）。どちらも次パートの PUT 前に弾く。
+                        if bytesRead > expectedStat.size {
+                            throw SyncError.fileChangedDuringUpload(path: resume?.path ?? key)
+                        }
+                        if try reader.info().mtime != expectedStat.mtime {
+                            throw SyncError.fileChangedDuringUpload(path: resume?.path ?? key)
+                        }
+                    }
 
                     // 既に完了済み（前回セッション）→ アップロードせず parts にだけ反映。即進捗加算。
                     if let etag = completedByNumber[n] {
@@ -180,6 +200,16 @@ struct MultipartUploader {
                 ))
             }
 
+            // L6 (A-detect): completeMultipartUpload の前に再 stat し、読込中にローカルが変化していたら
+            // torn なので complete しない（現行 S3 オブジェクトは未差し替えのまま保全される）。下の catch が
+            // abort + (resume) checkpoint クリアして、新 mtime でのフル再開に委ねる。
+            if let expectedStat {
+                let finalStat = try reader.info()
+                if !StabilityCheck.isStable(expected: expectedStat, final: finalStat) {
+                    throw SyncError.fileChangedDuringUpload(path: resume?.path ?? key)
+                }
+            }
+
             let sha = HashCalculator.hex(hasher.finalize())
             let put = try await client.completeMultipartUpload(
                 key: key, uploadId: uploadId, parts: parts
@@ -189,11 +219,21 @@ struct MultipartUploader {
             }
             return Result(put: put, sha256: sha)
         } catch {
-            if resume == nil {
-                // 従来挙動: best-effort で中止（残骸はライフサイクル tide-abort-incomplete-multipart が掃除）。
+            // 不安定（読込中に内容が変化＝L6 A-detect）は、この MPU が stale なので resume 有無に関わらず
+            // abort + checkpoint クリアして、新 mtime でのフル再開に委ねる（保持して再開すると stale な
+            // 旧パートを使い続けてしまう）。
+            let fileChanged: Bool
+            if case SyncError.fileChangedDuringUpload = error { fileChanged = true } else { fileChanged = false }
+
+            if resume == nil || fileChanged {
+                // resume なしの従来挙動 or 不安定: best-effort で中止
+                // （残骸はライフサイクル tide-abort-incomplete-multipart が掃除）。
                 try? await client.abortMultipartUpload(key: key, uploadId: uploadId)
             }
-            // resume あり: MPU と checkpoint を保持して次回再開に委ねる（abort/clear しない）。
+            if fileChanged, let resume {
+                try? await resume.store.clearUpload(path: resume.path)
+            }
+            // resume あり & 不安定でない（瞬断等）: MPU と checkpoint を保持して次回再開に委ねる（abort/clear しない）。
             throw error
         }
     }
