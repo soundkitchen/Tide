@@ -88,14 +88,23 @@ struct SyncActivityWindow: View {
         }
         if model.entries.isEmpty {
             if !model.isLoading {
-                Text("No activity yet.")
-                    .foregroundStyle(.secondary)
+                // 全チップ off（仕様どおり 0 件）と「ログ自体が無い」を区別する（PR #17 レビュー nit-2）。
+                if model.selectedTypes.isEmpty {
+                    Text("No event types selected.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("No activity yet.")
+                        .foregroundStyle(.secondary)
+                }
             }
             Spacer()
         } else {
-            List {
+            // List(selection:) でキーボード上下 / VoiceOver の行選択を効かせる（PR #17 レビュー nit-3）。
+            // fetch 済み行の id は常に非 nil（AUTOINCREMENT）なので `?? -1` は実質到達しない。
+            List(selection: $model.selectedEntryId) {
                 ForEach(model.entries, id: \.id) { entry in
                     row(entry)
+                        .tag(entry.id ?? -1)
                 }
                 if model.hasMore {
                     HStack {
@@ -113,8 +122,7 @@ struct SyncActivityWindow: View {
     }
 
     private func row(_ entry: SyncLogRecord) -> some View {
-        let isSelected = entry.id == model.selectedEntryId
-        return HStack(alignment: .firstTextBaseline, spacing: 8) {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
             Image(systemName: Self.symbol(for: SyncLogEventType(rawValue: entry.eventType)))
                 .foregroundStyle(Self.color(for: SyncLogEventType(rawValue: entry.eventType)))
                 .frame(width: 16)
@@ -136,11 +144,6 @@ struct SyncActivityWindow: View {
             Spacer(minLength: 0)
         }
         .padding(.vertical, 1)
-        .contentShape(Rectangle())
-        .onTapGesture {
-            model.selectedEntryId = (model.selectedEntryId == entry.id) ? nil : entry.id
-        }
-        .listRowBackground(isSelected ? Color.accentColor.opacity(0.12) : nil)
     }
 
     // MARK: - 詳細ペイン

@@ -37,7 +37,9 @@ struct MenuBarContent: View {
                 openSetupWindow()
             }
         }
-        .task(id: env.engine?.lastSyncedAt) {
+        // lastSyncedAt は upload 周回完了でしか前進しないため、pull 由来の download / 削除反映も
+        // 拾えるよう lastRemoteCheckedAt と束ねて id にする（PR #17 レビュー Low-2）。
+        .task(id: [env.engine?.lastSyncedAt, env.engine?.lastRemoteCheckedAt]) {
             await loadRecentActivity()
         }
     }
@@ -96,7 +98,11 @@ struct MenuBarContent: View {
         switch p {
         case .notConfigured:    return String(localized: "Not configured")
         case .allSynced:        return String(localized: "All synced")
-        case .syncing:          return String(localized: "Syncing…")
+        case .syncing(let pending):
+            // 残作業の目安（queue と転送中の大きい方）。0 のときは件数を出さない。
+            return pending > 0
+                ? String(localized: "Syncing… (\(pending))")
+                : String(localized: "Syncing…")
         case .paused:           return String(localized: "Paused")
         case .error(let s):     return String(localized: "Error: \(s)")
         }

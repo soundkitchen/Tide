@@ -3,8 +3,9 @@ import GRDB
 
 /// エラーを `SyncIssue` に分類する純粋ロジック（F4 / H2 UI 残の解消）。
 /// 判定順序は (1) `SyncError` の case 直マップ →（`awsError` は underlying を剥がして）
-/// (2) `S3ErrorClassifier`（S3 固有コード）→ (3) URLError / キーワードでネットワーク →
-/// (4) ローカル系の型マッチ → (5) `.other`。全分岐を `SyncIssueClassifierTests` で固定する。
+/// (2) 型マッチ（URLError / CocoaError / FileOpenError / DatabaseError）→
+/// (3) `S3ErrorClassifier`（S3 固有コードの文字列マッチ）→ (4) キーワードでネットワーク →
+/// (5) `.other`。全分岐を `SyncIssueClassifierTests` で固定する。
 enum SyncIssueClassifier {
     static func classify(error: Error, path: String? = nil, date: Date = Date()) -> SyncIssue {
         SyncIssue(
@@ -42,14 +43,21 @@ enum SyncIssueClassifier {
 
     /// SyncError 以外（生 SDK / Foundation / GRDB エラー）の分類。
     private static func categoryForGenericError(_ error: Error) -> SyncIssue.Category {
-        // S3 固有コードを先に見る（"connection" 等の汎用語より特異度が高い）。
+        // 型マッチを文字列ヒューリスティックより先に確定させる（PR #17 レビュー Low-1）。
+        // ローカルエラーの説明文（パス名・メッセージ）に "412" / "offline" 等が偶然含まれると
+        // 部分一致が誤発火するため。SDK エラーがこれらの型に該当することはないので、
+        // S3 エラーを横取りする副作用はない。
+        if error is URLError { return .network }
+        if let cocoa = error as? CocoaError, cocoa.isFileError { return .localIO }
+        if error is FileOpenError { return .localIO }
+        if error is DatabaseError { return .database }
+        // S3 固有コード（SDK がエラー型を公開しないため文字列マッチ）。
         if S3ErrorClassifier.isForbidden(error) { return .accessDenied }
         if S3ErrorClassifier.isNotFound(error) { return .notFound }
         if S3ErrorClassifier.isPreconditionFailed(error) || S3ErrorClassifier.isConditionalConflict(error) {
             return .remoteConflict
         }
-        if error is URLError { return .network }
-        // SDK がエラー型を公開しないため、S3ErrorClassifier と同じ文字列マッチ流儀で補足する。
+        // 最後にネットワーク系キーワード（S3ErrorClassifier と同じ文字列マッチ流儀）。
         let desc = String(describing: error)
         if desc.contains("NSURLError")
             || desc.contains("timed out")
@@ -59,9 +67,6 @@ enum SyncIssueClassifier {
             || desc.contains("crtError") {
             return .network
         }
-        if let cocoa = error as? CocoaError, cocoa.isFileError { return .localIO }
-        if error is FileOpenError { return .localIO }
-        if error is DatabaseError { return .database }
         return .other
     }
 

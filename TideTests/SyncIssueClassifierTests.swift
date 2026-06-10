@@ -109,6 +109,35 @@ final class SyncIssueClassifierTests: XCTestCase {
         )
     }
 
+    /// 型マッチが文字列ヒューリスティックより先に確定する（PR #17 レビュー Low-1）。
+    /// 説明文に "412" / "offline" を含むローカルエラーが remoteConflict / network に
+    /// 誤分類されないことを固定する。
+    func testTypeMatchBeatsStringHeuristics() {
+        // GRDB DatabaseError: message に "412" と "offline" を含めても database のまま。
+        let dbError = DatabaseError(
+            resultCode: .SQLITE_IOERR,
+            message: "disk I/O error at offline-412.sqlite (PreconditionFailed-like text)"
+        )
+        XCTAssertTrue(
+            String(describing: dbError).contains("412"),
+            "前提: 説明文に 412 が含まれている（含まれないならこのテストは無意味）"
+        )
+        XCTAssertEqual(SyncIssueClassifier.category(for: dbError), .database)
+
+        // CocoaError(file 系): userInfo のパスに "offline" / "412" を含めても localIO のまま。
+        let cocoaError = CocoaError(
+            .fileReadNoSuchFile,
+            userInfo: [NSFilePathErrorKey: "/tmp/offline-report-412.txt"]
+        )
+        XCTAssertEqual(SyncIssueClassifier.category(for: cocoaError), .localIO)
+
+        // URLError: userInfo に S3 風の語を含めても network のまま。
+        var urlInfo: [String: Any] = [:]
+        urlInfo[NSLocalizedDescriptionKey] = "AccessDenied-like 412 message"
+        let urlError = URLError(.cannotConnectToHost, userInfo: urlInfo)
+        XCTAssertEqual(SyncIssueClassifier.category(for: urlError), .network)
+    }
+
     // MARK: - フォールバック
 
     func testUnknownErrorFallsBackToOther() {
