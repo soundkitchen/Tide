@@ -172,6 +172,12 @@ struct MultipartUploader {
                     }
                     // 帯域制御（サブ E）: このパートのバイト数ぶん、設定レートに見合うまで待つ。
                     // 複数ファイル並行 UL とパート並列が同一 limiter を共有して合計が上限に収まる。
+                    // early-bail（上の成長/mtime 前進チェック）の後に置く＝torn で捨てる運命のパートに
+                    // 帯域待ちを浪費しない。完了済みパート（resume）は上の continue で送信せず acquire も踏まない。
+                    // 既知の小穴（PR #15 レビュー nit-1）: acquire はパートにつき 1 回。`uploadPartWithRetry` の
+                    // 瞬断再送（最大 3 回・同 body）は再 acquire されず律速を外れる＝低レート×不安定回線で
+                    // 瞬間的に上限超過し得る。リトライは稀＆個人利用想定で実害小のため現状維持（acquire を
+                    // 再送ループ内へ寄せると actor 共有の粒度が変わる）。
                     await limiter?.acquire(body.count)
                     group.addTask {
                         let etag = try await Self.uploadPartWithRetry(

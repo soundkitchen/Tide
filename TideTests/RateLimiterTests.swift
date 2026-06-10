@@ -1,8 +1,10 @@
 import XCTest
 @testable import Tide
 
-/// `TokenBucket`（帯域制御の純粋計算）の網羅。時刻を注入して決定的に検証する。
-final class TokenBucketTests: XCTestCase {
+/// 帯域制御（サブ E）の網羅。純粋関数 `TokenBucket` を時刻注入で決定的に検証し（大半）、
+/// 末尾で `RateLimiter` actor の無制限即返り・`setRate` を薄く通す。ファイル名と一致させて
+/// `RateLimiterTests`（PR #15 レビュー nit-4）。
+final class RateLimiterTests: XCTestCase {
 
     // MARK: - 無制限
 
