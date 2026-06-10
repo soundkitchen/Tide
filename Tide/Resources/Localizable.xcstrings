@@ -12,6 +12,61 @@
         }
       }
     },
+    "All synced" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "すべて同期済み"
+          }
+        }
+      }
+    },
+    "%lld items queued" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld 件待機中"
+          }
+        }
+      }
+    },
+    "Clear" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "クリア"
+          }
+        }
+      }
+    },
+    "Details…" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "詳細…"
+          }
+        }
+      }
+    },
+    "Recent activity" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "最近の同期"
+          }
+        }
+      }
+    },
     "Conflicts" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -1340,17 +1395,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "取得中…"
-          }
-        }
-      }
-    },
-    "Queue: %lld" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "キュー: %lld 件"
           }
         }
       }

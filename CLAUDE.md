@@ -301,6 +301,13 @@
 - **`SyncActivityModel` は `LocalDatabase` を引数で受ける**（env 非依存）。temp DB だけで `SyncActivityModelTests` が完結する。`reload` は世代トークンで「最新が勝つ」（isLoading での再入拒否はしない＝フィルタ連打で最後の状態に収束）、`loadMore` は `!isLoading` ガード + 世代一致確認（進行中 reload があれば stale ページを捨てる）。
 - **メニューバー「Details…」からのフィルタプリセット渡しは見送り**: 単一 `Window` Scene は値を渡せず、`AppEnvironment` に一時ヒントを持たせるのは状態の寿命管理が汚れる。ポップオーバー側に rawDetail コピーがあるので必要性も薄い（据え置き）。
 
+### ポップオーバー刷新（M4・2026-06-11）
+
+- **構成**（幅 320 → **340**）: statusHeader（状態アイコン + 見出し）/ syncInfoCard（Last sync / Last remote check / 待機件数。queue 0 なら行ごと省略）/ recentActivityCard（直近 3 件の upload/download/delete）/ transfersCard / issuesCard（カテゴリ別グルーピング + 件数バッジ + DisclosureGroup 展開 + Clear + Details…）/ primaryActions（Pause/Resume・Force scan・Pull の 3 等分アイコンボタン `.bordered`）/ secondaryActions（メニュー風フル幅 plain ボタン）。カード背景は `.background(.quinary, in: RoundedRectangle(cornerRadius: 8))`。
+- **「All synced」判定は純粋関数 `MenuBarPresentation.headline(status:queueDepth:activeTransferCount:)`**（`Tide/UI/MenuBarPresentation.swift`・`MenuBarPresentationTests` で全分岐固定）。allSynced ⇔ **`.idle` かつ queue 0 かつ転送中 0** のみ。`.idle` でも queue > 0 / 転送 > 0 なら syncing 表示（キュー処理周回の谷間を「同期済み」と誤表示しない）。issuesCard のグルーピングも同ファイルの純粋関数 `groupIssues`（最新 issue を含むグループが先・グループ内新しい順）。
+- **直近の同期ファイルは sync_log の直読み**（`fetchLogs(eventTypes: [upload, download, delete], limit: 3)`・`.task(id: engine.lastSyncedAt)` で開時 + 同期完了ごとに再取得）。SyncEngine にメモリ状態を増やさない（再起動で消える割に Uploader/Downloader → engine の報告配線コストが高い案は不採用）。
+- **壊してはならない既存挙動**（リファクタ時の checklist）: 「Pull from S3」は pull 中も **enabled**（押下が coalescing の入口）+ スピナー／全 `openWindow` 前に `NSApp.activate`／root の `.task` bootstrap（ウィザード保険）／`Open Sync Folder` の nil disabled／Quit の ⌘Q／未設定・bootstrapFailure 分岐（**bootstrapFailure の生文字列表示はスコープ外で維持** — セットアップ復旧には全文が要る。§8 参照）。
+
 ## 8. 既知の据え置き項目
 
 - **C3 後半**: HTTPS 強制バケットポリシー（`PutBucketPolicy` で `aws:SecureTransport=true`）。SDK 自体は HTTPS 既定で送るので緊急度は低い。
@@ -325,3 +332,4 @@
 - **ネスト `.syncignore`**: ディレクトリごとの `.syncignore`（git 風の階層的オーバーライド）は未対応。現状はルートの `<syncRoot>/.syncignore` のみ。将来タスク（`docs/07-M3-IMPLEMENTATION-GUIDE.md` サブタスク B「既知の制限 / 将来タスク」参照）。
 - **M4 復元 UI の据え置き（2026-06-10）**: (a) **S3 内 CopyObject 方式**: 巨大ファイルをローカル往復させない復元。マニフェスト整合（sha256/etag）を別途解決する設計が要るため別タスク（現状は「書き戻し → 再アップロード」一本）。(b) **大規模バケットの全削除済み列挙コスト**: 「Deleted files」タブは `files/` 全体を毎回フル列挙するため、巨大バケットでは増分インデックス/キャッシュが望ましい（現状は明示ボタン + 逐次表示 + キャンセルで緩和）。(c) **マルチパート過去版の etag 整合チェック**: `<md5>-<n>` 形式で MD5 一致しないため整合判定に使っていない（サイズ + 復元後の再ハッシュで担保）。(d) **delete marker の直接削除による「完全削除取り消し」別経路**（CopyObject せず復活）は UI スコープ外。(e) **過去バージョン参照のファイル選択**は相対パス入力 + `NSOpenPanel`（syncRoot 内限定）のみ。同期済みファイル一覧からの選択や、削除済みファイルの版履歴ブラウズは未対応。
 - **`RestoreService` / 復元 UI の reconcile 競合**: 復元の atomic move は専用 tmp 名（`restore-<hash>.part`）で `Downloader` の `dl-` tmp とは非衝突だが、復元書込と並行 `triggerRemotePull` の reconcile が同一 path に同時に触れる窓は厳密には未閉鎖（手動操作 + フルスキャン委譲で実害は出ていない）。pull 単一ゲートと同様の直列化が要るなら別タスク。
+- **`bootstrapFailure` / `VersionHistoryModel.errorMessage` の生エラー文字列表示（F4 の残り面・据え置き）**: F4 本体（`recentIssues` / `.error`）は 2026-06-11 に分類サマリ化で解消したが、この 2 面は意図的に生文字列のまま — bootstrapFailure はセットアップ復旧に全文が要り、復元 UI のエラーは操作直後の文脈でデバッグ実利が大きい。露出はメタデータのみ・本人画面のみ（旧 F4 と同評価）。他人配布前に再評価（`security/README.md` 参照）。
