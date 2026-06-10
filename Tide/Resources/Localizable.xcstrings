@@ -1,6 +1,424 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "Access denied" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "アクセスが拒否されました"
+          }
+        }
+      }
+    },
+    "All synced" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "すべて同期済み"
+          }
+        }
+      }
+    },
+    "%lld items queued" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld 件待機中"
+          }
+        }
+      }
+    },
+    "Clear" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "クリア"
+          }
+        }
+      }
+    },
+    "Details…" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "詳細…"
+          }
+        }
+      }
+    },
+    "Recent activity" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "最近の同期"
+          }
+        }
+      }
+    },
+    "Conflicts" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "競合"
+          }
+        }
+      }
+    },
+    "Deletions" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "削除"
+          }
+        }
+      }
+    },
+    "Downloads" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ダウンロード"
+          }
+        }
+      }
+    },
+    "Errors" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "エラー"
+          }
+        }
+      }
+    },
+    "Info" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "情報"
+          }
+        }
+      }
+    },
+    "Load more" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "さらに読み込む"
+          }
+        }
+      }
+    },
+    "Logs older than 30 days are removed automatically." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "30 日より古いログは自動的に削除されます。"
+          }
+        }
+      }
+    },
+    "No activity yet." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "まだアクティビティはありません。"
+          }
+        }
+      }
+    },
+    "No event types selected." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "表示するイベント種別が選択されていません。"
+          }
+        }
+      }
+    },
+    "Syncing… (%lld)" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "同期中… (%lld)"
+          }
+        }
+      }
+    },
+    "Refresh" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "更新"
+          }
+        }
+      }
+    },
+    "Run setup first to view sync activity." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "同期アクティビティを表示するには、先にセットアップを実行してください。"
+          }
+        }
+      }
+    },
+    "Sync Activity" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "同期アクティビティ"
+          }
+        }
+      }
+    },
+    "Sync Activity…" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "同期アクティビティ…"
+          }
+        }
+      }
+    },
+    "Uploads" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "アップロード"
+          }
+        }
+      }
+    },
+    "Another device may be syncing; usually resolves on retry." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "他のデバイスが同期中の可能性があります。通常は再試行で解消します。"
+          }
+        }
+      }
+    },
+    "Check the IAM policy for the bucket." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "バケットの IAM ポリシーを確認してください。"
+          }
+        }
+      }
+    },
+    "Configuration error" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "設定エラー"
+          }
+        }
+      }
+    },
+    "Copy details" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "詳細をコピー"
+          }
+        }
+      }
+    },
+    "Database error" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "データベースエラー"
+          }
+        }
+      }
+    },
+    "File keeps changing" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ファイルが変化し続けています"
+          }
+        }
+      }
+    },
+    "File too large" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ファイルサイズ超過"
+          }
+        }
+      }
+    },
+    "Local file error" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ローカルファイルエラー"
+          }
+        }
+      }
+    },
+    "Network error" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ネットワークエラー"
+          }
+        }
+      }
+    },
+    "Not backed up. Increase the upload size limit in Settings." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "バックアップされていません。設定でアップロードサイズ上限を引き上げてください。"
+          }
+        }
+      }
+    },
+    "Not backed up yet. It will be uploaded once it stops changing." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "まだバックアップされていません。変化が止まり次第アップロードされます。"
+          }
+        }
+      }
+    },
+    "Not found on S3" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "S3 に見つかりません"
+          }
+        }
+      }
+    },
+    "Remote write conflict" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "リモート書き込みの競合"
+          }
+        }
+      }
+    },
+    "Run Setup again to fix the configuration." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "セットアップをやり直して設定を修正してください。"
+          }
+        }
+      }
+    },
+    "Sync error" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "同期エラー"
+          }
+        }
+      }
+    },
+    "Unsafe remote path rejected" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "不正なリモートパスを拒否しました"
+          }
+        }
+      }
+    },
+    "Will retry when the connection recovers." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "接続が回復したら再試行します。"
+          }
+        }
+      }
+    },
     "Deleted files" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -317,28 +735,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "%@*（前方一致）"
-          }
-        }
-      }
-    },
-    "%@ exceeds the upload size limit and was not backed up. Increase the limit in Settings." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "%@ はアップロードサイズ上限を超えているためバックアップされませんでした。Settings で上限を上げてください。"
-          }
-        }
-      }
-    },
-    "%@ keeps changing and has not been backed up yet. It will be uploaded once it stops changing." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "%@ は変更され続けているため、まだバックアップされていません。変更が止まればアップロードされます。"
           }
         }
       }
@@ -1021,17 +1417,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "取得中…"
-          }
-        }
-      }
-    },
-    "Queue: %lld" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "キュー: %lld 件"
           }
         }
       }

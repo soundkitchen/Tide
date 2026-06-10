@@ -41,10 +41,17 @@ AWS SDK のエラー記述には、リクエスト URL（バケット名・キ�
 - ログは `privacy: .private`（または既定値）にし、`(reason)` のみ public に
 - UI の `recentErrors` はクラス分けされたメッセージ（e.g. "AccessDenied on key X"）に絞る
 
-**残存 (F4, 2026-06-01) ⏸ Deferred — 意図的保持 (2026-06-02 判断):** OS Log の `.public` 漏洩は是正済みだが、
-上記対策の 3 点目「UI の `recentErrors` をクラス分けされたメッセージに絞る」は**意図的に未実施**。
-`SyncEngine.appendError("\(path): \(error)")` および `status = .error(String(describing: error))` が生の SDK
-エラー文字列（バケット名・キー・リージョンを含み得る）を `MenuBarContent`（`textSelection` 有効）へ表示し続けている。
+**残存 (F4, 2026-06-01) ✅ Fixed (2026-06-11) — B 案で是正（M4 Sync Activity 対応に同梱）:**
+上記対策の 3 点目を実装した。`recentErrors: [String]` を構造化型 **`recentIssues: [SyncIssue]`** に置換し、
+UI の既定表示は **`SyncIssueClassifier`（`Tide/Core/SyncIssueClassifier.swift`・`S3ErrorClassifier`/`SyncError` を再利用）
+の分類サマリ（ローカライズ済みカテゴリ + 行動指針）のみ**。生のエラー文字列は `SyncIssue.rawDetail` に隔離し、
+行の context menu「Copy details」および Sync Activity ウィンドウの details 列で**オンデマンドにのみ**参照できる
+（デバッグ性は保持＝B 案の意図どおり）。`status = .error(...)` も分類サマリ文字列に変更。sync_log への記録も
+message は英語固定文・生エラーは details 列へ分離した。
+
+**旧・残存内容（参考・解消済み）:** `SyncEngine.appendError("\(path): \(error)")` および
+`status = .error(String(describing: error))` が生の SDK エラー文字列（バケット名・キー・リージョンを含み得る）を
+`MenuBarContent`（`textSelection` 有効）へ表示し続けていた。
 
 **脅威:** 攻撃者前提なしの情報露出。露出するのは**メタデータ**（バケット名・S3 キー＝同期ファイルのパス・リージョン）で、
 **認証情報は含まない**（S3 エラー応答はエコーバックしない）。露出先は**本人画面のみ**で、API 経由のローカル読み出し経路は無い。

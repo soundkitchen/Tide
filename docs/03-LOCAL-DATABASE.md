@@ -106,7 +106,7 @@ CREATE TABLE sync_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp REAL NOT NULL,
     
-    -- 'upload', 'delete', 'error', 'conflict'（M3で使用）, 'info'
+    -- 'upload', 'download', 'delete', 'error', 'conflict'（M3で使用）, 'info'
     event_type TEXT NOT NULL,
     
     -- 関連ファイルパス（イベントによっては NULL）
@@ -115,12 +115,18 @@ CREATE TABLE sync_log (
     -- メッセージ
     message TEXT NOT NULL,
     
-    -- 追加情報（JSON 文字列）
+    -- 追加情報
     details TEXT
 );
 
 CREATE INDEX idx_log_timestamp ON sync_log(timestamp DESC);
 ```
+
+書込・読出の規約（M4・2026-06-11）:
+
+- `event_type` の実使用値は `SyncLogEventType` enum（`LocalDatabase.swift`）に集約し、書込箇所はリテラルでなく rawValue を使う（タイポすると UI フィルタから黙って漏れるため）。
+- **エラー行は `message` = 英語固定文（操作の文脈。例 "Remote pull failed"）、`details` = 生エラー全文**に分離する。生エラーを `message` に埋め込まない（F4 / H2 と同じ整理。UI 既定表示は message のみ・details はオンデマンド）。
+- 読出は `LocalDatabase.fetchLogs(eventTypes:beforeId:limit:)`（Sync Activity ウィンドウ用）。**id 降順 + `beforeId` カーソル**でページングする（id は AUTOINCREMENT で単調・一意。timestamp は REAL の同値衝突がありページ境界で重複/欠落し得るため使わない）。`limit + 1` 件 fetch して `hasMore` を判定する。
 
 ### transfer_state（M3 サブ D・中断/再開）
 

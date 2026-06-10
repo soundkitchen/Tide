@@ -164,12 +164,12 @@ M1 の 100MiB ハード上限（`maxSizeM1`）は M3 で撤廃した。`Uploader
 - **シングルパート**（`≤ 16 MiB`、`PartPlan.shouldUseMultipart` が false）: O_NOFOLLOW の単一 FD から 1 回読んだバッファでハッシュも本体も賄い（M5: 2 回 open を畳む）、`putObject` で送る。
 - **マルチパート**（`> 16 MiB`）: `MultipartUploader` が単一 FD から順次読込しつつ SHA-256 を逐次更新し、読み終えたパートを**有界並列（最大 3）で UploadPart**。アダプティブパートサイズ（`PartPlan`）: 目標パート数 9,000 基準値を `[5MiB, 64MiB]` にクランプ（常駐メモリ抑制）、10,000 パートに収まらない超巨大ファイルのみ必要分まで partSize を上げる（MiB 境界切り上げで `partCount ≤ 10,000`）。瞬断は**パート単位リトライ**で吸収し、恒久失敗は best-effort `abort` → throw（ファイル単位リトライへ）。`UploadId` の永続化・再起動またぎ再開はサブタスク D（別チャンク）。
 
-**1 ファイルあたりのアップロード上限**は `ConfigStore.uploadSizeLimitBytes`（Settings で変更、既定 1GiB、`-1` = 無制限）。上限はアップロード方向のみに適用し、ダウンロード（復元）は常に許可する。上限超過は**黙ってスキップせず** `SyncError.fileTooLarge` を投げ、`SyncEngine.handleProcessingFailure` がリトライせずに `recentErrors` へ明示 + `sync_log` の `error` 記録 + キュー除去する（「このファイルはバックアップされていない」を可視化）。
+**1 ファイルあたりのアップロード上限**は `ConfigStore.uploadSizeLimitBytes`（Settings で変更、既定 1GiB、`-1` = 無制限）。上限はアップロード方向のみに適用し、ダウンロード（復元）は常に許可する。上限超過は**黙ってスキップせず** `SyncError.fileTooLarge` を投げ、`SyncEngine.handleProcessingFailure` がリトライせずに `recentIssues` へ明示（分類サマリ + 行動指針）+ `sync_log` の `error` 記録 + キュー除去する（「このファイルはバックアップされていない」を可視化）。
 
 ```swift
 let limit = config.uploadSizeLimitBytes   // 既定 1GiB、-1 = 無制限
 guard PartPlan.isWithinUploadLimit(size: size, limitBytes: limit) else {
-    throw SyncError.fileTooLarge(path: path, size: size)  // → recentErrors に明示、リトライしない
+    throw SyncError.fileTooLarge(path: path, size: size)  // → recentIssues に明示、リトライしない
 }
 ```
 
@@ -266,7 +266,7 @@ func processDelete(_ queueItem: UploadQueueRecord) async throws {
 
 > **torn read を“コミット”しない安定化ゲート（L6・A-detect・2026-06-09）**: アップロードは単一 `O_NOFOLLOW` FD から読むが、読込中にローカルが書き換えられると torn（千切れ）な内容を S3 にコミットし得る。**読み終えた後に同 FD を再 `fstat`** し、開始時の (size, mtime) と size 変化 or mtime 前進があれば「不安定」とみなす（純粋関数 `StabilityCheck.isStable`）。シングルパートは上記 2. の `putObject` の**前**に判定し、不安定なら **PUT しない**（現行 S3 オブジェクトを torn で上書きしない）。マルチパートは `completeMultipartUpload` の**前**に判定し、不安定なら **abort +（resume 時）checkpoint クリア**（complete しないので現行版は無傷・新 mtime でフル再開）。いずれも `SyncError.fileChangedDuringUpload` を投げる。加えてマルチパートは **read ループ内で逐次 early-bail**（読了量が開始時 size 超過＝成長／`reader.info()` の mtime 前進＝in-place 書換）し、次パートを PUT する前に throw する＝成長/変化し続ける大ファイルで「満額 PUT → 全 abort」を毎リトライ繰り返す PUT 課金・帯域の浪費を避ける。
 >
-> 書込が落ち着くまで安定しないファイル（ログ/DB 等）は、`handleProcessingFailure` が `fileChangedDuringUpload` を **give-up カウント（`attempts`）に載せず**、`LocalDatabase.deferUnstableQueueItem` で安定するまで延期する（再検査間隔は保留経過に比例・上限 300s、`enqueuedAt`/`attempts` は保持）。一定時間（30s）安定しなければ「まだバックアップされていない」を `recentErrors`/`sync_log` に **1 回だけ**可視化する（＝torn を出さず、取りこぼしも黙らせない）。
+> 書込が落ち着くまで安定しないファイル（ログ/DB 等）は、`handleProcessingFailure` が `fileChangedDuringUpload` を **give-up カウント（`attempts`）に載せず**、`LocalDatabase.deferUnstableQueueItem` で安定するまで延期する（再検査間隔は保留経過に比例・上限 300s、`enqueuedAt`/`attempts` は保持）。一定時間（30s）安定しなければ「まだバックアップされていない」を `recentIssues`/`sync_log` に **1 回だけ**可視化する（＝torn を出さず、取りこぼしも黙らせない）。
 
 ## リトライ戦略
 
