@@ -294,6 +294,13 @@
 - **sync_log の流儀**: `event_type` はリテラル禁止で **`SyncLogEventType`**（`LocalDatabase.swift`）の rawValue を使う。エラー行は **message = 英語固定文（操作の文脈）/ details = 生エラー全文**に分離（give-up 行の message 埋め込み生文字列も廃止。過去行はそのまま・30 日 prune で自然消滅）。`SyncEngine.recordIssue(_:logAs:)` は `logAs`（英語固定文）を渡したときだけ sync_log("error") にも書く — nil は呼び元が自前 Tx 内で原子的に書く箇所（fileTooLarge / give-up / 不安定警告）と、リトライごとの重複記録を避ける箇所（give-up 前の各失敗）。これにより scan / pull / reconcile / 削除反映 / enqueue 失敗も sync_log に載るようになった。
 - **読出 API**: `LocalDatabase.fetchLogs(eventTypes:beforeId:limit:)`（id 降順・`limit+1` fetch で `hasMore` 判定）。**カーソルは id**（AUTOINCREMENT 単調・一意。timestamp は REAL 同値衝突でページ境界に重複/欠落が出るため不採用）。`eventTypes` nil = 全種別、空集合 = 0 件。
 
+### Sync Activity ウィンドウ（M4・2026-06-11）
+
+- **単一「Sync Activity」ウィンドウ**（`TideApp` の `Window(id:"activity")`・`Tide/UI/SyncActivityWindow.swift` + `SyncActivityModel`）で sync_log を閲覧する。種別フィルタチップ（6 種トグル）+ 新しい順リスト + 選択行の詳細ペイン（path/message/details 全文 + 「Copy details」）+ hasMore 時「Load more」。**DB 内の path/message/details は英語生文字列なので必ず `Text(verbatim:)`**（ローカライズ解決に流さない・Version History と同じ流儀）。
+- **ライブ更新はしない**（開時 `.task` ロード + 手動 Refresh）。診断面でリアルタイム性の要求が薄く、GRDB ValueObservation はフィルタ × ページングカーソルとの整合（observation 中の append 位置）が複雑化するため。将来 ValueObservation 化するならカーソルの巻き直しに注意。
+- **`SyncActivityModel` は `LocalDatabase` を引数で受ける**（env 非依存）。temp DB だけで `SyncActivityModelTests` が完結する。`reload` は世代トークンで「最新が勝つ」（isLoading での再入拒否はしない＝フィルタ連打で最後の状態に収束）、`loadMore` は `!isLoading` ガード + 世代一致確認（進行中 reload があれば stale ページを捨てる）。
+- **メニューバー「Details…」からのフィルタプリセット渡しは見送り**: 単一 `Window` Scene は値を渡せず、`AppEnvironment` に一時ヒントを持たせるのは状態の寿命管理が汚れる。ポップオーバー側に rawDetail コピーがあるので必要性も薄い（据え置き）。
+
 ## 8. 既知の据え置き項目
 
 - **C3 後半**: HTTPS 強制バケットポリシー（`PutBucketPolicy` で `aws:SecureTransport=true`）。SDK 自体は HTTPS 既定で送るので緊急度は低い。

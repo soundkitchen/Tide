@@ -37,6 +37,11 @@ struct MenuBarContent: View {
         openWindow(id: "versions")
     }
 
+    private func openActivityWindow() {
+        NSApp.activate(ignoringOtherApps: true)
+        openWindow(id: "activity")
+    }
+
     private var header: some View {
         HStack {
             Image(systemName: "icloud.and.arrow.up")
@@ -208,6 +213,9 @@ struct MenuBarContent: View {
             }
             .disabled(env.config.syncRootPath == nil)
             if env.engine != nil {
+                Button("Sync Activity…") {
+                    openActivityWindow()
+                }
                 Button("Version History…") {
                     openVersionsWindow()
                 }

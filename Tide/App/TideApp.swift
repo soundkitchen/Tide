@@ -38,6 +38,12 @@ struct TideApp: App {
                 .environment(appDelegate.environment)
         }
         .windowResizability(.contentSize)
+
+        Window("Sync Activity", id: "activity") {
+            SyncActivityWindow()
+                .environment(appDelegate.environment)
+        }
+        .windowResizability(.contentSize)
     }
 }
 

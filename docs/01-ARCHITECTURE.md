@@ -17,7 +17,11 @@ Tide/
 │   ├── UI/
 │   │   ├── MenuBarContent.swift       メニューバーのポップオーバー
 │   │   ├── SettingsWindow.swift       設定画面
-│   │   └── SetupWizardWindow.swift    初回セットアップ（リージョン Picker / バケット作成分岐）
+│   │   ├── SetupWizardWindow.swift    初回セットアップ（リージョン Picker / バケット作成分岐）
+│   │   ├── VersionHistoryWindow.swift 過去バージョン / 削除済み復元ウィンドウ (M4)
+│   │   ├── VersionHistoryModel.swift  ↑の @MainActor @Observable モデル
+│   │   ├── SyncActivityWindow.swift   同期アクティビティ（sync_log 閲覧）ウィンドウ (M4)
+│   │   └── SyncActivityModel.swift    ↑の @MainActor @Observable モデル（フィルタ / ページング）
 │   ├── Core/
 │   │   ├── SyncEngine.swift           同期制御の中枢（ローカル監視 + リモート pull）
 │   │   ├── FileWatcher.swift          FSEvents ラッパー
@@ -28,7 +32,8 @@ Tide/
 │   │   ├── PathValidator.swift        リモート由来パス / シャード ID の検証 (security)
 │   │   ├── TideTmpDirectory.swift     ダウンロード一時ディレクトリの解決 (M2)
 │   │   ├── AppLogger.swift            os.Logger ラッパー
-│   │   └── SyncError.swift            アプリ独自エラー型
+│   │   ├── SyncError.swift            アプリ独自エラー型
+│   │   └── SyncIssueClassifier.swift  エラー → SyncIssue 分類（純粋関数・F4/H2 対応）(M4)
 │   ├── Storage/
 │   │   ├── LocalDatabase.swift        GRDB.swift ラッパー
 │   │   ├── KeychainStore.swift        認証情報保管（Data Protection Keychain）
@@ -46,6 +51,7 @@ Tide/
 │   │   ├── FileEntry.swift            マニフェストのファイルエントリ
 │   │   ├── SyncEvent.swift            FileChangeEvent
 │   │   ├── SyncStatus.swift           同期状態（idle, syncing, error 等）
+│   │   ├── SyncIssue.swift            UI 向けの構造化エラー（分類サマリ + rawDetail 隔離）(M4)
 │   │   └── AWSCredentials.swift       認証情報
 │   └── Resources/
 │       ├── Assets.xcassets
