@@ -140,11 +140,10 @@ struct RestoreService {
                 try? FileManager.default.removeItem(at: tmpURL)
                 throw Self.notFoundError(key: s3Key)
             }
-        } catch let abort as RestoreAbort {
+        } catch is RestoreAbort {
             try? handle.close()
             try? FileManager.default.removeItem(at: tmpURL)
             AppLogger.s3.error("Restore exceeded expected size: \(relativePath, privacy: .private)")
-            _ = abort
             throw SyncError.ioError(underlying: NSError(
                 domain: "Tide.RestoreService", code: -41,
                 userInfo: [NSLocalizedDescriptionKey: "restored body exceeds expected size for key \(s3Key)"]
@@ -178,7 +177,9 @@ struct RestoreService {
         try FileManager.default.createDirectory(
             at: targetURL.deletingLastPathComponent(), withIntermediateDirectories: true
         )
-        // 同一 FS なので remove + move は atomic な rename（replaceItemAt は sb-* で FSEvents を汚すので使わない）。
+        // rename(2) 自体は atomic だが、remove → move のシーケンス全体としては非 atomic（間でクラッシュ
+        // すると原本が消え tmp が残る）。Downloader と同型の許容トレードオフ: writeOriginal の原本は
+        // 「最後に同期した内容」＝ S3 現行版から回復できる（replaceItemAt は sb-* で FSEvents を汚すので使わない）。
         if FileManager.default.fileExists(atPath: targetURL.path) {
             try FileManager.default.removeItem(at: targetURL)
         }

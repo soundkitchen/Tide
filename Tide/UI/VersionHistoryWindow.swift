@@ -194,9 +194,12 @@ struct VersionHistoryWindow: View {
         panel.allowsMultipleSelection = false
         panel.directoryURL = URL(fileURLWithPath: rootPath, isDirectory: true)
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        let root = URL(fileURLWithPath: rootPath, isDirectory: true).standardizedFileURL
+        // NSOpenPanel は実パスを返しがちなので、syncRoot 設定値が symlink を含む場合に備えて
+        // 両辺とも symlink 解決してから比較する（さもないと正当な選択を弾く）。
+        let root = URL(fileURLWithPath: rootPath, isDirectory: true)
+            .standardizedFileURL.resolvingSymlinksInPath()
         let rootStr = root.path.hasSuffix("/") ? root.path : root.path + "/"
-        let picked = url.standardizedFileURL.path
+        let picked = url.standardizedFileURL.resolvingSymlinksInPath().path
         if picked.hasPrefix(rootStr) {
             model.pathInput = String(picked.dropFirst(rootStr.count))
             load()

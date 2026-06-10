@@ -24,9 +24,14 @@ final class VersionHistoryModel {
     /// 走査済みの版・marker 件数（進捗表示用）。
     var deletedScanned = 0
     @ObservationIgnored private var scanTask: Task<Void, Never>?
+    /// 再検索 / キャンセルのたびに進める世代。cancel は in-flight の await を即座には止められず、
+    /// 復帰後の state 書込が新スキャンを潰しうるため、各書込前に世代一致を確認して stale を捨てる。
+    @ObservationIgnored private var scanGeneration = 0
 
     /// 指定相対パスの全バージョン（delete marker 含む）を列挙して時系列降順に並べる。
     func loadVersions(for relativePathRaw: String, env: AppEnvironment) async {
+        // ボタンは isLoading で disabled だが onSubmit / Choose… 経由は素通しなので再入をここで止める。
+        if isLoading { return }
         let relativePath = relativePathRaw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !relativePath.isEmpty else { return }
         guard let s3 = env.s3 else {
@@ -104,13 +109,17 @@ final class VersionHistoryModel {
             return
         }
         scanTask?.cancel()
+        scanGeneration += 1
+        let generation = scanGeneration
         isScanningDeleted = true
         errorMessage = nil
         restoreNote = nil
         deletedFiles = []
         deletedScanned = 0
         // @MainActor メソッド内の Task は MainActor を継承する（state 更新は安全）。
-        // listObjectVersions の待機はネットワークなので off-main に逃げる。
+        // listObjectVersions の待機はネットワークなので off-main に逃げ、累積全件の再グルーピング
+        // （全体ソート含む・大規模バケットでは累積 × ページ数で効く）も detached で main から外す。
+        // 各 await 復帰後の書込は世代一致のときだけ行う（stale タスクが現役スキャンの状態を潰さない）。
         scanTask = Task { [weak self] in
             guard let self else { return }
             var allVersions: [TideS3Client.S3ObjectVersionRaw] = []
@@ -118,30 +127,41 @@ final class VersionHistoryModel {
             var keyMarker: String? = nil
             var versionIdMarker: String? = nil
             do {
-                while true {
-                    if Task.isCancelled { break }
+                while !Task.isCancelled {
                     let page = try await s3.listObjectVersions(
                         prefix: "files/", keyMarker: keyMarker, versionIdMarker: versionIdMarker
                     )
+                    guard generation == self.scanGeneration else { return }
                     allVersions.append(contentsOf: page.versions)
                     allMarkers.append(contentsOf: page.deleteMarkers)
                     // 毎ページ全体を再グルーピング（key がページ跨ぎでも最終結果は常に正しく、途中表示は自己補正）。
-                    let grouped = ObjectVersionHistory.group(versions: allVersions, deleteMarkers: allMarkers)
-                    self.deletedFiles = ObjectVersionHistory.deletedFiles(grouped)
+                    let snapshotVersions = allVersions
+                    let snapshotMarkers = allMarkers
+                    let deleted = await Task.detached(priority: .userInitiated) {
+                        ObjectVersionHistory.deletedFiles(
+                            ObjectVersionHistory.group(versions: snapshotVersions, deleteMarkers: snapshotMarkers)
+                        )
+                    }.value
+                    guard generation == self.scanGeneration else { return }
+                    self.deletedFiles = deleted
                     self.deletedScanned = allVersions.count + allMarkers.count
                     guard page.isTruncated else { break }
                     keyMarker = page.nextKeyMarker
                     versionIdMarker = page.nextVersionIdMarker
                 }
             } catch {
+                guard generation == self.scanGeneration else { return }
                 if !Task.isCancelled { self.errorMessage = String(describing: error) }
             }
-            self.isScanningDeleted = false
+            if generation == self.scanGeneration {
+                self.isScanningDeleted = false
+            }
         }
     }
 
     func cancelDeletedScan() {
         scanTask?.cancel()
+        scanGeneration += 1  // cancel が間に合わなかった stale 書込（await 復帰後）も世代不一致で抑止
         isScanningDeleted = false
     }
 
@@ -165,8 +185,11 @@ final class VersionHistoryModel {
                 ? String(localized: "Restored as a copy:")
                 : String(localized: "Restored to:")
             restoreNote = "\(label) \(result.writtenRelativePath)"
-            // 復元したものは「現在削除済み」ではなくなるので一覧から外す。
-            deletedFiles.removeAll { $0.relativePath == history.relativePath }
+            // 原パスへ復元できたときだけ一覧から外す。divert（別名退避）時は原 key が
+            // delete marker のまま＝引き続き「現在削除済み」なので残す。
+            if !result.diverted {
+                deletedFiles.removeAll { $0.relativePath == history.relativePath }
+            }
         } catch {
             errorMessage = String(describing: error)
         }
