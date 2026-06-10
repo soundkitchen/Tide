@@ -18,7 +18,7 @@
 
 ## 再レビューのフォローアップ（2026-06-01）
 
-現行コード全体の再レビューで検出した懸念。F1〜F3 は 2026-06-01 に対応（コード + テスト + ドキュメント）。F1 は当初速攻ガードで Mitigated 止まりだったが、**2026-06-04 に線形時間グロブ照合への置換で構造的に解消（Fixed）**。F4 は**意図的に保持**（下記）。
+現行コード全体の再レビューで検出した懸念。F1〜F3 は 2026-06-01 に対応（コード + テスト + ドキュメント）。F1 は当初速攻ガードで Mitigated 止まりだったが、**2026-06-04 に線形時間グロブ照合への置換で構造的に解消（Fixed）**。F4 は当初意図的保持だったが、**2026-06-11 に B 案（分類サマリ + オンデマンド詳細）で是正（Fixed）**。
 各項目の詳細・対応内容・追加テストは参照先 md に記載する。
 
 | ID | 重要度 | 概要 | 状態 | 参照 |
@@ -26,11 +26,11 @@
 | F1 | Low〜Medium（可用性） | `.syncignore` の glob→正規表現が破滅的バックトラッキング（ReDoS）。当初の「ReDoS 回避済み」は過大記載だった | ✅ Fixed（線形時間グロブ照合に置換。2026-06-04） | [low.md](low.md) L8/F1 |
 | F2 | Medium | 祖先ディレクトリが symlink だとダウンロード書込が syncRoot 外へ抜ける（`resolveSafely` は字句検証のみ。C1/C2 の補完漏れ） | ✅ Fixed（`resolveForWrite` 新設） | [medium.md](medium.md) M6 |
 | F3 | Low | `Uploader` が symlink 追従 API で読む。アップロード直前の symlink 再チェックが無い（TOCTOU、M5 と同根） | 🟡 Mitigated（直前再チェック。`O_NOFOLLOW` 化は M5/M3） | [low.md](low.md) L9 |
-| F4 | Low | UI の `recentErrors` / `.error` が生エラー文字列を表示し続けている（H2 の UI 側残存） | ⏸ Deferred（意図的保持。配布前に再評価） | [high.md](high.md) H2 |
+| F4 | Low | UI の `recentErrors` / `.error` が生エラー文字列を表示し続けている（H2 の UI 側残存） | ✅ Fixed（`SyncIssue` 分類サマリ + オンデマンド詳細コピーに置換。2026-06-11） | [high.md](high.md) H2 |
 
 凡例: ✅ Fixed / 🟡 Mitigated / ⏸ Deferred / 🔴 未対応。深刻度は可用性・前提（攻撃者が S3 バケットを書ける必要があるか）を勘案した相対値。
 
-F4 の据え置き理由: 生エラー文字列は開発中のデバッグで実利が大きく（H2 で OS Log は `.private` 化したため `log show` は伏字、UI が事後コピーの実質唯一ソース）、重要度も Low（露出はメタデータ＝バケット名・キー・リージョン、本人画面のみ、認証情報は含まない）。**他人への配布／単一ユーザ開発を抜ける前に再評価**し、その際は単純削除ではなく「UI は分類サマリ＋オンデマンドで詳細展開/コピー」案でデバッグ性を保ったまま是正する。
+F4 の是正内容（2026-06-11・M4 Sync Activity 対応に同梱）: `recentErrors: [String]` を構造化型 `recentIssues: [SyncIssue]` に置換し、UI 既定は `SyncIssueClassifier` の分類サマリ（ローカライズ済みカテゴリ + 行動指針）のみ。生エラー文字列は `rawDetail` に隔離し、context menu「Copy details」/ Sync Activity ウィンドウの details 列でオンデマンド参照（デバッグ性は維持＝B 案）。なお `VersionHistoryModel.errorMessage` の生エラー表示は本件と別面として残存（下表参照・配布前に再評価）。
 
 ## M4 復元 / バージョン UI ブランチのレビュー（2026-06-10）
 
@@ -42,7 +42,7 @@ F4 の据え置き理由: 生エラー文字列は開発中のデバッグで実
 | 書込のルート脱出 / symlink 追従 | `RestoreService` は `PathValidator.resolveForWrite`（祖先 symlink 脱出防止）+ 最終コンポーネント symlink 拒否で書込 → atomic move。原パスが symlink なら読まず（unreadable 扱い）別名退避（リンク先実体を書き換えない） | M6/F2 と同系 |
 | 復元 DL のサイズ無制限（DoS） | 過去版にマニフェスト sha256/size が無いため、`headObject(versionId:)` の `Content-Length` を真実サイズに使い、streaming sink で受信累積が超えたら破棄。commit 前に実 tmp サイズと突合 | M7 を復元でも維持 |
 | 未同期ローカル編集の保護 | ハイブリッド復元先（`RestoreTarget.decide`）: 現在 SHA が DB 記録と食い違う / 読めないときは `(restored ...)` 別名へ退避し上書きしない（データ損失より重複） | — |
-| エラー文字列の UI 露出 | `VersionHistoryModel.errorMessage` は生 SDK エラー文字列を UI に出す（F4 と同じ既知の意図的保持。配布前に再評価） | F4 |
+| エラー文字列の UI 露出 | `VersionHistoryModel.errorMessage` は生 SDK エラー文字列を UI に出す（旧 F4 と同種の意図的保持。F4 本体は 2026-06-11 に是正済みだが、この面は復元 UI の操作直後文脈でデバッグ実利が大きく据え置き。配布前に再評価） | F4 |
 
 回帰テスト: `ObjectVersionHistoryTests`（不正キー除外含む全分岐）/ `RestoreTargetTests` / `RestoreServiceTests`（symlink 非追従・サイズ超過 abort・サイズ不一致・別名退避を実 DB + フェイク S3 で固定）。
 
@@ -54,7 +54,7 @@ F4 の据え置き理由: 生エラー文字列は開発中のデバッグで実
 | C2 | symlink フォロー | ✅ Fixed |
 | C3 | SSE / Public Access Block / HTTPS 強制 | 🟡 Partial — SSE + PublicAccessBlock 適用、HTTPS バケットポリシーは据置き |
 | H1 | Keychain 属性 | ✅ Fixed |
-| H2 | エラー詳細のログ露出 | ✅ Fixed（UI 残は F4 として ⏸ Deferred・意図的保持） |
+| H2 | エラー詳細のログ露出 | ✅ Fixed（UI 残 F4 も 2026-06-11 に分類サマリ化で解消） |
 | H3 | 静的キー長期保管 | 🟡 Mitigated — docs 注記のみ。構造的対応は将来 |
 | M1 | Package.resolved コミット | ✅ Fixed |
 | M2 | factoryReset のファイル残置 | ✅ Fixed |

@@ -101,15 +101,14 @@ struct MenuBarContent: View {
                 if !engine.activeTransfers.isEmpty {
                     transfersSection(engine.activeTransfers)
                 }
-                if !engine.recentErrors.isEmpty {
-                    DisclosureGroup("Recent errors (\(engine.recentErrors.count))") {
+                if !engine.recentIssues.isEmpty {
+                    DisclosureGroup("Recent errors (\(engine.recentIssues.count))") {
                         ScrollView {
-                            VStack(alignment: .leading, spacing: 2) {
-                                ForEach(Array(engine.recentErrors.suffix(10).enumerated()), id: \.offset) { _, msg in
-                                    Text(msg)
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                        .textSelection(.enabled)
+                            VStack(alignment: .leading, spacing: 4) {
+                                // 新しい順に最大 10 件。生エラー文字列は出さず分類サマリのみ
+                                //（F4）。詳細は行の context menu からコピー。
+                                ForEach(engine.recentIssues.suffix(10).reversed()) { issue in
+                                    issueRow(issue)
                                 }
                             }
                         }
@@ -134,6 +133,42 @@ struct MenuBarContent: View {
                 Button("Run Setup…") {
                     openSetupWindow()
                 }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func issueRow(_ issue: SyncIssue) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            HStack(spacing: 4) {
+                Image(systemName: issue.category.symbolName)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Text(issue.category.localizedLabel)
+                    .font(.caption2)
+                if let path = issue.path {
+                    Text(verbatim: (path as NSString).lastPathComponent)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer(minLength: 4)
+                Text(issue.date, style: .time)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+            if let guidance = issue.category.localizedGuidance {
+                Text(guidance)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .contextMenu {
+            Button("Copy details") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(issue.rawDetail, forType: .string)
             }
         }
     }

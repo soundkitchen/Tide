@@ -156,4 +156,95 @@ final class LocalDatabaseTests: XCTestCase {
         let ok = try await db.deferUnstableQueueItem(id: id1, nextRetryAt: 1234, lastError: "x")
         XCTAssertFalse(ok, "置換済み行（id1 不在）には触れない")
     }
+
+    // MARK: - sync_log の読出（fetchLogs・Sync Activity 用）
+
+    /// type を巡回しながら n 件のログを積む（timestamp は挿入順に増加）。
+    private func seedLogs(_ db: LocalDatabase, count: Int, types: [SyncLogEventType] = [.upload]) async throws {
+        try await db.pool.write { dbq in
+            for i in 0..<count {
+                var row = SyncLogRecord(
+                    id: nil,
+                    timestamp: 1000.0 + Double(i),
+                    eventType: types[i % types.count].rawValue,
+                    path: "f\(i).txt",
+                    message: "m\(i)",
+                    details: nil
+                )
+                try row.insert(dbq)
+            }
+        }
+    }
+
+    func testFetchLogsReturnsNewestFirst() async throws {
+        let db = try makeDB()
+        try await seedLogs(db, count: 5)
+
+        let page = try await db.fetchLogs(limit: 10)
+        XCTAssertEqual(page.records.map(\.message), ["m4", "m3", "m2", "m1", "m0"])
+        XCTAssertFalse(page.hasMore)
+    }
+
+    func testFetchLogsFiltersByEventType() async throws {
+        let db = try makeDB()
+        try await seedLogs(db, count: 6, types: [.upload, .error, .info])
+
+        let errors = try await db.fetchLogs(eventTypes: [.error], limit: 10)
+        XCTAssertEqual(errors.records.map(\.eventType), ["error", "error"])
+
+        let two = try await db.fetchLogs(eventTypes: [.error, .info], limit: 10)
+        XCTAssertEqual(two.records.count, 4)
+
+        // 空集合は「全種別」ではなく 0 件（nil とは区別する）。
+        let none = try await db.fetchLogs(eventTypes: [], limit: 10)
+        XCTAssertTrue(none.records.isEmpty)
+        XCTAssertFalse(none.hasMore)
+    }
+
+    /// beforeId カーソルで 2 ページ目が重複も欠落もなく続く。
+    func testFetchLogsPaginatesWithBeforeIdCursor() async throws {
+        let db = try makeDB()
+        try await seedLogs(db, count: 7)
+
+        let first = try await db.fetchLogs(limit: 3)
+        XCTAssertEqual(first.records.count, 3)
+        XCTAssertTrue(first.hasMore)
+
+        let second = try await db.fetchLogs(beforeId: first.records.last?.id, limit: 3)
+        XCTAssertEqual(second.records.count, 3)
+        XCTAssertTrue(second.hasMore)
+
+        let third = try await db.fetchLogs(beforeId: second.records.last?.id, limit: 3)
+        XCTAssertEqual(third.records.count, 1)
+        XCTAssertFalse(third.hasMore)
+
+        let all = (first.records + second.records + third.records).map(\.message)
+        XCTAssertEqual(all, ["m6", "m5", "m4", "m3", "m2", "m1", "m0"], "重複・欠落なし")
+    }
+
+    /// hasMore の境界: ちょうど limit 件なら false、limit+1 件なら true。
+    func testFetchLogsHasMoreBoundary() async throws {
+        let db = try makeDB()
+        try await seedLogs(db, count: 3)
+
+        let exact = try await db.fetchLogs(limit: 3)
+        XCTAssertEqual(exact.records.count, 3)
+        XCTAssertFalse(exact.hasMore)
+
+        try await seedLogs(db, count: 1)
+        let over = try await db.fetchLogs(limit: 3)
+        XCTAssertEqual(over.records.count, 3)
+        XCTAssertTrue(over.hasMore)
+    }
+
+    func testAppendLogWritesRow() async throws {
+        let db = try makeDB()
+        try await db.appendLog(type: .error, path: "a.txt", message: "Remote pull failed", details: "raw detail")
+
+        let page = try await db.fetchLogs(eventTypes: [.error], limit: 10)
+        XCTAssertEqual(page.records.count, 1)
+        XCTAssertEqual(page.records.first?.path, "a.txt")
+        XCTAssertEqual(page.records.first?.message, "Remote pull failed")
+        XCTAssertEqual(page.records.first?.details, "raw detail")
+    }
 }

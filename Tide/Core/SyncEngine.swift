@@ -15,7 +15,9 @@ final class SyncEngine {
     var lastSyncedAt: Date?
     var lastRemoteCheckedAt: Date?
     var queueDepth: Int = 0
-    var recentErrors: [String] = []
+    /// UI に見せる直近のエラー（構造化・上限 50）。生のエラー文字列は `SyncIssue.rawDetail` に
+    /// 隔離し、既定表示は分類サマリのみ（F4 / H2 UI 残の解消）。
+    var recentIssues: [SyncIssue] = []
 
     /// 現在有効な `.syncignore` のパターン行（Settings 表示用）。
     var activeIgnorePatterns: [String] = []
@@ -52,7 +54,7 @@ final class SyncEngine {
     private var running: Bool = false
     private var ignoreMatcher: SyncIgnoreMatcher = .empty
     /// 読込中に変化し続けて安定しないファイル（L6 A-detect の延期対象）で、既に「未バックアップ」警告を
-    /// 出した path。recentErrors への重複表示を防ぐ。キューから消えた path はアイドル周回で間引く
+    /// 出した path。recentIssues への重複表示を防ぐ。キューから消えた path はアイドル周回で間引く
     /// （= 安定して同期完了 or 除去されたら再エピソードでまた警告できる）。
     @ObservationIgnored private var unstableWarned: Set<String> = []
 
@@ -131,7 +133,10 @@ final class SyncEngine {
         do {
             try watcher.start()
         } catch {
-            status = .error(String(describing: error))
+            // 生のエラー文字列は status に乗せない（分類サマリのみ）。詳細は recentIssues 側に残す。
+            let issue = SyncIssueClassifier.classify(error: error)
+            status = .error(issue.category.localizedLabel)
+            await recordIssue(issue, logAs: "Failed to start file watcher")
             running = false
             return
         }
@@ -405,7 +410,7 @@ final class SyncEngine {
             try await performFullScan()
         } catch {
             AppLogger.sync.error("Full scan failed: \(String(describing: error), privacy: .private)")
-            await appendError("Full scan failed: \(error)")
+            await recordIssue(SyncIssueClassifier.classify(error: error), logAs: "Full scan failed")
         }
     }
 
@@ -628,7 +633,7 @@ final class SyncEngine {
                 lastRemoteCheckedAt = Date()
             } catch {
                 AppLogger.sync.error("Remote pull failed: \(String(describing: error), privacy: .private)")
-                await appendError("Remote pull failed: \(error)")
+                await recordIssue(SyncIssueClassifier.classify(error: error), logAs: "Remote pull failed")
             }
             currentReason = .manualCoalesced
             // stop()（pause / factory reset 経路）後や呼び元タスクの cancel 後に新ラウンドを
@@ -684,7 +689,10 @@ final class SyncEngine {
                     _ = try await dl.applyRemoteDeletion(relativePath: path)
                 } catch {
                     AppLogger.sync.error("applyRemoteDeletion(\(path, privacy: .private)) failed: \(String(describing: error), privacy: .private)")
-                    await appendError("\(path): \(error)")
+                    await recordIssue(
+                        SyncIssueClassifier.classify(error: error, path: path),
+                        logAs: "Remote deletion failed"
+                    )
                 }
             }
         }
@@ -705,7 +713,14 @@ final class SyncEngine {
             fullURL = try PathValidator.resolveSafely(relativePath: path, syncRoot: syncRoot)
         } catch {
             AppLogger.sync.error("Rejected unsafe remote path: \(path, privacy: .private)")
-            await appendError("Unsafe remote path rejected")
+            // リモート由来の不正パスは UI / ログに流さない（現挙動維持）。path は意図的に nil。
+            await recordIssue(
+                SyncIssue(
+                    id: UUID(), date: Date(), path: nil, category: .unsafePath,
+                    rawDetail: "Unsafe remote path rejected (manifest)"
+                ),
+                logAs: "Unsafe remote path rejected (manifest)"
+            )
             return
         }
         let localRec: FileRecord?
@@ -749,7 +764,10 @@ final class SyncEngine {
             }
         } catch {
             AppLogger.sync.error("Remote reconcile \(path, privacy: .private) failed: \(String(describing: error), privacy: .private)")
-            await appendError("\(path): \(error)")
+            await recordIssue(
+                SyncIssueClassifier.classify(error: error, path: path),
+                logAs: "Remote reconcile failed"
+            )
         }
     }
 
@@ -760,7 +778,10 @@ final class SyncEngine {
             try await processEventToQueue(event)
         } catch {
             AppLogger.sync.error("Failed to enqueue change for \(event.relativePath, privacy: .private): \(String(describing: error), privacy: .private)")
-            await appendError("\(event.relativePath): \(error)")
+            await recordIssue(
+                SyncIssueClassifier.classify(error: error, path: event.relativePath),
+                logAs: "Failed to enqueue local change"
+            )
         }
     }
 
@@ -953,10 +974,11 @@ final class SyncEngine {
             return
         }
 
-        // サイズ上限超過は恒久的失敗（リトライしても無駄）。黙ってスキップせず、ユーザ向けに
-        // ローカライズしたメッセージを recentErrors に出す（生エラー文字列ではなく一級 UX 状態として扱う）。
+        // サイズ上限超過は恒久的失敗（リトライしても無駄）。黙ってスキップせず、分類サマリ
+        // （fileTooLarge + guidance）として recentIssues に出す（一級 UX 状態として扱う）。
         if case SyncError.fileTooLarge = error {
-            await appendError(String(localized: "\(item.path) exceeds the upload size limit and was not backed up. Increase the limit in Settings."))
+            // sync_log は下の Tx 内でキュー除去と原子的に書く（logAs: nil）。
+            await recordIssue(SyncIssueClassifier.classify(error: error, path: item.path))
             do {
                 try await db.pool.write { db in
                     // L6: 処理したこの行 (item.id) だけを消す（path 基準だと処理中に置換された新 id 行を巻き込む）。
@@ -966,10 +988,10 @@ final class SyncEngine {
                     var log = SyncLogRecord(
                         id: nil,
                         timestamp: Date().timeIntervalSince1970,
-                        eventType: "error",
+                        eventType: SyncLogEventType.error.rawValue,
                         path: item.path,
                         message: "Exceeds the per-file upload size limit; not backed up. Adjust the limit in Settings.",
-                        details: nil
+                        details: String(describing: error)
                     )
                     try log.insert(db)
                 }
@@ -980,7 +1002,8 @@ final class SyncEngine {
                 AppLogger.db.error("Failed to record size-limit skip: \(String(describing: error), privacy: .private)")
             }
         } else {
-            await appendError("\(item.path): \(error)")
+            // リトライごとの sync_log 書込はしない（5 回で give-up 時に下で 1 回だけ記録）。
+            await recordIssue(SyncIssueClassifier.classify(error: error, path: item.path))
         }
 
         let attempts = item.attempts + 1
@@ -996,10 +1019,11 @@ final class SyncEngine {
                     var log = SyncLogRecord(
                         id: nil,
                         timestamp: now,
-                        eventType: "error",
+                        eventType: SyncLogEventType.error.rawValue,
                         path: item.path,
-                        message: "Gave up after \(attempts) attempts: \(error)",
-                        details: nil
+                        // 生エラーは message に埋め込まず details へ（message は固定文・F4 と同じ整理）。
+                        message: "Gave up after \(attempts) attempts",
+                        details: String(describing: error)
                     )
                     try log.insert(db)
                 }
@@ -1054,13 +1078,19 @@ final class SyncEngine {
         // 可視化: 安定しないまま閾値を超えたら 1 回だけ「未バックアップ」を見せる（retry ごとの重複は出さない）。
         if Self.shouldWarnUnstable(pendingAge: pendingAge), !unstableWarned.contains(item.path) {
             unstableWarned.insert(item.path)
-            await appendError(String(localized: "\(item.path) keeps changing and has not been backed up yet. It will be uploaded once it stops changing."))
+            // sync_log はこの直後に info で書く（logAs: nil）。
+            await recordIssue(
+                SyncIssue(
+                    id: UUID(), date: Date(), path: item.path, category: .unstableFile,
+                    rawDetail: "File keeps changing during upload; deferring until it settles (not backed up yet)."
+                )
+            )
             do {
                 try await db.pool.write { db in
                     var log = SyncLogRecord(
                         id: nil,
                         timestamp: now,
-                        eventType: "info",
+                        eventType: SyncLogEventType.info.rawValue,
                         path: item.path,
                         message: "File keeps changing during upload; deferring until it settles (not backed up yet).",
                         details: nil
@@ -1130,9 +1160,26 @@ final class SyncEngine {
         }
     }
 
-    private func appendError(_ message: String) async {
-        recentErrors.append(message)
-        if recentErrors.count > 50 { recentErrors.removeFirst(recentErrors.count - 50) }
+    /// 分類済み issue を recentIssues に積む（上限 50・FIFO）。`logAs` に英語固定文を渡すと
+    /// sync_log("error") にも 1 行残す（message = 固定文、details = rawDetail）。nil は
+    /// 呼び元が自前の write Tx 内で原子的に書く箇所（fileTooLarge / give-up / 不安定警告）か、
+    /// リトライごとの重複記録を避けたい箇所（give-up 前の各失敗）。
+    private func recordIssue(_ issue: SyncIssue, logAs logMessage: String? = nil) async {
+        recentIssues.append(issue)
+        if recentIssues.count > 50 { recentIssues.removeFirst(recentIssues.count - 50) }
+        guard let logMessage else { return }
+        do {
+            try await db.appendLog(
+                type: .error, path: issue.path, message: logMessage, details: issue.rawDetail
+            )
+        } catch {
+            AppLogger.db.error("Failed to append issue log: \(String(describing: error), privacy: .private)")
+        }
+    }
+
+    /// メニューバーの「Clear」用。
+    func clearIssues() {
+        recentIssues.removeAll()
     }
 }
 

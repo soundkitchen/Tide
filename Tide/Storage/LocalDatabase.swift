@@ -67,10 +67,21 @@ struct ShardStateRecord: Codable, FetchableRecord, MutablePersistableRecord, Sen
     }
 }
 
+/// sync_log の `event_type` の実使用値。書込箇所はリテラルでなくこの rawValue を使う
+/// （タイポすると Activity のフィルタから黙って漏れるため）。
+enum SyncLogEventType: String, CaseIterable, Sendable {
+    case upload
+    case download
+    case delete
+    case conflict
+    case error
+    case info
+}
+
 struct SyncLogRecord: Codable, FetchableRecord, MutablePersistableRecord, Sendable {
     var id: Int64?
     var timestamp: Double
-    var eventType: String      // upload / delete / error / info / conflict
+    var eventType: String      // SyncLogEventType.rawValue
     var path: String?
     var message: String
     var details: String?
@@ -155,17 +166,45 @@ final class LocalDatabase: @unchecked Sendable {
 
     // MARK: - log
 
-    func appendLog(type: String, path: String? = nil, message: String, details: String? = nil) throws {
-        try pool.write { db in
+    func appendLog(type: SyncLogEventType, path: String? = nil, message: String, details: String? = nil) async throws {
+        try await pool.write { db in
             var row = SyncLogRecord(
                 id: nil,
                 timestamp: Date().timeIntervalSince1970,
-                eventType: type,
+                eventType: type.rawValue,
                 path: path,
                 message: message,
                 details: details
             )
             try row.insert(db)
+        }
+    }
+
+    /// sync_log の 1 ページ（id 降順 = 新しい順）。
+    struct SyncLogPage: Sendable {
+        var records: [SyncLogRecord]
+        var hasMore: Bool
+    }
+
+    /// sync_log を新しい順に読む（Sync Activity ウィンドウ用）。
+    /// カーソルは `beforeId`（AUTOINCREMENT で単調・一意）。timestamp は REAL の同値衝突が
+    /// あり得てページ境界で重複 / 欠落するため使わない。`limit + 1` 件 fetch して hasMore を
+    /// 判定する。`eventTypes` nil は全種別（空集合は 0 件）。
+    func fetchLogs(
+        eventTypes: Set<SyncLogEventType>? = nil,
+        beforeId: Int64? = nil,
+        limit: Int = 100
+    ) async throws -> SyncLogPage {
+        try await pool.read { db in
+            var request = SyncLogRecord.order(Column("id").desc)
+            if let eventTypes {
+                request = request.filter(eventTypes.map(\.rawValue).contains(Column("event_type")))
+            }
+            if let beforeId {
+                request = request.filter(Column("id") < beforeId)
+            }
+            let rows = try request.limit(limit + 1).fetchAll(db)
+            return SyncLogPage(records: Array(rows.prefix(limit)), hasMore: rows.count > limit)
         }
     }
 

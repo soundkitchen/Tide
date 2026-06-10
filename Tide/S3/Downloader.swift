@@ -281,7 +281,7 @@ struct Downloader {
             var log = SyncLogRecord(
                 id: nil,
                 timestamp: Date().timeIntervalSince1970,
-                eventType: "conflict",
+                eventType: SyncLogEventType.conflict.rawValue,
                 path: relativePath,
                 message: "Renamed local copy → \(newRelative)",
                 details: nil
@@ -328,7 +328,7 @@ struct Downloader {
                 var log = SyncLogRecord(
                     id: nil,
                     timestamp: Date().timeIntervalSince1970,
-                    eventType: "delete",
+                    eventType: SyncLogEventType.delete.rawValue,
                     path: relativePath,
                     message: "Removed locally (remote deletion)",
                     details: nil
@@ -343,7 +343,7 @@ struct Downloader {
                 var log = SyncLogRecord(
                     id: nil,
                     timestamp: Date().timeIntervalSince1970,
-                    eventType: "conflict",
+                    eventType: SyncLogEventType.conflict.rawValue,
                     path: relativePath,
                     message: "Remote deleted but local was modified; keeping local copy",
                     details: nil
@@ -433,7 +433,7 @@ struct Downloader {
             var log = SyncLogRecord(
                 id: nil,
                 timestamp: now,
-                eventType: "download",
+                eventType: SyncLogEventType.download.rawValue,
                 path: relativePath,
                 message: "Downloaded \(entry.size) bytes",
                 details: nil

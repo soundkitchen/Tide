@@ -64,7 +64,7 @@ NSWorkspace.shared.open(URL(fileURLWithPath: path))
 
 2. **torn read**: そもそも成長中ファイルを読んで torn な内容をコミットしていた。→ **修正: 安定化ゲート（A-detect）**。単一 `O_NOFOLLOW` FD で読み終えた後に同 FD を再 `fstat` し、開始時の (size, mtime) と変化（size 変化 or mtime 前進）があれば不安定とみなす（純粋関数 `StabilityCheck.isStable`）。シングルパートは `putObject` 前に判定して**不安定なら PUT しない**（現行 S3 版を torn で上書きしない）、マルチパートは `completeMultipartUpload` 前に判定して**不安定なら abort + (resume 時) checkpoint クリア**（complete しないので現行版は無傷、新 mtime でフル再開）。いずれも `SyncError.fileChangedDuringUpload` を投げる。さらに**マルチパートは read ループ内で逐次 early-bail**（読了量が開始時 size 超過＝成長／`reader.info()` の mtime 前進＝in-place 書換）し、次パートを PUT する前に throw する＝成長/変化し続ける大ファイルで「満額 PUT → 不安定検知 → 全 abort」を毎リトライ繰り返す PUT 課金・帯域の浪費を避ける（PR #14 レビュー Medium）。
 
-書込が落ち着くまで安定しないファイル（ログ/DB 等）は、`handleProcessingFailure` が `fileChangedDuringUpload` を **give-up カウント（attempts）に載せず**安定するまで延期（`LocalDatabase.deferUnstableQueueItem`、再検査間隔は保留経過に比例・上限 300s）。一定時間安定しなければ「まだバックアップされていない」を `recentErrors` / `sync_log` に **1 回だけ**可視化（dedup）。＝torn を出さず、取りこぼしも黙らせない。
+書込が落ち着くまで安定しないファイル（ログ/DB 等）は、`handleProcessingFailure` が `fileChangedDuringUpload` を **give-up カウント（attempts）に載せず**安定するまで延期（`LocalDatabase.deferUnstableQueueItem`、再検査間隔は保留経過に比例・上限 300s）。一定時間安定しなければ「まだバックアップされていない」を `recentIssues` / `sync_log` に **1 回だけ**可視化（dedup）。＝torn を出さず、取りこぼしも黙らせない。
 
 **該当箇所:** `Tide/S3/Uploader.swift`（id 基準削除・シングルパート安定化ゲート）／`Tide/S3/MultipartUploader.swift`（`expectedStat`・complete 前判定）／`Tide/Core/StabilityCheck.swift`（判定）／`Tide/Core/SyncEngine.swift`（id 基準失敗処理・`handleUnstableFile`・`pruneUnstableWarned`）／`Tide/Storage/LocalDatabase.swift`（`deferUnstableQueueItem`）。回帰: `LocalDatabaseTests`（id 基準削除・defer）／`StabilityCheckTests`／`MultipartUploaderTests`（安定→complete・不安定→abort）。
 

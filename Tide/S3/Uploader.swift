@@ -56,7 +56,7 @@ struct Uploader {
                 var log = SyncLogRecord(
                     id: nil,
                     timestamp: Date().timeIntervalSince1970,
-                    eventType: "error",
+                    eventType: SyncLogEventType.error.rawValue,
                     path: path,
                     message: "Refusing to upload a symbolic link (skipped)",
                     details: nil
@@ -79,7 +79,7 @@ struct Uploader {
         let mtime = mtimeDate.timeIntervalSince1970
 
         // 1 ファイルあたりのアップロード上限。超過は黙ってスキップせず fileTooLarge を投げ、
-        // SyncEngine 側でリトライせずに recentErrors へ明示 + キュー除去する（「バックアップされていない」可視化）。
+        // SyncEngine 側でリトライせずに recentIssues へ明示 + キュー除去する（「バックアップされていない」可視化）。
         let limit = config.uploadSizeLimitBytes
         guard PartPlan.isWithinUploadLimit(size: size, limitBytes: limit) else {
             throw SyncError.fileTooLarge(path: path, size: size)
@@ -189,7 +189,7 @@ struct Uploader {
             var log = SyncLogRecord(
                 id: nil,
                 timestamp: now,
-                eventType: "upload",
+                eventType: SyncLogEventType.upload.rawValue,
                 path: path,
                 message: "Uploaded \(size) bytes",
                 details: nil
@@ -221,7 +221,7 @@ struct Uploader {
             var log = SyncLogRecord(
                 id: nil,
                 timestamp: now,
-                eventType: "delete",
+                eventType: SyncLogEventType.delete.rawValue,
                 path: path,
                 message: "Deleted",
                 details: nil
