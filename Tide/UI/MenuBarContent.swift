@@ -32,6 +32,11 @@ struct MenuBarContent: View {
         openWindow(id: "settings")
     }
 
+    private func openVersionsWindow() {
+        NSApp.activate(ignoringOtherApps: true)
+        openWindow(id: "versions")
+    }
+
     private var header: some View {
         HStack {
             Image(systemName: "icloud.and.arrow.up")
@@ -167,6 +172,11 @@ struct MenuBarContent: View {
                 openSyncFolder()
             }
             .disabled(env.config.syncRootPath == nil)
+            if env.engine != nil {
+                Button("Version History…") {
+                    openVersionsWindow()
+                }
+            }
             Button("Settings…") {
                 openSettingsWindow()
             }

@@ -1,6 +1,226 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "Deleted files" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "削除済みファイル"
+          }
+        }
+      }
+    },
+    "No deleted files found. Press Search to scan." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "削除済みファイルは見つかりません。検索を押して走査してください。"
+          }
+        }
+      }
+    },
+    "Restore" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "復元"
+          }
+        }
+      }
+    },
+    "Scanning…" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "走査中…"
+          }
+        }
+      }
+    },
+    "Search deleted files" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "削除済みファイルを検索"
+          }
+        }
+      }
+    },
+    "Versions" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "バージョン"
+          }
+        }
+      }
+    },
+    "(deletion marker)" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "（削除マーカー）"
+          }
+        }
+      }
+    },
+    "Current" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "現行"
+          }
+        }
+      }
+    },
+    "Deleted" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "削除済み"
+          }
+        }
+      }
+    },
+    "Load versions" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "バージョンを読み込む"
+          }
+        }
+      }
+    },
+    "No versions found for this file." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このファイルのバージョンは見つかりませんでした。"
+          }
+        }
+      }
+    },
+    "Please choose a file inside the sync folder." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "同期フォルダ内のファイルを選んでください。"
+          }
+        }
+      }
+    },
+    "Relative path (e.g. docs/note.txt)" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "相対パス（例: docs/note.txt）"
+          }
+        }
+      }
+    },
+    "Restore this version" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "この版を復元"
+          }
+        }
+      }
+    },
+    "Restored as a copy:" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "コピーとして復元しました:"
+          }
+        }
+      }
+    },
+    "Restored to:" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "復元しました:"
+          }
+        }
+      }
+    },
+    "Run setup first to browse versions." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "バージョンを参照するには先にセットアップしてください。"
+          }
+        }
+      }
+    },
+    "Version History" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "バージョン履歴"
+          }
+        }
+      }
+    },
+    "Version History…" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "バージョン履歴…"
+          }
+        }
+      }
+    },
+    "Versions of" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "バージョン:"
+          }
+        }
+      }
+    },
     "%lld MB/s" : {
       "extractionState" : "manual",
       "localizations" : {

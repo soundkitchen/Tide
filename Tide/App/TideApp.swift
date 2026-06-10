@@ -32,6 +32,12 @@ struct TideApp: App {
                 .frame(width: 540, height: 420)
         }
         .windowResizability(.contentSize)
+
+        Window("Version History", id: "versions") {
+            VersionHistoryWindow()
+                .environment(appDelegate.environment)
+        }
+        .windowResizability(.contentSize)
     }
 }
 
