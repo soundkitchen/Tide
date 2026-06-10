@@ -186,6 +186,19 @@ let request = PutBucketVersioningInput(
 )
 ```
 
+### バージョン復元 / 削除済み復元 (M4)
+
+バージョニングと delete marker を使って「過去バージョン参照」「削除済みファイルの復元」を行う。
+
+- **列挙**: `TideS3Client.listObjectVersions(prefix:keyMarker:versionIdMarker:maxKeys:)`（`ListObjectVersions`）で `files/` 配下の版・delete marker をページング取得する。生 SDK 型は Tide 独自の Sendable 値（`ObjectVersionPage` / `S3ObjectVersionRaw` / `S3DeleteMarkerRaw`）に詰め替える。整形（相対パスごとのグルーピング・時系列降順・削除済み集合）は純粋関数 `ObjectVersionHistory` に集約（`files/` を剥がし `PathValidator.validateRelativePath` に通らない不正キーは除外）。
+  - **特定ファイルの履歴**は `prefix = files/<相対パス>` で 1 key に絞れる＝安価。
+  - **全削除済み一覧**は `prefix = files/` 全体を舐めるため高コスト。よって**明示ボタンでのみ**フル列挙し、ページングしながら逐次表示・キャンセル可とする（ポーリングには乗せない）。
+- **遡及窓**: ライフサイクル `tide-expire-old-versions`（NoncurrentDays=90）/ `tide-expire-delete-markers` により、復元できるのは概ね**直近 90 日**ぶん。
+- **取得**: `getObject` / `headObject` / `streamObject` は `versionId` を受けられる。復元は特定 `versionId` を `streamObject(versionId:)` でストリーミング DL する。
+- **整合性**: マニフェスト（`index.json` / shards）は**現行状態のみ**を表し、過去版・削除済みは含まない。よって**過去版には sha256 が無い**。履歴 DL では SHA 突合せず、`headObject(versionId:)` の真実サイズ（`Content-Length`）を上限ガード（ローカルディスク枯渇 DoS = M7 を復元でも維持）＆実サイズ突合に使う。復元後は通常 upload 経路で新マニフェストに sha256 が載り、以後の整合性は既存保証へ合流する。
+- **方式**: 「ローカルへ書き戻し → 再アップロード」（`RestoreService`）。選んだ版を一時ファイルへ DL → `PathValidator.resolveForWrite` + symlink 非追従で原パス（または別名退避）へ atomic move → FileWatcher が拾って新しい**現行版**として上げ直す（DB は触らない）。S3 内 CopyObject 方式は採らない（マニフェスト整合の設計コストが高い・据え置き）。
+- **復元先（ハイブリッド）**: 原パスへ書き戻す。ただしローカルに既存ファイルがあり現在 SHA が DB 記録（最後に同期した SHA）と食い違う＝未同期編集なら、`(restored YYYY-MM-DD HH-MM-SS)` の別名へ退避して上書きを避ける（純粋関数 `RestoreTarget.decide`）。
+
 ## Public Access Block (M2 で追加)
 
 初回セットアップ時に `TideS3Client.enforcePublicAccessBlock` で **4 設定すべて true** を投入する:

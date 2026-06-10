@@ -2,6 +2,8 @@ import Foundation
 
 /// 復元時にローカルとリモートの SHA が衝突した場合のリネーム規則。
 /// `foo.txt` → `foo (local copy 2026-05-24 12-34-56).txt`
+/// バージョン復元で未同期のローカル編集を退避するときは `restored` ラベルを使う。
+/// `foo.txt` → `foo (restored 2026-05-24 12-34-56).txt`
 enum ConflictNamer {
     private static let timestampStyle: Date.FormatStyle = .dateTime
         .year().month().day()
@@ -12,6 +14,23 @@ enum ConflictNamer {
         for relativePath: String,
         at date: Date = Date()
     ) -> String {
+        copyRelativePath(for: relativePath, label: "local copy", at: date)
+    }
+
+    /// バージョン復元で、未同期のローカル編集を上書きしないよう退避コピー先を作る。
+    static func restoredCopyRelativePath(
+        for relativePath: String,
+        at date: Date = Date()
+    ) -> String {
+        copyRelativePath(for: relativePath, label: "restored", at: date)
+    }
+
+    /// `<stem> (<label> YYYY-MM-DD HH-MM-SS).<ext>` を組む共通ロジック。
+    private static func copyRelativePath(
+        for relativePath: String,
+        label: String,
+        at date: Date
+    ) -> String {
         let parts = relativePath.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
         guard let last = parts.last else { return relativePath }
 
@@ -19,9 +38,9 @@ enum ConflictNamer {
         let stamp = sanitizeTimestamp(date.formatted(timestampStyle))
         let newLast: String
         if ext.isEmpty {
-            newLast = "\(stem) (local copy \(stamp))"
+            newLast = "\(stem) (\(label) \(stamp))"
         } else {
-            newLast = "\(stem) (local copy \(stamp)).\(ext)"
+            newLast = "\(stem) (\(label) \(stamp)).\(ext)"
         }
         var newParts = parts
         newParts[newParts.count - 1] = newLast

@@ -409,6 +409,23 @@ final class SyncEngine {
         }
     }
 
+    // MARK: - Restore（M4: 過去バージョン / 削除済みの復元）
+
+    /// 指定 key（相対パス）の `versionId`（nil = 最新版）をローカルへ復元する（UI から呼ぶ）。
+    /// 復元サービスは private 保持の db / syncRoot / tmpDir / downloadLimiter を共有する。
+    /// 復元後はフルスキャンを促し、書き戻したファイルを通常 upload 経路で**新しい現行版**として上げ直す
+    /// （= 復元 = 再アップロード。DB は復元サービス側で触らない）。重い DL は復元サービス内で off-main に走る。
+    @discardableResult
+    func restore(relativePath: String, versionId: String?) async throws -> RestoreService.RestoreResult {
+        let service = RestoreService(
+            client: s3, db: db, syncRoot: syncRoot, tmpDir: tmpDir, downloadLimiter: downloadLimiter
+        )
+        let result = try await service.restore(relativePath: relativePath, versionId: versionId)
+        // 書き戻したファイルを拾わせる（FileWatcher の取りこぼし保険＝確実に再アップロードへ乗せる）。
+        await triggerFullScan()
+        return result
+    }
+
     private func performFullScan() async throws {
         let root = self.syncRoot
         let dev = self.deviceId

@@ -32,6 +32,20 @@
 
 F4 の据え置き理由: 生エラー文字列は開発中のデバッグで実利が大きく（H2 で OS Log は `.private` 化したため `log show` は伏字、UI が事後コピーの実質唯一ソース）、重要度も Low（露出はメタデータ＝バケット名・キー・リージョン、本人画面のみ、認証情報は含まない）。**他人への配布／単一ユーザ開発を抜ける前に再評価**し、その際は単純削除ではなく「UI は分類サマリ＋オンデマンドで詳細展開/コピー」案でデバッグ性を保ったまま是正する。
 
+## M4 復元 / バージョン UI ブランチのレビュー（2026-06-10）
+
+`feature/m4-restore-version-ui`（M4 サブ A〜E: バージョン列挙 + 復元サービス + 過去版/削除済み UI）の差分をレビュー。**復元はリモート由来の key/versionId をローカル FS 書込に到達させる新しい入口**なので、既存ゲートをこの経路にも漏れなく通したことを記録する。新規の未対応脆弱性は無し。
+
+| 観点 | 対応 | 参照 |
+|---|---|---|
+| リモート由来 key のパス検証 | `ListObjectVersions` の key は `ObjectVersionHistory` で `files/` を剥がし `PathValidator.validateRelativePath` に通らないものを除外。`RestoreService` 入口でも再検証 | C1/C2 と同系 |
+| 書込のルート脱出 / symlink 追従 | `RestoreService` は `PathValidator.resolveForWrite`（祖先 symlink 脱出防止）+ 最終コンポーネント symlink 拒否で書込 → atomic move。原パスが symlink なら読まず（unreadable 扱い）別名退避（リンク先実体を書き換えない） | M6/F2 と同系 |
+| 復元 DL のサイズ無制限（DoS） | 過去版にマニフェスト sha256/size が無いため、`headObject(versionId:)` の `Content-Length` を真実サイズに使い、streaming sink で受信累積が超えたら破棄。commit 前に実 tmp サイズと突合 | M7 を復元でも維持 |
+| 未同期ローカル編集の保護 | ハイブリッド復元先（`RestoreTarget.decide`）: 現在 SHA が DB 記録と食い違う / 読めないときは `(restored ...)` 別名へ退避し上書きしない（データ損失より重複） | — |
+| エラー文字列の UI 露出 | `VersionHistoryModel.errorMessage` は生 SDK エラー文字列を UI に出す（F4 と同じ既知の意図的保持。配布前に再評価） | F4 |
+
+回帰テスト: `ObjectVersionHistoryTests`（不正キー除外含む全分岐）/ `RestoreTargetTests` / `RestoreServiceTests`（symlink 非追従・サイズ超過 abort・サイズ不一致・別名退避を実 DB + フェイク S3 で固定）。
+
 ## 対応サマリ（2026-05-24 適用後）
 
 | ID | タイトル | ステータス |

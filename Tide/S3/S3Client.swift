@@ -216,8 +216,10 @@ final class TideS3Client: @unchecked Sendable {
     }
 
     /// オブジェクトのメタデータのみ取得する。404 → nil。
-    func headObject(key: String) async throws -> ObjectHead? {
-        let input = HeadObjectInput(bucket: bucket, key: key)
+    /// `versionId` を渡すとその特定バージョンの HEAD を取る（復元の真実サイズ取得に使う）。
+    func headObject(key: String, versionId: String? = nil) async throws -> ObjectHead? {
+        var input = HeadObjectInput(bucket: bucket, key: key)
+        if let versionId { input.versionId = versionId }
         do {
             let output = try await client.headObject(input: input)
             let etag = Self.cleanETag(output.eTag)
@@ -240,8 +242,9 @@ final class TideS3Client: @unchecked Sendable {
 
     /// オブジェクトを取得する。`maxBytes` を指定するとレスポンスサイズの自己防衛が効く
     /// （膨大な `.tide/index.json` などで OOM を起こさせない）。
-    func getObject(key: String, maxBytes: Int64 = 200 * 1024 * 1024) async throws -> ObjectFetch? {
-        let input = GetObjectInput(bucket: bucket, key: key)
+    func getObject(key: String, maxBytes: Int64 = 200 * 1024 * 1024, versionId: String? = nil) async throws -> ObjectFetch? {
+        var input = GetObjectInput(bucket: bucket, key: key)
+        if let versionId { input.versionId = versionId }
         do {
             let output = try await client.getObject(input: input)
             // 事前にサーバ申告のサイズで弾く
@@ -385,7 +388,22 @@ final class TideS3Client: @unchecked Sendable {
         limiter: RateLimiter? = nil,
         sink: (Data) throws -> Void
     ) async throws -> StreamObjectResult? {
+        try await streamObject(
+            key: key, versionId: nil, rangeStart: rangeStart, limiter: limiter, sink: sink
+        )
+    }
+
+    /// `versionId` 指定でストリーミング取得する（復元の履歴 DL 用）。versionId なし = 最新版。
+    /// 404 / `NoSuchVersion` のとき nil。挙動は versionId なし版と同じ（`input.versionId` を足すだけ）。
+    func streamObject(
+        key: String,
+        versionId: String?,
+        rangeStart: Int64?,
+        limiter: RateLimiter? = nil,
+        sink: (Data) throws -> Void
+    ) async throws -> StreamObjectResult? {
         var input = GetObjectInput(bucket: bucket, key: key)
+        if let versionId { input.versionId = versionId }
         if let rangeStart, rangeStart > 0 {
             input.range = "bytes=\(rangeStart)-"
         }
@@ -417,6 +435,80 @@ final class TideS3Client: @unchecked Sendable {
             if S3ErrorClassifier.isNotFound(error) { return nil }
             throw error
         }
+    }
+
+    // MARK: - Object versions（バージョン履歴 / 削除済み復元）
+
+    /// `ListObjectVersions` の 1 ページぶんを Tide 独自の Sendable 値へ詰め替えたもの。
+    /// 生 SDK 型（`S3ClientTypes.ObjectVersion` / `DeleteMarkerEntry`）を UI / ロジックへ漏らさない。
+    struct S3ObjectVersionRaw: Sendable {
+        let key: String
+        let versionId: String?
+        let isLatest: Bool
+        let size: Int64?
+        let lastModified: Date?
+        let etag: String
+    }
+
+    struct S3DeleteMarkerRaw: Sendable {
+        let key: String
+        let versionId: String?
+        let isLatest: Bool
+        let lastModified: Date?
+    }
+
+    struct ObjectVersionPage: Sendable {
+        let versions: [S3ObjectVersionRaw]
+        let deleteMarkers: [S3DeleteMarkerRaw]
+        /// 次ページのカーソル（`isTruncated` が true のとき有効）。
+        let nextKeyMarker: String?
+        let nextVersionIdMarker: String?
+        let isTruncated: Bool
+    }
+
+    /// `prefix` 配下のオブジェクトバージョンと delete marker を 1 ページぶん列挙する。
+    /// `keyMarker` / `versionIdMarker` に前ページの `next*` を渡すと続きを取得できる。
+    func listObjectVersions(
+        prefix: String,
+        keyMarker: String? = nil,
+        versionIdMarker: String? = nil,
+        maxKeys: Int = 1000
+    ) async throws -> ObjectVersionPage {
+        let input = ListObjectVersionsInput(
+            bucket: bucket,
+            keyMarker: keyMarker,
+            maxKeys: maxKeys,
+            prefix: prefix,
+            versionIdMarker: versionIdMarker
+        )
+        let output = try await client.listObjectVersions(input: input)
+        let versions: [S3ObjectVersionRaw] = (output.versions ?? []).compactMap { v in
+            guard let key = v.key else { return nil }
+            return S3ObjectVersionRaw(
+                key: key,
+                versionId: v.versionId,
+                isLatest: v.isLatest ?? false,
+                size: v.size.map(Int64.init),
+                lastModified: v.lastModified,
+                etag: Self.cleanETag(v.eTag)
+            )
+        }
+        let markers: [S3DeleteMarkerRaw] = (output.deleteMarkers ?? []).compactMap { m in
+            guard let key = m.key else { return nil }
+            return S3DeleteMarkerRaw(
+                key: key,
+                versionId: m.versionId,
+                isLatest: m.isLatest ?? false,
+                lastModified: m.lastModified
+            )
+        }
+        return ObjectVersionPage(
+            versions: versions,
+            deleteMarkers: markers,
+            nextKeyMarker: output.nextKeyMarker,
+            nextVersionIdMarker: output.nextVersionIdMarker,
+            isTruncated: output.isTruncated ?? false
+        )
     }
 
     // MARK: - Manifest
@@ -495,6 +587,7 @@ enum S3ErrorClassifier {
         return desc.contains("NotFound")
             || desc.contains("NoSuchBucket")
             || desc.contains("NoSuchKey")
+            || desc.contains("NoSuchVersion")
             || desc.contains("statusCode: 404")
             || desc.contains("status code: 404")
     }
