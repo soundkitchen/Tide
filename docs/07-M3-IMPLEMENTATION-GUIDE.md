@@ -187,15 +187,33 @@ soundkitchen のレビュー（ブロッカー無し）を受けて 4 点を対�
 
 ---
 
-## サブタスク E: 帯域制御（オプション）
+## サブタスク E: 帯域制御（✅ 実装済み・2026-06-10）
 
 ### 目的
-バックグラウンドで動作中に帯域を制限したい時のための上限設定。Settings で「アップロード上限 X MB/s」「ダウンロード上限 Y MB/s」を指定可能に。
+バックグラウンドで動作中に帯域を制限したい時のための上限設定。Settings で「アップロード上限 X MB/s」「ダウンロード上限 Y MB/s」を独立に指定できる（既定は無制限）。
 
-### 設計の出発点
-- aws-sdk-swift 側に直接の帯域制御 API があるか要調査
-- 無ければ `URLSession` レベル / アップロード並列度の動的調整 / トークンバケットアルゴリズム
-- 優先度は低い（個人利用想定）
+### 実装
+- **方式はトークンバケット**。aws-sdk-swift の高レベル `S3Client` には公開の帯域制御ノブが無い（`S3ClientConfiguration` にレート上限の設定は無く、URLSession/CRT に委譲して全速送信する）ため、docs の出発点どおりアプリの送受信フィード層で律速する（SDK 非依存・テスト可能）。
+- **`Tide/Core/RateLimiter.swift`**: レート計算は純粋関数 `TokenBucket`（`StabilityCheck`/`PartPlan` と同じパターンで `RateLimiterTests` が全分岐網羅）、`RateLimiter` actor が単調時計（`DispatchTime`）と `Task.sleep` を担当。**予約（負残高許容）方式**で、`acquire(n)` は `n` を即座に残高から差し引き「残高が 0 以上へ回復するまでの待ち秒」だけ待つ。先に差し引くので並行 acquire でも公平（到着順で後続は先行分の負債も含めて待つ）に総スループットが収束する。`rate <= 0` は無制限（即返る）。`n > burst` でもデッドロックしない（比例待ち）。バーストは「アイドル中に貯まるトークン上限 = 1 秒ぶん」で抑える。
+- **スロットル点**（実データフローに対応）:
+  - マルチパートアップロード（`MultipartUploader.upload`）: 各 `uploadPart` をスケジュールする前に `await limiter.acquire(part.count)`。
+  - ダウンロード（`TideS3Client.streamObject` の async 読みループ）: 各チャンクを `sink` へ渡す前に `await limiter.acquire(chunk.count)`。読込を遅らせると TCP フロー制御でサーバ送出も自然に絞られる。
+  - 単発アップロード（`putObject`、≤16MiB）: Data 一括なので PUT 前に `acquire(size)`（平均レートで律速・粒度は粗いが個人利用では十分）。
+- **共有リミッタ**: 同時並行転送（複数ファイル並行 UL/DL ＋ マルチパートのパート並列）が **`SyncEngine` 保持の 1 インスタンス**（upload 用／download 用）を共有して初めて合計が上限に収まる。`Uploader.uploadLimiter` / `Downloader.downloadLimiter` / `streamObject(limiter:)` へ注入する。
+- **レートは config から周回ごとに更新**（`SyncEngine.refreshBandwidthLimits()` を runQueueLoop・performRemotePull の冒頭で呼ぶ＝`uploadSizeLimitBytes` と同じ「都度読み直し」流儀で Settings 変更が次の転送周回で効く）。
+- **マニフェスト・シャード・index 等の小さなメタデータ PUT/GET は律速しない**（file 本体 `files/*` のみ）。
+- **Settings UI**: `SettingsWindow` の「Bandwidth」セクションに「No upload/download bandwidth limit」トグル＋ MB/s スライダ（1〜100・1 刻み・トグル off で表示）。`uploadSizeLimitBytes` と同じく `@State` + `onAppear`/`onChange` の write-through。`ConfigStore.uploadBandwidthBytesPerSec` / `downloadBandwidthBytesPerSec`（bytes/sec、`<= 0`=無制限・既定 `-1`）。MB/s は decimal（1 MB/s = 1,000,000 bytes/s）。新規 xcstrings キーは `extractionState:"manual"`。
+
+### 実機検証（2026-06-10・バケット `dev-tide`・上限 5 MB/s）
+実 S3 で実効スループットが上限に収まることを確認した（ユニットテストはバケット計算のみ網羅するため）。uplink は無制限時 ~30–50 MB/s。
+- **アップロード**: 150MiB を 35.6s で完了＝実効 4.41 MB/s（gross。デバウンス等を引いた転送のみは ~4.7 MB/s）。無制限なら数秒で終わるところが律速された。
+- **ダウンロード**: 同 150MiB を起動時 pull で 31.8s＝実効 4.95 MB/s（≈上限）。
+- いずれも**ローカル == S3 の SHA-256 が一致**（スロットル下でもマルチパート／Range・ストリーミングの内容は完全）、残置マルチパートなし、削除は delete marker 経由で伝播。
+
+### 既知の制限 / 将来タスク
+- 単発 PUT（≤16MiB）は本体を一括送出するため、acquire は送出**前**にまとめて待つ＝粒度が粗い（瞬間的には設定 MB/s を超え得るが平均は収束）。気になるなら将来 `putObject` をチャンク送出（multipart 同様）に寄せる。
+- マルチパートの `acquire(part)` はパートにつき 1 回。`uploadPartWithRetry` の瞬断再送（最大 3 回・同 body）は再 acquire されず律速を外れる（PR #15 レビュー nit-1）。リトライは稀＆個人利用想定で実害は小さいため現状維持。厳密にするなら acquire を再送ループの内側へ寄せる（actor 共有の粒度が変わる点に注意）。
+- マルチパートも「パート単位」での律速（acquire はパートをスケジュールする前）。partSize（5〜64MiB）粒度なので低レートだとバースト的だが平均は収束する。
 
 ---
 

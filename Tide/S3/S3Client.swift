@@ -376,9 +376,13 @@ final class TideS3Client: @unchecked Sendable {
     /// 順に `sink` へ渡す。ファイル書込・SHA 計算・サイズ上限の判定は呼び出し側（`Downloader`）が
     /// `sink` の中で行う（再開のためのハッシュ前置きと進捗 checkpoint を呼び出し側で握りやすくするため）。
     /// 404 のとき nil。`sink` が throw したらそのまま伝播する（tmp の後始末は呼び出し側）。
+    ///
+    /// `limiter` を渡すと、各チャンクを `sink` へ渡す前に帯域制御 actor から許可を取り、消費（＝読込）
+    /// 速度を律速する。読込を遅らせると下層の TCP フロー制御でサーバ送出も自然に絞られる（サブ E）。
     func streamObject(
         key: String,
         rangeStart: Int64?,
+        limiter: RateLimiter? = nil,
         sink: (Data) throws -> Void
     ) async throws -> StreamObjectResult? {
         var input = GetObjectInput(bucket: bucket, key: key)
@@ -393,10 +397,14 @@ final class TideS3Client: @unchecked Sendable {
             case .some(.stream(let stream)):
                 while let chunk = try await stream.readAsync(upToCount: 1 << 20) {
                     if chunk.isEmpty { break }
+                    await limiter?.acquire(chunk.count)
                     try sink(chunk)
                 }
             case .some(.data(let data)):
-                if let data, !data.isEmpty { try sink(data) }
+                if let data, !data.isEmpty {
+                    await limiter?.acquire(data.count)
+                    try sink(data)
+                }
             case .some(.noStream), .none:
                 break
             }

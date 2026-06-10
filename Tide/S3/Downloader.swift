@@ -8,6 +8,7 @@ protocol RangedDownloadClient: Sendable {
     func streamObject(
         key: String,
         rangeStart: Int64?,
+        limiter: RateLimiter?,
         sink: (Data) throws -> Void
     ) async throws -> TideS3Client.StreamObjectResult?
 }
@@ -40,6 +41,8 @@ struct Downloader {
     let transferStore: any TransferStateStoring
     /// 進捗報告（メニューバー表示用）。nil 可。
     var progressReporter: TransferProgressReporter? = nil
+    /// ダウンロード帯域制御（サブ E）。複数ファイル並行 DL で共有する。nil = 無制限。
+    var downloadLimiter: RateLimiter? = nil
 
     /// リモート 1 ファイルをローカルに反映する。
     /// - Returns: 実際に書き込みが行われたら true、スキップなら false。
@@ -123,7 +126,7 @@ struct Downloader {
         let streamResult: TideS3Client.StreamObjectResult?
         do {
             streamResult = try await downloadClient.streamObject(
-                key: s3Key, rangeStart: resumeFrom > 0 ? resumeFrom : nil
+                key: s3Key, rangeStart: resumeFrom > 0 ? resumeFrom : nil, limiter: downloadLimiter
             ) { chunk in
                 total += Int64(chunk.count)
                 if total > maxBytes { throw DownloadAbort.tooLarge }

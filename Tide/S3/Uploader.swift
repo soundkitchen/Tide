@@ -13,6 +13,8 @@ struct Uploader {
     let transferStore: any TransferStateStoring
     /// 進捗報告（メニューバー表示用）。マルチパート経路でのみ発行する。nil 可。
     var progressReporter: TransferProgressReporter? = nil
+    /// アップロード帯域制御（サブ E）。複数ファイル並行 UL で共有する。nil = 無制限。
+    var uploadLimiter: RateLimiter? = nil
 
     /// upload_queue の 1 件を処理する。
     func process(_ item: UploadQueueRecord) async throws {
@@ -121,6 +123,7 @@ struct Uploader {
                 metadata: metadata,
                 resume: resume,
                 expectedStat: info,
+                limiter: uploadLimiter,
                 onProgress: onProgress
             )
             sha256 = mp.sha256
@@ -135,6 +138,9 @@ struct Uploader {
                 throw SyncError.fileChangedDuringUpload(path: path)
             }
             sha256 = sha
+            // 帯域制御（サブ E）: 単発 PUT は Data 一括なので、送出前に本体サイズぶんを取得して
+            // 平均レートを律速する（≤16MiB なので粒度は粗いが個人利用では十分）。
+            await uploadLimiter?.acquire(data.count)
             result = try await s3.putObject(
                 key: s3Key,
                 data: data,

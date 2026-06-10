@@ -1,6 +1,72 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "%lld MB/s" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld MB/s"
+          }
+        }
+      }
+    },
+    "Download limit" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ダウンロード上限"
+          }
+        }
+      }
+    },
+    "Limits throttle file transfers in the background. Leave off for full speed." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "上限はファイル転送をバックグラウンドで絞ります。全速で使うにはオフのままにしてください。"
+          }
+        }
+      }
+    },
+    "No download bandwidth limit" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ダウンロード帯域を制限しない"
+          }
+        }
+      }
+    },
+    "No upload bandwidth limit" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "アップロード帯域を制限しない"
+          }
+        }
+      }
+    },
+    "Upload limit" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "アップロード上限"
+          }
+        }
+      }
+    },
     ".syncignore" : {
       "extractionState" : "manual",
       "localizations" : {
