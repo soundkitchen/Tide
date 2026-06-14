@@ -15,7 +15,8 @@ struct TideApp: App {
             MenuBarContent()
                 .environment(appDelegate.environment)
         } label: {
-            Image(systemName: "icloud.and.arrow.up")
+            MenuBarLabel()
+                .environment(appDelegate.environment)
         }
         .menuBarExtraStyle(.window)
 
@@ -47,6 +48,25 @@ struct TideApp: App {
     }
 }
 
+/// メニューバーアイコン（MenuBarExtra のラベル）。常駐アプリでは起動直後に必ず生成されるため、
+/// ここで通知クリック → Sync Activity を開くアクションを `NotificationManager` に登録する
+/// （`openWindow` は View 環境にしか無く、AppKit のデリゲートからは直接呼べないため）。
+/// MenuBarContent.task でも同じ登録を保険として行う。
+private struct MenuBarLabel: View {
+    @Environment(AppEnvironment.self) private var env
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Image(systemName: "icloud.and.arrow.up")
+            .onAppear {
+                env.notifications.openActivity = {
+                    NSApp.activate(ignoringOtherApps: true)
+                    openWindow(id: "activity")
+                }
+            }
+    }
+}
+
 /// 起動時に SyncEngine を eager に立ち上げるためのデリゲート。
 /// `AppEnvironment` をここで 1 つだけ生成して保持し、Scene 各所へ `.environment(...)` で配る。
 @MainActor
@@ -54,6 +74,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let environment = AppEnvironment()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // 通知のデリゲートを登録（クリック処理 / 前面時のバナー）。許可プロンプトは初回発火時まで出さない。
+        environment.notifications.registerAsDelegate()
         // bootstrap() は冪等（engine 起動済み or 進行中なら no-op）なので、
         // 後から走る MenuBarContent.task の bootstrap 呼びと二重に起動することはない。
         Task { await environment.bootstrap() }

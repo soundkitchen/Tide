@@ -33,6 +33,11 @@ struct MenuBarContent: View {
         .frame(width: 340)
         .task {
             await env.bootstrap()
+            // 通知クリック → Sync Activity を開くアクションを登録（MenuBarLabel.onAppear の保険）。
+            env.notifications.openActivity = {
+                NSApp.activate(ignoringOtherApps: true)
+                openWindow(id: "activity")
+            }
             if !env.isSetupCompleted || env.bootstrapFailure != nil {
                 openSetupWindow()
             }

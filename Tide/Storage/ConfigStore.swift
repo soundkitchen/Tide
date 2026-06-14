@@ -14,6 +14,7 @@ final class ConfigStore: @unchecked Sendable {
         static let uploadSizeLimitBytes = "tide.uploadSizeLimitBytes"
         static let uploadBandwidthBytesPerSec = "tide.uploadBandwidthBytesPerSec"
         static let downloadBandwidthBytesPerSec = "tide.downloadBandwidthBytesPerSec"
+        static let notificationsEnabled = "tide.notificationsEnabled"
     }
 
     /// 1 ファイルあたりのアップロードサイズ上限の既定値（1 GiB）。
@@ -86,6 +87,16 @@ final class ConfigStore: @unchecked Sendable {
         set { defaults.set(Int(newValue), forKey: Key.downloadBandwidthBytesPerSec) }
     }
 
+    /// 競合発生・未バックアップ確定（サイズ超過 / give-up / 不安定）を OS 通知で知らせるか。
+    /// キー未設定なら既定 on（オプトアウト方式）。実際に通知を出すかは OS の許可状態にも従う。
+    var notificationsEnabled: Bool {
+        get {
+            guard defaults.object(forKey: Key.notificationsEnabled) != nil else { return true }
+            return defaults.bool(forKey: Key.notificationsEnabled)
+        }
+        set { defaults.set(newValue, forKey: Key.notificationsEnabled) }
+    }
+
     /// 初回アクセス時に UUID を自動生成して保存する。以降不変。
     var deviceId: String {
         if let existing = defaults.string(forKey: Key.deviceId), !existing.isEmpty {
@@ -104,7 +115,8 @@ final class ConfigStore: @unchecked Sendable {
         for key in [Key.bucketName, Key.region, Key.syncRootPath,
                     Key.pollingIntervalSeconds, Key.setupCompleted,
                     Key.uploadSizeLimitBytes,
-                    Key.uploadBandwidthBytesPerSec, Key.downloadBandwidthBytesPerSec] {
+                    Key.uploadBandwidthBytesPerSec, Key.downloadBandwidthBytesPerSec,
+                    Key.notificationsEnabled] {
             defaults.removeObject(forKey: key)
         }
     }

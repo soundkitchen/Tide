@@ -38,6 +38,8 @@ final class SyncEngine {
     private let deviceId: String
     private let tmpDir: URL
     private let config: ConfigStore
+    /// 競合 / 未バックアップ確定を OS 通知で知らせる（注入・テストでは nil）。
+    private let notifier: (any SyncNotifying)?
 
     // MARK: - Internals
 
@@ -78,13 +80,15 @@ final class SyncEngine {
         syncRoot: URL,
         deviceId: String,
         config: ConfigStore,
-        pollIntervalSeconds: Int = 180
+        pollIntervalSeconds: Int = 180,
+        notifier: (any SyncNotifying)? = nil
     ) {
         self.db = db
         self.s3 = s3
         self.syncRoot = syncRoot
         self.deviceId = deviceId
         self.config = config
+        self.notifier = notifier
         self.pollIntervalSeconds = max(30, pollIntervalSeconds)
         // 帯域制御（サブ E）: config の bytes/sec で初期化（既定 -1 = 無制限）。
         self.uploadLimiter = RateLimiter(ratePerSec: Double(config.uploadBandwidthBytesPerSec))
@@ -756,7 +760,9 @@ final class SyncEngine {
                 try await dl.download(relativePath: path, entry: entry)
             case .conflictThenDownload:
                 // 双方乖離（ローカル編集 / 未追跡 / unreadable）→ ローカルをコンフリクトコピーへ退避してからリモート取得。
-                _ = try dl.renameLocalForConflict(relativePath: path)
+                let localCopy = try dl.renameLocalForConflict(relativePath: path)
+                // 手動マージが要る可能性があるので通知（退避自体は成功＝download 失敗でも知らせる）。
+                await notifier?.post(.conflictCopyCreated(path: path, localCopyPath: localCopy))
                 try await dl.download(relativePath: path, entry: entry)
             case .deleteLocal, .keepLocalRemoteDeleted, .noop:
                 // remote が非 nil のここでは到達しない。来たら decide() のロジックバグ。
@@ -979,6 +985,8 @@ final class SyncEngine {
         if case SyncError.fileTooLarge = error {
             // sync_log は下の Tx 内でキュー除去と原子的に書く（logAs: nil）。
             await recordIssue(SyncIssueClassifier.classify(error: error, path: item.path))
+            // 恒久的に未バックアップ＝サイレントな取りこぼしにしないよう通知する。
+            await notifier?.post(.fileTooLarge(path: item.path))
             do {
                 try await db.pool.write { db in
                     // L6: 処理したこの行 (item.id) だけを消す（path 基準だと処理中に置換された新 id 行を巻き込む）。
@@ -1030,6 +1038,8 @@ final class SyncEngine {
             } catch {
                 AppLogger.db.error("Failed to record give-up: \(String(describing: error), privacy: .private)")
             }
+            // リトライを使い切って未バックアップのまま諦めた＝通知する。
+            await notifier?.post(.uploadGaveUp(path: item.path))
             return
         }
 
@@ -1100,6 +1110,8 @@ final class SyncEngine {
             } catch {
                 AppLogger.db.error("Failed to record unstable-defer log: \(String(describing: error), privacy: .private)")
             }
+            // unstableWarned で dedup 済み＝この path につき 1 回だけ通知する。
+            await notifier?.post(.fileKeepsChanging(path: item.path))
         }
     }
 
