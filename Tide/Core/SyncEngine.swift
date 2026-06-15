@@ -755,9 +755,9 @@ final class SyncEngine {
         }
 
         do {
-            // ローカル stat（size, mtime）を一度だけ取得（存在するときのみ・symlink は従来どおり追従）。
-            let exists = FileManager.default.fileExists(atPath: fullURL.path)
-            let stat = exists ? Self.statSizeAndMtime(at: fullURL) : nil
+            // ローカル stat（size, mtime）を取得（symlink は従来どおり追従）。stat 成功 ⟹ 存在確定。
+            // steady-state（ゲート発火）はこの 1 syscall だけで抜ける（PR #20 レビュー nit-2）。
+            let stat = Self.statSizeAndMtime(at: fullURL)
 
             // 最適化（M4・pull コスト削減）: ローカルが DB と一致し、かつ DB がリモート entry を
             // そのまま反映しているなら、hash も DB write も不要で reconcile をスキップ（証明可能な no-op）。
@@ -777,7 +777,10 @@ final class SyncEngine {
             }
 
             // ローカル状態。不在 / 存在するがハッシュ不能 / SHA 取得済み を区別して decide() へ渡す。
+            // stat 成功なら存在確定。stat 失敗時のみ fileExists で absent（不在）と unreadable（在るが
+            // stat 不能＝権限/ディレクトリ等）を分ける（不在を unreadable 扱いすると renameLocalForConflict が空振る）。
             // @MainActor なので hash は detached で（pull 中のメインスレッドブロックを解消）。
+            let exists = stat != nil || FileManager.default.fileExists(atPath: fullURL.path)
             let localState: LocalState
             if exists {
                 let computed = await Task.detached(priority: .utility) {

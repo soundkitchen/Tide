@@ -36,7 +36,7 @@ M1 では **ローカル → S3 の一方向** のみを実装する。
 
 > **実装ノート（2026-06-08・SHA ゲート実装）**: 2.b〜d の変更判定は純粋関数 **`ChangeDetector`**（`Tide/Core/ChangeDetector.swift`、`preDecision`/`postHash` の two-step）に集約し、FSEvents 経路（後述）と共用する。仕様との差分は最適化 1 点のみ: **size 不一致のときは SHA を再計算せず直接アップロードキューへ**（size が違えば sha は一致し得ないため挙動は同義）。「ハッシュ同じ → mtime だけ DB 更新」は **CAS**（`LocalDatabase.refreshMtimeIfShaUnchanged`: 単一 write Tx 内で再フェッチし sha 一致時のみ更新・`lastSyncedAt` は保持）で行い、判定〜書込の間に走った並行 pull の更新（新 sha / versionId）を巻き戻さない。
 >
-> **不変条件: 「`FileRecord.mtime` = 最後に同期した時点のローカル stat mtime」**。マニフェスト `mtime` は ISO8601 秒精度（fractional なし）なので、これで DB を上書きすると上記 2.d の比較（許容差 0.001s）が常に外れ、無変更ファイルが毎起動再アップロードされる（実際に起きたバグ・2026-06-08 修正。`CLAUDE.md §8` 参照）。pull の内容一致時の DB 最新化（`Downloader.updateDBEntryWithoutWrite`）もローカル stat 実値を記録する。SHA ゲートは、過去に秒精度で汚染された既存 DB も初回スキャンの「hash 1 回 → mtime 修復のみ」で自己回復させる安全網を兼ねる。
+> **不変条件: 「`FileRecord.mtime` = 最後に同期した時点のローカル stat mtime」**。マニフェスト `mtime` は ISO8601 秒精度（fractional なし）なので、これで DB を上書きすると上記 2.d の比較（許容差 0.001s）が常に外れ、無変更ファイルが毎起動再アップロードされる（実際に起きたバグ・2026-06-08 修正。`CLAUDE.md §8` 参照）。pull の内容一致時の DB 最新化（`Downloader.markSynced`）もローカル stat 実値を記録する。SHA ゲートは、過去に秒精度で汚染された既存 DB も初回スキャンの「hash 1 回 → mtime 修復のみ」で自己回復させる安全網を兼ねる。
 
 ### 並列度と順序
 
