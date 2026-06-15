@@ -70,7 +70,7 @@ struct Downloader {
         // 「新 mtime + 旧 sha」の組になり、変更の取りこぼしが恒久化し得る。
         let localStatMtime = Self.fileMtime(at: fullURL)
         if let localSha = try currentLocalSha(at: fullURL), localSha == entry.sha256 {
-            try await updateDBEntryWithoutWrite(
+            try await markSynced(
                 relativePath: relativePath, entry: entry, localMtime: localStatMtime
             )
             return false
@@ -448,14 +448,17 @@ struct Downloader {
             .contentModificationDate?.timeIntervalSince1970
     }
 
-    /// 実書込なしの DB 最新化（ローカル内容がリモートと一致した早期 return 用）。
+    /// 内容一致時に、実書込なし（FS を触らず）で DB メタデータのみ最新化する。
+    /// 呼び元は 2 つ: `download()` の早期 return（ローカル内容がリモートと一致）と、reconcile の
+    /// `.localMatchesRemote`（再 hash を避けるため `download()` に畳まず直接呼ぶ・pull コスト削減 M4）。
+    ///
     /// mtime は**ローカル stat 実値**を記録する（不変条件: 「DB.mtime = 最後に同期した時点の
     /// ローカル stat mtime」）。マニフェスト mtime は ISO8601 秒精度（fractional なし）に
     /// 切り捨てられており、これで上書きすると次回フルスキャンの `< 0.001` 比較が必ず外れ、
     /// 無変更ファイルが毎起動再アップロードされる自己持続サイクルになる（pull は未変化シャードでも
     /// 全 entry をここに通すため、毎 pull で汚染されていた）。stat 失敗時のみマニフェスト値へ
     /// フォールバック（従来挙動）。
-    private func updateDBEntryWithoutWrite(
+    func markSynced(
         relativePath: String,
         entry: ManifestFileEntry,
         localMtime: Double?

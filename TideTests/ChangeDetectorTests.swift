@@ -90,4 +90,68 @@ final class ChangeDetectorTests: XCTestCase {
             .enqueue
         )
     }
+
+    // MARK: - reconcileIsNoop（pull コスト削減の stat ゲート）
+
+    private func noop(
+        known: ChangeDetector.Known? = nil,
+        localSize: Int64 = 100, localMtime: Double = 1_780_000_000.789,
+        knownEtag: String = "etag-1", knownVersionId: String? = "v1",
+        remoteSha: String = "abc", remoteEtag: String = "etag-1", remoteVersionId: String? = "v1"
+    ) -> Bool {
+        ChangeDetector.reconcileIsNoop(
+            known: known ?? self.known(),
+            localSize: localSize, localMtime: localMtime,
+            knownEtag: knownEtag, knownVersionId: knownVersionId,
+            remoteSha: remoteSha, remoteEtag: remoteEtag, remoteVersionId: remoteVersionId
+        )
+    }
+
+    func testReconcileNoopWhenLocalMatchesDBAndDBReflectsRemote() {
+        // ローカル stat == DB かつ sha/etag/versionId 一致 → 完全 no-op でスキップ。
+        XCTAssertTrue(noop())
+    }
+
+    func testReconcileNotNoopWhenKnownNil() {
+        // DB 記録なし（未追跡）→ known より前で false。
+        XCTAssertFalse(
+            ChangeDetector.reconcileIsNoop(
+                known: nil, localSize: 100, localMtime: 1, knownEtag: "e", knownVersionId: nil,
+                remoteSha: "abc", remoteEtag: "e", remoteVersionId: nil
+            )
+        )
+    }
+
+    func testReconcileNotNoopWhenUnsynced() {
+        // lastSyncedAt == nil → preDecision が enqueue → スキップしない。
+        XCTAssertFalse(noop(known: known(isSynced: false)))
+    }
+
+    func testReconcileNotNoopWhenSizeDiffers() {
+        XCTAssertFalse(noop(localSize: 101))
+    }
+
+    func testReconcileNotNoopWhenMtimeDrifts() {
+        // size 一致・mtime ドリフト（preDecision == .verifyHash）→ hash 検証が要るのでスキップしない。
+        XCTAssertFalse(noop(localMtime: 1_780_000_000.789 + 0.0011))
+    }
+
+    func testReconcileNotNoopWhenShaDiffers() {
+        // リモートが変化（DB.sha != entry.sha）→ ダウンロードが要るのでスキップしない。
+        XCTAssertFalse(noop(remoteSha: "different"))
+    }
+
+    func testReconcileNotNoopWhenEtagDiffers() {
+        // クロスデバイスで同一内容が再 UL され etag だけ変わったケース → 通常経路で DB を最新化させる。
+        XCTAssertFalse(noop(remoteEtag: "etag-2"))
+    }
+
+    func testReconcileNotNoopWhenVersionIdDiffers() {
+        XCTAssertFalse(noop(remoteVersionId: "v2"))
+    }
+
+    func testReconcileNoopWithMatchingEmptyEtagAndNilVersionId() {
+        // 空 etag（DB.s3Etag が nil → "" に正規化）/ versionId 双方 nil でも一致なら no-op。
+        XCTAssertTrue(noop(knownEtag: "", knownVersionId: nil, remoteEtag: "", remoteVersionId: nil))
+    }
 }
