@@ -1699,6 +1699,127 @@
           }
         }
       }
+    },
+    "Sync conflict" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "同期の競合"
+          }
+        }
+      }
+    },
+    "“%@” changed on another device. Your local edits were kept as a separate copy." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "「%@」が別のデバイスで変更されました。ローカルの編集は別のコピーとして保存しました。"
+          }
+        }
+      }
+    },
+    "File not backed up" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ファイルが未バックアップ"
+          }
+        }
+      }
+    },
+    "“%@” is too large to upload. Adjust the size limit in Settings." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "「%@」はアップロードのサイズ上限を超えています。設定で上限を調整してください。"
+          }
+        }
+      }
+    },
+    "Upload failed" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "アップロードに失敗しました"
+          }
+        }
+      }
+    },
+    "“%@” could not be uploaded after several attempts." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "「%@」を数回試みましたが、アップロードできませんでした。"
+          }
+        }
+      }
+    },
+    "File not backed up yet" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ファイルはまだ未バックアップです"
+          }
+        }
+      }
+    },
+    "“%@” keeps changing and hasn’t been backed up yet." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "「%@」は変更され続けており、まだバックアップされていません。"
+          }
+        }
+      }
+    },
+    "Notifications" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "通知"
+          }
+        }
+      }
+    },
+    "Notify about conflicts and backup problems" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "競合とバックアップの問題を通知"
+          }
+        }
+      }
+    },
+    "Shows a notification when a sync conflict happens or a file can’t be backed up. macOS notification settings still apply." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "同期の競合が発生したとき、またはファイルをバックアップできないときに通知を表示します。macOS の通知設定も適用されます。"
+          }
+        }
+      }
     }
   },
   "version" : "1.1"

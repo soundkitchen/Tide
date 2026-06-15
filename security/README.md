@@ -46,6 +46,17 @@ F4 の是正内容（2026-06-11・M4 Sync Activity 対応に同梱）: `recentEr
 
 回帰テスト: `ObjectVersionHistoryTests`（不正キー除外含む全分岐）/ `RestoreTargetTests` / `RestoreServiceTests`（symlink 非追従・サイズ超過 abort・サイズ不一致・別名退避を実 DB + フェイク S3 で固定）。
 
+## M4 通知（UserNotifications）のレビュー（2026-06-15）
+
+`NotificationManager` / `NotificationPolicy` を追加。新規の未対応脆弱性は無し。観点 2 点のみ記録:
+
+| 観点 | 対応 | 参照 |
+|---|---|---|
+| 通知本文へのメタデータ露出 | OS 通知本文に出すのは**ファイル名（末尾コンポーネント）のみ**。ロック画面等に表示されうるが、「どのファイルが競合した/未バックアップか」をユーザに伝えるのが通知の目的＝by-design。Settings の「Notifications」トグル（既定 on）+ OS 許可で二重にゲート。**生エラー文字列（`SyncIssue.rawDetail`）や S3 キー全体は通知に載せない**（`NotificationPolicy` が path の末尾だけを使う） | F4 と同評価（メタデータのみ・本人画面） |
+| 許可リクエストのタイミング | 起動時・セットアップ時にはプロンプトしない。**初回の通知発火時**にのみ一度リクエスト（エラー/競合が一度も起きないユーザにいきなり許可を求めない）。拒否済み/未決なら静かに諦める | — |
+
+回帰テスト: `NotificationPolicyTests`（identifier の安定性で dedup を担保・本文がフルパスでなくファイル名であることを固定）。
+
 ## 対応サマリ（2026-05-24 適用後）
 
 | ID | タイトル | ステータス |

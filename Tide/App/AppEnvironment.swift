@@ -7,6 +7,9 @@ import Observation
 final class AppEnvironment {
     let config: ConfigStore
     let keychain: KeychainStore
+    /// OS 通知の発行とクリック処理（アプリ全体で 1 つ）。SyncEngine へ注入し、クリック時の
+    /// Sync Activity オープンは App 層が `openActivity` に登録する。
+    let notifications: NotificationManager
 
     var database: LocalDatabase?
     var s3: TideS3Client?
@@ -23,8 +26,10 @@ final class AppEnvironment {
     @ObservationIgnored private var isBootstrapping = false
 
     init() {
-        self.config = ConfigStore()
+        let config = ConfigStore()
+        self.config = config
         self.keychain = KeychainStore()
+        self.notifications = NotificationManager(config: config)
     }
 
     /// アプリ起動時のブートストラップ。設定済みなら SyncEngine を立ち上げる。
@@ -112,7 +117,8 @@ final class AppEnvironment {
             syncRoot: url,
             deviceId: config.deviceId,
             config: config,
-            pollIntervalSeconds: config.pollingIntervalSeconds
+            pollIntervalSeconds: config.pollingIntervalSeconds,
+            notifier: notifications
         )
         self.database = db
         self.s3 = s3

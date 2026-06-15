@@ -25,6 +25,9 @@ struct SettingsWindow: View {
     @State private var noDownloadBwLimit: Bool = true
     @State private var downloadBwMBps: Double = 10
 
+    /// 通知トグル（既定 on）。ConfigStore は @Observable でないので他の設定と同じ @State write-through。
+    @State private var notificationsEnabled: Bool = true
+
     private static let bytesPerMBps: Int64 = 1_000_000
     private static let maxBwMBps: Double = 100
 
@@ -93,6 +96,12 @@ struct SettingsWindow: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            Section("Notifications") {
+                Toggle("Notify about conflicts and backup problems", isOn: $notificationsEnabled)
+                Text("Shows a notification when a sync conflict happens or a file can’t be backed up. macOS notification settings still apply.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Section("Excluded patterns (built-in)") {
                 ForEach(Array(HardcodedIgnoreRules.exactNames).sorted(), id: \.self) { name in
                     Text(name).font(.system(.body, design: .monospaced))
@@ -135,6 +144,10 @@ struct SettingsWindow: View {
                 limitGB = min(Self.maxLimitGB, max(1, Double(bytes / Self.oneGiB)))
             }
             loadBandwidth()
+            notificationsEnabled = env.config.notificationsEnabled
+        }
+        .onChange(of: notificationsEnabled) { _, newValue in
+            env.config.notificationsEnabled = newValue
         }
         .onChange(of: noLimit) { _, _ in persistLimit() }
         .onChange(of: limitGB) { _, _ in persistLimit() }
