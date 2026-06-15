@@ -10,9 +10,13 @@ enum ConflictNamer {
     /// `at` 区切りのロケール表記になり、辞書順が時系列にならない（`Jun`/`Mar`… で並ぶ）ため使わない。
     /// `VerbatimFormatStyle` は Sendable なので `static let` のまま strict concurrency で安全。
     /// 区切りはすべてリテラル（`-` / 空白）＝コロン等を含まないので別途のサニタイズは不要。
+    /// timeZone は `.autoupdatingCurrent`＝`formatted()` ごとにシステム TZ を解決する（旧
+    /// `Date.FormatStyle` の既定と同じ挙動）。`.current` だと `static let` 初回アクセス時の TZ で
+    /// フリーズし、常駐中の TZ 変更 / DST 跨ぎでローカル時刻表示がズレる（ソート可能性はどちらでも
+    /// 保たれるが壁時計追従を優先）。
     private static let timestampStyle = Date.VerbatimFormatStyle(
         format: "\(year: .padded(4))-\(month: .twoDigits)-\(day: .twoDigits) \(hour: .twoDigits(clock: .twentyFourHour, hourCycle: .zeroBased))-\(minute: .twoDigits)-\(second: .twoDigits)",
-        timeZone: .current,
+        timeZone: .autoupdatingCurrent,
         calendar: Calendar(identifier: .gregorian)
     )
 
