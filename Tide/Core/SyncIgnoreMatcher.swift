@@ -2,7 +2,7 @@ import Foundation
 
 /// `.syncignore`（gitignore 構文の一般的サブセット）をパースして除外判定する不変マッチャ。
 ///
-/// 対応構文（`docs/07-M3-IMPLEMENTATION-GUIDE.md` サブタスク B / `CLAUDE.md` 第 7 節）:
+/// 対応構文（`docs/07-M3-IMPLEMENTATION-GUIDE.md` サブタスク B / `docs/08-IMPLEMENTATION-NOTES.md`）:
 /// - `#` で始まる行はコメント、空行は無視
 /// - 先頭 `!` は否定（再包含）。`\#` / `\!` で `#` / `!` をエスケープ
 /// - 末尾 `/` はディレクトリ限定

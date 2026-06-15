@@ -80,7 +80,7 @@ macOS のクリーンインストール後の復旧を主目的とした、Dropb
 
 ### M3: 双方向同期と競合解決、大ファイル対応（サブ A〜E 実装済み・M3 完了）
 
-詳細な設計メモと実装状況は `07-M3-IMPLEMENTATION-GUIDE.md`、確定した実装判断は `CLAUDE.md` 第 7 節を参照。
+詳細な設計メモと実装状況は `07-M3-IMPLEMENTATION-GUIDE.md`、確定した実装判断は `docs/08-IMPLEMENTATION-NOTES.md`を参照。
 
 - ✅ 3-way merge による双方向同期（サブ C・`ThreeWayMerge`）
 - ✅ 競合検出と `<stem> (local copy YYYY-MM-DD HH-MM-SS).<ext>` リネーム（`ConflictNamer`）
@@ -93,13 +93,13 @@ macOS のクリーンインストール後の復旧を主目的とした、Dropb
 
 - ✅ 削除済みファイルの復元 UI（「Version History」ウィンドウの「Deleted files」タブ。明示ボタンでフル列挙・逐次表示・キャンセル可）
 - ✅ 過去バージョン参照 UI（同ウィンドウの「Versions」タブ。特定ファイルの版を時系列表示し、選んだ版を復元）
-  - 列挙は `ListObjectVersions`、取得は `versionId` 指定、復元は「書き戻し → 再アップロード」方式（`RestoreService`）。遡及窓は概ね 90 日。詳細は `docs/02-S3-LAYOUT.md`「バージョン復元 / 削除済み復元」と `CLAUDE.md` 第 7 節。
+  - 列挙は `ListObjectVersions`、取得は `versionId` 指定、復元は「書き戻し → 再アップロード」方式（`RestoreService`）。遡及窓は概ね 90 日。詳細は `docs/02-S3-LAYOUT.md`「バージョン復元 / 削除済み復元」と `docs/08-IMPLEMENTATION-NOTES.md`。
 - ✅ 同期状況の詳細表示、エラー履歴
-  - 「Sync Activity」ウィンドウ（sync_log の閲覧。種別フィルタ + ページング + 詳細コピー）。エラーは構造化型 `SyncIssue` に分類して表示し、生エラー文字列はオンデマンド参照のみ（`security/high.md` H2 / F4 解消）。メニューバーポップオーバーも刷新（ステータスヘッダー / 同期情報カード / 直近の同期 / 分類エラーサマリ / アイコンアクション）。詳細は `CLAUDE.md` 第 7 節。
+  - 「Sync Activity」ウィンドウ（sync_log の閲覧。種別フィルタ + ページング + 詳細コピー）。エラーは構造化型 `SyncIssue` に分類して表示し、生エラー文字列はオンデマンド参照のみ（`security/high.md` H2 / F4 解消）。メニューバーポップオーバーも刷新（ステータスヘッダー / 同期情報カード / 直近の同期 / 分類エラーサマリ / アイコンアクション）。詳細は `docs/08-IMPLEMENTATION-NOTES.md`。
 - ✅ 通知（競合発生時・未バックアップ確定時）
-  - macOS 通知（UserNotifications）。発火は「ユーザの介入が要る／取りこぼしが起きうる確定的な事象」だけに絞る: ① 競合コピー作成、② サイズ上限超過、③ リトライ give-up、④ 不安定ファイル（変化し続けて未バックアップ）。一過性のネットワークエラー等は出さない。許可は**初回発火時**にリクエスト。Settings の「Notifications」トグル（既定 on）で抑止可。通知クリックで Sync Activity を開く。判定は純粋関数 `NotificationPolicy`。詳細は `CLAUDE.md` 第 7 節。
+  - macOS 通知（UserNotifications）。発火は「ユーザの介入が要る／取りこぼしが起きうる確定的な事象」だけに絞る: ① 競合コピー作成、② サイズ上限超過、③ リトライ give-up、④ 不安定ファイル（変化し続けて未バックアップ）。一過性のネットワークエラー等は出さない。許可は**初回発火時**にリクエスト。Settings の「Notifications」トグル（既定 on）で抑止可。通知クリックで Sync Activity を開く。判定は純粋関数 `NotificationPolicy`。詳細は `docs/08-IMPLEMENTATION-NOTES.md`。
 - ✅ パフォーマンス最適化（pull コスト削減）
-  - リモート pull の取り込み（`reconcileRemoteEntry`）に **stat ゲート**を追加。未変化シャードは entry が DB から再合成されるため、ローカルが DB と一致し DB がリモートをそのまま反映していれば hash も DB write もせずスキップする（証明可能な no-op）。内容一致時の DB 最新化は `download()` から専用 `markSynced` に分離し、残る hash も off-main 化（pull 中のメインスレッドブロックを解消）。判定は純粋関数 `ChangeDetector.reconcileIsNoop`。詳細は `CLAUDE.md` 第 7 節「reconcile 入口の stat ゲート」と `docs/04-SYNC-LOGIC.md`。
+  - リモート pull の取り込み（`reconcileRemoteEntry`）に **stat ゲート**を追加。未変化シャードは entry が DB から再合成されるため、ローカルが DB と一致し DB がリモートをそのまま反映していれば hash も DB write もせずスキップする（証明可能な no-op）。内容一致時の DB 最新化は `download()` から専用 `markSynced` に分離し、残る hash も off-main 化（pull 中のメインスレッドブロックを解消）。判定は純粋関数 `ChangeDetector.reconcileIsNoop`。詳細は `docs/08-IMPLEMENTATION-NOTES.md`「reconcile 入口の stat ゲート」と `docs/04-SYNC-LOGIC.md`。
 
 ## 技術スタック
 

@@ -70,7 +70,7 @@ NSWorkspace.shared.open(URL(fileURLWithPath: path))
 
 **実機検証（2026-06-10・バケット `dev-tide`・同期ルート `/Users/hige/Tide`）:** 成長し続ける大ファイルを 2 パターンで投入して統合挙動を確認した。① バースト＋休止（~440MiB）＝デバウンス再発火でキュー行 id が次々置換（89→91→92→94）。成長中に `Uploaded` ログは一切出ず（torn 未コミット）、安定化後に完全版が載った。古い in-flight 行の完了が新 id 行を巻き込み消去しない証拠として **完全版の二重アップロード（自己修復）** を観測。② 連続書込（~324MiB）＝単一行が置換されず滞留し、`attempts` は 0 のまま延期（`File changed during upload; deferring`）、**経過 ~30s で「未バックアップ」警告が 1 回だけ**発火（dedup）。両パターンとも安定後に完全版が上がり、**ローカル == DB == S3 の SHA-256 が一致**、残置マルチパートなし（abort 済み）、削除は S3 delete marker 経由で伝播。＝torn を出さず取りこぼしもしないことを実機で確認。
 
-**据え置き**: `reconcile/削除の配線部が未結合テスト`（CLAUDE.md §8）と同様、`processUpload`/`MultipartUploader` の「不安定 → abort/PUT 見送り」I/O 配線は結合テスト未整備（純粋判定と DB 操作は固定済み・S3 シームの注入面が processUpload 側に無い）。`StabilityCheck` の差し替え可能化と合わせて将来タスク。
+**据え置き**: `reconcile/削除の配線部が未結合テスト`（docs/09-DEFERRED.md）と同様、`processUpload`/`MultipartUploader` の「不安定 → abort/PUT 見送り」I/O 配線は結合テスト未整備（純粋判定と DB 操作は固定済み・S3 シームの注入面が processUpload 側に無い）。`StabilityCheck` の差し替え可能化と合わせて将来タスク。
 
 ---
 
@@ -200,4 +200,4 @@ symlink を辿り、リンク先（例: `~/.ssh/id_rsa`）の中身を S3 へ送
 - **宙ぶらりんリソースの蓄積**: `SyncEngine.start()` 冒頭の `pruneOrphanTransfers()` が、ローカルファイルの消えた upload 行（宙ぶらりん MPU を best-effort `abortMultipartUpload`）、tmp の消えた download 行（当該シャードのキャッシュを sentinel 化**してから**削除＝取り残し防止・2026-06-07 修正）、7 日より古い行を掃除する。S3 側の `tide-abort-incomplete-multipart`（7 日）と歩調を合わせる。
 - **secret 非保持**: `transfer_state` は path / UploadId / etag / partSize / mtime / size のみ。認証情報・本文は持たない。
 
-**残ロジック上の据え置き:** ✅ 解消済み（2026-06-07）。prune 本体を `SyncEngine.pruneOrphanTransfers(db:store:syncRoot:now:abortUpload:)`（`nonisolated static`・依存注入＝実 `TideS3Client` 不要）へ切り出し、`TransferPruneTests`（実 DB + abort フェイク）で clear（tmp 消失/stale）・resumable・upload 全分岐の配線を回帰固定。あわせて clear 分岐の `invalidateShardCache` 漏れ（中断 DL の永久取り残し）も修正（`CLAUDE.md §8` 参照）。store 操作自体は従来どおり `TransferStateStoreTests` でカバー。
+**残ロジック上の据え置き:** ✅ 解消済み（2026-06-07）。prune 本体を `SyncEngine.pruneOrphanTransfers(db:store:syncRoot:now:abortUpload:)`（`nonisolated static`・依存注入＝実 `TideS3Client` 不要）へ切り出し、`TransferPruneTests`（実 DB + abort フェイク）で clear（tmp 消失/stale）・resumable・upload 全分岐の配線を回帰固定。あわせて clear 分岐の `invalidateShardCache` 漏れ（中断 DL の永久取り残し）も修正（`docs/09-DEFERRED.md` 参照）。store 操作自体は従来どおり `TransferStateStoreTests` でカバー。
