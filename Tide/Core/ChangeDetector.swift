@@ -15,8 +15,8 @@ import Foundation
 /// （scan は `.ignore` = リトライ中 attempts を巻き戻さない / event は `.replace` = リセット。
 /// 意図的な挙動差なのでここに吸わせない）。
 ///
-/// 将来の第 3 の呼び元: reconcile 入口の stat ゲート（pull が全ツリーを毎回 hash する問題の
-/// 最適化・据え置き）もこの API を使う想定。
+/// 第 3 の呼び元: reconcile 入口の stat ゲート（pull が全ツリーを毎回 hash + 全行 DB write する
+/// 問題の最適化・M4・2026-06-16）も `preDecision` を使う（下記 `reconcileIsNoop`）。
 enum ChangeDetector {
     /// DB（`FileRecord`）由来の既知状態。
     struct Known: Equatable, Sendable {
@@ -64,5 +64,42 @@ enum ChangeDetector {
     static func postHash(knownSha: String, computedSha: String?) -> PostHashDecision {
         guard let computedSha, computedSha == knownSha else { return .enqueue }
         return .refreshMtimeOnly
+    }
+
+    /// reconcile（pull 取り込み）入口の stat ゲート（第 3 の呼び元）。
+    ///
+    /// pull は remoteMap の全 entry を `reconcileRemoteEntry` に通すが、未変化シャードの entry は
+    /// `ManifestReader` が DB レコードそのものから再合成する（sha/etag/versionId/size/mtime 全部 DB 由来）。
+    /// その結果 steady-state では「ローカル == DB == リモート」なのに毎 pull（最短 3 分毎）に全ファイルを
+    /// 2 回 hash + 全行 DB write していた。これを消すためのゲート。
+    ///
+    /// 真なら hash も DB write も不要で reconcile をスキップしてよい。条件:
+    /// 1. ローカル stat が DB の (size, mtime) と一致（= `preDecision` の `.skip`）＝ローカル未変更。
+    /// 2. DB がリモート entry を**そのまま反映**している（sha / etag / versionId 一致）。
+    ///
+    /// このとき `markSynced`（= 旧 `updateDBEntryWithoutWrite`）が書く値は、`lastSyncedAt`/`updatedAt`
+    /// の timestamp を除いて DB の現値と完全一致する。よってスキップは振る舞い上 **no-op**（証明可能）。
+    /// timestamp は再合成マニフェストの `uploadedAt` に使われるだけで、再合成は read 専用＝S3 に戻らず
+    /// ロジック上の比較対象にもならないため、bump を省いても無害（むしろ uploadedAt の意味として正しい）。
+    ///
+    /// クロスデバイスで同一内容が再アップロードされ etag だけ変わった場合はこのゲートが外れ、
+    /// 通常経路の hash → `.localMatchesRemote` → `markSynced` で DB の etag/versionId が最新化される。
+    static func reconcileIsNoop(
+        known: Known?,
+        localSize: Int64,
+        localMtime: Double,
+        knownEtag: String,
+        knownVersionId: String?,
+        remoteSha: String,
+        remoteEtag: String,
+        remoteVersionId: String?,
+        tolerance: Double = 0.001
+    ) -> Bool {
+        guard let known else { return false }
+        guard preDecision(known: known, size: localSize, mtime: localMtime, tolerance: tolerance) == .skip
+        else { return false }
+        return known.sha256 == remoteSha
+            && knownEtag == remoteEtag
+            && knownVersionId == remoteVersionId
     }
 }

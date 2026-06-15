@@ -592,6 +592,16 @@ final class SyncEngine {
         return p
     }
 
+    /// ローカルファイルの (size, mtime) を一度の stat で取得（reconcile の stat ゲート用）。
+    /// scan の `.contentModificationDateKey` と同じ API 系。ディレクトリ / stat 不能なら nil。
+    nonisolated static func statSizeAndMtime(at url: URL) -> (size: Int64, mtime: Double)? {
+        guard let v = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]),
+              let size = v.fileSize,
+              let mtime = v.contentModificationDate?.timeIntervalSince1970
+        else { return nil }
+        return (Int64(size), mtime)
+    }
+
     // MARK: - Remote pull
 
     /// リモート pull の契機。PR #9 ⑥ まではログ専用の文字列だったが、coalescing（PR #9 レビュー ④）で
@@ -745,19 +755,48 @@ final class SyncEngine {
         }
 
         do {
+            // ローカル stat（size, mtime）を一度だけ取得（存在するときのみ・symlink は従来どおり追従）。
+            let exists = FileManager.default.fileExists(atPath: fullURL.path)
+            let stat = exists ? Self.statSizeAndMtime(at: fullURL) : nil
+
+            // 最適化（M4・pull コスト削減）: ローカルが DB と一致し、かつ DB がリモート entry を
+            // そのまま反映しているなら、hash も DB write も不要で reconcile をスキップ（証明可能な no-op）。
+            // steady-state（未変化シャードは entry が DB から再合成される）では毎 pull がここで抜ける。
+            if let stat, let localRec {
+                let known = ChangeDetector.Known(
+                    size: localRec.size, mtime: localRec.mtime,
+                    sha256: localRec.sha256, isSynced: localRec.lastSyncedAt != nil
+                )
+                if ChangeDetector.reconcileIsNoop(
+                    known: known, localSize: stat.size, localMtime: stat.mtime,
+                    knownEtag: localRec.s3Etag ?? "", knownVersionId: localRec.s3VersionId,
+                    remoteSha: entry.sha256, remoteEtag: entry.etag, remoteVersionId: entry.s3VersionId
+                ) {
+                    return
+                }
+            }
+
             // ローカル状態。不在 / 存在するがハッシュ不能 / SHA 取得済み を区別して decide() へ渡す。
+            // @MainActor なので hash は detached で（pull 中のメインスレッドブロックを解消）。
             let localState: LocalState
-            if FileManager.default.fileExists(atPath: fullURL.path) {
-                localState = (try? HashCalculator.sha256(of: fullURL)).map(LocalState.present) ?? .unreadable
+            if exists {
+                let computed = await Task.detached(priority: .utility) {
+                    try? HashCalculator.sha256(of: fullURL)
+                }.value
+                localState = computed.map(LocalState.present) ?? .unreadable
             } else {
                 localState = .absent
             }
 
             // 競合解決は ThreeWayMerge に一本化（remote はここでは常に非 nil）。
             switch ThreeWayMerge.decide(base: localRec?.sha256, local: localState, remote: entry.sha256) {
-            case .download, .localMatchesRemote:
-                // リモート採用（欠落/上書き）または内容一致（download() の早期 return で DB を最新化）。
+            case .download:
+                // リモート採用（ローカル欠落 / ローカル未編集でリモートのみ変化 → 上書き取得）。
                 try await dl.download(relativePath: path, entry: entry)
+            case .localMatchesRemote:
+                // 内容一致: 書き込み不要。DB メタデータのみ最新化（mtime ドリフト修復 / etag 追従）。
+                // 再 hash を避けるため download() に畳まず markSynced を直接呼ぶ。localMtime は上の stat 値。
+                try await dl.markSynced(relativePath: path, entry: entry, localMtime: stat?.mtime)
             case .conflictThenDownload:
                 // 双方乖離（ローカル編集 / 未追跡 / unreadable）→ ローカルをコンフリクトコピーへ退避してからリモート取得。
                 let localCopy = try dl.renameLocalForConflict(relativePath: path)

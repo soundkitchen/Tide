@@ -448,6 +448,15 @@ struct Downloader {
             .contentModificationDate?.timeIntervalSince1970
     }
 
+    /// 内容一致（reconcile の `.localMatchesRemote`）時に、実書込なしで DB メタデータのみ最新化する。
+    /// 旧来は `download()` の早期 return に畳まれていたが、再 hash を避けるため reconcile から直接呼ぶ
+    /// （pull コスト削減・M4）。実装は `updateDBEntryWithoutWrite` と同一。
+    func markSynced(relativePath: String, entry: ManifestFileEntry, localMtime: Double?) async throws {
+        try await updateDBEntryWithoutWrite(
+            relativePath: relativePath, entry: entry, localMtime: localMtime
+        )
+    }
+
     /// 実書込なしの DB 最新化（ローカル内容がリモートと一致した早期 return 用）。
     /// mtime は**ローカル stat 実値**を記録する（不変条件: 「DB.mtime = 最後に同期した時点の
     /// ローカル stat mtime」）。マニフェスト mtime は ISO8601 秒精度（fractional なし）に

@@ -89,7 +89,7 @@ macOS のクリーンインストール後の復旧を主目的とした、Dropb
 - ✅ `.syncignore` 対応（サブ B）
 - ✅ 帯域制御（オプション・サブ E・トークンバケット `RateLimiter`。アップロード／ダウンロードの上限を Settings で MB/s 指定。既定は無制限）
 
-### M4: 運用機能と磨き込み（一部実装済み）
+### M4: 運用機能と磨き込み（実装済み）
 
 - ✅ 削除済みファイルの復元 UI（「Version History」ウィンドウの「Deleted files」タブ。明示ボタンでフル列挙・逐次表示・キャンセル可）
 - ✅ 過去バージョン参照 UI（同ウィンドウの「Versions」タブ。特定ファイルの版を時系列表示し、選んだ版を復元）
@@ -98,7 +98,8 @@ macOS のクリーンインストール後の復旧を主目的とした、Dropb
   - 「Sync Activity」ウィンドウ（sync_log の閲覧。種別フィルタ + ページング + 詳細コピー）。エラーは構造化型 `SyncIssue` に分類して表示し、生エラー文字列はオンデマンド参照のみ（`security/high.md` H2 / F4 解消）。メニューバーポップオーバーも刷新（ステータスヘッダー / 同期情報カード / 直近の同期 / 分類エラーサマリ / アイコンアクション）。詳細は `CLAUDE.md` 第 7 節。
 - ✅ 通知（競合発生時・未バックアップ確定時）
   - macOS 通知（UserNotifications）。発火は「ユーザの介入が要る／取りこぼしが起きうる確定的な事象」だけに絞る: ① 競合コピー作成、② サイズ上限超過、③ リトライ give-up、④ 不安定ファイル（変化し続けて未バックアップ）。一過性のネットワークエラー等は出さない。許可は**初回発火時**にリクエスト。Settings の「Notifications」トグル（既定 on）で抑止可。通知クリックで Sync Activity を開く。判定は純粋関数 `NotificationPolicy`。詳細は `CLAUDE.md` 第 7 節。
-- パフォーマンス最適化（未着手）
+- ✅ パフォーマンス最適化（pull コスト削減）
+  - リモート pull の取り込み（`reconcileRemoteEntry`）に **stat ゲート**を追加。未変化シャードは entry が DB から再合成されるため、ローカルが DB と一致し DB がリモートをそのまま反映していれば hash も DB write もせずスキップする（証明可能な no-op）。内容一致時の DB 最新化は `download()` から専用 `markSynced` に分離し、残る hash も off-main 化（pull 中のメインスレッドブロックを解消）。判定は純粋関数 `ChangeDetector.reconcileIsNoop`。詳細は `CLAUDE.md` 第 7 節「reconcile 入口の stat ゲート」と `docs/04-SYNC-LOGIC.md`。
 
 ## 技術スタック
 

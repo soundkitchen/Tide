@@ -453,6 +453,8 @@ M2 で **S3 → ローカルの取り込み** が追加された。ローカル 
 [lastRemoteCheckedAt 更新]
 ```
 
+> **実装ノート（2026-06-16・pull コスト削減＝M4 perf）**: 未変化シャードのファイルは entry が**ローカル DB から再合成**される（上図「変化なしシャードのファイルはローカル DB から補完」）ため、steady-state では「ローカル == DB == リモート」なのに毎 pull（最短 3 分毎）で全ファイルを 2 回ハッシュ（`ThreeWayMerge` 用 + `download()` 早期 return 用）＋全行 DB write していた。さらに reconcile は `@MainActor` 上でハッシュしていた（`processEventToQueue` だけ `Task.detached` で逃がしていた）。これを `reconcileRemoteEntry` 入口の **stat ゲート**で解消した: 純粋関数 **`ChangeDetector.reconcileIsNoop`**（`preDecision == .skip`＝ローカル stat が DB の size/mtime と一致、かつ DB が entry を sha/etag/versionId そのまま反映）が真なら、`markSynced` が書く値と timestamp 以外完全一致するので**証明可能な no-op**としてスキップ（ハッシュも DB write もしない）。ゲートを抜けた `.localMatchesRemote`（実際に mtime/etag ドリフトの修復が要るケースだけ残る）は専用 `Downloader.markSynced` で DB を最新化（`download()` の二度目ハッシュを排除）。残るハッシュは `Task.detached(priority:.utility)` で off-main 化（pull 中のメインスレッドブロック解消）。ゲートは既存 SHA ゲートと同じ「size+mtime 一致 → 内容不変とみなす」前提を流用するので新たな取りこぼし窓は作らない。詳細は `CLAUDE.md` 第 7 節「reconcile 入口の stat ゲート」。
+
 ## トリガー
 
 `SyncEngine.start()` で 3 つのオブザーバを起動する:
