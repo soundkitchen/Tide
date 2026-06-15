@@ -311,12 +311,15 @@
 
 ### 通知（UserNotifications・M4・2026-06-15）
 
-- **発火は「ユーザの介入が要る／取りこぼし（未バックアップ）が起きうる確定的な事象」だけに絞る**（4 種）: ① 競合コピー作成（`reconcileRemoteEntry` の `.conflictThenDownload`）、② サイズ上限超過 `fileTooLarge`、③ リトライ give-up（`attempts >= 5`）、④ 不安定ファイル（`unstableFile` 警告・既に `unstableWarned` で dedup 済み）。**一過性エラー（network 等）は出さない**（オフラインのたびに通知が溢れるのを避ける＝§7「構造化エラー」の `recentIssues` とは別ポリシー: recentIssues は全失敗を載せるが通知は確定事象だけ）。配線は全部 `SyncEngine`（@MainActor）の各点から `await notifier?.post(...)`。
+- **発火は「ユーザの介入が要る／取りこぼし（未バックアップ）が起きうる確定的な事象」だけに絞る**（4 種）: ① 競合コピー作成（`reconcileRemoteEntry` の `.conflictThenDownload`）、② サイズ上限超過 `fileTooLarge`、③ リトライ give-up（`attempts >= 5`）、④ 不安定ファイル（`unstableFile` 警告・既に `unstableWarned` で dedup 済み）。**一過性エラー（network 等）は出さない**（オフラインのたびに通知が溢れるのを避ける＝§7「構造化エラー」の `recentIssues` とは別ポリシー: recentIssues は全失敗を載せるが通知は確定事象だけ）。
+- **配線は `SyncEngine`（@MainActor）の各点から fire-and-forget の `Task { await self.notifier?.post(...) }`**（PR #18 レビュー Medium）。`post` の初回呼びは許可プロンプト応答までサスペンドし得るため、インライン `await` だと確定エラー 1 件で以降のアップロード処理（特に `fileTooLarge` 分岐はキュー除去 Tx の直前）が宙吊りになる。通知は順序保証不要なので同期処理から切り離す（@MainActor 同士＋ path 値渡しで安全）。
 - **判定は純粋関数 `NotificationPolicy.content(for:) -> NotificationContent`（`Tide/Core/NotificationPolicy.swift`）**。`NotificationEvent` enum（上記 4 種）→ `(identifier, title, body)`。**identifier は `"<種別>:<path>"`**（例 `conflict:a/b.txt`）で、UNUserNotificationCenter の「同一 identifier は置換」仕様により同一 (path, 種別) の連発を 1 件に畳む（バナー溢れ防止）。本文はフルパスでなく**末尾コンポーネント**（通知は幅が狭い）。全分岐 `NotificationPolicyTests`（identifier の安定性 / path・種別での分離 / 本文がファイル名を含む）。表示文言は xcstrings（`%@` 一個・`extractionState:"manual"`）。
 - **発行と OS 連携は `NotificationManager`（`Tide/App/NotificationManager.swift`・@MainActor・`SyncNotifying` 実装）**。SyncEngine には `SyncNotifying`（`NotificationPolicy.swift` 定義）だけ注入し、UserNotifications / AppKit を持ち込まない（テストでも nil 差し替え可・既存 SyncEngine 直構築は AppEnvironment 1 箇所のみ）。`AppEnvironment` が 1 インスタンス保持し `notifier:` で SyncEngine へ注入。
 - **許可（authorization）は初回 `post` 時に一度だけリクエスト**（起動時・セットアップ時には出さない＝エラー/競合が一度も起きないユーザにいきなりプロンプトしない）。許可されていなければ静かに諦める。Settings の「Notifications」トグル（`ConfigStore.notificationsEnabled`・**既定 on**・presence 判定）が off なら許可も求めない。`factoryReset` で消える設定群にも追加済み。
+- **初回リクエストは単一タスク `authorizationRequest: Task<Void, Never>?` に集約**（PR #18 レビュー Low）。並行 post はこのタスクの完了を `await` してから `notificationSettings()` を読むので、初回プロンプト応答待ち中に来た 2 件目が `.notDetermined` で early-return＝取りこぼされない。許可状態は毎回読む（後から System Settings で許可された場合も拾う）。`requestAuthorization` は `.notDetermined` のときだけプロンプトを出し確定済みなら即返る。
 - **通知クリックで Sync Activity を開く**: `NotificationManager.openActivity` クロージャを App 層が登録する（`openWindow` は SwiftUI の View 環境にしか無く AppKit デリゲートから直接呼べないため）。登録は **MenuBarExtra のラベル（`MenuBarLabel`・常駐アプリでは起動直後に必ず生成される）の `onAppear`** が一次、`MenuBarContent.task` が保険。クリック時も `openWindow` 前に `NSApp.activate`（LSUIElement の定石）。デリゲート登録は `AppDelegate.applicationDidFinishLaunching` で `registerAsDelegate()`。
 - **据え置き**: file 名（末尾コンポーネント）が OS 通知本文＝ロック画面等に出うる（メタデータ露出）。バックアップツールとして「どのファイルか」を伝えるのが通知の目的なので by-design・トグル + OS 許可でゲート・**生エラー文字列は通知に出さない**（`SyncIssue.rawDetail` は通知に載せない）。`security/README.md` に注記。**実機受け入れテストは未消化**（次セッションで: 競合発生時のバナー / クリック → Sync Activity / トグル off で抑止 / 初回許可プロンプト）。
+- **将来の 5 種目候補（PR #18 レビュー・スコープ外メモ）**: `applyRemoteDeletion` の `.keepLocalRemoteDeleted`（リモート削除だがローカル編集で残した＝ユーザ判断が要る）も通知候補。現状 sync_log warning のみで通知はしない。今回 4 種に絞る判断は妥当だが、将来の通知拡張時に検討。
 
 ## 8. 既知の据え置き項目
 

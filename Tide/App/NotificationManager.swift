@@ -18,8 +18,10 @@ final class NotificationManager: NSObject, SyncNotifying {
     /// 無いため、App 層（MenuBarExtra のラベル等）が onAppear でここへクロージャを登録する。
     var openActivity: (() -> Void)?
 
-    /// 初回 post で一度だけ許可をリクエストしたか。
-    private var didRequestAuthorization = false
+    /// 初回 post で起こす許可リクエストの単一タスク。並行 post はこの完了を待ってから許可状態を
+    /// 読むことで、初回プロンプト応答待ち中に来た 2 件目が `.notDetermined` で early-return され
+    /// 取りこぼされるのを防ぐ（PR #18 レビュー Low）。リクエスト自体はアプリ生涯で 1 回だけ起こす。
+    private var authorizationRequest: Task<Void, Never>?
 
     init(config: ConfigStore) {
         self.config = config
@@ -36,16 +38,20 @@ final class NotificationManager: NSObject, SyncNotifying {
         guard config.notificationsEnabled else { return }
         let center = UNUserNotificationCenter.current()
 
-        // 初回だけ許可をリクエスト（以降は OS が状態を保持）。
-        if !didRequestAuthorization {
-            didRequestAuthorization = true
-            do {
-                _ = try await center.requestAuthorization(options: [.alert, .sound])
-            } catch {
-                AppLogger.ui.error("Notification authorization request failed: \(String(describing: error), privacy: .private)")
+        // 初回だけ許可リクエストを 1 回起こし、後続の post はその完了を待ってから許可状態を読む。
+        // requestAuthorization は `.notDetermined` のときだけプロンプトを出し、確定済みなら即返る。
+        if authorizationRequest == nil {
+            authorizationRequest = Task {
+                do {
+                    _ = try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound])
+                } catch {
+                    AppLogger.ui.error("Notification authorization request failed: \(String(describing: error), privacy: .private)")
+                }
             }
         }
+        await authorizationRequest?.value
 
+        // 許可状態は毎回読む（後から System Settings で許可された場合も拾う）。
         // 許可されていなければ静かに諦める（拒否済み / 未決を尊重）。
         let settings = await center.notificationSettings()
         switch settings.authorizationStatus {
