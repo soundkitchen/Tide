@@ -12,8 +12,12 @@ enum ConflictNamer {
     /// 区切りはすべてリテラル（`-` / 空白）＝コロン等を含まないので別途のサニタイズは不要。
     /// timeZone は `.autoupdatingCurrent`＝`formatted()` ごとにシステム TZ を解決する（旧
     /// `Date.FormatStyle` の既定と同じ挙動）。`.current` だと `static let` 初回アクセス時の TZ で
-    /// フリーズし、常駐中の TZ 変更 / DST 跨ぎでローカル時刻表示がズレる（ソート可能性はどちらでも
-    /// 保たれるが壁時計追従を優先）。
+    /// フリーズし、常駐中の TZ 変更 / DST 跨ぎでローカル時刻表示がズレる。
+    /// トレードオフ（厳密には逆向き・PR #19 再レビュー）: フリーズ側はオフセット固定で壁時計が
+    /// UTC と厳密単調＝辞書順が時系列に一致。`.autoupdatingCurrent` は壁時計に忠実な代わり、
+    /// DST 後退 / 西向き TZ 変更の約 1 時間窓では厳密単調性を手放す（後の事象が早い時刻を描画し得る）。
+    /// ローカル時刻表示が設計意図で、退行回避＆呼び元の同一秒バンプ（`addingTimeInterval(tries)`）
+    /// 併用のため後者を採る。厳密単調ソートが要件化したら固定ゾーン（UTC 等）で整形すること。
     private static let timestampStyle = Date.VerbatimFormatStyle(
         format: "\(year: .padded(4))-\(month: .twoDigits)-\(day: .twoDigits) \(hour: .twoDigits(clock: .twentyFourHour, hourCycle: .zeroBased))-\(minute: .twoDigits)-\(second: .twoDigits)",
         timeZone: .autoupdatingCurrent,
