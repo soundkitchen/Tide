@@ -70,11 +70,14 @@ final class AppEnvironment {
         }
     }
 
+    /// nil または空文字を「未設定」とみなす（必須設定の検証用）。
+    private static func isBlank(_ s: String?) -> Bool { s?.isEmpty ?? true }
+
     func launchEngineFromCurrentConfig() async throws {
         var missing: [String] = []
-        if config.bucketName == nil || config.bucketName?.isEmpty == true { missing.append("bucket name") }
-        if config.region == nil || config.region?.isEmpty == true { missing.append("region") }
-        if config.syncRootPath == nil || config.syncRootPath?.isEmpty == true { missing.append("sync folder") }
+        if Self.isBlank(config.bucketName) { missing.append("bucket name") }
+        if Self.isBlank(config.region) { missing.append("region") }
+        if Self.isBlank(config.syncRootPath) { missing.append("sync folder") }
         if !missing.isEmpty {
             throw SyncError.notConfigured(reason: "Missing: \(missing.joined(separator: ", "))")
         }

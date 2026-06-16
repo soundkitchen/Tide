@@ -390,9 +390,8 @@ final class SyncEngine {
         return await Task.detached(priority: .utility) { () -> SyncIgnoreMatcher in
             let fm = FileManager.default
             guard fm.fileExists(atPath: url.path) else { return .empty }
-            // セキュリティゲート: シンボリックリンクは絶対に追従しない
-            if let values = try? url.resourceValues(forKeys: [.isSymbolicLinkKey]),
-               values.isSymbolicLink == true {
+            // セキュリティゲート: シンボリックリンクは絶対に追従しない（判定は PathValidator に一本化）
+            if PathValidator.isSymbolicLink(at: url) {
                 AppLogger.sync.error("Refusing to read symlinked .syncignore")
                 return .empty
             }
@@ -403,6 +402,14 @@ final class SyncEngine {
             }
             let text = String(decoding: data, as: UTF8.self)
             return SyncIgnoreMatcher.parse(text)
+        }.value
+    }
+
+    /// SHA-256 計算を detached（off-main・.utility）で実行する共通ヘルパ。
+    /// @MainActor のメソッドから呼んでもメインスレッドをブロックしない（pull / event 両経路で共用）。
+    private static func computeHashDetached(_ url: URL) async -> String? {
+        await Task.detached(priority: .utility) {
+            try? HashCalculator.sha256(of: url)
         }.value
     }
 
@@ -783,9 +790,7 @@ final class SyncEngine {
             let exists = stat != nil || FileManager.default.fileExists(atPath: fullURL.path)
             let localState: LocalState
             if exists {
-                let computed = await Task.detached(priority: .utility) {
-                    try? HashCalculator.sha256(of: fullURL)
-                }.value
+                let computed = await Self.computeHashDetached(fullURL)
                 localState = computed.map(LocalState.present) ?? .unreadable
             } else {
                 localState = .absent
@@ -877,9 +882,7 @@ final class SyncEngine {
             case .verifyHash:
                 // @MainActor なので hash は detached で（メインスレッドをブロックしない）。
                 let knownSha = known?.sha256 ?? ""
-                let computed = await Task.detached(priority: .utility) {
-                    try? HashCalculator.sha256(of: fullURL)
-                }.value
+                let computed = await Self.computeHashDetached(fullURL)
                 switch ChangeDetector.postHash(knownSha: knownSha, computedSha: computed) {
                 case .refreshMtimeOnly:
                     // mtime ドリフトのみ → CAS で修復してアップロードしない（performFullScan と同じ）。

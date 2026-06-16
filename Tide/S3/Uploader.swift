@@ -256,63 +256,55 @@ struct ManifestUpdater {
         transform: (inout ManifestShard) -> Void
     ) async throws {
         let shardId = ManifestSharding.shardId(for: path)
-        var lastError: Error?
+        try await withConditionalRetry("shard \(shardId)") {
+            let fetched = try await s3.getShard(shardId)
+            var shard = fetched?.value ?? ManifestShard.empty(id: shardId)
+            let etag = fetched?.etag
+            transform(&shard)
+            shard.updatedAt = ISO8601.now()
 
-        for _ in 0..<5 {
-            do {
-                let fetched = try await s3.getShard(shardId)
-                var shard = fetched?.value ?? ManifestShard.empty(id: shardId)
-                let etag = fetched?.etag
-                transform(&shard)
-                shard.updatedAt = ISO8601.now()
-
-                if shard.files.isEmpty {
-                    if etag != nil {
-                        try await s3.deleteShard(shardId)
-                    }
-                    try await updateIndex { idx in
-                        idx.shards.removeValue(forKey: shardId)
-                    }
-                    return
+            if shard.files.isEmpty {
+                if etag != nil {
+                    try await s3.deleteShard(shardId)
                 }
-
-                let newEtag = try await s3.putShard(shard, ifMatch: etag)
                 try await updateIndex { idx in
-                    idx.shards[shardId] = .init(etag: newEtag, count: shard.files.count)
+                    idx.shards.removeValue(forKey: shardId)
                 }
                 return
-            } catch {
-                // 412 PreconditionFailed / 409 ConditionalRequestConflict は同一シャードへの
-                // 並行更新による一時的失敗。再取得して PUT し直せば解消するのでリトライ。
-                if S3ErrorClassifier.isPreconditionFailed(error)
-                    || S3ErrorClassifier.isConditionalConflict(error) {
-                    lastError = error
-                    let nanos = UInt64.random(in: 100_000_000...500_000_000)
-                    try? await Task.sleep(nanoseconds: nanos)
-                    continue
-                }
-                throw error
+            }
+
+            let newEtag = try await s3.putShard(shard, ifMatch: etag)
+            try await updateIndex { idx in
+                idx.shards[shardId] = .init(etag: newEtag, count: shard.files.count)
             }
         }
-        throw SyncError.manifestUpdateFailed(
-            "shard \(shardId) conditional update failed 5 times: \(String(describing: lastError))"
-        )
     }
 
     private func updateIndex(_ transform: (inout ManifestIndex) -> Void) async throws {
+        try await withConditionalRetry("index.json") {
+            let fetched = try await s3.getIndex()
+            var index = fetched?.value ?? ManifestIndex.empty(updatedBy: deviceId)
+            let etag = fetched?.etag
+            transform(&index)
+            index.updatedAt = ISO8601.now()
+            index.updatedBy = deviceId
+            _ = try await s3.putIndex(index, ifMatch: etag)
+        }
+    }
+
+    /// シャード / index.json の楽観的ロック更新を共通化したリトライ実行。
+    /// 412 PreconditionFailed / 409 ConditionalRequestConflict（同一オブジェクトへの並行更新による
+    /// 一時的失敗）は再取得して PUT し直せば解消するので、最大 5 回・100–500ms ランダムバックオフで
+    /// リトライする。それ以外のエラーは即時伝播。5 回尽きたら `manifestUpdateFailed(label …)`。
+    private func withConditionalRetry<T>(
+        _ label: String,
+        _ operation: () async throws -> T
+    ) async throws -> T {
         var lastError: Error?
         for _ in 0..<5 {
             do {
-                let fetched = try await s3.getIndex()
-                var index = fetched?.value ?? ManifestIndex.empty(updatedBy: deviceId)
-                let etag = fetched?.etag
-                transform(&index)
-                index.updatedAt = ISO8601.now()
-                index.updatedBy = deviceId
-                _ = try await s3.putIndex(index, ifMatch: etag)
-                return
+                return try await operation()
             } catch {
-                // 412 / 409 は index.json への並行更新による一時的失敗。再取得してリトライ。
                 if S3ErrorClassifier.isPreconditionFailed(error)
                     || S3ErrorClassifier.isConditionalConflict(error) {
                     lastError = error
@@ -324,7 +316,7 @@ struct ManifestUpdater {
             }
         }
         throw SyncError.manifestUpdateFailed(
-            "index.json conditional update failed 5 times: \(String(describing: lastError))"
+            "\(label) conditional update failed 5 times: \(String(describing: lastError))"
         )
     }
 }
