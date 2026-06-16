@@ -2,7 +2,7 @@ import Foundation
 
 /// 「このパスを同期からスキップするか」を決める二段判定（純粋関数）。
 ///
-/// 判定順（`docs/07-M3-IMPLEMENTATION-GUIDE.md` サブタスク B / `CLAUDE.md` 第 7 節）:
+/// 判定順（`docs/07-M3-IMPLEMENTATION-GUIDE.md` サブタスク B / `docs/08-IMPLEMENTATION-NOTES.md`）:
 /// 1. `HardcodedIgnoreRules` にマッチ → 追跡状態に関係なく常にスキップ（機密網は最優先・否定でも覆せない）
 /// 2. `.syncignore` ファイル自身 → 決してスキップしない（除外設定が同期から外れて消えるのを防ぐ）
 /// 3. `.syncignore` のユーザパターンにマッチ かつ 未追跡 → スキップ（新規のみ。既存追跡は触らない＝gitignore 純正）

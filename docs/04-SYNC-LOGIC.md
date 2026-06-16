@@ -36,7 +36,7 @@ M1 では **ローカル → S3 の一方向** のみを実装する。
 
 > **実装ノート（2026-06-08・SHA ゲート実装）**: 2.b〜d の変更判定は純粋関数 **`ChangeDetector`**（`Tide/Core/ChangeDetector.swift`、`preDecision`/`postHash` の two-step）に集約し、FSEvents 経路（後述）と共用する。仕様との差分は最適化 1 点のみ: **size 不一致のときは SHA を再計算せず直接アップロードキューへ**（size が違えば sha は一致し得ないため挙動は同義）。「ハッシュ同じ → mtime だけ DB 更新」は **CAS**（`LocalDatabase.refreshMtimeIfShaUnchanged`: 単一 write Tx 内で再フェッチし sha 一致時のみ更新・`lastSyncedAt` は保持）で行い、判定〜書込の間に走った並行 pull の更新（新 sha / versionId）を巻き戻さない。
 >
-> **不変条件: 「`FileRecord.mtime` = 最後に同期した時点のローカル stat mtime」**。マニフェスト `mtime` は ISO8601 秒精度（fractional なし）なので、これで DB を上書きすると上記 2.d の比較（許容差 0.001s）が常に外れ、無変更ファイルが毎起動再アップロードされる（実際に起きたバグ・2026-06-08 修正。`CLAUDE.md §8` 参照）。pull の内容一致時の DB 最新化（`Downloader.markSynced`）もローカル stat 実値を記録する。SHA ゲートは、過去に秒精度で汚染された既存 DB も初回スキャンの「hash 1 回 → mtime 修復のみ」で自己回復させる安全網を兼ねる。
+> **不変条件: 「`FileRecord.mtime` = 最後に同期した時点のローカル stat mtime」**。マニフェスト `mtime` は ISO8601 秒精度（fractional なし）なので、これで DB を上書きすると上記 2.d の比較（許容差 0.001s）が常に外れ、無変更ファイルが毎起動再アップロードされる（実際に起きたバグ・2026-06-08 修正。`docs/09-DEFERRED.md` 参照）。pull の内容一致時の DB 最新化（`Downloader.markSynced`）もローカル stat 実値を記録する。SHA ゲートは、過去に秒精度で汚染された既存 DB も初回スキャンの「hash 1 回 → mtime 修復のみ」で自己回復させる安全網を兼ねる。
 
 ### 並列度と順序
 
@@ -369,7 +369,7 @@ struct HardcodedIgnoreRules {
 ## `.syncignore` 除外ルール（M3）
 
 M3 で `<syncRoot>/.syncignore`（gitignore 構文の一般的サブセット）対応を追加した。
-詳細な確定仕様は `docs/07-M3-IMPLEMENTATION-GUIDE.md` サブタスク B と `CLAUDE.md` 第 7 節を参照。要点:
+詳細な確定仕様は `docs/07-M3-IMPLEMENTATION-GUIDE.md` サブタスク B と `docs/08-IMPLEMENTATION-NOTES.md` を参照。要点:
 
 - `HardcodedIgnoreRules`（機密網）は**常に最優先**で効く。`.syncignore` の否定 `!` でも覆せない。
 - `.syncignore` のユーザパターンは**新規ファイルにのみ**適用する（gitignore 純正）。
@@ -439,8 +439,10 @@ M2 で **S3 → ローカルの取り込み** が追加された。ローカル 
 [全リモートファイル × 5 並列で reconcileRemoteEntry]
    │  各 path に対して:
    │  ├─ PathValidator で path / shardId を検証（攻撃面の遮断）
+   │  ├─ stat ゲート: ローカル stat == DB かつ DB がリモートを反映（sha/etag/versionId 一致）
+   │  │    → 完全スキップ（hash も DB write もしない・steady-state の大半／ChangeDetector.reconcileIsNoop）
    │  ├─ ローカル無し → ダウンロード
-   │  ├─ ローカルあり / SHA 一致 → スキップ（DB を最新化）
+   │  ├─ ローカルあり / SHA 一致 → markSynced（DB メタデータのみ最新化＝mtime/etag ドリフト修復・ゲートを抜けた分だけ）
    │  ├─ ローカルあり / SHA != remote / DB と一致 → ローカル未編集 → ダウンロード（上書き）
    │  └─ ローカルあり / SHA != remote / DB とも違う → コンフリクト
    │       └─ Downloader.renameLocalForConflict → リモートをダウンロード
@@ -453,7 +455,7 @@ M2 で **S3 → ローカルの取り込み** が追加された。ローカル 
 [lastRemoteCheckedAt 更新]
 ```
 
-> **実装ノート（2026-06-16・pull コスト削減＝M4 perf）**: 未変化シャードのファイルは entry が**ローカル DB から再合成**される（上図「変化なしシャードのファイルはローカル DB から補完」）ため、steady-state では「ローカル == DB == リモート」なのに毎 pull（最短 3 分毎）で全ファイルを 2 回ハッシュ（`ThreeWayMerge` 用 + `download()` 早期 return 用）＋全行 DB write していた。さらに reconcile は `@MainActor` 上でハッシュしていた（`processEventToQueue` だけ `Task.detached` で逃がしていた）。これを `reconcileRemoteEntry` 入口の **stat ゲート**で解消した: 純粋関数 **`ChangeDetector.reconcileIsNoop`**（`preDecision == .skip`＝ローカル stat が DB の size/mtime と一致、かつ DB が entry を sha/etag/versionId そのまま反映）が真なら、`markSynced` が書く値と timestamp 以外完全一致するので**証明可能な no-op**としてスキップ（ハッシュも DB write もしない）。ゲートを抜けた `.localMatchesRemote`（実際に mtime/etag ドリフトの修復が要るケースだけ残る）は専用 `Downloader.markSynced` で DB を最新化（`download()` の二度目ハッシュを排除）。残るハッシュは `Task.detached(priority:.utility)` で off-main 化（pull 中のメインスレッドブロック解消）。ゲートは既存 SHA ゲートと同じ「size+mtime 一致 → 内容不変とみなす」前提を流用するので新たな取りこぼし窓は作らない。詳細は `CLAUDE.md` 第 7 節「reconcile 入口の stat ゲート」。
+> **実装ノート（2026-06-16・pull コスト削減＝M4 perf）**: 未変化シャードのファイルは entry が**ローカル DB から再合成**される（上図「変化なしシャードのファイルはローカル DB から補完」）ため、steady-state では「ローカル == DB == リモート」なのに毎 pull（最短 3 分毎）で全ファイルを 2 回ハッシュ（`ThreeWayMerge` 用 + `download()` 早期 return 用）＋全行 DB write していた。さらに reconcile は `@MainActor` 上でハッシュしていた（`processEventToQueue` だけ `Task.detached` で逃がしていた）。これを `reconcileRemoteEntry` 入口の **stat ゲート**で解消した: 純粋関数 **`ChangeDetector.reconcileIsNoop`**（`preDecision == .skip`＝ローカル stat が DB の size/mtime と一致、かつ DB が entry を sha/etag/versionId そのまま反映）が真なら、`markSynced` が書く値と timestamp 以外完全一致するので**証明可能な no-op**としてスキップ（ハッシュも DB write もしない）。ゲートを抜けた `.localMatchesRemote`（実際に mtime/etag ドリフトの修復が要るケースだけ残る）は専用 `Downloader.markSynced` で DB を最新化（`download()` の二度目ハッシュを排除）。残るハッシュは `Task.detached(priority:.utility)` で off-main 化（pull 中のメインスレッドブロック解消）。ゲートは既存 SHA ゲートと同じ「size+mtime 一致 → 内容不変とみなす」前提を流用するので新たな取りこぼし窓は作らない。詳細は `docs/08-IMPLEMENTATION-NOTES.md`「reconcile 入口の stat ゲート」。
 
 ## トリガー
 
