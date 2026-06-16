@@ -185,7 +185,8 @@
 - **[pull 直列化]** すべてのリモート pull は `SyncEngine.triggerRemotePull` の単一ゲート（`isRemotePulling`）を通す。並行 pull は共有 tmp `dl-<sha>.part` を破壊する。→ `docs/04` / `docs/08`
 - **[DL サイズ検証]** `Downloader.download` は commit（tmp→本体 move）前に「実 tmp サイズ == `entry.size`」を検証する。
 - **[reconcile ゲート]** pull 取り込みは入口で純粋関数 `ChangeDetector.reconcileIsNoop` を通し、no-op（ローカル==DB==リモート）を skip（hash も DB write もしない）。→ `docs/04`
-- **[mtime 不変条件]** `FileRecord.mtime` = 最後に同期した時点の**ローカル stat 実値**。マニフェスト ISO8601 秒精度値で上書きしない（毎起動再アップロードの自己持続サイクルになる）。`Downloader.markSynced` も stat 実値を記録。
+- **[prune 順序]** 中断転送の prune は download 行を落とす**前に**必ず `invalidateShardCache(forPath:)` を実行する（逆順だと中断 DL がシャード変化まで永久に再 DL されず＝クリーンインストール復旧で一部ファイル欠落）。→ `docs/09`
+- **[mtime 不変条件]** `FileRecord.mtime` = 最後に同期した時点の**ローカル stat 実値**。マニフェスト ISO8601 秒精度値で上書きしない（毎起動再アップロードの自己持続サイクルになる）。`Downloader.markSynced` も stat 実値を記録。**マニフェスト mtime に fractional seconds を足さない**（`parseISO8601` が nil → now フォールバックでパース全滅）。
 - **[キュー行 id 基準]** アップロードキュー行の完了/失敗処理は **`item.id` 基準**で消す（`path` 基準にしない）。処理中に置換された新 id 行を巻き込むと無エラー乖離になる。
 - **[torn 安定化ゲート]** アップロードは読了後に同 FD を再 `fstat` し、size 変化 or mtime 前進があれば torn とみなして commit しない（`StabilityCheck` / `SyncError.fileChangedDuringUpload`）。不安定ファイルは give-up させず延期＋1 回可視化。
 - **[ignore 優先順位]** ハードコード除外（機密網）が常に最優先。ユーザ `.syncignore` パターンは**未追跡ファイルのみ**に適用。`.syncignore` 自身は決して除外しない。判定は `IgnoreDecision.shouldSkip`（scan/event/reconcile の 3 経路共用）。

@@ -80,7 +80,7 @@ macOS のクリーンインストール後の復旧を主目的とした、Dropb
 
 ### M3: 双方向同期と競合解決、大ファイル対応（サブ A〜E 実装済み・M3 完了）
 
-詳細な設計メモと実装状況は `07-M3-IMPLEMENTATION-GUIDE.md`、確定した実装判断は `docs/08-IMPLEMENTATION-NOTES.md`を参照。
+詳細な設計メモと実装状況は `07-M3-IMPLEMENTATION-GUIDE.md`、確定した実装判断は `docs/08-IMPLEMENTATION-NOTES.md` を参照。
 
 - ✅ 3-way merge による双方向同期（サブ C・`ThreeWayMerge`）
 - ✅ 競合検出と `<stem> (local copy YYYY-MM-DD HH-MM-SS).<ext>` リネーム（`ConflictNamer`）

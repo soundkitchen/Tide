@@ -369,7 +369,7 @@ struct HardcodedIgnoreRules {
 ## `.syncignore` 除外ルール（M3）
 
 M3 で `<syncRoot>/.syncignore`（gitignore 構文の一般的サブセット）対応を追加した。
-詳細な確定仕様は `docs/07-M3-IMPLEMENTATION-GUIDE.md` サブタスク B と `docs/08-IMPLEMENTATION-NOTES.md`を参照。要点:
+詳細な確定仕様は `docs/07-M3-IMPLEMENTATION-GUIDE.md` サブタスク B と `docs/08-IMPLEMENTATION-NOTES.md` を参照。要点:
 
 - `HardcodedIgnoreRules`（機密網）は**常に最優先**で効く。`.syncignore` の否定 `!` でも覆せない。
 - `.syncignore` のユーザパターンは**新規ファイルにのみ**適用する（gitignore 純正）。
