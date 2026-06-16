@@ -210,6 +210,6 @@ struct VersionHistoryWindow: View {
 
     private static func dateString(_ date: Date?) -> String {
         guard let date else { return "—" }
-        return date.formatted(date: .abbreviated, time: .standard)
+        return date.tideTimestampLabel
     }
 }

@@ -62,7 +62,7 @@ struct SyncActivityWindow: View {
             Task { await model.toggleFilter(type, db: db) }
         } label: {
             HStack(spacing: 3) {
-                Image(systemName: Self.symbol(for: type))
+                Image(systemName: type.iconSymbol)
                 Text(Self.label(for: type))
             }
             .font(.caption)
@@ -123,10 +123,10 @@ struct SyncActivityWindow: View {
 
     private func row(_ entry: SyncLogRecord) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Image(systemName: Self.symbol(for: SyncLogEventType(rawValue: entry.eventType)))
-                .foregroundStyle(Self.color(for: SyncLogEventType(rawValue: entry.eventType)))
+            Image(systemName: SyncLogEventType(rawValue: entry.eventType)?.iconSymbol ?? "questionmark.circle")
+                .foregroundStyle(SyncLogEventType(rawValue: entry.eventType)?.iconColor ?? .secondary)
                 .frame(width: 16)
-            Text(verbatim: Self.dateString(entry.timestamp))
+            Text(verbatim: Date(timeIntervalSince1970: entry.timestamp).tideTimestampLabel)
                 .font(.caption).monospacedDigit().foregroundStyle(.secondary)
                 .frame(width: 130, alignment: .leading)
             VStack(alignment: .leading, spacing: 1) {
@@ -151,9 +151,9 @@ struct SyncActivityWindow: View {
     private func detailPane(_ entry: SyncLogRecord) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Image(systemName: Self.symbol(for: SyncLogEventType(rawValue: entry.eventType)))
-                    .foregroundStyle(Self.color(for: SyncLogEventType(rawValue: entry.eventType)))
-                Text(verbatim: Self.dateString(entry.timestamp))
+                Image(systemName: SyncLogEventType(rawValue: entry.eventType)?.iconSymbol ?? "questionmark.circle")
+                    .foregroundStyle(SyncLogEventType(rawValue: entry.eventType)?.iconColor ?? .secondary)
+                Text(verbatim: Date(timeIntervalSince1970: entry.timestamp).tideTimestampLabel)
                     .font(.caption).monospacedDigit().foregroundStyle(.secondary)
                 Spacer()
                 Button("Copy details") {
@@ -186,7 +186,7 @@ struct SyncActivityWindow: View {
             .frame(height: 90)
         }
         .padding(10)
-        .background(.quinary, in: RoundedRectangle(cornerRadius: 8))
+        .cardBackground()
     }
 
     // MARK: - 表示ヘルパ
@@ -202,29 +202,4 @@ struct SyncActivityWindow: View {
         }
     }
 
-    private static func symbol(for type: SyncLogEventType?) -> String {
-        switch type {
-        case .upload:   return "arrow.up.circle"
-        case .download: return "arrow.down.circle"
-        case .delete:   return "trash"
-        case .conflict: return "exclamationmark.triangle"
-        case .error:    return "xmark.octagon"
-        case .info:     return "info.circle"
-        case nil:       return "questionmark.circle"
-        }
-    }
-
-    private static func color(for type: SyncLogEventType?) -> Color {
-        switch type {
-        case .upload, .download: return .blue
-        case .conflict:          return .orange
-        case .error:             return .red
-        case .delete, .info, nil: return .secondary
-        }
-    }
-
-    private static func dateString(_ timestamp: Double) -> String {
-        Date(timeIntervalSince1970: timestamp)
-            .formatted(date: .abbreviated, time: .standard)
-    }
 }

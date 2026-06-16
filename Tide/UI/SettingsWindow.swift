@@ -157,21 +157,21 @@ struct SettingsWindow: View {
         .onChange(of: downloadBwMBps) { _, _ in persistBandwidth() }
     }
 
+    /// config のバイト/秒値を (無制限フラグ, MB/s クランプ値) に変換する（`<= 0` = 無制限）。
+    /// 無制限時の MB/s は呼び出し側で未使用（@State の現値を温存する）。
+    private static func decodeBandwidth(_ bytes: Int64) -> (noLimit: Bool, mbps: Double) {
+        guard bytes > 0 else { return (true, 0) }
+        return (false, min(maxBwMBps, max(1, Double(bytes / bytesPerMBps))))
+    }
+
     /// 帯域上限を config から @State へ読み込む（`<= 0` = 無制限）。
     private func loadBandwidth() {
-        let up = env.config.uploadBandwidthBytesPerSec
-        if up <= 0 {
-            noUploadBwLimit = true
-        } else {
-            noUploadBwLimit = false
-            uploadBwMBps = min(Self.maxBwMBps, max(1, Double(up / Self.bytesPerMBps)))
-        }
-        let down = env.config.downloadBandwidthBytesPerSec
-        if down <= 0 {
-            noDownloadBwLimit = true
-        } else {
-            noDownloadBwLimit = false
-            downloadBwMBps = min(Self.maxBwMBps, max(1, Double(down / Self.bytesPerMBps)))
-        }
+        let up = Self.decodeBandwidth(env.config.uploadBandwidthBytesPerSec)
+        noUploadBwLimit = up.noLimit
+        if !up.noLimit { uploadBwMBps = up.mbps }
+
+        let down = Self.decodeBandwidth(env.config.downloadBandwidthBytesPerSec)
+        noDownloadBwLimit = down.noLimit
+        if !down.noLimit { downloadBwMBps = down.mbps }
     }
 }

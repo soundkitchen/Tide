@@ -39,7 +39,7 @@ struct MenuBarContent: View {
                 openWindow(id: "activity")
             }
             if !env.isSetupCompleted || env.bootstrapFailure != nil {
-                openSetupWindow()
+                activateAndOpen("setup")
             }
         }
         // lastSyncedAt は upload 周回完了でしか前進しないため、pull 由来の download / 削除反映も
@@ -51,24 +51,11 @@ struct MenuBarContent: View {
 
     // MARK: - window openers（LSUIElement: openWindow 前に必ず NSApp.activate）
 
-    private func openSetupWindow() {
+    /// LSUIElement アプリはウィンドウを開く前にアプリを前面化しないと不可視のまま開く事故が起きるため、
+    /// `openWindow(id:)` は必ずこの 1 経路を通す（NSApp.activate の前置を集約＝不変条件の単一管理）。
+    private func activateAndOpen(_ id: String) {
         NSApp.activate(ignoringOtherApps: true)
-        openWindow(id: "setup")
-    }
-
-    private func openSettingsWindow() {
-        NSApp.activate(ignoringOtherApps: true)
-        openWindow(id: "settings")
-    }
-
-    private func openVersionsWindow() {
-        NSApp.activate(ignoringOtherApps: true)
-        openWindow(id: "versions")
-    }
-
-    private func openActivityWindow() {
-        NSApp.activate(ignoringOtherApps: true)
-        openWindow(id: "activity")
+        openWindow(id: id)
     }
 
     // MARK: - ステータスヘッダー
@@ -88,7 +75,7 @@ struct MenuBarContent: View {
                     .font(.headline)
                     .lineLimit(1)
                 if case .syncing(let progress) = engine.status, let file = progress.currentFile {
-                    Text(verbatim: (file as NSString).lastPathComponent)
+                    Text(verbatim: file.lastPathComponent)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -151,7 +138,7 @@ struct MenuBarContent: View {
         .foregroundStyle(.secondary)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(8)
-        .background(.quinary, in: RoundedRectangle(cornerRadius: 8))
+        .cardBackground()
     }
 
     // MARK: - 直近の同期ファイル
@@ -163,10 +150,10 @@ struct MenuBarContent: View {
                 .foregroundStyle(.secondary)
             ForEach(recentActivity, id: \.id) { entry in
                 HStack(spacing: 4) {
-                    Image(systemName: Self.activitySymbol(for: entry.eventType))
+                    Image(systemName: SyncLogEventType(rawValue: entry.eventType)?.iconSymbol ?? "doc")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
-                    Text(verbatim: ((entry.path ?? "") as NSString).lastPathComponent)
+                    Text(verbatim: (entry.path ?? "").lastPathComponent)
                         .font(.caption2)
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -179,16 +166,7 @@ struct MenuBarContent: View {
         }
         .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quinary, in: RoundedRectangle(cornerRadius: 8))
-    }
-
-    private static func activitySymbol(for eventType: String) -> String {
-        switch SyncLogEventType(rawValue: eventType) {
-        case .upload:   return "arrow.up.circle"
-        case .download: return "arrow.down.circle"
-        case .delete:   return "trash"
-        default:        return "doc"
-        }
+        .cardBackground()
     }
 
     private func loadRecentActivity() async {
@@ -212,7 +190,7 @@ struct MenuBarContent: View {
                         Image(systemName: t.direction == .upload ? "arrow.up.circle" : "arrow.down.circle")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
-                        Text(verbatim: (t.path as NSString).lastPathComponent)
+                        Text(verbatim: t.path.lastPathComponent)
                             .font(.caption2)
                             .lineLimit(1)
                             .truncationMode(.middle)
@@ -229,7 +207,7 @@ struct MenuBarContent: View {
         }
         .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quinary, in: RoundedRectangle(cornerRadius: 8))
+        .cardBackground()
     }
 
     // MARK: - エラーカード（分類サマリ・F4）
@@ -245,7 +223,7 @@ struct MenuBarContent: View {
                     .buttonStyle(.plain)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Button("Details…") { openActivityWindow() }
+                Button("Details…") { activateAndOpen("activity") }
                     .buttonStyle(.plain)
                     .font(.caption)
                     .foregroundStyle(Color.accentColor)
@@ -256,7 +234,7 @@ struct MenuBarContent: View {
         }
         .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quinary, in: RoundedRectangle(cornerRadius: 8))
+        .cardBackground()
     }
 
     private func issueGroupView(_ group: MenuBarPresentation.IssueGroup) -> some View {
@@ -290,7 +268,7 @@ struct MenuBarContent: View {
         VStack(alignment: .leading, spacing: 1) {
             HStack(spacing: 4) {
                 if let path = issue.path {
-                    Text(verbatim: (path as NSString).lastPathComponent)
+                    Text(verbatim: path.lastPathComponent)
                         .font(.caption2)
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -340,7 +318,7 @@ struct MenuBarContent: View {
                         .textSelection(.enabled)
                 }
                 Button("Run Setup…") {
-                    openSetupWindow()
+                    activateAndOpen("setup")
                 }
             }
         }
@@ -402,10 +380,10 @@ struct MenuBarContent: View {
             menuRow("Open Sync Folder", systemImage: "folder") { openSyncFolder() }
                 .disabled(env.config.syncRootPath == nil)
             if env.engine != nil {
-                menuRow("Sync Activity…", systemImage: "list.bullet.rectangle") { openActivityWindow() }
-                menuRow("Version History…", systemImage: "clock.arrow.circlepath") { openVersionsWindow() }
+                menuRow("Sync Activity…", systemImage: "list.bullet.rectangle") { activateAndOpen("activity") }
+                menuRow("Version History…", systemImage: "clock.arrow.circlepath") { activateAndOpen("versions") }
             }
-            menuRow("Settings…", systemImage: "gearshape") { openSettingsWindow() }
+            menuRow("Settings…", systemImage: "gearshape") { activateAndOpen("settings") }
             Divider()
             menuRow("Quit", systemImage: "power") { NSApp.terminate(nil) }
                 .keyboardShortcut("q")
