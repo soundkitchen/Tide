@@ -22,10 +22,7 @@ private enum DownloadAbort: Error {
     func asSyncError(key: String) -> SyncError {
         switch self {
         case .tooLarge:
-            return SyncError.ioError(underlying: NSError(
-                domain: "Tide.Downloader", code: -23,
-                userInfo: [NSLocalizedDescriptionKey: "downloaded body exceeds expected size for key \(key)"]
-            ))
+            return Downloader.downloaderError(-23, "downloaded body exceeds expected size for key \(key)")
         }
     }
 }
@@ -55,11 +52,7 @@ struct Downloader {
         let fullURL = try PathValidator.resolveForWrite(relativePath: relativePath, syncRoot: syncRoot)
         // 既存パスがシンボリックリンクなら拒否（リンク先実体を書き換えない）
         if PathValidator.isSymbolicLink(at: fullURL) {
-            throw SyncError.ioError(underlying: NSError(
-                domain: "Tide.Downloader",
-                code: -13,
-                userInfo: [NSLocalizedDescriptionKey: "target is a symbolic link; refusing to write"]
-            ))
+            throw Self.downloaderError(-13, "target is a symbolic link; refusing to write")
         }
 
         let s3Key = "files/\(relativePath)"
@@ -143,8 +136,7 @@ struct Downloader {
         } catch let abort as DownloadAbort {
             // サイズ上限超過（マニフェストとリモートのサイズ食い違い）→ 破棄して仕切り直し。
             try? handle.close()
-            try? FileManager.default.removeItem(at: tmpURL)
-            try? await transferStore.clearDownload(path: relativePath)
+            await cleanupFailedDownload(tmpURL: tmpURL, path: relativePath)
             AppLogger.s3.error("Download exceeded expected size: \(relativePath, privacy: .private)")
             throw abort.asSyncError(key: s3Key)
         } catch {
@@ -171,14 +163,9 @@ struct Downloader {
 
         guard streamResult != nil else {
             // 404: 行と部分 tmp を掃除
-            try? FileManager.default.removeItem(at: tmpURL)
-            try? await transferStore.clearDownload(path: relativePath)
+            await cleanupFailedDownload(tmpURL: tmpURL, path: relativePath)
             AppLogger.s3.error("Download object not found on S3: \(relativePath, privacy: .private)")
-            throw SyncError.ioError(underlying: NSError(
-                domain: "Tide.Downloader",
-                code: -10,
-                userInfo: [NSLocalizedDescriptionKey: "object not found on S3"]
-            ))
+            throw Self.downloaderError(-10, "object not found on S3")
         }
 
         // 実ファイルサイズ検証（防御的・並行追記対策）:
@@ -189,27 +176,17 @@ struct Downloader {
         // マニフェストまで汚染する事故が起きる。pull の単一ゲート化（SyncEngine 側）と二段で防ぐ。
         let actualSize = Self.fileSize(at: tmpURL) ?? -1
         if actualSize != entry.size {
-            try? FileManager.default.removeItem(at: tmpURL)
-            try? await transferStore.clearDownload(path: relativePath)
+            await cleanupFailedDownload(tmpURL: tmpURL, path: relativePath)
             AppLogger.s3.error("Downloaded size mismatch (\(actualSize) != \(entry.size)): \(relativePath, privacy: .private)")
-            throw SyncError.ioError(underlying: NSError(
-                domain: "Tide.Downloader",
-                code: -15,
-                userInfo: [NSLocalizedDescriptionKey: "downloaded file size mismatch"]
-            ))
+            throw Self.downloaderError(-15, "downloaded file size mismatch")
         }
 
         // SHA 検証（不一致なら tmp を捨てて行をクリアし失敗＝壊れた内容を再開し続けない）
         let sha = HashCalculator.hex(hasher.finalize())
         if sha != entry.sha256 {
-            try? FileManager.default.removeItem(at: tmpURL)
-            try? await transferStore.clearDownload(path: relativePath)
+            await cleanupFailedDownload(tmpURL: tmpURL, path: relativePath)
             AppLogger.s3.error("SHA mismatch downloading \(relativePath, privacy: .private)")
-            throw SyncError.ioError(underlying: NSError(
-                domain: "Tide.Downloader",
-                code: -11,
-                userInfo: [NSLocalizedDescriptionKey: "SHA-256 mismatch"]
-            ))
+            throw Self.downloaderError(-11, "SHA-256 mismatch")
         }
 
         // mtime 復元（rename で保たれる）
@@ -256,11 +233,7 @@ struct Downloader {
         while FileManager.default.fileExists(atPath: syncRoot.appendingPathComponent(newRelative).path) {
             tries += 1
             if tries > 10 {
-                throw SyncError.ioError(underlying: NSError(
-                    domain: "Tide.Downloader",
-                    code: -12,
-                    userInfo: [NSLocalizedDescriptionKey: "could not find non-conflicting rename for \(relativePath)"]
-                ))
+                throw Self.downloaderError(-12, "could not find non-conflicting rename for \(relativePath)")
             }
             newRelative = ConflictNamer.localCopyRelativePath(for: relativePath, at: now.addingTimeInterval(Double(tries)))
         }
@@ -357,6 +330,21 @@ struct Downloader {
 
     // MARK: - helpers
 
+    /// `SyncError.ioError` を `Tide.Downloader` ドメインで生成する共通ファクトリ（NSError 生成の定型を集約）。
+    fileprivate static func downloaderError(_ code: Int, _ message: String) -> SyncError {
+        SyncError.ioError(underlying: NSError(
+            domain: "Tide.Downloader", code: code,
+            userInfo: [NSLocalizedDescriptionKey: message]
+        ))
+    }
+
+    /// DL を破棄して仕切り直す失敗経路の後始末（部分 tmp 削除 + 再開行クリア）。
+    /// 後続の log / throw は呼び出し側に残す。resumable 失敗（部分 tmp を保持して Range 再開）には使わない。
+    private func cleanupFailedDownload(tmpURL: URL, path: String) async {
+        try? FileManager.default.removeItem(at: tmpURL)
+        try? await transferStore.clearDownload(path: path)
+    }
+
     /// 相対パスから決定的な tmp ファイル名を導く（再開で同じ tmp を再発見できるように）。
     /// 内容（etag）が変わった場合は `transferStore.expectedEtag` の照合で破棄するので、名前は path のみで決める。
     static func resumeTmpURL(in tmpDir: URL, relativePath: String) -> URL {
@@ -374,10 +362,7 @@ struct Downloader {
         let fd = url.path.withCString { open($0, flags, 0o600) }
         if fd < 0 {
             let err = errno
-            throw SyncError.ioError(underlying: NSError(
-                domain: "Tide.Downloader", code: -14,
-                userInfo: [NSLocalizedDescriptionKey: "failed to open tmp for writing (errno \(err))"]
-            ))
+            throw Self.downloaderError(-14, "failed to open tmp for writing (errno \(err))")
         }
         let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
         if append { try handle.seekToEnd() }

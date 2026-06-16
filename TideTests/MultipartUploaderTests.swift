@@ -25,9 +25,7 @@ final class MultipartUploaderTests: XCTestCase {
     }
 
     /// 決定的で非自明な内容（全部同じバイトだと連結検証が緩くなるため）。
-    private func deterministicBytes(_ count: Int) -> Data {
-        Data((0..<count).map { UInt8($0 % 251) })
-    }
+    private func deterministicBytes(_ count: Int) -> Data { TestData.deterministicBytes(count) }
 
     // MARK: - テスト
 

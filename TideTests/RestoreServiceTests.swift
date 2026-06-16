@@ -9,22 +9,13 @@ final class RestoreServiceTests: XCTestCase {
     // MARK: - env / helpers
 
     private func makeEnv() throws -> (db: LocalDatabase, root: URL, tmp: URL) {
-        let base = FileManager.default.temporaryDirectory
-            .appendingPathComponent("tide-restore-tests-\(UUID().uuidString)", isDirectory: true)
-        let root = base.appendingPathComponent("root", isDirectory: true)
-        let tmp = base.appendingPathComponent("tmp", isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
-        addTeardownBlock { try? FileManager.default.removeItem(at: base) }
-        let db = try LocalDatabase(at: base.appendingPathComponent("db.sqlite"))
-        return (db, root, tmp)
+        let e = try makeTideTestEnv(prefix: "tide-restore-tests")
+        return (e.db, e.root, e.tmp)
     }
 
-    private func bytes(_ n: Int, salt: UInt8 = 0) -> Data {
-        Data((0..<n).map { UInt8(($0 + Int(salt)) % 251) })
-    }
+    private func bytes(_ n: Int, salt: UInt8 = 0) -> Data { TestData.deterministicBytes(n, salt: salt) }
 
-    private func shaHex(_ data: Data) -> String { HashCalculator.hex(SHA256.hash(data: data)) }
+    private func shaHex(_ data: Data) -> String { TestData.shaHex(data) }
 
     private func service(_ client: any VersionedObjectClient, _ env: (db: LocalDatabase, root: URL, tmp: URL)) -> RestoreService {
         RestoreService(client: client, db: env.db, syncRoot: env.root, tmpDir: env.tmp)

@@ -8,19 +8,12 @@ final class DownloaderTests: XCTestCase {
     // MARK: - ヘルパ
 
     private func makeEnv() throws -> (db: LocalDatabase, store: TransferStateStore, root: URL, tmp: URL) {
-        let base = FileManager.default.temporaryDirectory
-            .appendingPathComponent("tide-dl-tests-\(UUID().uuidString)", isDirectory: true)
-        let root = base.appendingPathComponent("root", isDirectory: true)
-        let tmp = base.appendingPathComponent("tmp", isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
-        addTeardownBlock { try? FileManager.default.removeItem(at: base) }
-        let db = try LocalDatabase(at: base.appendingPathComponent("db.sqlite"))
-        return (db, TransferStateStore(db: db), root, tmp)
+        let e = try makeTideTestEnv(prefix: "tide-dl-tests")
+        return (e.db, e.store, e.root, e.tmp)
     }
 
     private func deterministicBytes(_ n: Int, salt: UInt8 = 0) -> Data {
-        Data((0..<n).map { UInt8(($0 + Int(salt)) % 251) })
+        TestData.deterministicBytes(n, salt: salt)
     }
 
     private func entry(for data: Data, etag: String = "etag-x") -> ManifestFileEntry {
@@ -42,23 +35,7 @@ final class DownloaderTests: XCTestCase {
         Downloader(downloadClient: client, db: db, syncRoot: root, tmpDir: tmp, deviceId: "devL", transferStore: store)
     }
 
-    /// path が属するシャードの shard_state 行を seed する（ManifestReader が fetch 時点で記録する状況の模擬）。
-    private func seedShardState(db: LocalDatabase, path: String, etag: String) async throws {
-        try await db.pool.write { dbq in
-            var rec = ShardStateRecord(
-                shardId: ManifestSharding.shardId(for: path),
-                etag: etag,
-                fetchedAt: Date().timeIntervalSince1970
-            )
-            try rec.save(dbq)
-        }
-    }
-
-    private func shardEtag(db: LocalDatabase, path: String) async throws -> String? {
-        try await db.pool.read { dbq in
-            try ShardStateRecord.fetchOne(dbq, key: ManifestSharding.shardId(for: path))?.etag
-        }
-    }
+    // seedShardState / shardEtag は TestSupport.swift の XCTestCase 拡張へ集約（TransferPruneTests と共用）。
 
     // MARK: - テスト
 
