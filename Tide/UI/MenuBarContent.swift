@@ -150,6 +150,8 @@ struct MenuBarContent: View {
                 .foregroundStyle(.secondary)
             ForEach(recentActivity, id: \.id) { entry in
                 HStack(spacing: 4) {
+                    // recentActivity は loadRecentActivity で upload/download/delete に絞っているため、
+                    // "doc" フォールバックは rawValue 不正時のみ＝実質到達しない（フィルタ拡張時はここも追従）。
                     Image(systemName: SyncLogEventType(rawValue: entry.eventType)?.iconSymbol ?? "doc")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
