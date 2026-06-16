@@ -6,11 +6,7 @@ import XCTest
 /// 新しい sha / s3VersionId / s3Etag を巻き戻さないことを固定する。
 final class LocalDatabaseTests: XCTestCase {
     private func makeDB() throws -> LocalDatabase {
-        let base = FileManager.default.temporaryDirectory
-            .appendingPathComponent("tide-db-tests-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-        addTeardownBlock { try? FileManager.default.removeItem(at: base) }
-        return try LocalDatabase(at: base.appendingPathComponent("db.sqlite"))
+        try makeTideTestEnv(prefix: "tide-db-tests").db
     }
 
     private func seed(
@@ -159,22 +155,7 @@ final class LocalDatabaseTests: XCTestCase {
 
     // MARK: - sync_log の読出（fetchLogs・Sync Activity 用）
 
-    /// type を巡回しながら n 件のログを積む（timestamp は挿入順に増加）。
-    private func seedLogs(_ db: LocalDatabase, count: Int, types: [SyncLogEventType] = [.upload]) async throws {
-        try await db.pool.write { dbq in
-            for i in 0..<count {
-                var row = SyncLogRecord(
-                    id: nil,
-                    timestamp: 1000.0 + Double(i),
-                    eventType: types[i % types.count].rawValue,
-                    path: "f\(i).txt",
-                    message: "m\(i)",
-                    details: nil
-                )
-                try row.insert(dbq)
-            }
-        }
-    }
+    // seedLogs は TestSupport.swift の XCTestCase 拡張へ集約（SyncActivityModelTests と共用）。
 
     func testFetchLogsReturnsNewestFirst() async throws {
         let db = try makeDB()

@@ -5,28 +5,10 @@ import XCTest
 @MainActor
 final class SyncActivityModelTests: XCTestCase {
     private func makeDB() throws -> LocalDatabase {
-        let base = FileManager.default.temporaryDirectory
-            .appendingPathComponent("tide-activity-tests-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-        addTeardownBlock { try? FileManager.default.removeItem(at: base) }
-        return try LocalDatabase(at: base.appendingPathComponent("db.sqlite"))
+        try makeTideTestEnv(prefix: "tide-activity-tests").db
     }
 
-    private func seedLogs(_ db: LocalDatabase, count: Int, types: [SyncLogEventType] = [.upload]) async throws {
-        try await db.pool.write { dbq in
-            for i in 0..<count {
-                var row = SyncLogRecord(
-                    id: nil,
-                    timestamp: 1000.0 + Double(i),
-                    eventType: types[i % types.count].rawValue,
-                    path: "f\(i).txt",
-                    message: "m\(i)",
-                    details: nil
-                )
-                try row.insert(dbq)
-            }
-        }
-    }
+    // seedLogs は TestSupport.swift の XCTestCase 拡張へ集約（LocalDatabaseTests と共用）。
 
     func testReloadLoadsNewestFirstPage() async throws {
         let db = try makeDB()
