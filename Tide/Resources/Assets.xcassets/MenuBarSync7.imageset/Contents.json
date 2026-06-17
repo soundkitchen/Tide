@@ -1,0 +1,9 @@
+{
+  "images" : [
+    { "idiom" : "mac", "scale" : "1x", "filename" : "MenuBarSync7_18.png" },
+    { "idiom" : "mac", "scale" : "2x", "filename" : "MenuBarSync7_36.png" },
+    { "idiom" : "mac", "scale" : "3x", "filename" : "MenuBarSync7_54.png" }
+  ],
+  "info" : { "author" : "xcode", "version" : 1 },
+  "properties" : { "template-rendering-intent" : "template" }
+}

@@ -1,3 +1,4 @@
+import AppKit
 import XCTest
 @testable import Tide
 
@@ -92,5 +93,45 @@ final class MenuBarPresentationTests: XCTestCase {
         let groups = MenuBarPresentation.groupIssues(issues)
         XCTAssertEqual(groups.count, 1)
         XCTAssertEqual(groups[0].issues.count, 3)
+    }
+
+    // MARK: - メニューバー status item アイコン
+
+    /// 固定グリフのマッピングを全分岐固定（到達しない `.syncing` 既定値も含む）。
+    func testMenuBarIconNameForEachCase() {
+        XCTAssertEqual(MenuBarPresentation.notConfigured.menuBarIconName, "MenuBarNotConfigured")
+        XCTAssertEqual(MenuBarPresentation.allSynced.menuBarIconName, "MenuBarWave")
+        XCTAssertEqual(MenuBarPresentation.paused.menuBarIconName, "MenuBarPaused")
+        XCTAssertEqual(MenuBarPresentation.error(summary: "x").menuBarIconName, "MenuBarError")
+        XCTAssertEqual(MenuBarPresentation.syncing(pending: 1).menuBarIconName, "MenuBarWave")
+    }
+
+    /// `isSyncing` は `.syncing` のときだけ true。
+    func testIsSyncingFlag() {
+        XCTAssertTrue(MenuBarPresentation.syncing(pending: 0).isSyncing)
+        let nonSyncing: [MenuBarPresentation] = [.notConfigured, .allSynced, .paused, .error(summary: "x")]
+        for p in nonSyncing {
+            XCTAssertFalse(p.isSyncing, "\(p) は syncing でない")
+        }
+    }
+
+    /// frame 番号 → アセット名の生成規則を固定（View と共有する単一の規則）。
+    func testSyncFrameNameFormat() {
+        XCTAssertEqual(MenuBarPresentation.syncFrameName(0), "MenuBarSync0")
+        XCTAssertEqual(MenuBarPresentation.syncFrameName(7), "MenuBarSync7")
+    }
+
+    /// status item に出す全アセットが実在することを担保する（文字列ベース参照が
+    /// アセット追加漏れで「無言の空画像」になる事故を防ぐ）。テストホストが Tide.app なので
+    /// `NSImage(named:)` は本番表示と同じ main bundle の asset catalog を引く。
+    func testMenuBarIconAssetsExist() {
+        let glyphs: [MenuBarPresentation] = [.notConfigured, .allSynced, .paused, .error(summary: "x")]
+        for p in glyphs {
+            XCTAssertNotNil(NSImage(named: p.menuBarIconName), "固定グリフのアセット欠落: \(p.menuBarIconName)")
+        }
+        for frame in 0..<MenuBarPresentation.syncFrameCount {
+            let name = MenuBarPresentation.syncFrameName(frame)
+            XCTAssertNotNil(NSImage(named: name), "syncing フレームのアセット欠落: \(name)")
+        }
     }
 }
