@@ -143,7 +143,8 @@
 
 ### メニューバー status item アイコン（2026-06-18）
 
-- **状態は「アイコンの様子」だけで表現する**（バッジ・色は使わない）。固定グリフ 4 種＝`MenuBarWave`（allSynced・月＋ゆるい波）/ `MenuBarPaused`（凪）/ `MenuBarError`（荒れた海）/ `MenuBarNotConfigured`（？＋波）。syncing 中は `MenuBarSync0…7` の **8 フレームを 8fps でコマ送り**して波が流れる様子を出す（フレーム数 / FPS は `MenuBarLabel.syncFrameCount` / `syncFPS`）。
+- **状態は「アイコンの様子」だけで表現する**（バッジ・色は使わない）。固定グリフ 4 種＝`MenuBarWave`（allSynced・月＋ゆるい波）/ `MenuBarPaused`（凪）/ `MenuBarError`（荒れた海）/ `MenuBarNotConfigured`（？＋波）。syncing 中は `MenuBarSync0…7` の **8 フレームを 8fps でコマ送り**して波が流れる様子を出す。
+- **グリフ名 / フレーム名 / フレーム数のマッピングは純粋関数として `MenuBarPresentation` に集約**（`menuBarIconName` / `isSyncing` / `syncFrameCount` / `syncFrameName(_:)`）。`MenuBarLabel` はそれを引くだけ（FPS だけは View 側の `syncFPS`）。文字列ベースの `Image(MenuBarPresentation.syncFrameName(n))` はアセット追加漏れがコンパイル時に弾けず**無言の空画像**になりうるので、`MenuBarPresentationTests` でマッピング全分岐固定 + 全グリフ / 全フレームの `NSImage(named:)` 実在を担保する（テストホストが `Tide.app` なので本番と同じ main bundle を引く）。
 - **全アセットは template-rendering（モノクロ）**（imageset の `template-rendering-intent: "template"`）。メニューバーの明暗（ダーク/ライト）にシステムが自動追従する。各 3 解像度（`*_18` / `*_36` / `*_54` = 1x/2x/3x、status item の高さ ~18pt）。
 - **表示状態はポップオーバー見出しと同じ純粋関数 `MenuBarPresentation.headline(status:queueDepth:activeTransferCount:)` で算出**（表示ロジックの単一管理）。`MenuBarLabel` 側は `isSyncing` / `staticIconName` をここから導出するだけ。
 - **【重要・ハング回避】`MenuBarExtra` のラベルに `TimelineView(.animation)` を置いてはならない**。その文脈では `minimumInterval` が無視され、SwiftUI が `MenuBarExtraHost.requestUpdate(after:)` を実質ゼロ間隔で再発火し続け、毎フレーム `NSStatusItem` の画像差し替え＋Auto Layout 再計算でメインスレッドが 100% スピン→アプリ全体が無応答になる（2026-06-18 実機で再現・サンプル採取で確定）。フレーム送りは **`.task(id: isSyncing)` 内の自前タイマー（`Task.sleep`）で `@State` の `animationFrame` を進め `Image("MenuBarSync\(frame)")` を差し替える**方式にする。`isSyncing` が落ちている間は `.task` がキャンセルされタイマーが回らず CPU を消費しない。実装は `Tide/App/TideApp.swift` の `MenuBarLabel`。CLAUDE.md §3「SwiftUI 起き上がり」にも load-bearing ルールとして記載。

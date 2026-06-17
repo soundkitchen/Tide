@@ -56,8 +56,8 @@ private struct MenuBarLabel: View {
     @Environment(AppEnvironment.self) private var env
     @Environment(\.openWindow) private var openWindow
 
-    /// syncing アニメのフレーム数とコマ送り速度（MenuBarSync0…N-1 のアセットに対応）。
-    private static let syncFrameCount = 8
+    /// syncing アニメのコマ送り速度（フレーム数 / グリフ名 / フレーム名のマッピングは
+    /// `MenuBarPresentation` 側の純粋関数に集約＝表示ロジックの単一管理・テスト可能）。
     private static let syncFPS: Double = 8
 
     /// syncing 中に表示するフレーム番号。下の `.task` が syncing の間だけ進める。
@@ -72,31 +72,15 @@ private struct MenuBarLabel: View {
         )
     }
 
-    /// 非アニメ状態の固定グリフ名。すべてモノクロのテンプレート画像なので
-    /// メニューバーの明暗（ダーク/ライト）にシステムが自動追従する。
-    private var staticIconName: String {
-        switch presentation {
-        case .allSynced:     return "MenuBarWave"          // 月＋ゆるい波
-        case .paused:        return "MenuBarPaused"        // 月＋凪（フラットな水面）
-        case .error:         return "MenuBarError"         // 月＋荒れた海
-        case .notConfigured: return "MenuBarNotConfigured" // ？＋波
-        case .syncing:       return "MenuBarWave"          // 実際は下の分岐でフレームを回す
-        }
-    }
-
-    private var isSyncing: Bool {
-        if case .syncing = presentation { return true }
-        return false
-    }
-
     var body: some View {
         // 状態はアイコンの「様子」で表現する：syncing は波が流れるフレームアニメ、
         // それ以外は状態ごとの固定グリフを切り替える（バッジ・色は使わない）。
+        // グリフ名 / フレーム名のマッピングは MenuBarPresentation 側の純粋関数で単一管理。
         Group {
-            if isSyncing {
-                Image("MenuBarSync\(animationFrame)")
+            if presentation.isSyncing {
+                Image(MenuBarPresentation.syncFrameName(animationFrame))
             } else {
-                Image(staticIconName)
+                Image(presentation.menuBarIconName)
             }
         }
         // フレーム送りは MainActor 上の自前の低 FPS タイマーで行う。
@@ -106,13 +90,14 @@ private struct MenuBarLabel: View {
         // 再計算でメインスレッドが 100% スピン→アプリ全体が無応答になる（実機で確認済み）。
         // .task(id:) は isSyncing が変化した時だけ起動/キャンセルされるので、
         // syncing でない間はタイマーが一切回らず CPU を消費しない。
-        .task(id: isSyncing) {
-            guard isSyncing else { return }
+        .task(id: presentation.isSyncing) {
+            guard presentation.isSyncing else { return }
+            animationFrame = 0  // 同期開始のたびに先頭フレームから（途中フレーム継続を避け挙動を明示）
             let interval = Duration.milliseconds(Int(1000 / Self.syncFPS))
             while !Task.isCancelled {
                 try? await Task.sleep(for: interval)
                 if Task.isCancelled { break }
-                animationFrame = (animationFrame + 1) % Self.syncFrameCount
+                animationFrame = (animationFrame + 1) % MenuBarPresentation.syncFrameCount
             }
         }
         .onAppear {
