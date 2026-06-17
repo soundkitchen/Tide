@@ -45,6 +45,11 @@ struct TideApp: App {
                 .environment(appDelegate.environment)
         }
         .windowResizability(.contentSize)
+
+        Window("About Tide", id: "about") {
+            AboutWindow()
+        }
+        .windowResizability(.contentSize)
     }
 }
 

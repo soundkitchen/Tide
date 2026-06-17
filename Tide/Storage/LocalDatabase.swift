@@ -217,6 +217,16 @@ final class LocalDatabase: @unchecked Sendable {
         }
     }
 
+    /// 診断エクスポート用に、DB の一貫スナップショットを `url` に書き出す（`VACUUM INTO`）。
+    /// WAL の内容まで取り込まれた単一ファイルになるので、wal/shm を別途コピーする必要はない。
+    /// VACUUM はトランザクション内では実行できないため `writeWithoutTransaction` を使う。
+    /// `url` は事前に存在しないこと（`VACUUM INTO` は既存ファイルへは書けない）。
+    func snapshot(to url: URL) async throws {
+        try await pool.writeWithoutTransaction { db in
+            try db.execute(sql: "VACUUM main INTO ?", arguments: [url.path])
+        }
+    }
+
     // MARK: - files（mtime 修復）
 
     /// SHA ゲート（`ChangeDetector.postHash` → `.refreshMtimeOnly`）用の CAS 更新。
