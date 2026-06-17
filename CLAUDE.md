@@ -126,6 +126,7 @@
 
 ### SwiftUI 起き上がり
 - **メニューバーポップオーバーから `openWindow(id:)` を呼ぶときは必ず `NSApp.activate(ignoringOtherApps: true)` を前置する**。LSUIElement = YES のアプリだとアプリがフォアグラウンドに来ておらず、ウィンドウが見えないまま開かれる事故が起きる。
+- **`MenuBarExtra` のラベル（status item アイコン）に `TimelineView(.animation)` を置いてはならない**。その文脈では `minimumInterval` が無視され、SwiftUI が `MenuBarExtraHost.requestUpdate(after:)` を実質ゼロ間隔で再発火し続ける。毎回 `NSStatusItem` の画像差し替え（`setImage:` → `_adjustLength` → Auto Layout 再計算）が走り、**メインスレッドが 100% スピンしてアプリ全体が無応答（＝ハング）になる**（2026-06-18、同期中アニメで実機再現・サンプル採取で確定）。アイコンのコマ送りアニメが要るときは、`.task(id:)` 内の自前タイマー（`Task.sleep`）で `@State` のフレーム番号を進め、`Image("…\(frame)")` を差し替える方式にする。`.task(id:)` のキー（例: `isSyncing`）が落ちている間はタイマーが回らず CPU を消費しない。実装は `Tide/App/TideApp.swift` の `MenuBarLabel` 参照。
 
 ### Time-of-check vs Time-of-use
 - アップロードのハッシュ計算と本体読込/パート送信は **`NoFollowFileReader` の単一 `O_NOFOLLOW` FD** から行い、2 回 open の TOCTOU を解消済み（M5 / F3 / L9、2026-06-02）。`O_NOFOLLOW` は最終コンポーネントのみ有効（祖先 symlink は別レイヤ）。
