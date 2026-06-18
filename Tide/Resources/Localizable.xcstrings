@@ -1898,17 +1898,6 @@
         }
       }
     },
-    "Saves a .zip with app logs and settings (no AWS credentials) for troubleshooting." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "トラブルシューティング用に、アプリのログと設定（AWS 認証情報は含みません）を .zip で保存します。"
-          }
-        }
-      }
-    },
     "Saved diagnostics." : {
       "extractionState" : "manual",
       "localizations" : {
@@ -1927,6 +1916,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "書き出しに失敗しました。"
+          }
+        }
+      }
+    },
+    "Saves a .zip with app logs, settings, and the local database — includes file names/paths and the bucket name, but no AWS credentials." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "アプリのログ・設定・ローカル DB を .zip で保存します（ファイル名/パス・バケット名を含みますが、AWS 認証情報は含みません）。"
           }
         }
       }

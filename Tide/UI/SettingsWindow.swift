@@ -132,7 +132,7 @@ struct SettingsWindow: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                Text("Saves a .zip with app logs and settings (no AWS credentials) for troubleshooting.")
+                Text("Saves a .zip with app logs, settings, and the local database — includes file names/paths and the bucket name, but no AWS credentials.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -200,6 +200,7 @@ struct SettingsWindow: View {
         panel.allowedContentTypes = [.zip]
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        exportMessage = nil  // 前回の結果メッセージを消してから走らせる（2 回目以降に古い表示が残らない）
         Task {
             do {
                 try await DiagnosticsExporter.export(to: url, env: env)

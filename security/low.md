@@ -201,3 +201,19 @@ symlink を辿り、リンク先（例: `~/.ssh/id_rsa`）の中身を S3 へ送
 - **secret 非保持**: `transfer_state` は path / UploadId / etag / partSize / mtime / size のみ。認証情報・本文は持たない。
 
 **残ロジック上の据え置き:** ✅ 解消済み（2026-06-07）。prune 本体を `SyncEngine.pruneOrphanTransfers(db:store:syncRoot:now:abortUpload:)`（`nonisolated static`・依存注入＝実 `TideS3Client` 不要）へ切り出し、`TransferPruneTests`（実 DB + abort フェイク）で clear（tmp 消失/stale）・resumable・upload 全分岐の配線を回帰固定。あわせて clear 分岐の `invalidateShardCache` 漏れ（中断 DL の永久取り残し）も修正（`docs/09-DEFERRED.md` 参照）。store 操作自体は従来どおり `TransferStateStoreTests` でカバー。
+
+---
+
+## L13. 診断エクスポートの同梱範囲（プライバシー境界）
+
+**Status:** ✅ Reviewed — サポート用の診断エクスポート機能を追加。**認証情報は含まないが、ファイル名/パス・バケット名・deviceId は含む**境界を確認し、UI と出力に明示した (2026-06-19・PR #24)。
+
+**該当箇所:** `Tide/Core/DiagnosticsExporter.swift`、`Tide/Storage/LocalDatabase.swift`（`snapshot(to:)`）、`Tide/UI/SettingsWindow.swift`（「Export Diagnostics…」）。
+
+**重要度:** Low（攻撃者前提なし。本人画面の操作で本人のデータを本人が選んだ場所に書き出すだけ。露出はメタデータ＝ファイル名/パス・バケット名・リージョン・deviceId で、**認証情報は含まない**）。
+
+**境界と対策:**
+- **含まない**: AWS 認証情報。`DiagnosticsExporter` は Keychain を一切参照せず、入力は `ConfigStore` の非機密フィールドと `sync_log` / DB のみ（構造的に漏れない）。
+- **含む**: DB スナップショット（`VACUUM INTO`）と `sync-log.txt` に、同期フォルダ配下の**ファイル名/相対パス**・バケット名・リージョン・deviceId。診断目的で必要。
+- **明示**: CLAUDE.md が path を常に `privacy: .private` で扱う方針に合わせ、**テスターが驚かないよう**「含む/含まない」を Settings の文言と `diagnostics.txt` の Note に明記（生成物を第三者に送る前提のため）。
+- **出力先**: `NSSavePanel` でユーザが選んだ場所のみ。重い IO は `writeArchive`（nonisolated）でメインアクター外で実行。`DiagnosticsExporterTests` が純粋テキスト（シークレット非混入）と zip 生成（同梱 3 ファイル）を回帰固定。
