@@ -1820,6 +1820,116 @@
           }
         }
       }
+    },
+    "About Tide" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tide について"
+          }
+        }
+      }
+    },
+    "Released under the MIT License." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "MIT ライセンスで公開されています。"
+          }
+        }
+      }
+    },
+    "Report an Issue" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "問題を報告"
+          }
+        }
+      }
+    },
+    "Sync your folders through your own S3 bucket." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "自分の S3 バケットを通じてフォルダを同期します。"
+          }
+        }
+      }
+    },
+    "Version %@ (build %@)" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "バージョン %@ (ビルド %@)"
+          }
+        }
+      }
+    },
+    "Diagnostics" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "診断情報"
+          }
+        }
+      }
+    },
+    "Export Diagnostics…" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "診断情報を書き出す…"
+          }
+        }
+      }
+    },
+    "Saved diagnostics." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "診断情報を保存しました。"
+          }
+        }
+      }
+    },
+    "Export failed." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "書き出しに失敗しました。"
+          }
+        }
+      }
+    },
+    "Saves a .zip with app logs, settings, and the local database — includes file names/paths and the bucket name, but no AWS credentials." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "アプリのログ・設定・ローカル DB を .zip で保存します（ファイル名/パス・バケット名を含みますが、AWS 認証情報は含みません）。"
+          }
+        }
+      }
     }
   },
   "version" : "1.1"

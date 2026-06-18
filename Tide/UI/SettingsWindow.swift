@@ -1,9 +1,14 @@
 import SwiftUI
+import AppKit
+import UniformTypeIdentifiers
 
 struct SettingsWindow: View {
     @Environment(AppEnvironment.self) private var env
     @Environment(\.openWindow) private var openWindow
     @Environment(\.dismissWindow) private var dismissWindow
+
+    /// 診断エクスポートの結果メッセージ（成功/失敗の一過性表示）。
+    @State private var exportMessage: String?
 
     /// 現在有効な `.syncignore` のパターン（閲覧のみ）。
     private var syncignorePatterns: [String] {
@@ -120,6 +125,17 @@ struct SettingsWindow: View {
                     }
                 }
             }
+            Section("Diagnostics") {
+                Button("Export Diagnostics…") { exportDiagnostics() }
+                if let exportMessage {
+                    Text(exportMessage)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Text("Saves a .zip with app logs, settings, and the local database — includes file names/paths and the bucket name, but no AWS credentials.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Section {
                 Button("Open Setup Wizard") {
                     NSApp.activate(ignoringOtherApps: true)
@@ -173,5 +189,27 @@ struct SettingsWindow: View {
         let down = Self.decodeBandwidth(env.config.downloadBandwidthBytesPerSec)
         noDownloadBwLimit = down.noLimit
         if !down.noLimit { downloadBwMBps = down.mbps }
+    }
+
+    /// 診断 zip の保存先を NSSavePanel で選ばせ、`DiagnosticsExporter` で書き出す。
+    /// LSUIElement アプリなので panel を前面に出すため NSApp.activate を前置する。
+    private func exportDiagnostics() {
+        NSApp.activate(ignoringOtherApps: true)
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "Tide-Diagnostics.zip"
+        panel.allowedContentTypes = [.zip]
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        exportMessage = nil  // 前回の結果メッセージを消してから走らせる（2 回目以降に古い表示が残らない）
+        Task {
+            do {
+                try await DiagnosticsExporter.export(to: url, env: env)
+                exportMessage = String(localized: "Saved diagnostics.")
+                NSWorkspace.shared.activateFileViewerSelecting([url])
+            } catch {
+                AppLogger.ui.error("Diagnostics export failed: \(String(describing: error), privacy: .private)")
+                exportMessage = String(localized: "Export failed.")
+            }
+        }
     }
 }

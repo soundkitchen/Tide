@@ -386,6 +386,7 @@ struct MenuBarContent: View {
                 menuRow("Version History…", systemImage: "clock.arrow.circlepath") { activateAndOpen("versions") }
             }
             menuRow("Settings…", systemImage: "gearshape") { activateAndOpen("settings") }
+            menuRow("About Tide", systemImage: "info.circle") { activateAndOpen("about") }
             Divider()
             menuRow("Quit", systemImage: "power") { NSApp.terminate(nil) }
                 .keyboardShortcut("q")
