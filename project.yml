@@ -42,11 +42,14 @@ targets:
       path: Tide/Info.plist
       properties:
         LSUIElement: YES
+        LSApplicationCategoryType: public.app-category.utilities
         CFBundleName: $(PRODUCT_NAME)
         CFBundleDisplayName: Tide
-        CFBundleShortVersionString: "0.1.0"
-        CFBundleVersion: "1"
-        NSHumanReadableCopyright: ""
+        # バージョンは build settings（MARKETING_VERSION / CURRENT_PROJECT_VERSION）を唯一のソースにし、
+        # Xcode がビルド時に Info.plist へ変数展開する（plist 側に数値を二重定義しない）。
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        NSHumanReadableCopyright: "© 2026 Takanobu Izukawa"
         LSMinimumSystemVersion: "$(MACOSX_DEPLOYMENT_TARGET)"
     # Data Protection Keychain (kSecUseDataProtectionKeychain=true) を使うには
     # keychain-access-groups entitlement が要る。無いと OSStatus 34018 (errSecMissingEntitlement)。
