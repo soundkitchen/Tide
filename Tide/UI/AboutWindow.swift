@@ -20,7 +20,11 @@ struct AboutWindow: View {
 
     var body: some View {
         VStack(spacing: 12) {
-            Image(nsImage: NSApp.applicationIconImage)
+            // アプリアイコンはバンドルのコンパイル済みアセット（appiconset "AppIcon"）を
+            // 一次ソースにする。NSApp.applicationIconImage は LaunchServices のアイコンキャッシュ
+            // （バンドル ID 単位で古い dev ビルドのアイコンを保持しがち）を反映して古い絵を返すことが
+            // あるため、解決できなかったときのフォールバックにのみ使う。
+            Image(nsImage: NSImage(named: "AppIcon") ?? NSApp.applicationIconImage)
                 .resizable()
                 .frame(width: 96, height: 96)
                 .accessibilityHidden(true)
