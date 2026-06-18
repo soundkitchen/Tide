@@ -66,6 +66,10 @@ targets:
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         ENABLE_PREVIEWS: YES
         COMBINE_HIDPI_IMAGES: YES
+        # バージョン運用ルール: docs / 計画のみのコミットでは上げない。
+        # v0.2.0 タスク（GitHub #25〜#34）の実コード変更を最初に着地させるコミットで
+        # MARKETING_VERSION を 0.1.1 に上げ、以降はタスク消化に応じて patch を刻む。
+        # 機能セットが揃った節目で 0.2.0（minor）。リリースのタグはこの値を唯一のソースとする。
         MARKETING_VERSION: "0.1.0"
         CURRENT_PROJECT_VERSION: "1"
     dependencies:

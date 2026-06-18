@@ -5,6 +5,43 @@
 
 ---
 
+## v0.2.0 タスクとして GitHub Issue 化（2026-06-19）
+
+下記の据え置き項目は v0.2.0（自分用ソース反復）のタスクとして GitHub Issue に登録した。実装の追跡は Issue 側で行い、本ファイルは経緯の記録として残す。スコープ確定の経緯は `~/.claude/plans/version-0-2-0-*.md`（会話で確定した方針）参照。
+
+- **A（最重要）= [#25]**: アップロード側の並行更新検出（last-writer-wins 解消）。本ファイル「アップロード側の並行更新検出」項。解決方向は **リモート版を正規パスに残す**（自分の編集を `(local copy …)` へ退避＝pull 側と対称）。
+- **B = [#26]**: C3 後半 — HTTPS 強制バケットポリシー。
+- **C1 = [#27]**: ネスト `.syncignore`。
+- **C2 = [#28]**: 復元 UI — 同期一覧からのファイル選択（本ファイル「M4 復元 UI の据え置き」(e)）。
+- **C3 = [#29]（ストレッチ）**: 残りの復元 UI 拡張（同 (a) CopyObject / (b) 削除一覧の増分化 / 設定 export）。
+- **D1 = [#30]**: reconcile/削除/scan 配線の結合テスト整備。
+- **D2 = [#31]**: ローカル hash 経路の NoFollow 一括化。
+- **D3 = [#32]**: `recentIssues` の (path, category) dedupe（PR #17 nit-4）。
+- **D4 = [#33]**: マルチパートの stale UploadId 回復（NoSuchUpload を成功扱い・サブ D PR #4 レビュー (a)）。
+- **D5 = [#34]（ストレッチ）**: `RestoreService` と pull の直列化。
+
+[#25]: https://github.com/soundkitchen/Tide/issues/25
+[#26]: https://github.com/soundkitchen/Tide/issues/26
+[#27]: https://github.com/soundkitchen/Tide/issues/27
+[#28]: https://github.com/soundkitchen/Tide/issues/28
+[#29]: https://github.com/soundkitchen/Tide/issues/29
+[#30]: https://github.com/soundkitchen/Tide/issues/30
+[#31]: https://github.com/soundkitchen/Tide/issues/31
+[#32]: https://github.com/soundkitchen/Tide/issues/32
+[#33]: https://github.com/soundkitchen/Tide/issues/33
+[#34]: https://github.com/soundkitchen/Tide/issues/34
+
+## M5 / Files On-Demand（File Provider）— 0.3.0 以降の独立マイルストーン（Issue 化せず本メモで追跡）
+
+オンラインのみ実体・ローカルは参照（プレースホルダ）にし、ファイルを開いた瞬間に実体を取得（materialize）する Dropbox / Google Drive 風の挙動。ユーザ要望（「オンラインのみ実態を保存、ローカルは参照のみ」）に対する実現性調査の結論を記録する。**0.2.0 では実装しない。**
+
+- **唯一の正規手段は Apple の File Provider フレームワーク**（`NSFileProviderReplicatedExtension`）。Dropbox / Google Drive / OneDrive が旧 kernel extension 方式から移行した先で、これ以外に dataset を dataless プレースホルダ化する公開 API は無い。
+- **現アーキからの作り替えで規模は M1〜M4 全体に匹敵**。今は「普通のユーザフォルダを FSEvents 監視 + フルスキャン + アップロードキュー」。File Provider では OS が管理する**ドメイン**（同期先が `~/Library/CloudStorage/<provider>` に移る）になり、列挙(`enumerator`)・開封時の実体取得(`fetchContents` = materialize)・ローカル変更(`createItem`/`modifyItem`/`deleteItem`)・容量逼迫時の eviction（実体→プレースホルダに戻す）を **OS のコールバックが駆動**する。現在の FSEvents + スキャン + キューの大半は拡張の裏に作り直し。
+- **新しい App Extension ターゲットが要り、拡張は別プロセスでサンドボックス必須＝L1（App Sandbox）と密結合**。同期コア（`S3Client` / `Manifest` / `LocalDatabase`）を拡張プロセスから呼べる形に再編が必要。**L1 の security-scoped bookmark 対応もこの版で一度に行う**（arbitrary-folder モデルのまま 0.2.0 で先行サンドボックス化すると、ドメインへ移る本版で作り直しになるため＝二度手間回避。L1 / H3 を 0.2.0 から外した理由）。
+- **最小プロトタイプ**＝ドメイン登録 + `enumerator` + `fetchContents` で実現性を確認してから本実装に入る段取り。
+
+---
+
 - **C3 後半**: HTTPS 強制バケットポリシー（`PutBucketPolicy` で `aws:SecureTransport=true`）。SDK 自体は HTTPS 既定で送るので緊急度は低い。
 - **H3**: 静的 AWS キー → STS / IAM Identity Center への構造的置き換え。M3 以降で要検討。
 - **M5 / F3 (L9)**: ✅ 解消済み（2026-06-02）。M3 マルチパート対応で `NoFollowFileReader`（`O_NOFOLLOW` の単一 FD）に置換し、ハッシュ計算と本体読込/パート送信を同一 FD 化＝2 回 open の TOCTOU を構造的に解消。`O_NOFOLLOW` は最終コンポーネントのみ有効（祖先 symlink は別レイヤ）。
