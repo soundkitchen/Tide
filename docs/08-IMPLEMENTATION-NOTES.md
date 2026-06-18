@@ -176,6 +176,7 @@
 ### バージョン単一化と診断エクスポート（2026-06-19・PR #24）
 
 - **バージョン単一ソース化**: `Tide/Info.plist` の `CFBundleShortVersionString` / `CFBundleVersion` を `$(MARKETING_VERSION)` / `$(CURRENT_PROJECT_VERSION)` 参照にし、**バージョンは `project.yml` の build settings を唯一のソース**にした（plist 側に数値を二重定義しない・Xcode がビルド時に展開）。あわせて `NSHumanReadableCopyright` を設定、`LSApplicationCategoryType=utilities` を追加（アーカイブ時のカテゴリ未設定警告を解消）。About 表示・診断テキストはどちらも `Bundle.main` から動的取得するのでこの単一ソースに追従する。
+- **About のアプリアイコン**: `NSImage(named: "AppIcon")`（バンドルのコンパイル済み asset catalog を直接引く）を一次ソースにし、解決できないときだけ `NSApp.applicationIconImage` にフォールバックする。**`NSApp.applicationIconImage` は LaunchServices のアイコンキャッシュ（バンドル ID 単位で古い dev ビルドのアイコンを保持しがち）を反映して古い絵を返すことがある**ため、現在のバンドルのアイコンを確実に出すには named 参照が要る（実機で旧アイコン表示を確認・差し替え済み）。`AboutWindowTests` が appiconset `"AppIcon"` の `NSImage(named:)` 解決を担保（`MenuBarPresentationTests` のアセット実在テストと同じ「無言の空画像」防止）。
 - **診断エクスポート**（`Tide/Core/DiagnosticsExporter.swift`）: サポート用に診断テキスト + `sync-log.txt` + DB スナップショットを 1 つの `.zip` にまとめ、`NSSavePanel` でユーザが選んだ場所へ書き出す。
   - **セキュリティ境界（`security/low.md` L13）**: AWS 認証情報（Keychain）は一切扱わない（構造的に漏れない）。ただし DB スナップショットと sync_log には**ファイル名/相対パス・バケット名・deviceId が含まれる**ため、「含む/含まない」を Settings 文言と `diagnostics.txt` の Note に明示する（生成物を第三者へ送る前提のため・CLAUDE.md の path 非公開方針と整合）。
   - **DB スナップショット**: `LocalDatabase.snapshot(to:)` が `VACUUM main INTO ?`（`writeWithoutTransaction`＝VACUUM はトランザクション内不可）で WAL を取り込んだ一貫単一ファイルを出力。出力先は事前非存在であること。
