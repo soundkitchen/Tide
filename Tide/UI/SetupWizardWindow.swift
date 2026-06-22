@@ -304,6 +304,19 @@ struct SetupWizardWindow: View {
             try await probe.enforcePublicAccessBlock()
             bucketSetupLog.append(String(localized: "✓ Public access block enforced"))
 
+            // HTTPS 強制バケットポリシー（C3 後半・Issue #26）。非致命: 失敗してもセットアップは続行する
+            // （SDK 既定 HTTPS の多層防御。s3:PutBucketPolicy 権限が無い構成でも止めない）。Block Public Access の
+            // 後でよい（Deny statement は public 判定にならず弾かれない）。
+            do {
+                let tls = try await probe.enforceTLSBucketPolicy()
+                bucketSetupLog.append(tls == .alreadyEnforced
+                    ? String(localized: "✓ HTTPS-only bucket policy already enforced")
+                    : String(localized: "✓ HTTPS-only bucket policy enforced"))
+            } catch {
+                AppLogger.s3.error("enforceTLSBucketPolicy failed (non-fatal): \(String(describing: error), privacy: .private)")
+                bucketSetupLog.append(String(localized: "⚠ Could not set HTTPS-only policy (continuing)"))
+            }
+
             bucketSetupLog.append(String(localized: "✓ Provisioning complete"))
         } catch {
             let detail = String(describing: error)
