@@ -99,6 +99,23 @@ final class BucketPolicyBuilderTests: XCTestCase {
         }
     }
 
+    func testMergeThrowsOnMalformedStatement() {
+        // Statement が存在するのに配列/オブジェクトでない（不正）→ 黙って捨てず throw して上書きを避ける（nit-4）。
+        let bad = #"{"Version":"2012-10-17","Statement":"should-be-array-or-object"}"#
+        XCTAssertThrowsError(try BucketPolicyBuilder.mergeTLSDenyStatement(into: bad, bucket: bucket)) { error in
+            guard case BucketPolicyBuilder.BucketPolicyError.unparseableExistingPolicy = error else {
+                return XCTFail("expected unparseableExistingPolicy, got \(error)")
+            }
+        }
+    }
+
+    func testMergeIntoEmptyStatementArray() throws {
+        // 空の Statement 配列は不正ではない（throw しない）。Tide statement を 1 件だけ足す。
+        let existing = #"{"Version":"2012-10-17","Statement":[]}"#
+        let out = try BucketPolicyBuilder.mergeTLSDenyStatement(into: existing, bucket: bucket)
+        XCTAssertEqual(tideStatements(try parse(out)).count, 1)
+    }
+
     // MARK: - 適用済み判定
 
     func testIsEnforcedFalseWhenNoPolicy() {

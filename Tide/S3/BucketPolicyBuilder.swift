@@ -46,7 +46,20 @@ enum BucketPolicyBuilder {
             root = obj
         }
 
-        var statements = normalizedStatements(root["Statement"])
+        // Statement は配列 or 単一オブジェクト（IAM 仕様）。**存在するのに配列/オブジェクトでない**（不正）なら
+        // 黙って捨てず throw し、上書きで取りこぼすのを避ける（unparseable と対称＝「理解できないポリシーは
+        // 壊さない」方針の徹底・PR #36 nit-4）。
+        var statements: [[String: Any]]
+        switch root["Statement"] {
+        case nil:
+            statements = []
+        case let arr as [[String: Any]]:
+            statements = arr
+        case let single as [String: Any]:
+            statements = [single]
+        default:
+            throw BucketPolicyError.unparseableExistingPolicy
+        }
         statements.removeAll { ($0["Sid"] as? String) == tideDenySid }   // 既存 Tide statement を除去（冪等）
         statements.append(denyStatement(bucket: bucket))
 
