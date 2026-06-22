@@ -7,6 +7,13 @@ import GRDB
 /// 実 DB（一時ファイル）で結合検証する。`SyncEngine.resolveUploadConflict`（nonisolated static）を
 /// 直接駆動し、退避コピー生成・両版保持・正規パス=リモート・キュー行ライフサイクル（id 基準）を固定する。
 /// D1（reconcile/削除/scan 配線の結合テスト整備）のシーム利用の先駆けも兼ねる。
+///
+/// 回帰範囲の注記（PR #35 レビュー nit-4）: ここで直接駆動するのは `resolveUploadConflict` の本体まで。
+/// 次の 2 つは未カバーで **D1（#30）クラスの結合テスト負債**として認識:
+/// (a) `handleProcessingFailure` の `if case SyncError.uploadConflict` ディスパッチ（error → handler の
+///     振り分け。@MainActor private のため直接駆動面が無い）。
+/// (b) `Uploader.processUpload` の `.alreadyUpToDate` 分岐の DB 書込（本ファイルの RISK3 テストは
+///     `ChangeDetector.reconcileIsNoop` 経由の間接確認。`Uploader.s3` が具象のため直接結合は D1 で）。
 final class UploaderConflictTests: XCTestCase {
 
     /// recordIssue クロージャの呼び出し回数を数えるだけの Sendable スパイ（Error は非 Sendable なので保持しない）。

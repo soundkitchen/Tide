@@ -307,6 +307,11 @@ struct ManifestUpdater {
             if decision == .conflict, let existing {
                 throw SyncError.uploadConflict(path: path, remoteEntry: existing)
             }
+            // ここに来るのは .proceed のみ（理論上不到達: .alreadyUpToDate/.conflict は existing 非 nil で
+            // 上の if が return/throw する）。万一 decideUpload の不変条件「remote==nil ⟹ .proceed」が
+            // 壊れて existing==nil で落ちてくると無音上書きが復活するので、debug で回帰を捕まえる
+            // （release は安全側＝自分の entry を書込）。
+            assert(decision == .proceed, "decideUpload returned \(decision) with a nil existing entry")
 
             shard.files[path] = newEntry
             shard.updatedAt = ISO8601.now()
