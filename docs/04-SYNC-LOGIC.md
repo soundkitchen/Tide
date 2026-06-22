@@ -531,7 +531,17 @@ M3 サブ C で **ベース / ローカル / リモートの 3 SHA による 3-w
 
 「両方が同じ方向に変化」（ベースから local も remote も同一内容へ）は `local == remote` なので `.localMatchesRemote`（fast-forward）に入る。リネーム規則は `ConflictNamer.localCopyRelativePath(for:at:)`。dotfile / 拡張子なしも対応。
 
-> **既知の制限（アップロード側の last-writer-wins）**: 競合検出は現状 **pull/削除側のみ**。同一ベースから 2 台が編集すると後勝ちでマニフェストが上書きされ、先に上げた側は次回 pull で「local == base＝未編集」と判定して相手版を取り込み、自分のローカル編集がワーキングコピーから消える（S3 のバージョン履歴には残る）。アップロード直前にも `ThreeWayMerge` を適用する対称化は将来サブタスク（`07-M3-IMPLEMENTATION-GUIDE.md` 参照）。
+### アップロード側の並行更新検出（last-writer-wins 解消・Issue #25 / A・2026-06-23）
+
+競合検出を **アップロード側にも対称適用**した（旧「既知の制限」を解消）。並行更新は常に「2 番目の書き手」で検出される（1 番目は書込時 remote == base なので無競合）。
+
+- **判定**: 純粋関数 `ThreeWayMerge.decideUpload(base:uploading:remote:) -> UploadMergeDecision{proceed, alreadyUpToDate, conflict}`。`base = FileRecord.sha256`、`uploading` = 今アップロードした sha、`remote` = 権威シャードの `shard.files[path]?.sha256`。`remote==nil`→`proceed`（再作成）、`remote==uploading`→`alreadyUpToDate`（別書き手が同一内容を確定済み・書込不要）、`remote==base`→`proceed`（通常）、それ以外→`conflict`。
+- **検出**: `Uploader.ManifestUpdater.updateFileEntry` が `withConditionalRetry` 内のフェッチ済みシャードから権威 entry を読み（追加 GET なし）判定。`.conflict` は `SyncError.uploadConflict(path:remoteEntry:)` を投げて RMW を安全中断（412/409 クラシファイアにマッチせず即伝播）。412/409 再フェッチ時は同 retry 内で再評価＝無音上書きの窓は実質ゼロ。`.alreadyUpToDate` は put せず DB をリモート版 identity（etag/versionId）へ合わせて次回 pull を no-op に。
+- **解決（pull 側 `.conflictThenDownload` と対称）**: `SyncEngine.resolveUploadConflict`（回復可能順序）。① キュー行を **item.id 基準で除去**（give-up 加算なし）→ ② ローカル編集を `(local copy …)` へ退避（`renameLocalForConflict`）→ ③ リモート版を **versionId 指定**で正規パスへ取得（`Downloader.download(versionId:clearQueueByPath:false)`。本体 PUT が「最新」を自分の内容に変えているため最新取得では相手版を取れない）→ ④ `.conflictCopyCreated` を通知。退避コピーは新規ファイルとして再アップロードされる。
+- **回復可能性**: リネームはキュー行除去を決して上回らない（さもないと canonical 欠落 + 行残存で再処理が delete-marker を打つ）。rename/download が失敗しても次回 pull が `.conflictThenDownload` / `local-absent→download` で自己回復する。
+- **残存レース / orphan version（いずれも data loss でない・versioning backstop）**: 本体 PUT は判定の前に走るため、`.conflict`／`.alreadyUpToDate` のどちらでも自分の PUT 版がマニフェスト未参照の orphan S3 version として残る（`.conflict` は捨てた版に帯域を消費・`.alreadyUpToDate` は内容同一なので無害）。さらに DB 失敗フォールスルー（行除去に失敗して generic backoff へ落ちる経路）ではリトライのたびに再 PUT＝orphan が増える。いずれも**すべての読みは manifest の versionId 経由**なので orphan は決して配信されず、ライフサイクルの incomplete-multipart / noncurrent version 失効で回収される。事前 GET（＋ TOCTOU 窓）を避けるための設計トレードオフ。加えて 2 台同時 `.conflict` は互いのコピーができ得る（稀・自己収束）。
+
+全分岐は `ThreeWayMergeTests`（`decideUpload` テーブル）と `UploaderConflictTests`（解決の結合）で固定する。
 
 ## セキュリティゲート
 

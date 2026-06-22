@@ -24,6 +24,10 @@ enum SyncIssueClassifier {
                 return .fileTooLarge
             case .fileChangedDuringUpload:
                 return .unstableFile
+            case .uploadConflict:
+                // 並行更新を検出して退避＋リモート採用で解決する（pull 側コンフリクトと同種）。
+                // 通常は handleProcessingFailure で先取り処理されるが、分類網羅と中間状態の保険。
+                return .remoteConflict
             case .ioError:
                 return .localIO
             case .databaseError:

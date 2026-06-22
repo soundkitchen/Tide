@@ -17,6 +17,7 @@
 		114F8696EC6701E674C97FDA /* TideTmpDirectory.swift in Sources */ = {isa = PBXBuildFile; fileRef = 19BDDA56B819A3F918C424E9 /* TideTmpDirectory.swift */; };
 		1360C8F6BC2EE0FD99458D93 /* RestoreTargetTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F5BEAC74205EE85F1B3D85E4 /* RestoreTargetTests.swift */; };
 		1628205A2D702AD28C982B14 /* SyncEvent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52A253BAA0EB5A4D52C3E77A /* SyncEvent.swift */; };
+		1C0A17697FC913A6ECF1B490 /* UploaderConflictTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26B8754452476E7B305F6BA3 /* UploaderConflictTests.swift */; };
 		23A360C00976634BDC6D7A69 /* RestoreService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68B67C8D931416D1FFDFD498 /* RestoreService.swift */; };
 		274736C1DFBC4F29E2A8D2D7 /* NotificationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8DB10BCAF7E41F7945E67A7 /* NotificationManager.swift */; };
 		2934320120BBFB444BED2195 /* ObjectVersionHistoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 218BF6C59F9429D95309C74F /* ObjectVersionHistoryTests.swift */; };
@@ -134,6 +135,7 @@
 		218BF6C59F9429D95309C74F /* ObjectVersionHistoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ObjectVersionHistoryTests.swift; sourceTree = "<group>"; };
 		228CB9307607736CAE07F2B2 /* ChangeDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChangeDetector.swift; sourceTree = "<group>"; };
 		24840B9F9DE6EE279D82F062 /* SyncIgnoreMatcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncIgnoreMatcher.swift; sourceTree = "<group>"; };
+		26B8754452476E7B305F6BA3 /* UploaderConflictTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UploaderConflictTests.swift; sourceTree = "<group>"; };
 		2891D2A84ED794803593042D /* SmokeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SmokeTests.swift; sourceTree = "<group>"; };
 		28C008109E7A3765EE5A18E7 /* TransferProgressTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TransferProgressTests.swift; sourceTree = "<group>"; };
 		29A0EA5C034CFDEE0E2994AE /* DebounceQueue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebounceQueue.swift; sourceTree = "<group>"; };
@@ -310,6 +312,7 @@
 				28C008109E7A3765EE5A18E7 /* TransferProgressTests.swift */,
 				91F4AD8CE93628B2C74331DC /* TransferPruneTests.swift */,
 				0B1FCEBC900F68780C8C5561 /* TransferStateStoreTests.swift */,
+				26B8754452476E7B305F6BA3 /* UploaderConflictTests.swift */,
 			);
 			path = TideTests;
 			sourceTree = "<group>";
@@ -607,6 +610,7 @@
 				A3DD7D936C5EB50A1769BC5E /* TransferProgressTests.swift in Sources */,
 				BBFF23668817A804F38D4ACF /* TransferPruneTests.swift in Sources */,
 				828EBD9EFC5BF9E0DB2276DC /* TransferStateStoreTests.swift in Sources */,
+				1C0A17697FC913A6ECF1B490 /* UploaderConflictTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -636,7 +640,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = 0.1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = org.izukawa.Tide;
 				PRODUCT_NAME = Tide;
 				SDKROOT = macosx;
@@ -739,7 +743,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = 0.1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = org.izukawa.Tide;
 				PRODUCT_NAME = Tide;
 				SDKROOT = macosx;

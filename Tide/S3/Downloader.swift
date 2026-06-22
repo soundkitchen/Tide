@@ -4,9 +4,12 @@ import CryptoKit
 
 /// `Downloader` が必要とする S3 ストリーミング取得の最小シーム。
 /// 本番は `TideS3Client` が適合し、テストはフェイクを差し込んで（ネットワーク無しで）再開ロジックを検証する。
+/// `versionId` 指定で特定バージョンを取得する（nil = 最新版）。アップロード競合の解決（Issue #25 / A）では
+/// 本体 PUT が「最新」を自分の内容に変えてしまっているため、リモート版を必ず `versionId` 指定で取得する。
 protocol RangedDownloadClient: Sendable {
     func streamObject(
         key: String,
+        versionId: String?,
         rangeStart: Int64?,
         limiter: RateLimiter?,
         sink: (Data) throws -> Void
@@ -42,11 +45,20 @@ struct Downloader {
     var downloadLimiter: RateLimiter? = nil
 
     /// リモート 1 ファイルをローカルに反映する。
+    /// - Parameters:
+    ///   - versionId: 取得する S3 バージョン。nil = 最新版（通常 pull）。アップロード競合の解決では
+    ///     本体 PUT が最新を自分の内容に変えているため `entry.s3VersionId` を渡して相手版を確実に取得する。
+    ///   - clearQueueByPath: 完了時に同 path の upload キュー行を path 基準で削除するか。通常 pull は true
+    ///     （リモート採用が pending な local upload を上書きするのは正当）。アップロード競合の解決は false
+    ///     ＝行ライフサイクルを解決ヘルパが item.id 基準で所有し、処理中に届いた新 id 行を巻き込まない
+    ///     （不変条件 [キュー行 id 基準] の維持・Issue #25 BUG1）。
     /// - Returns: 実際に書き込みが行われたら true、スキップなら false。
     @discardableResult
     func download(
         relativePath: String,
-        entry: ManifestFileEntry
+        entry: ManifestFileEntry,
+        versionId: String? = nil,
+        clearQueueByPath: Bool = true
     ) async throws -> Bool {
         // C1/C2/F2: 入口でリモート由来パスを検証 + sync root エスケープ防止（祖先 symlink 経由の脱出も含む）
         let fullURL = try PathValidator.resolveForWrite(relativePath: relativePath, syncRoot: syncRoot)
@@ -72,8 +84,10 @@ struct Downloader {
         // 一時ファイルは SyncEngine 起動時に決めた tmpDir に置く
         // （同一ボリュームが保証されるので、後段の moveItem が atomic な rename になる）。
         // 再開できるよう、相対パスから決定的な tmp 名を導く（UUID ではない）。
+        // versionId 指定（競合解決の特定版取得）時は tmp 名にも織り込み、並行 pull（最新版）の共有 tmp と
+        // 衝突させない（dl-<sha(path)>.part の取り合いで torn になる窓を塞ぐ・Issue #25 RISK4）。
         try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
-        let tmpURL = Self.resumeTmpURL(in: tmpDir, relativePath: relativePath)
+        let tmpURL = Self.resumeTmpURL(in: tmpDir, relativePath: relativePath, versionId: versionId)
 
         // 再開判定: 永続行が現エントリ（etag）と一致し、tmp が部分的に存在すれば bytes_done から再開。
         // 既送プレフィクスは読み直して hash に前置きし、全体 SHA を復元する（ネットワークは未取得分だけ）。
@@ -119,7 +133,8 @@ struct Downloader {
         let streamResult: TideS3Client.StreamObjectResult?
         do {
             streamResult = try await downloadClient.streamObject(
-                key: s3Key, rangeStart: resumeFrom > 0 ? resumeFrom : nil, limiter: downloadLimiter
+                key: s3Key, versionId: versionId,
+                rangeStart: resumeFrom > 0 ? resumeFrom : nil, limiter: downloadLimiter
             ) { chunk in
                 total += Int64(chunk.count)
                 if total > maxBytes { throw DownloadAbort.tooLarge }
@@ -212,7 +227,9 @@ struct Downloader {
 
         // 再開状態をクリア（完了したので不要）+ DB 反映
         try await transferStore.clearDownload(path: relativePath)
-        try await updateDBEntryAfterDownload(relativePath: relativePath, entry: entry)
+        try await updateDBEntryAfterDownload(
+            relativePath: relativePath, entry: entry, clearQueueByPath: clearQueueByPath
+        )
         AppLogger.s3.info("Downloaded (bytes=\(total)): \(relativePath, privacy: .private)")
         return true
     }
@@ -347,8 +364,11 @@ struct Downloader {
 
     /// 相対パスから決定的な tmp ファイル名を導く（再開で同じ tmp を再発見できるように）。
     /// 内容（etag）が変わった場合は `transferStore.expectedEtag` の照合で破棄するので、名前は path のみで決める。
-    static func resumeTmpURL(in tmpDir: URL, relativePath: String) -> URL {
-        let h = HashCalculator.hex(SHA256.hash(data: Data(relativePath.utf8)))
+    /// `versionId` 指定（競合解決の特定版取得）時のみ名前に織り込み、最新版 pull の共有 tmp と区別する
+    /// （並行取得で同一 tmp を取り合って torn になる窓を塞ぐ・Issue #25 RISK4）。nil なら従来どおり path のみ。
+    static func resumeTmpURL(in tmpDir: URL, relativePath: String, versionId: String? = nil) -> URL {
+        let seed = versionId.map { "\(relativePath)\u{0}\($0)" } ?? relativePath
+        let h = HashCalculator.hex(SHA256.hash(data: Data(seed.utf8)))
         return tmpDir.appendingPathComponent("dl-\(h).part")
     }
 
@@ -395,7 +415,8 @@ struct Downloader {
 
     private func updateDBEntryAfterDownload(
         relativePath: String,
-        entry: ManifestFileEntry
+        entry: ManifestFileEntry,
+        clearQueueByPath: Bool = true
     ) async throws {
         let now = Date().timeIntervalSince1970
         let mtime = parseISO8601(entry.mtime)?.timeIntervalSince1970 ?? now
@@ -411,10 +432,15 @@ struct Downloader {
                 updatedAt: now
             )
             try rec.save(db)
-            // 既にローカル発で upload キューに入っていたら不要になる
-            try UploadQueueRecord
-                .filter(Column("path") == relativePath)
-                .deleteAll(db)
+            // 既にローカル発で upload キューに入っていたら不要になる（通常 pull）。
+            // ただしアップロード競合の解決経路（clearQueueByPath=false）では path 基準で消さない:
+            // 処理中に届いた同 path の新 id 行を巻き込まないため（行ライフサイクルは解決ヘルパが
+            // item.id 基準で所有・不変条件 [キュー行 id 基準]・Issue #25 BUG1）。
+            if clearQueueByPath {
+                try UploadQueueRecord
+                    .filter(Column("path") == relativePath)
+                    .deleteAll(db)
+            }
             var log = SyncLogRecord(
                 id: nil,
                 timestamp: now,

@@ -304,6 +304,7 @@ final class FakeRangedDownloadClient: RangedDownloadClient, @unchecked Sendable 
     let corruptTmpURL: URL?
     let corruptExtraBytes: Int
     private(set) var lastRangeStart: Int64?
+    private(set) var lastVersionId: String?
     private(set) var callCount = 0
 
     init(fullData: Data, etag: String = "etag-x", failAfterBytes: Int? = nil, notFound: Bool = false, chunkSize: Int = 1024, corruptTmpURL: URL? = nil, corruptExtraBytes: Int = 0) {
@@ -318,12 +319,14 @@ final class FakeRangedDownloadClient: RangedDownloadClient, @unchecked Sendable 
 
     func streamObject(
         key: String,
+        versionId: String?,
         rangeStart: Int64?,
         limiter: RateLimiter?,
         sink: (Data) throws -> Void
     ) async throws -> TideS3Client.StreamObjectResult? {
         callCount += 1
         lastRangeStart = rangeStart
+        lastVersionId = versionId
         if notFound { return nil }
         let start = Int(rangeStart ?? 0)
         guard start <= fullData.count else {

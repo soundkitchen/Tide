@@ -114,4 +114,63 @@ final class ThreeWayMergeTests: XCTestCase {
         XCTAssertEqual(decide(nil, .unreadable, nil), .keepLocalRemoteDeleted)
         XCTAssertEqual(decide("A", .unreadable, nil), .keepLocalRemoteDeleted)
     }
+
+    // MARK: - アップロード側（書込シーム）の競合判定 decideUpload
+
+    private func decideUpload(_ base: String?, _ uploading: String, _ remote: String?) -> UploadMergeDecision {
+        ThreeWayMerge.decideUpload(base: base, uploading: uploading, remote: remote)
+    }
+
+    func testDecideUploadTable() {
+        // (base, uploading, remote, expected)
+        let cases: [(String?, String, String?, UploadMergeDecision)] = [
+            // remote = nil（誰も持っていない / 削除済み）→ 再作成として書込
+            (nil, "A", nil, .proceed),
+            ("A", "B", nil, .proceed),
+            ("A", "A", nil, .proceed),
+
+            // remote == uploading（別書き手が同一内容を確定済み）→ 書込不要
+            (nil, "A", "A", .alreadyUpToDate),    // 未追跡でも内容一致なら no-op
+            ("A", "B", "B", .alreadyUpToDate),    // 自分の新内容 == 相手の新内容
+            ("A", "A", "A", .alreadyUpToDate),    // base==uploading==remote（全一致）
+
+            // remote == base かつ remote != uploading（自分だけ編集・リモート未変化）→ 通常更新
+            ("A", "B", "A", .proceed),
+
+            // 双方乖離（相手が base とも自分とも違う内容を上げた）→ コンフリクト
+            ("A", "B", "C", .conflict),           // 自分 B / リモート C / base A
+            ("A", "C", "B", .conflict),
+            (nil, "A", "B", .conflict),           // 未追跡 + リモートに別内容 → コンフリクト
+            ("A", "A", "B", .conflict),           // 自分は base のまま再送 / リモートは別内容 → コンフリクト
+        ]
+        for (base, uploading, remote, expected) in cases {
+            XCTAssertEqual(
+                decideUpload(base, uploading, remote), expected,
+                "base=\(base ?? "nil") uploading=\(uploading) remote=\(remote ?? "nil")"
+            )
+        }
+    }
+
+    func testDecideUploadRemoteAbsentProceeds() {
+        // リモート未存在 → 自分の entry で再作成（誰の編集も踏まない）
+        XCTAssertEqual(decideUpload("A", "B", nil), .proceed)
+        XCTAssertEqual(decideUpload(nil, "X", nil), .proceed)
+    }
+
+    func testDecideUploadIdenticalContentIsAlreadyUpToDate() {
+        // 別書き手が同一 SHA を確定済み → マニフェスト書込不要
+        XCTAssertEqual(decideUpload("base", "same", "same"), .alreadyUpToDate)
+        XCTAssertEqual(decideUpload(nil, "same", "same"), .alreadyUpToDate)
+    }
+
+    func testDecideUploadRemoteUnchangedProceeds() {
+        // リモートが base のまま（自分だけが編集）→ 通常更新
+        XCTAssertEqual(decideUpload("A", "B", "A"), .proceed)
+    }
+
+    func testDecideUploadDivergedConflicts() {
+        // リモートが base とも自分とも別内容 → 無音上書きせずコンフリクト退避
+        XCTAssertEqual(decideUpload("A", "B", "C"), .conflict)
+        XCTAssertEqual(decideUpload(nil, "L", "R"), .conflict)   // 未追跡 + 別内容
+    }
 }

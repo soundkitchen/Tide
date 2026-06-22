@@ -198,6 +198,20 @@ final class SyncEngine {
         }
     }
 
+    /// pull / アップロード競合解決で使う `Downloader` を同一構成で生成する。
+    private func makeDownloader() -> Downloader {
+        Downloader(
+            downloadClient: s3,
+            db: db,
+            syncRoot: syncRoot,
+            tmpDir: tmpDir,
+            deviceId: deviceId,
+            transferStore: TransferStateStore(db: db),
+            progressReporter: makeProgressReporter(),
+            downloadLimiter: downloadLimiter
+        )
+    }
+
     /// 進捗イベントを `activeTransfers` に反映する。集約ロジックは純粋関数
     /// `TransferProgress.reduce` に切り出し（out-of-order 耐性を `TransferProgressTests` で固定）。
     private func applyProgress(_ event: TransferProgressEvent) {
@@ -668,16 +682,7 @@ final class SyncEngine {
         let reader = ManifestReader(s3: s3, db: db)
         guard let result = try await reader.read() else { return }
         let remoteMap = result.files
-        let dl = Downloader(
-            downloadClient: s3,
-            db: db,
-            syncRoot: syncRoot,
-            tmpDir: tmpDir,
-            deviceId: deviceId,
-            transferStore: TransferStateStore(db: db),
-            progressReporter: makeProgressReporter(),
-            downloadLimiter: downloadLimiter
-        )
+        let dl = makeDownloader()
 
         // 1) 取り込み（最大 5 並列）
         let entries = Array(remoteMap)
@@ -1026,6 +1031,14 @@ final class SyncEngine {
             return
         }
 
+        // Issue #25 (A): 書込シームで並行更新を検出した。ローカル編集をコンフリクトコピーへ退避し、
+        // リモート版を正規パスへ取得し直す（pull 側 .conflictThenDownload と対称）。give-up に載せない。
+        if case let SyncError.uploadConflict(_, remoteEntry) = error {
+            if await handleUploadConflict(item: item, remoteEntry: remoteEntry) { return }
+            // 行除去すらできなかった（DB 失敗）場合のみ generic backoff へフォールスルー
+            // （行は残存・ローカルファイルは無傷・リネームもしていない＝再試行で自己修復）。
+        }
+
         // サイズ上限超過は恒久的失敗（リトライしても無駄）。黙ってスキップせず、分類サマリ
         // （fileTooLarge + guidance）として recentIssues に出す（一級 UX 状態として扱う）。
         if case SyncError.fileTooLarge = error {
@@ -1162,6 +1175,86 @@ final class SyncEngine {
         }
     }
 
+    /// アップロード競合（Issue #25 / A）の解決を起動する @MainActor ラッパ。
+    /// 本体は回帰テスト可能な `nonisolated static resolveUploadConflict` に切り出し（`UploaderConflictTests`）、
+    /// ここでは Downloader 構築・recordIssue / 通知の発火という @MainActor 依存だけを担う。
+    /// - Returns: 行を item.id 基準で除去できたら true（呼出側は return）。除去すらできなければ false
+    ///   （呼出側は generic backoff へフォールバック）。
+    private func handleUploadConflict(item: UploadQueueRecord, remoteEntry: ManifestFileEntry) async -> Bool {
+        let dl = makeDownloader()
+        let result = await Self.resolveUploadConflict(
+            item: item,
+            remoteEntry: remoteEntry,
+            db: db,
+            downloader: dl,
+            recordIssue: { [weak self] error in
+                await self?.recordIssue(SyncIssueClassifier.classify(error: error, path: item.path))
+            }
+        )
+        // 退避コピーを作れたら手動マージの可能性を通知（fire-and-forget・pull 側と同じ既存イベント）。
+        if let copy = result.conflictCopyPath {
+            Task { await self.notifier?.post(.conflictCopyCreated(path: item.path, localCopyPath: copy)) }
+        }
+        return result.tookOwnership
+    }
+
+    /// アップロード競合解決の本体（回復可能順序）。`pruneOrphanTransfers` と同型の依存注入 static。
+    ///
+    /// 不変条件: **リネームはキュー行除去を決して上回らない**。先に item.id 基準で行を除去し、成功した
+    /// 場合にのみ不可逆な `renameLocalForConflict`（FS 移動 + FileRecord 削除）へ進む。これにより
+    /// 「canonical 消失 + キュー行残存」を作らない（さもないと再処理が `convertQueueItemToDelete` →
+    /// リモート delete-marker ＝他端末のデータ損失）。
+    ///
+    /// 失敗時はすべて次回 pull で自己回復する: rename 失敗ならローカルが残り pull 側 `.conflictThenDownload`
+    /// が退避+取得、download 失敗なら `local absent + remote present → .download` で正規パスを再投入。
+    nonisolated static func resolveUploadConflict(
+        item: UploadQueueRecord,
+        remoteEntry: ManifestFileEntry,
+        db: LocalDatabase,
+        downloader: Downloader,
+        recordIssue: @Sendable (Error) async -> Void
+    ) async -> UploadConflictResolution {
+        // 1. キュー行を item.id 基準で除去（give-up 加算なし）。失敗なら何も壊さず呼出側へ委ねる。
+        do {
+            try await db.pool.write { db in
+                try UploadQueueRecord
+                    .filter(Column("id") == item.id)
+                    .deleteAll(db)
+            }
+        } catch {
+            AppLogger.sync.error("Upload-conflict: failed to remove queue row for \(item.path, privacy: .private): \(String(describing: error), privacy: .private)")
+            return UploadConflictResolution(tookOwnership: false, conflictCopyPath: nil)
+        }
+
+        // 2. ローカル編集をコンフリクトコピーへ退避（FileRecord も削除）。行は既に除去済みなので、
+        //    ここで失敗してもリモート delete-marker は起き得ない。次回 pull が退避+取得して回復する。
+        let localCopy: String
+        do {
+            localCopy = try downloader.renameLocalForConflict(relativePath: item.path)
+        } catch {
+            AppLogger.sync.error("Upload-conflict: rename failed for \(item.path, privacy: .private) (will heal on next pull): \(String(describing: error), privacy: .private)")
+            await recordIssue(error)
+            return UploadConflictResolution(tookOwnership: true, conflictCopyPath: nil)
+        }
+
+        // 3. ベストエフォートでリモート版を正規パスへ。versionId 指定で相手版を確実に取得（本体 PUT が
+        //    最新を自分の内容に変えているため）。キュー行は id 基準で所有済みなので path 基準削除はしない。
+        do {
+            try await downloader.download(
+                relativePath: item.path,
+                entry: remoteEntry,
+                versionId: remoteEntry.s3VersionId,
+                clearQueueByPath: false
+            )
+        } catch {
+            AppLogger.sync.error("Upload-conflict: download of remote version failed for \(item.path, privacy: .private) (will heal on next pull): \(String(describing: error), privacy: .private)")
+            await recordIssue(error)
+            // 退避は成功しているので通知はする（手動マージ可能・正規パスは次回 pull で回復）。
+        }
+
+        return UploadConflictResolution(tookOwnership: true, conflictCopyPath: localCopy)
+    }
+
     /// キューから消えた（安定して同期完了 or 除去された）path を unstableWarned から間引く。
     /// これで同じ path が後で再び不安定化したとき、また 1 回だけ「未バックアップ」を見せられる。
     /// アイドル周回で呼ぶ（このとき残るのは延期中の不安定行だけなので intersection が安全）。
@@ -1240,6 +1333,16 @@ final class SyncEngine {
     func clearIssues() {
         recentIssues.removeAll()
     }
+}
+
+/// `SyncEngine.resolveUploadConflict` の結果（Issue #25 / A）。
+struct UploadConflictResolution: Equatable, Sendable {
+    /// item.id 基準でキュー行を除去できたか。false なら呼出側は generic backoff へフォールバックする
+    /// （行は残存・ローカルファイルは無傷・リネームもしていない）。
+    let tookOwnership: Bool
+    /// 退避したコンフリクトコピーの相対パス。非 nil なら `.conflictCopyCreated` を通知する。
+    /// nil（rename 失敗で次回 pull に委ねる場合）は通知しない。
+    let conflictCopyPath: String?
 }
 
 /// NWPathMonitor のクロージャから @MainActor へ値を渡すための単純なロック付きホルダ。
