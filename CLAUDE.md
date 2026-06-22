@@ -190,6 +190,9 @@
 - **[mtime 不変条件]** `FileRecord.mtime` = 最後に同期した時点の**ローカル stat 実値**。マニフェスト ISO8601 秒精度値で上書きしない（毎起動再アップロードの自己持続サイクルになる）。`Downloader.markSynced` も stat 実値を記録。**マニフェスト mtime に fractional seconds を足さない**（`parseISO8601` が nil → now フォールバックでパース全滅）。
 - **[キュー行 id 基準]** アップロードキュー行の完了/失敗処理は **`item.id` 基準**で消す（`path` 基準にしない）。処理中に置換された新 id 行を巻き込むと無エラー乖離になる。
 - **[torn 安定化ゲート]** アップロードは読了後に同 FD を再 `fstat` し、size 変化 or mtime 前進があれば torn とみなして commit しない（`StabilityCheck` / `SyncError.fileChangedDuringUpload`）。不安定ファイルは give-up させず延期＋1 回可視化。
+- **[アップロード競合検出]** アップロードのマニフェスト書込は `Uploader.ManifestUpdater.updateFileEntry` で権威シャードの現 entry を読み `ThreeWayMerge.decideUpload` で判定する（無条件上書きしない）。`.conflict` は `SyncError.uploadConflict` を投げて RMW を安全中断＝**412/409 クラシファイアにマッチさせない**（リトライに飲ませない）。解決は pull 側 `.conflictThenDownload` と対称（リモート版が正規パスで勝つ）。Issue #25 / A。→ `docs/04` / `docs/08`
+- **[アップロード競合：リネーム≦キュー行除去]** `SyncEngine.resolveUploadConflict` は「**item.id 基準で行除去 → 成功時のみ** `renameLocalForConflict`」の順。canonical 消失とキュー行残存を同時に作らない（さもないと再処理が `convertQueueItemToDelete` → リモート delete-marker＝他端末データ損失）。失敗は次回 pull で自己回復。
+- **[アップロード競合：リモート版は versionId 取得]** 解決の取得は `Downloader.download(versionId: remoteEntry.s3VersionId, clearQueueByPath: false)`。本体 PUT が「最新」を自分の内容に変えているため最新取得では相手版を取れず sha 検証に失敗する。`clearQueueByPath:false` で同 path の新 id 行を巻き込まない（[キュー行 id 基準] の維持）。
 - **[ignore 優先順位]** ハードコード除外（機密網）が常に最優先。ユーザ `.syncignore` パターンは**未追跡ファイルのみ**に適用。`.syncignore` 自身は決して除外しない。判定は `IgnoreDecision.shouldSkip`（scan/event/reconcile の 3 経路共用）。
 - **[競合/復元コピー名]** `ConflictNamer` の命名は**時系列ソート可能書式**（`Date.VerbatimFormatStyle`・`YYYY-MM-DD HH-MM-SS`）。ロケール依存書式（`.dateTime` 等）にしない（辞書順が時系列にならない）。
 - **[エラー表示]** UI に見せるエラーは構造化型 `SyncIssue` に一本化し、生エラー文字列は `rawDetail` に隔離（オンデマンド参照のみ）。`sync_log.event_type` はリテラル禁止＝`SyncLogEventType` の rawValue。DB 内の path/message/details は英語生文字列なので UI では **`Text(verbatim:)`**。

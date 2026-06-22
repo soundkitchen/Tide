@@ -141,7 +141,7 @@ M2 の単純ルール（`04-SYNC-LOGIC.md`「競合解決」）を **ベース /
 - 全分岐を `ThreeWayMergeTests` で網羅（`make test` 緑）。
 
 ### 既知の制限 / 将来サブタスク
-- **アップロード側の last-writer-wins ギャップ**: 競合検出は pull/削除側のみ。同一ベースから 2 台が編集すると後勝ちでマニフェストが上書きされ、先に上げた側は次回 pull で「local == base＝未編集」判定で相手版を取り込み、ローカル編集がワーキングコピーから消える（S3 バージョン履歴には残る）。対称化＝`Uploader.processUpload` 直前にも `ThreeWayMerge` を適用（per-upload でリモートマニフェスト読み + アップロード側コンフリクト経路の新設）は別サブタスク。
+- **アップロード側の last-writer-wins ギャップ（✅ 解消済み 2026-06-23・Issue #25 / A・M3 ではスコープ外だった）**: 競合検出は当時 pull/削除側のみだった。同一ベースから 2 台が編集すると後勝ちでマニフェストが上書きされ、先に上げた側は次回 pull で「local == base＝未編集」判定で相手版を取り込み、ローカル編集がワーキングコピーから消えていた（S3 バージョン履歴には残る）。**v0.2.0 で対称化**: `ThreeWayMerge.decideUpload` + `Uploader.ManifestUpdater.updateFileEntry`（書込シームでリモートマニフェスト読み）+ `SyncEngine.resolveUploadConflict`（リモート版が正規パスで勝つ・versionId 指定取得）。詳細は `docs/04-SYNC-LOGIC.md` /  `docs/08-IMPLEMENTATION-NOTES.md`「アップロード側の並行更新検出」。
 - **配線部（`MergeDecision` → 実 I/O）が未結合テスト**（PR #3 レビュー指摘 2）: `decide()` の純粋ロジックは全分岐網羅したが、「`.deleteLocal` が削除+DB削除+log」「`.conflictThenDownload` が rename→download」等の switch マッピングを検証する結合テストは無い（switch の取り違えを回帰検出できない）。`Downloader.applyRemoteDeletion` は S3 を使わないので、`MultipartUploadClient` と同様に `Downloader` へ最小 S3 シームを切れば temp DB + temp syncRoot で削除側の結合テストが可能。重いので別サブタスクに据え置き。
 
 ---

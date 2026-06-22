@@ -52,7 +52,15 @@
 
 ### 競合解決（3-way merge・M3 サブ C）
 - **競合解決の判定は純粋関数 `ThreeWayMerge.decide(base:local:remote:) -> MergeDecision` に一本化**（`Tide/Core/ThreeWayMerge.swift`）。`reconcileRemoteEntry`（pull 側）と `applyRemoteDeletion`（削除側）の両方がこれを通す。**ベース = `FileRecord.sha256`（ローカル DB）**、マニフェスト schema は拡張しない。判定ロジックを副作用から切り離し、全分岐を `ThreeWayMergeTests` で網羅（`IgnoreDecision`/`PartPlan` と同じパターン）。挙動は旧 M2 表（`docs/04-SYNC-LOGIC.md`）と 1:1 一致。
-- **アップロード側に並行更新検出は無い（last-writer-wins ギャップ・据え置き）**。競合検出は pull/削除側のみ。詳細は docs/09-DEFERRED.md 参照。
+- **アップロード側の並行更新検出（last-writer-wins 解消・Issue #25 / A・2026-06-23）**。下記の専用節を参照。
+
+### アップロード側の並行更新検出（Issue #25 / A・2026-06-23）
+- **判定**: 純粋関数 `ThreeWayMerge.decideUpload(base:uploading:remote:) -> UploadMergeDecision{proceed, alreadyUpToDate, conflict}`。pull 側 `decide` と対称。全分岐を `ThreeWayMergeTests` の `decideUpload` テーブルで固定。
+- **検出は書込シームで（追加 GET なし）**: `Uploader.ManifestUpdater.updateFileEntry` が `withConditionalRetry` 内のフェッチ済みシャードから現リモート entry を読み判定。`.conflict`→`SyncError.uploadConflict(path:remoteEntry:)` を投げて RMW を安全中断（`S3ErrorClassifier.isPreconditionFailed/isConditionalConflict` にマッチせず即伝播）。412/409 再フェッチ時は同 retry 内で再評価＝無音上書きの窓は実質ゼロ。`.alreadyUpToDate` は put せず、`processUpload` は DB をリモート版 identity（etag/versionId）+ ローカル stat mtime で記録して次回 pull を no-op に（`ChangeDetector.reconcileIsNoop` 成立）。
+- **解決は pull 側 `.conflictThenDownload` と対称・回復可能順序**: `SyncEngine.resolveUploadConflict`（`nonisolated static`・`pruneOrphanTransfers` と同型の依存注入）。① キュー行を **item.id 基準で除去**（give-up 加算なし）→ ② `renameLocalForConflict` でローカル編集を `(local copy …)` へ退避 → ③ リモート版を **versionId 指定** + `clearQueueByPath:false` で正規パスへ取得 → ④ `.conflictCopyCreated` を @MainActor 側で通知。`@MainActor handleUploadConflict` が Downloader 構築・通知・recordIssue だけを担い、本体は `UploaderConflictTests` で結合固定。
+- **なぜ versionId 取得が必須か**: 本体 PUT がマニフェスト判定より先に走るので、`.conflict` 時には `files/<path>` の**最新が自分の内容**になっている。最新取得（versionId なし）だと自分の内容を取り直して `entry.sha256` 検証に失敗する。`Downloader.download(versionId:)` で相手版を確実に取る（`RangedDownloadClient` に versionId を追加・`TideS3Client` は復元用の既存版で適合）。並行 pull（最新）との tmp 衝突を避けるため `resumeTmpURL` は versionId 指定時のみ名前に織り込む。
+- **なぜ「リネーム≦キュー行除去」か**: `renameLocalForConflict` は不可逆な FS 移動 + FileRecord 削除。これがキュー行除去より先に走り後続が失敗すると、canonical 欠落 + キュー行残存で再処理が `convertQueueItemToDelete` → リモート delete-marker（他端末データ損失）。だから行を先に除去し、成功時のみリネームする。rename/download が失敗しても次回 pull が `.conflictThenDownload` / `local-absent→download` で自己回復。
+- **残存レース（data loss でない・versioning backstop）**: (1) `.conflict` 時にマニフェスト未参照の orphan S3 version が 1 つ残る（読みは全て manifest の versionId 経由なので配信されない）。(2) 2 台同時 `.conflict` で互いのコピーができ得る（稀・自己収束）。
 
 ### リモート削除の取り扱い
 - **「リモートで消えたファイルをローカル削除するのは、ローカルファイルの SHA が DB 記録（最後にアップロードした内容）と一致するときのみ」**（= `ThreeWayMerge` の `.deleteLocal`）。一致しなければユーザが触っているとみなし（`.keepLocalRemoteDeleted`）、`sync_log` に warning を残してスキップ。`Downloader.applyRemoteDeletion`。
