@@ -71,7 +71,8 @@ targets:
         # MARKETING_VERSION を 0.1.1 に上げ、以降はタスク消化に応じて patch を刻む。
         # 機能セットが揃った節目で 0.2.0（minor）。リリースのタグはこの値を唯一のソースとする。
         # 0.1.1: #25 / A（アップロード側の並行更新検出）を着地（v0.2.0 タスクの最初の実コード）。
-        MARKETING_VERSION: "0.1.1"
+        # 0.1.2: #26 / B（HTTPS 強制バケットポリシー）を着地。
+        MARKETING_VERSION: "0.1.2"
         CURRENT_PROJECT_VERSION: "1"
     dependencies:
       - package: AWSSwiftSDK
