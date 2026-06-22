@@ -9,6 +9,12 @@ enum SyncError: Error, CustomStringConvertible {
     /// 読込中にローカルファイルが変化した（torn read を避けてコミットを見送った）。L6。
     /// リトライ扱いだが give-up カウントには載せず、安定するまで延期する。
     case fileChangedDuringUpload(path: String)
+    /// アップロード書込シームで並行更新を検出した（Issue #25 / A）。`remoteEntry` は権威シャードから
+    /// 読んだ現リモート版（正規パスへ下ろす版）。give-up カウントに載せず、SyncEngine がローカル編集を
+    /// コンフリクトコピーへ退避してから remoteEntry を正規パスへ取得し直す（pull 側と対称）。
+    /// `S3ErrorClassifier.isPreconditionFailed/isConditionalConflict` にマッチしない＝RMW リトライに
+    /// 飲まれず即伝播する。
+    case uploadConflict(path: String, remoteEntry: ManifestFileEntry)
     case awsError(underlying: Error)
     case databaseError(underlying: Error)
     case ioError(underlying: Error)
@@ -29,6 +35,8 @@ enum SyncError: Error, CustomStringConvertible {
             return "File exceeds the per-file upload size limit (\(size) bytes); not backed up. Adjust the limit in Settings: \(path)"
         case .fileChangedDuringUpload(let path):
             return "File changed during upload (torn read avoided); will retry when it settles: \(path)"
+        case .uploadConflict(let path, _):
+            return "Concurrent update detected on upload; keeping remote and saving local edits as a copy: \(path)"
         case .awsError(let err):
             return "AWS error: \(err)"
         case .databaseError(let err):

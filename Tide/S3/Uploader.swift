@@ -150,22 +150,38 @@ struct Uploader {
         }
         AppLogger.s3.info("Uploaded \(path, privacy: .private) (\(size) bytes)")
 
-        // 3. manifest update
-        try await ManifestUpdater(s3: s3, deviceId: deviceId).updateShard(
-            for: path
-        ) { shard in
-            shard.files[path] = ManifestFileEntry(
-                size: size,
-                mtime: ISO8601.format(mtimeDate),
-                sha256: sha256,
-                s3VersionId: result.versionId,
-                etag: result.etag,
-                deviceId: deviceId,
-                uploadedAt: ISO8601.now()
-            )
+        // 3. manifest update（Issue #25 / A: 書込直前に権威 entry を読み並行更新を検出）。
+        //    base = 最後にローカル DB へ記録した SHA。これと「今上げた sha256」「権威シャードの現リモート sha」を
+        //    decideUpload で突き合わせ、.conflict なら uploadConflict を投げて RMW を安全中断する（無音上書きしない）。
+        let base = try await db.pool.read { db in
+            try FileRecord.fetchOne(db, key: path)?.sha256
         }
+        let newEntry = ManifestFileEntry(
+            size: size,
+            mtime: ISO8601.format(mtimeDate),
+            sha256: sha256,
+            s3VersionId: result.versionId,
+            etag: result.etag,
+            deviceId: deviceId,
+            uploadedAt: ISO8601.now()
+        )
+        let outcome = try await ManifestUpdater(s3: s3, deviceId: deviceId).updateFileEntry(
+            for: path, base: base, newEntry: newEntry
+        )
 
         // 4. local DB
+        //    .wrote          → 自分の PUT identity（versionId/etag）を記録。
+        //    .alreadyUpToDate → 別書き手が確定済みのリモート版 identity を記録し、次回 pull を no-op にする
+        //                       （ChangeDetector.reconcileIsNoop の sha/etag/versionId 一致条件を満たす）。
+        //    size/sha は両者同一（alreadyUpToDate は remote == uploading ⟹ 同一内容 ⟹ 同一サイズ）。
+        //    mtime は常にローカル stat 実値（[mtime 不変条件]: マニフェスト ISO8601 秒精度で上書きしない）。
+        let identity: (versionId: String?, etag: String)
+        switch outcome {
+        case .wrote:
+            identity = (result.versionId, result.etag)
+        case .alreadyUpToDate(let remote):
+            identity = (remote.s3VersionId, remote.etag)
+        }
         let now = Date().timeIntervalSince1970
         try await db.pool.write { db in
             var rec = FileRecord(
@@ -173,8 +189,8 @@ struct Uploader {
                 size: size,
                 mtime: mtime,
                 sha256: sha256,
-                s3VersionId: result.versionId,
-                s3Etag: result.etag,
+                s3VersionId: identity.versionId,
+                s3Etag: identity.etag,
                 lastSyncedAt: now,
                 updatedAt: now
             )
@@ -246,10 +262,61 @@ struct Uploader {
     }
 }
 
+/// `updateFileEntry` の結果。アップロード書込シームでの並行更新検出（Issue #25 / A）の結末を表す。
+enum ShardUpdateOutcome: Equatable, Sendable {
+    /// 自分の entry でマニフェストを更新した。
+    case wrote
+    /// 別の書き手が同一内容を既に確定済みだった（マニフェスト書込せず）。
+    /// 付随する `ManifestFileEntry` は権威シャードの現リモート版＝ローカル DB をこの identity に合わせる。
+    case alreadyUpToDate(ManifestFileEntry)
+}
+
 /// シャードと index.json を楽観的ロックで更新する。
 struct ManifestUpdater {
     let s3: TideS3Client
     let deviceId: String
+
+    /// アップロードの per-file entry を、並行更新を検出しながら書き込む（Issue #25 / A）。
+    /// `withConditionalRetry` 内でフェッチ済みシャードの現エントリ（追加 GET なし）を読み、
+    /// `decideUpload(base:uploading:remote:)` で判定する:
+    /// - `.proceed` → 自分の entry を put（通常 / 再作成）。
+    /// - `.alreadyUpToDate` → put せず権威 entry を返す（別書き手が同一内容を確定済み）。
+    /// - `.conflict` → `SyncError.uploadConflict` を投げて RMW を安全中断（無音上書きしない）。
+    ///
+    /// 412/409 で再フェッチされた場合は同 retry 内で `decideUpload` を再評価するため、無音上書きの窓は
+    /// 実質ゼロに畳まれる（`uploadConflict` は 412/409 クラシファイアにマッチせず即伝播）。
+    func updateFileEntry(
+        for path: String,
+        base: String?,
+        newEntry: ManifestFileEntry
+    ) async throws -> ShardUpdateOutcome {
+        let shardId = ManifestSharding.shardId(for: path)
+        return try await withConditionalRetry("shard \(shardId)") {
+            let fetched = try await s3.getShard(shardId)
+            var shard = fetched?.value ?? ManifestShard.empty(id: shardId)
+            let etag = fetched?.etag
+            let existing = shard.files[path]
+            let decision = ThreeWayMerge.decideUpload(
+                base: base, uploading: newEntry.sha256, remote: existing?.sha256
+            )
+            // existing は decideUpload が .alreadyUpToDate / .conflict を返すとき必ず非 nil
+            // （remote == nil なら必ず .proceed）。理論上不到達の existing == nil は安全側で書込へ倒す。
+            if decision == .alreadyUpToDate, let existing {
+                return .alreadyUpToDate(existing)
+            }
+            if decision == .conflict, let existing {
+                throw SyncError.uploadConflict(path: path, remoteEntry: existing)
+            }
+
+            shard.files[path] = newEntry
+            shard.updatedAt = ISO8601.now()
+            let newEtag = try await s3.putShard(shard, ifMatch: etag)
+            try await updateIndex { idx in
+                idx.shards[shardId] = .init(etag: newEtag, count: shard.files.count)
+            }
+            return .wrote
+        }
+    }
 
     func updateShard(
         for path: String,
