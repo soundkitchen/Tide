@@ -10,7 +10,7 @@
 下記の据え置き項目は v0.2.0（自分用ソース反復）のタスクとして GitHub Issue に登録した。実装の追跡は Issue 側で行い、本ファイルは経緯の記録として残す。スコープ確定の経緯は `~/.claude/plans/version-0-2-0-*.md`（会話で確定した方針）参照。
 
 - **A（最重要）= [#25]**: アップロード側の並行更新検出（last-writer-wins 解消）。✅ **解消済み（2026-06-23）**。本ファイル「アップロード側の並行更新検出」項。解決方向は **リモート版を正規パスに残す**（自分の編集を `(local copy …)` へ退避＝pull 側と対称）。
-- **B = [#26]**: C3 後半 — HTTPS 強制バケットポリシー。
+- **B = [#26]**: C3 後半 — HTTPS 強制バケットポリシー。✅ **解消済み（2026-06-23）**。`enforceTLSBucketPolicy()` で `aws:SecureTransport=false` を Deny するポリシーを冪等適用（純粋 `BucketPolicyBuilder` + セットアップ時＋起動時の非致命適用）。`security/critical.md` C3 / `docs/06` IAM 参照。
 - **C1 = [#27]**: ネスト `.syncignore`。
 - **C2 = [#28]**: 復元 UI — 同期一覧からのファイル選択（本ファイル「M4 復元 UI の据え置き」(e)）。
 - **C3 = [#29]（ストレッチ）**: 残りの復元 UI 拡張（同 (a) CopyObject / (b) 削除一覧の増分化 / 設定 export）。
@@ -42,7 +42,7 @@
 
 ---
 
-- **C3 後半**: HTTPS 強制バケットポリシー（`PutBucketPolicy` で `aws:SecureTransport=true`）。SDK 自体は HTTPS 既定で送るので緊急度は低い。
+- **C3 後半（✅ 解消済み 2026-06-23・Issue #26 / B）**: HTTPS 強制バケットポリシー。`enforceTLSBucketPolicy()` で `aws:SecureTransport=false` を Deny する statement（`Sid: TideDenyInsecureTransport`）を `BucketPolicyBuilder` で冪等にマージし、セットアップ時＋起動時に**非致命**で適用（SDK 既定 HTTPS の多層防御。他 statement は保持・既存バケット/ドリフトは起動時に自己修復）。`PutBucketEncryption` のバケットデフォルト暗号化のみ optional 据置き（per-object SSE-S3 明示済みで実害なし）。`security/critical.md` C3 / `docs/06` IAM。
 - **H3**: 静的 AWS キー → STS / IAM Identity Center への構造的置き換え。M3 以降で要検討。
 - **M5 / F3 (L9)**: ✅ 解消済み（2026-06-02）。M3 マルチパート対応で `NoFollowFileReader`（`O_NOFOLLOW` の単一 FD）に置換し、ハッシュ計算と本体読込/パート送信を同一 FD 化＝2 回 open の TOCTOU を構造的に解消。`O_NOFOLLOW` は最終コンポーネントのみ有効（祖先 symlink は別レイヤ）。
 - **中断・再開（サブタスク D・進行中）**: D1（`transfer_state` + `TransferStateStore`）/ D2（アップロードの再起動またぎ再開）/ D3（ダウンロードの Range 再開）は ✅ 実装済み（2026-06-04）。アップロードは `MultipartUploader.ResumeContext` で UploadId と完了パートを checkpoint。ダウンロードは `Downloader` が決定的 tmp（`dl-<sha(path)>.part`）＋ `transfer_state`（tmp_path/expected_etag）で、永続行が現エントリ etag と一致すれば `streamObject(rangeStart:)` で `Range: bytes=N-` 再開し、既存プレフィクスを読み直して全体 SHA を復元、最後に必ず期待 SHA と突合。ネットワーク失敗は部分 tmp と行を保持して次回再開、etag 不一致/SHA 不一致/サイズ超過/404 は破棄して仕切り直す。D4 進捗 UI（下記「転送進捗 UI」）と D5（`SyncEngine.start()` 冒頭の `pruneOrphanTransfers` で消えたファイル/古い行/宙ぶらりん UploadId を best-effort 掃除 + `security/low.md` L12 レビュー）も ✅ 実装済み。**PR #4 レビュー反映（2026-06-05）**: download 失敗時に `recordDownloadProgress` を配線して `bytes_done`/`updated_at` を前進（prune の stale 判定が実活動を反映）、fresh の tmp 書込を `O_NOFOLLOW|O_EXCL` 化（symlink 追従窓を解消）、空 etag では再開しないガード、`applyProgress` を純粋関数 `TransferProgress.reduce` に切り出して `TransferProgressTests` で out-of-order 耐性を固定。**実機受け入れチェックリストも全項目消化済み（✅ 2026-06-07・チェックリストは運用ルールどおり削除）＝サブタスク D 完了**。消化中に発見した項目は本節下方の 3 項（L6 実害化／DL prune の invalidate 漏れ（✅ 修正済み 2026-06-07）／毎起動再アップロード（✅ 修正済み 2026-06-08））を参照。詳細は `docs/07-M3-IMPLEMENTATION-GUIDE.md` サブタスク D。

@@ -63,7 +63,7 @@ F4 の是正内容（2026-06-11・M4 Sync Activity 対応に同梱）: `recentEr
 |---|---|---|
 | C1 | パストラバーサル | ✅ Fixed |
 | C2 | symlink フォロー | ✅ Fixed |
-| C3 | SSE / Public Access Block / HTTPS 強制 | 🟡 Partial — SSE + PublicAccessBlock 適用、HTTPS バケットポリシーは据置き |
+| C3 | SSE / Public Access Block / HTTPS 強制 | ✅ Fixed（2026-06-23・#26）— SSE-S3 明示 + Public Access Block + HTTPS 強制（`aws:SecureTransport=false` Deny）適用。PutBucketEncryption デフォルト暗号化のみ optional 据置き |
 | H1 | Keychain 属性 | ✅ Fixed |
 | H2 | エラー詳細のログ露出 | ✅ Fixed（UI 残 F4 も 2026-06-11 に分類サマリ化で解消） |
 | H3 | 静的キー長期保管 | 🟡 Mitigated — docs 注記のみ。構造的対応は将来 |

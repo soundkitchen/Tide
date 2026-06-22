@@ -220,7 +220,7 @@ soundkitchen のレビュー（ブロッカー無し）を受けて 4 点を対�
 ## 共通タスク（M3 全体に共通する作業）
 
 - マニフェストバージョン番号の bump（既存 `version: 1` を `2` に上げて、リーダ側で互換層を持つかどうか議論）
-- セキュリティレビューの C3 後半 (`PutBucketPolicy` で HTTPS 強制)、H3（IAM Identity Center 検討）を必要に応じて並行で
+- セキュリティレビューの C3 後半 (`PutBucketPolicy` で HTTPS 強制) → ✅ **解消済み（2026-06-23・Issue #26 / B・M3 ではスコープ外だった）**。`enforceTLSBucketPolicy()` で `aws:SecureTransport=false` Deny を冪等適用（`security/critical.md` C3 / `docs/09`）。H3（IAM Identity Center 検討）は引き続き据え置き
 - 動作確認用に `tmp/M3-動作チェックリスト.md` を切る運用は M1 / M2 と同じ
 
 ## 着手前の必読
