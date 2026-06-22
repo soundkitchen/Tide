@@ -39,6 +39,18 @@ enum MergeDecision: Equatable, Sendable {
     case noop
 }
 
+/// アップロード側（書込シーム）の競合判定。pull 側の `MergeDecision` と対称で、
+/// 「2 番目の書き手」がマニフェスト書込直前に権威シャードの per-file entry を読んで決める。
+enum UploadMergeDecision: Equatable, Sendable {
+    /// マニフェストを自分の entry で更新してよい（リモート未存在＝再作成、またはリモート == base＝未変化）。
+    case proceed
+    /// 別の書き手が**同一内容**を既に確定済み → マニフェスト書込は不要。
+    /// ローカル DB はリモート entry の identity（etag/versionId）へ合わせて次回 pull を no-op にする。
+    case alreadyUpToDate
+    /// リモートが base とも自分の内容とも異なる別内容に変化済み → 双方乖離。無音上書きせず退避する。
+    case conflict
+}
+
 enum ThreeWayMerge {
     /// 3-way の決定。
     /// - Parameters:
@@ -75,5 +87,29 @@ enum ThreeWayMerge {
             // ローカルも編集済み（base != local）or 未追跡（base == nil）→ 双方乖離 → コンフリクト。
             return .conflictThenDownload
         }
+    }
+
+    /// アップロード側の競合判定。書込シーム（`Uploader.ManifestUpdater.updateFileEntry`）で、
+    /// 権威シャードから読んだ現リモート SHA と、これからアップロードする内容・base を突き合わせる。
+    /// pull 側 `decide()` と対称で「リモート版が正規パスで勝つ」方針を実現する純粋ロジック。
+    /// - Parameters:
+    ///   - base: 最後にローカル DB へ記録した SHA（`FileRecord.sha256`）。未追跡は `nil`。
+    ///   - uploading: 今アップロードした本体の SHA（hex 小文字）。
+    ///   - remote: 権威シャードの per-file entry の SHA（`shard.files[path]?.sha256`）。未存在は `nil`。
+    static func decideUpload(base: String?, uploading: String, remote: String?) -> UploadMergeDecision {
+        guard let remote else {
+            // リモートに無い（誰も持っていない / 削除済み）→ 自分の entry で再作成してよい。
+            return .proceed
+        }
+        if remote == uploading {
+            // 別の書き手が同一内容を確定済み → 書込不要（DB だけリモート identity へ合わせる）。
+            return .alreadyUpToDate
+        }
+        if let base, remote == base {
+            // 前回同期後リモート未変化（自分だけが編集）→ 通常更新。
+            return .proceed
+        }
+        // リモートが base とも自分の内容とも異なる（相手が別内容を上げた / 未追跡で別内容）→ 競合。
+        return .conflict
     }
 }
