@@ -59,7 +59,7 @@
 
 2. `Storage/KeychainStore.swift`:
    - Security framework 直接使用
-   - サービス名: `com.example.tide`
+   - サービス名: `org.izukawa.Tide`
    - アカウント: `aws_access_key_id`, `aws_secret_access_key`
    - メソッド: `save(credentials:)`, `load() throws -> AWSCredentials?`, `delete()`
 
@@ -177,7 +177,7 @@
 
 ### ステップ10: UI
 
-1. `App/TideApp.swift`:
+1. `App/TideApp.swift`（下記は M1 当時のスケッチ。現状は `NSApplicationDelegateAdaptor` 経由の eager bootstrap、`MenuBarLabel` による自前フレームアニメ、Scene は `settings`/`setup`/`versions`/`activity`/`about` の 5 つに拡張済み。現コードを正とする）:
    ```swift
    @main
    struct TideApp: App {
@@ -277,10 +277,10 @@ extension SyncError {
 import os
 
 enum AppLogger {
-    static let sync = Logger(subsystem: "com.example.tide", category: "sync")
-    static let s3 = Logger(subsystem: "com.example.tide", category: "s3")
-    static let db = Logger(subsystem: "com.example.tide", category: "database")
-    static let ui = Logger(subsystem: "com.example.tide", category: "ui")
+    static let sync = Logger(subsystem: "org.izukawa.Tide", category: "sync")
+    static let s3 = Logger(subsystem: "org.izukawa.Tide", category: "s3")
+    static let db = Logger(subsystem: "org.izukawa.Tide", category: "database")
+    static let ui = Logger(subsystem: "org.izukawa.Tide", category: "ui")
 }
 
 // 使用例

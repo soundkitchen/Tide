@@ -1,9 +1,11 @@
 # 同期ロジック
 
-> **スコープの現状 (2026-06-05)**:
+> **スコープの現状**:
 > - **M1 完了**: ローカル → S3 の一方向アップロード（本書の前半）
 > - **M2 完了**: S3 → ローカルのダウンロード、定期ポーリング、リモート削除反映、コンフリクトリネーム（本書末尾「M2 セクション」）
-> - **M3 サブ A〜D 実装済み**: 形式的な 3-way merge（サブ C・本書「競合解決」）、マルチパートアップロード / レンジダウンロード再開（サブ A・D）、`.syncignore`（サブ B）、中断・再開（サブ D）。帯域制御（E）は未着手。詳細は `07-M3-IMPLEMENTATION-GUIDE.md`
+> - **M3 完了（サブ A〜E）**: 形式的な 3-way merge（サブ C・本書「競合解決」）、マルチパートアップロード / レンジダウンロード再開（サブ A・D）、`.syncignore`（サブ B）、中断・再開（サブ D）、帯域制御（サブ E・`RateLimiter`）。詳細は `07-M3-IMPLEMENTATION-GUIDE.md`
+>
+> 注: 本書前半（M1）の擬似コードには当時のスケッチが残っている箇所がある（object metadata の sha256、`HardcodedIgnoreRules` のシグネチャ等）。後続セクションで設計が更新された点はその都度注記し、実コードを正とする。
 
 ## M1 のスコープ
 
@@ -108,8 +110,9 @@ func processUpload(_ queueItem: UploadQueueRecord) async throws {
     let sha256 = SHA256.hash(data: data).hex
     
     // 2. S3 にアップロード
+    // ※ 現行実装は object metadata に sha256 を載せない（CreateMultipartUpload 時点で
+    //    未確定なため。整合性の真実は ManifestFileEntry.sha256 に置く）。metadata は mtime/device/size のみ。
     let metadata = [
-        "sha256": sha256,
         "mtime": ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: mtime)),
         "device": deviceId,
         "size": String(size)
@@ -184,19 +187,20 @@ func updateShard(shardId: String, transform: (inout ManifestShard) -> Void) asyn
     
     for attempt in 0..<maxRetries {
         do {
-            // 1. 現在のシャードを取得
-            let (currentShard, currentETag) = try await s3Client.getShardWithETag(shardId) 
-                ?? (ManifestShard.empty(id: shardId), nil)
+            // 1. 現在のシャードを取得（実 API は getShard が ManifestFetch を返し .etag を含む）
+            let fetched = try await s3Client.getShard(shardId)
+            let currentShard = fetched?.value ?? ManifestShard.empty(id: shardId)
+            let currentETag = fetched?.etag
             
             // 2. 変換適用
             var newShard = currentShard
             transform(&newShard)
             newShard.updatedAt = Date()
             
-            // 3. 楽観的ロックで PUT
+            // 3. 楽観的ロックで PUT（実 API は putShard(_:ifMatch:) -> String）
             let newETag = try await s3Client.putShard(
                 newShard,
-                expectedETag: currentETag  // nil の場合は If-None-Match: * を付ける
+                ifMatch: currentETag  // nil の場合は If-None-Match: * を付ける
             )
             
             // 4. index.json も更新
@@ -330,36 +334,30 @@ func resumeQueue() async throws {
 
 ## 除外ルール（M1）
 
-M1 では `.syncignore` 対応はしない。ハードコードの除外のみ:
+M1 では `.syncignore` 対応はしない。ハードコードの除外のみ（下記は M1 当時のスケッチ）:
+
+> ※ 現行の `HardcodedIgnoreRules`（`Tide/Core/IgnoreRules.swift`）は機密網として大幅に拡張済み。
+> プロパティは `exactNames`（OS ジャンク + `.tide` + `.aws`/`.ssh`/`id_rsa` 等の機密 dotfile）、
+> `prefixPatterns`、`suffixPatterns`（`.pem`/`.key`/`.p12`/`.pfx`/`.keystore`）に分かれ、判定メソッドは
+> `shouldIgnore(relativePath:)`。新しい dotfile/拡張子で機密が紛れ込みそうなら即追加する運用（CLAUDE.md 参照）。
 
 ```swift
 struct HardcodedIgnoreRules {
-    static let patterns: Set<String> = [
-        ".DS_Store",
-        "Thumbs.db",
-        ".Spotlight-V100",
-        ".Trashes",
-        ".fseventsd",
-        ".TemporaryItems"
+    // ↓ M1 当時のスケッチ。現行のシグネチャ・除外集合は IgnoreRules.swift を正とする
+    static let exactNames: Set<String> = [
+        ".DS_Store", "Thumbs.db", ".Spotlight-V100", ".Trashes", ".fseventsd", ".TemporaryItems",
+        // ... 加えて .tide / 各種機密 dotfile（.aws / .ssh / id_rsa 等）
     ]
-    
-    static let prefixPatterns = [
-        ".DocumentRevisions-V100"
-    ]
-    
-    static func shouldIgnore(path: String) -> Bool {
-        let components = path.split(separator: "/")
-        
-        // パス中のどこかに除外対象があれば除外
+    static let prefixPatterns = [".DocumentRevisions-V100" /* 他 */]
+    static let suffixPatterns = [".pem", ".key", ".p12", ".pfx", ".keystore"]
+
+    static func shouldIgnore(relativePath: String) -> Bool {
+        let components = relativePath.split(separator: "/")
         for component in components {
-            if patterns.contains(String(component)) {
-                return true
-            }
-            for prefix in prefixPatterns {
-                if component.hasPrefix(prefix) {
-                    return true
-                }
-            }
+            let name = String(component)
+            if exactNames.contains(name) { return true }
+            if prefixPatterns.contains(where: { name.hasPrefix($0) }) { return true }
+            if suffixPatterns.contains(where: { name.hasSuffix($0) }) { return true }
         }
         return false
     }

@@ -251,7 +251,9 @@ struct ShardStateRecord: Codable, FetchableRecord, MutablePersistableRecord {
 
 ## 重要なクエリ
 
-### 未同期のファイル取得
+> 以下は概念説明用の簡略例。現行の差分検出は `ChangeDetector`（stat ベースの `preDecision` / `postHash`）が担い、未同期判定は部分インデックス `idx_files_unsynced`（`WHERE last_synced_at IS NULL`）を前提とする。
+
+### 未同期のファイル取得（概念例）
 
 ```swift
 let unsynced = try FileRecord
@@ -261,18 +263,24 @@ let unsynced = try FileRecord
 
 ### リトライ対象のキュー取得
 
+実装は give-up 上限 `attempts < 5` を先頭に持ち、1 周あたり 20 件取る（`SyncEngine.fetchReadyItems`）。
+attempts が 5 に達した行はリトライ対象から外れ、give-up 扱いになる。
+
 ```swift
 let now = Date().timeIntervalSince1970
 let ready = try UploadQueueRecord
+    .filter(Column("attempts") < 5)
     .filter(Column("next_retry_at") <= now || Column("next_retry_at") == nil)
     .order(Column("enqueued_at"))
-    .limit(10)
+    .limit(20)
     .fetchAll(db)
 ```
 
-### ハッシュキャッシュのヒット判定
+### ハッシュキャッシュのヒット判定（概念例）
 
-ファイルの (size, mtime) が DB と一致したらハッシュ計算スキップ:
+ファイルの (size, mtime) が DB と一致したらハッシュ計算スキップ。実装の `ChangeDetector.preDecision`
+は 3 値（`.skip` / `.enqueue` / `.verifyHash`）を返し、「size 一致だが mtime 不一致」のときは
+`.verifyHash`（SHA 再計算で内容変化を確認）に分岐する:
 
 ```swift
 let record = try FileRecord.fetchOne(db, key: relativePath)
@@ -281,7 +289,7 @@ let needsHash = record == nil ||
                 abs((record?.mtime ?? 0) - currentMtime) > 0.001
 ```
 
-mtime 比較で 1ms の許容を入れているのは、ファイルシステムの精度差吸収のため。
+mtime 比較で 1ms の許容（`abs(diff) < 0.001` を一致扱い）を入れているのは、ファイルシステムの精度差吸収のため。
 
 ## キャッシュサイズの管理
 

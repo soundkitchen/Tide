@@ -168,12 +168,12 @@ macOS のログイン項目に登録するには:
 ### ログの確認
 
 Console.app で以下のフィルタ:
-- Subsystem: `com.example.tide`
+- Subsystem: `org.izukawa.Tide`
 - Process: `Tide`
 
 コマンドラインなら:
 ```bash
-log stream --predicate 'subsystem == "com.example.tide"' --level debug
+log stream --predicate 'subsystem == "org.izukawa.Tide"' --level debug
 ```
 
 ### ローカル DB の確認
@@ -236,10 +236,10 @@ aws s3api list-object-versions --bucket your-bucket \
 rm -rf ~/Library/Application\ Support/Tide
 
 # 設定削除
-defaults delete com.example.tide
+defaults delete org.izukawa.Tide
 
 # Keychain からも削除（手動で Keychain Access から、または）
-security delete-generic-password -s com.example.tide
+security delete-generic-password -s org.izukawa.Tide
 ```
 
 ## 既知の落とし穴

@@ -104,7 +104,7 @@ s3://<user-bucket>/
   - `size`: バイト数。
   - `mtime`: ファイルの修正時刻（ローカルファイルシステムから取得）。ISO8601 UTC。
   - `sha256`: ファイル内容の SHA-256。hex 小文字。
-  - `s3_version_id`: アップロード時に S3 が返した version ID。
+  - `s3_version_id`: アップロード時に S3 が返した version ID。省略可（バージョニング無効バケット等では無し。`ManifestFileEntry.s3VersionId` は `String?`）。
   - `etag`: S3 が返した ETag。シングルパートアップロードなら MD5 と一致。**マルチパート（M3、16MiB 超）では `<md5>-<partcount>` 形式**。整合性検証は `sha256` ベースなので etag は情報用途（パース不要）。
   - `device_id`: アップロードしたデバイスの ID。
   - `uploaded_at`: アップロード完了時刻。
@@ -116,8 +116,8 @@ s3://<user-bucket>/
 ```swift
 func shardId(for path: String) -> String {
     // SHA-1 を使う（速いから、暗号強度は不要）
-    let hash = SHA1.hash(data: Data(path.utf8))
-    let firstByte = hash.first!
+    let hash = Array(Insecure.SHA1.hash(data: Data(path.utf8)))
+    let firstByte = hash[0]
     return String(format: "%02x", firstByte)
 }
 ```
@@ -250,7 +250,7 @@ let input = PutObjectInput(
 {
   "ID": "tide-abort-incomplete-multipart",
   "Status": "Enabled",
-  "Filter": {},
+  "Filter": { "Prefix": "" },
   "AbortIncompleteMultipartUpload": {
     "DaysAfterInitiation": 7
   }
@@ -265,7 +265,7 @@ let input = PutObjectInput(
 {
   "ID": "tide-expire-old-versions",
   "Status": "Enabled",
-  "Filter": {},
+  "Filter": { "Prefix": "" },
   "NoncurrentVersionExpiration": {
     "NoncurrentDays": 90
   }
@@ -280,7 +280,7 @@ let input = PutObjectInput(
 {
   "ID": "tide-expire-delete-markers",
   "Status": "Enabled",
-  "Filter": {},
+  "Filter": { "Prefix": "" },
   "Expiration": {
     "ExpiredObjectDeleteMarker": true
   }
