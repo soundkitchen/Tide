@@ -4,7 +4,7 @@
 
 **Status:** ✅ Fixed (2026-05-24) — `Tide/Core/PathValidator.swift` を新設。`Downloader.download` / `applyRemoteDeletion` / `renameLocalForConflict`、`SyncEngine.reconcileRemoteEntry` / `performFullScan`、`Uploader.processUpload` / `processDelete` の各入口で `validateRelativePath` + `resolveSafely` を呼び、`..` / 絶対パス / NUL / バックスラッシュ / 空コンポーネントを拒否し、解決後 URL が `syncRoot` 配下に収まることも検証する。`ManifestReader.read` が manifest のキーを取り込む前にも検証する。
 
-**該当箇所:** `Tide/S3/Downloader.swift:20-21, 76`、`Tide/Core/SyncEngine.swift:394`
+**該当箇所（対応コード）:** 検証は `Tide/Core/PathValidator.swift`（`validateRelativePath` / `resolveSafely` / `resolveForWrite`）。呼び出し入口は `Downloader.download`（`Downloader.swift:64` の `resolveForWrite`、commit は `:226` の `moveItem`）、`renameLocalForConflict`（`:259-260`）、`applyRemoteDeletion`（`:290`）、`SyncEngine.reconcileRemoteEntry`（`SyncEngine.swift:739`）、`performFullScan`（`:500`）、`ManifestReader.read`。以下は対策前の脆弱だったコード（参考）:
 
 ```swift
 let fullURL = syncRoot.appendingPathComponent(relativePath)
@@ -29,7 +29,7 @@ try FileManager.default.moveItem(at: tmpURL, to: fullURL)
 
 **Status:** ✅ Fixed (2026-05-24) — `performFullScan` のウォーカーで `.isSymbolicLinkKey` を取得、symlink なら `skipDescendants()` してから `continue`。`Downloader` の書き込み先がシンボリックリンクなら拒否（リンク先実体の書き換えを防ぐ）。`applyRemoteDeletion` も symlink を削除対象から除外。
 
-**該当箇所:** `Tide/Core/SyncEngine.swift:226-232`
+**該当箇所（対応コード）:** `Tide/Core/SyncEngine.swift:474-492`（enumerator 構築 + `.isSymbolicLinkKey` 取得 → symlink なら `skipDescendants()` + `continue`）。Downloader の書き込み先 symlink 拒否（`Downloader.swift:66-68`）、`applyRemoteDeletion` の symlink 除外（`:292-295`）。以下は対策前の、symlink を辿っていたコード（参考）:
 
 ```swift
 let walker = fm.enumerator(

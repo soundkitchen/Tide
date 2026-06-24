@@ -1,7 +1,9 @@
-# Tide アーキテクチャ（M1 + M2 実装後の現状）
+# Tide アーキテクチャ（M1〜M4 実装後の現状）
 
-> 当初は「M1 のみ」を対象に書かれたが、M2 の実装完了に伴って構成を更新した。
-> M3 で追加されるコンポーネントは [`07-M3-IMPLEMENTATION-GUIDE.md`](07-M3-IMPLEMENTATION-GUIDE.md) を参照。
+> 当初は「M1 のみ」を対象に書かれたが、M2〜M4 の実装完了に伴って構成を更新した。
+> 本書の API シグネチャの一部は M1 当時のスケッチが残っている箇所がある（その旨を各所に注記）。
+> M3 で追加されたコンポーネントの設計詳細は [`07-M3-IMPLEMENTATION-GUIDE.md`](07-M3-IMPLEMENTATION-GUIDE.md)、
+> 確定した実装判断は [`08-IMPLEMENTATION-NOTES.md`](08-IMPLEMENTATION-NOTES.md) を参照。
 
 ## モジュール構成
 
@@ -12,25 +14,39 @@ Tide/
 ├── Makefile                          build / test / reset / fresh の統合
 ├── Tide/
 │   ├── App/
-│   │   ├── TideApp.swift              @main、メニューバー常駐
-│   │   └── AppEnvironment.swift       依存性注入コンテナ + factoryReset
+│   │   ├── TideApp.swift              @main、メニューバー常駐（NSApplicationDelegateAdaptor で eager bootstrap）
+│   │   ├── AppEnvironment.swift       依存性注入コンテナ + factoryReset
+│   │   └── NotificationManager.swift  UserNotifications 配信（@MainActor・初回発火時に許可要求）(M4)
 │   ├── UI/
 │   │   ├── MenuBarContent.swift       メニューバーのポップオーバー
-│   │   ├── SettingsWindow.swift       設定画面
+│   │   ├── MenuBarPresentation.swift  ポップオーバー表示ロジック（headline / issue グルーピング）(M4)
+│   │   ├── SettingsWindow.swift       設定画面（帯域上限 / 通知トグル / .syncignore 閲覧）
 │   │   ├── SetupWizardWindow.swift    初回セットアップ（リージョン Picker / バケット作成分岐）
 │   │   ├── VersionHistoryWindow.swift 過去バージョン / 削除済み復元ウィンドウ (M4)
 │   │   ├── VersionHistoryModel.swift  ↑の @MainActor @Observable モデル
 │   │   ├── SyncActivityWindow.swift   同期アクティビティ（sync_log 閲覧）ウィンドウ (M4)
-│   │   └── SyncActivityModel.swift    ↑の @MainActor @Observable モデル（フィルタ / ページング）
+│   │   ├── SyncActivityModel.swift    ↑の @MainActor @Observable モデル（フィルタ / ページング）
+│   │   ├── AboutWindow.swift          バージョン情報ウィンドウ（PR #24）
+│   │   └── UIHelpers.swift            UI 共通ヘルパー
 │   ├── Core/
-│   │   ├── SyncEngine.swift           同期制御の中枢（ローカル監視 + リモート pull）
+│   │   ├── SyncEngine.swift           同期制御の中枢（@MainActor @Observable・ローカル監視 + リモート pull）
 │   │   ├── FileWatcher.swift          FSEvents ラッパー
 │   │   ├── HashCalculator.swift       SHA-256 計算（ストリーミング）
+│   │   ├── ChangeDetector.swift       stat ベースの差分判定（preDecision / reconcileIsNoop）(M4)
+│   │   ├── ThreeWayMerge.swift        3-way merge 判定（decide / decideUpload）(M3)
 │   │   ├── IgnoreRules.swift          ハードコード除外 + 既定の機密ファイル除外
+│   │   ├── IgnoreDecision.swift       除外判定の統合（scan/event/reconcile 共用）(M3)
+│   │   ├── SyncIgnoreMatcher.swift    .syncignore パターンマッチ（線形時間 DP）(M3)
 │   │   ├── DebounceQueue.swift        変更イベントのデバウンス
+│   │   ├── RateLimiter.swift          帯域制御（トークンバケット）(M3)
+│   │   ├── StabilityCheck.swift       torn upload 検出（読了後の再 stat）(M3)
+│   │   ├── NoFollowFileReader.swift   O_NOFOLLOW 単一 FD 読み出し（TOCTOU 解消）(M3)
+│   │   ├── RestoreService.swift       過去バージョン / 削除済みの復元 (M4)
 │   │   ├── ConflictNamer.swift        コンフリクト時のリネーム命名 (M2)
 │   │   ├── PathValidator.swift        リモート由来パス / シャード ID の検証 (security)
 │   │   ├── TideTmpDirectory.swift     ダウンロード一時ディレクトリの解決 (M2)
+│   │   ├── DiagnosticsExporter.swift  診断情報エクスポート（PR #24）
+│   │   ├── NotificationPolicy.swift   通知発火判定（純粋関数・4 事象のみ）(M4)
 │   │   ├── AppLogger.swift            os.Logger ラッパー
 │   │   ├── SyncError.swift            アプリ独自エラー型
 │   │   └── SyncIssueClassifier.swift  エラー → SyncIssue 分類（純粋関数・F4/H2 対応）(M4)
@@ -38,31 +54,41 @@ Tide/
 │   │   ├── LocalDatabase.swift        GRDB.swift ラッパー
 │   │   ├── KeychainStore.swift        認証情報保管（Data Protection Keychain）
 │   │   ├── ConfigStore.swift          UserDefaults ラッパー
+│   │   ├── TransferStateStore.swift   中断・再開の転送状態永続化（transfer_state）(M3)
 │   │   └── Migrations.swift           DB マイグレーション定義
 │   ├── S3/
 │   │   ├── S3Client.swift             AWS SDK ラッパー（SSE-S3 / PublicAccessBlock / ensureLifecycleRules マージ）
+│   │   ├── BucketPolicyBuilder.swift  HTTPS 強制バケットポリシー生成（C3）
 │   │   ├── Manifest.swift             マニフェスト型 + JSON 入出力
 │   │   ├── ManifestSharding.swift     シャード振り分け（SHA-1 先頭バイト）
 │   │   ├── ManifestReader.swift       リモート状態の集約読み込み (M2)
 │   │   ├── Uploader.swift             アップロード処理 + ManifestUpdater
+│   │   ├── MultipartUploader.swift    マルチパートアップロード（自前ラッパ）(M3)
+│   │   ├── PartPlan.swift             マルチパートのパート分割計画 (M3)
 │   │   ├── Downloader.swift           ダウンロード + コンフリクトリネーム + 削除反映 (M2)
+│   │   ├── ObjectVersionHistory.swift バージョン一覧 / 削除済み列挙 (M4)
 │   │   └── KnownRegions.swift         AWS リージョン一覧（Picker 用）
 │   ├── Models/
-│   │   ├── FileEntry.swift            マニフェストのファイルエントリ
-│   │   ├── SyncEvent.swift            FileChangeEvent
-│   │   ├── SyncStatus.swift           同期状態（idle, syncing, error 等）
+│   │   ├── FileEntry.swift            マニフェストのファイルエントリ（型名は ManifestFileEntry）
+│   │   ├── SyncEvent.swift            ファイル変更イベント（型名は FileChangeEvent）
+│   │   ├── SyncStatus.swift           同期状態（notConfigured, idle, syncing, paused, error 等）
+│   │   ├── TransferProgress.swift     転送進捗 (M3)
 │   │   ├── SyncIssue.swift            UI 向けの構造化エラー（分類サマリ + rawDetail 隔離）(M4)
 │   │   └── AWSCredentials.swift       認証情報
 │   └── Resources/
 │       ├── Assets.xcassets
 │       └── Localizable.xcstrings      String Catalog (en source / ja 翻訳)
-└── TideTests/
+└── TideTests/                          （主要なもの。全テストは TideTests/ 配下を参照）
     ├── ManifestShardingTests.swift
     ├── HardcodedIgnoreRulesTests.swift
     ├── HashCalculatorTests.swift
     ├── DebounceQueueTests.swift
     ├── ConflictNamerTests.swift
     ├── PathValidatorTests.swift
+    ├── ThreeWayMergeTests.swift
+    ├── SyncIgnoreMatcherTests.swift
+    ├── TransferPruneTests.swift
+    ├── UploaderConflictTests.swift
     └── SmokeTests.swift
 ```
 
@@ -108,26 +134,30 @@ Tide/
 - 進捗・ステータスを `@Observable` で公開
 - エラー時のリトライ管理（指数バックオフ、最大3回）
 
-公開 API（M1 範囲）:
+公開 API（現状。M2 以降で pull 系を追加）:
 ```swift
+// 状態は別ファイル Models/SyncStatus.swift の独立 enum
+enum SyncStatus: Equatable, Sendable {
+    case notConfigured
+    case idle
+    case syncing(SyncProgress)
+    case paused
+    case error(String)   // 連想値は SyncError ではなく表示用 String
+}
+
+@MainActor
 @Observable
 final class SyncEngine {
-    enum Status {
-        case idle
-        case syncing(progress: SyncProgress)
-        case paused
-        case error(SyncError)
-    }
-    
-    var status: Status { get }
-    var lastSyncedAt: Date? { get }
-    var queueDepth: Int { get }
-    
+    var status: SyncStatus = .notConfigured
+    var lastSyncedAt: Date?
+    var queueDepth: Int = 0
+
     func start() async
     func stop() async
     func pause()
     func resume()
-    func triggerFullScan() async  // 起動時のフル比較
+    func triggerFullScan() async                           // 起動時 / 明示のフル比較
+    func triggerRemotePull(reason: PullReason = .manual) async  // リモート pull（単一ゲートで直列化）
 }
 ```
 
@@ -138,17 +168,20 @@ final class SyncEngine {
 - 変更イベントを `AsyncStream<FileChangeEvent>` で配信
 - ハードコード除外（`.DS_Store`, `.Trashes`, `.Spotlight-V100`, `.fseventsd`, `Thumbs.db`）
 
-公開 API:
+公開 API（型定義は Models/SyncEvent.swift）:
 ```swift
-struct FileChangeEvent {
-    let path: String  // 同期ルートからの相対パス
+struct FileChangeEvent: Sendable, Equatable {
+    enum Kind: Sendable, Equatable {
+        case createdOrModified   // created / modified は統合（rename も create+delete 相当で扱う）
+        case deleted
+    }
+    let relativePath: String     // 同期ルートからの POSIX 相対パス
     let kind: Kind
-    enum Kind { case created, modified, deleted, renamed(from: String) }
 }
 
 final class FileWatcher {
-    init(rootPath: URL)
-    var events: AsyncStream<FileChangeEvent> { get }
+    init(rootURL: URL)
+    let events: AsyncStream<FileChangeEvent>
     func start() throws
     func stop()
 }
@@ -176,7 +209,7 @@ final class FileWatcher {
 
 ```swift
 struct HashCalculator {
-    static func sha256(of url: URL) async throws -> String
+    static func sha256(of url: URL, chunkSize: Int = 65_536) throws -> String
 }
 ```
 
@@ -196,27 +229,34 @@ struct HashCalculator {
 - リトライ、エラーハンドリングの統一
 - 認証情報の解決
 
-公開 API（M1 範囲）:
+公開 API（現状の主要メソッド。M2〜M4 で拡張済み。ファイル名は `S3Client.swift` だが実型名は `TideS3Client`）:
 ```swift
-final class S3Client {
-    init(credentials: AWSCredentials, region: String, bucket: String)
-    
+final class TideS3Client: @unchecked Sendable {
+    init(credentials: AWSCredentials, region: String, bucket: String, deviceId: String) throws
+
     // Bucket
     func checkBucketAccess() async throws
     func isVersioningEnabled() async throws -> Bool
     func enableVersioning() async throws
-    func setLifecycleRules() async throws
-    
+    func enforcePublicAccessBlock() async throws
+    func enforceTLSBucketPolicy() async throws -> TLSPolicyStatus     // HTTPS 強制（C3）
+    func ensureLifecycleRules() async throws -> LifecycleStatus       // tide-* ルールをマージ
+
     // Objects
-    func putObject(key: String, data: Data, metadata: [String: String]) async throws -> PutObjectResult
-    func deleteObject(key: String) async throws  // delete marker を付ける
-    func headObject(key: String) async throws -> HeadObjectResult?
-    
-    // Manifest
-    func getIndex() async throws -> ManifestIndex?
-    func putIndex(_ index: ManifestIndex, expectedETag: String?) async throws
-    func getShard(_ id: String) async throws -> ManifestShard?
-    func putShard(_ shard: ManifestShard, expectedETag: String?) async throws
+    func putObject(key: String, data: Data, contentType: String = "application/octet-stream",
+                   metadata: [String: String] = [:],
+                   ifMatch: String? = nil, ifNoneMatch: String? = nil) async throws -> PutObjectResult
+    func deleteObject(key: String) async throws                      // delete marker を付ける
+    func headObject(key: String, versionId: String? = nil) async throws -> ObjectHead?
+    func getObject(key: String, maxBytes: Int64 = 200 * 1024 * 1024, versionId: String? = nil) async throws -> ObjectFetch?
+    func listObjectVersions(...) async throws -> ObjectVersionPage    // M4 バージョン履歴
+
+    // Manifest（楽観的ロックは ifMatch / ifNoneMatch。戻り値は新 ETag）
+    func getIndex() async throws -> ManifestFetch<ManifestIndex>?
+    func putIndex(_ index: ManifestIndex, ifMatch: String?) async throws -> String
+    func getShard(_ id: String) async throws -> ManifestFetch<ManifestShard>?
+    func putShard(_ shard: ManifestShard, ifMatch: String?) async throws -> String
+    func deleteShard(_ id: String) async throws
 }
 
 struct PutObjectResult {
@@ -224,6 +264,10 @@ struct PutObjectResult {
     let versionId: String?
 }
 ```
+
+> マルチパート（`createMultipartUpload` / `uploadPart` / `completeMultipartUpload` /
+> `abortMultipartUpload`）とストリーミング DL（`streamObject`）は M3 で追加。詳細は
+> [`07-M3-IMPLEMENTATION-GUIDE.md`](07-M3-IMPLEMENTATION-GUIDE.md) を参照。
 
 ### Manifest
 
@@ -343,7 +387,7 @@ struct PutObjectResult {
 ## ログ出力
 
 - `os.Logger` を使用
-- サブシステム: `com.example.tide`
-- カテゴリ: `sync`, `s3`, `database`, `ui`
+- サブシステム: `org.izukawa.Tide`
+- カテゴリ: `sync`, `s3`, `database`, `ui`, `watcher`
 - レベル: debug / info / error
 - リリースビルドでも error は残す

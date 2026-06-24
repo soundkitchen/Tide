@@ -7,8 +7,12 @@
 - `02-S3-LAYOUT.md`: S3 バケットのデータレイアウト、マニフェスト仕様
 - `03-LOCAL-DATABASE.md`: ローカル SQLite スキーマ
 - `04-SYNC-LOGIC.md`: 同期アルゴリズム（M1 では片方向のみ）
-- `05-IMPLEMENTATION-GUIDE.md`: Claude Code 向けの実装手順
+- `05-IMPLEMENTATION-GUIDE.md`: Claude Code 向けの実装手順（M1 当時の過去ログ）
 - `06-SETUP-AND-BUILD.md`: 開発環境セットアップ、ビルド方法
+- `07-M3-IMPLEMENTATION-GUIDE.md`: M3（双方向同期・マルチパート・`.syncignore`・中断再開・帯域制御）の実装ガイド
+- `08-IMPLEMENTATION-NOTES.md`: 会話で確定した実装決定の集積（旧 §7）
+- `09-DEFERRED.md`: 据え置き項目・バックログ・解消済み記録（旧 §8）
+- `README.md`: ドキュメントセットの索引
 
 ## プロジェクト目的
 
@@ -107,7 +111,7 @@ macOS のクリーンインストール後の復旧を主目的とした、Dropb
 - **UI**: SwiftUI + AppKit（メニューバー部分）
 - **最低 OS**: macOS 26.0 (Tahoe)
 - **AWS SDK**: AWS SDK for Swift（公式）
-  - M3 で `aws-sdk-swift-s3-transfer-manager` を追加導入
+  - マルチパート / レンジダウンロードは**自前ラッパ方式**で実装。`aws-sdk-swift-s3-transfer-manager` は不採用（上記 M3 サブ A・D を参照）
 - **SQLite**: GRDB.swift
 - **ファイル監視**: CoreServices (FSEvents)
 - **認証情報保管**: Keychain (Security framework)

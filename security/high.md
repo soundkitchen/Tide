@@ -34,7 +34,7 @@ let attrs: [String: Any] = [kSecValueData as String: data]
 AppLogger.sync.error("Full scan failed: \(String(describing: error), privacy: .public)")
 ```
 
-AWS SDK のエラー記述には、リクエスト URL（バケット名・キー）、リージョン、稀にセッショントークンや署名のバイトが含まれる。`privacy: .public` だと**ユニファイドログに平文で永続化**され、後で `log show` から取得できる。さらに同じ文字列が `recentErrors` 配列に積まれ、メニューバー UI に表示されている（`SyncEngine.swift:657-660`、`MenuBarContent.swift:71-76`）。
+AWS SDK のエラー記述には、リクエスト URL（バケット名・キー）、リージョン、稀にセッショントークンや署名のバイトが含まれる。`privacy: .public` だと**ユニファイドログに平文で永続化**され、後で `log show` から取得できる。対策前は同じ文字列が（当時の）`recentErrors` 配列に積まれメニューバー UI に表示されていた。現在は下記「残存 (F4)」のとおり構造化型 `recentIssues: [SyncIssue]` へ置換済みで、`privacy: .public` 補間もコードから一掃済み（grep 0 件）。
 
 **対策:**
 - `String(describing: error)` ではなく、`SyncError` への classify→短い理由文字列に置き換える
