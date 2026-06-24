@@ -636,6 +636,9 @@ final class MultipartUploaderTests: XCTestCase {
         let beginCount = await ckpt.beginCount
         XCTAssertEqual(createCount, 0)
         XCTAssertEqual(beginCount, 0)
+        // NoSuchUpload は決定的な恒久失敗なのでリトライせず即 throw（part 4 の試行は 1 回だけ）。
+        let attempts4 = await fake.attemptsByPart[4]
+        XCTAssertEqual(attempts4, 1)
         // checkpoint を破棄して次回フル再開（保持し続けない）。abort はしない（MPU は既に無い）。
         let clearCount = await ckpt.clearCount
         let abortCount = await fake.abortCount

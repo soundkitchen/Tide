@@ -257,10 +257,11 @@ struct MultipartUploader {
             // そのファイルは変更されるまで永久に上がらない。checkpoint を破棄して次回フル再開に委ねる（Issue #33 経路2）。
             let noSuchUpload = S3ErrorClassifier.isNoSuchUpload(error)
 
-            if resume == nil || fileChanged {
+            if (resume == nil || fileChanged) && !noSuchUpload {
                 // resume なしの従来挙動 or 不安定: best-effort で中止
                 // （残骸はライフサイクル tide-abort-incomplete-multipart が掃除）。
-                // NoSuchUpload の MPU は既に存在しないので abort はしない（no-op で無意味）。
+                // NoSuchUpload の MPU は既に存在しないので、ここでは abort しない（no-op で無意味）＝
+                // resume の有無に関わらず !noSuchUpload で除外する。
                 try? await client.abortMultipartUpload(key: key, uploadId: uploadId)
             }
             if let resume, fileChanged || noSuchUpload {
@@ -286,6 +287,10 @@ struct MultipartUploader {
                     key: key, uploadId: uploadId, partNumber: partNumber, body: body
                 )
             } catch {
+                // NoSuchUpload は失効/完了済み UploadId に対する決定的な恒久失敗。リトライしても必ず再失敗
+                // するので即 throw し、外側 catch の checkpoint 破棄（経路2 フル再開）へ素早く渡す
+                // （瞬断バックオフ ≈6 秒を浪費しない）。
+                if S3ErrorClassifier.isNoSuchUpload(error) { throw error }
                 attempt += 1
                 if attempt >= policy.maxAttempts { throw error }
                 // 指数バックオフ + ジッタ（上限 cap）。
