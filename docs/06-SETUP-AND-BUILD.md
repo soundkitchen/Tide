@@ -39,6 +39,8 @@ aws s3 mb s3://your-tide-test-bucket --region ap-northeast-1
                 "s3:GetLifecycleConfiguration",
                 "s3:PutLifecycleConfiguration",
                 "s3:PutBucketPublicAccessBlock",
+                "s3:GetBucketPolicy",
+                "s3:PutBucketPolicy",
                 "s3:ListBucketVersions"
             ],
             "Resource": "arn:aws:s3:::your-tide-test-bucket"
@@ -59,6 +61,8 @@ aws s3 mb s3://your-tide-test-bucket --region ap-northeast-1
     ]
 }
 ```
+
+> `s3:GetBucketPolicy` / `s3:PutBucketPolicy` は **HTTPS 強制バケットポリシー**（`aws:SecureTransport=false` を Deny・C3 後半）を適用するためのもの。これは**多層防御**（Tide 自身の通信は SDK が常に HTTPS）で、適用は**非致命**＝この 2 権限を外しても同期は動く（ポリシーが設定されないだけ）。最小化したい場合は外してよいが、外部ツールの HTTP アクセスを防ぐハードニングは無効になる。
 
 このユーザーのアクセスキー ID とシークレットアクセスキーを発行し、アプリのセットアップウィザードで使用する。
 

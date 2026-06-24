@@ -127,6 +127,19 @@ final class AppEnvironment {
         self.s3 = s3
         self.engine = engine
         await engine.start()
+
+        // 既存バケット / ドリフトの自己修復（C3 後半・Issue #26 / B）: 起動ごとに TLS 強制バケットポリシーを
+        // 冪等・非致命で適用する。既に同内容なら GET だけで put しない。起動を遅らせないよう detached、失敗は
+        // ログのみ（多層防御＝Tide 自身の通信は SDK が常に HTTPS。守るのは他ツールの HTTP アクセス）。
+        Task.detached { [s3] in
+            do {
+                if try await s3.enforceTLSBucketPolicy() == .updated {
+                    AppLogger.s3.info("Enforced HTTPS-only bucket policy on launch")
+                }
+            } catch {
+                AppLogger.s3.error("enforceTLSBucketPolicy on launch failed (non-fatal): \(String(describing: error), privacy: .private)")
+            }
+        }
     }
 
     /// セットアップウィザード完了時に呼ぶ。

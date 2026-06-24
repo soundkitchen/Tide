@@ -893,6 +893,39 @@
         }
       }
     },
+    "✓ HTTPS-only bucket policy already enforced" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "✓ HTTPS 強制バケットポリシーは設定済み"
+          }
+        }
+      }
+    },
+    "✓ HTTPS-only bucket policy enforced" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "✓ HTTPS 強制バケットポリシーを設定しました"
+          }
+        }
+      }
+    },
+    "⚠ Could not set HTTPS-only policy (continuing)" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "⚠ HTTPS 強制ポリシーを設定できませんでした（続行します）"
+          }
+        }
+      }
+    },
     "✓ Public access block enforced" : {
       "extractionState" : "manual",
       "localizations" : {

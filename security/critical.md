@@ -50,11 +50,11 @@ let walker = fm.enumerator(
 
 ## C3. S3 サーバサイド暗号化が未指定 / バケットの Public Access Block 未設定
 
-**Status:** 🟡 Partial (2026-05-24) — `putObject` に `serverSideEncryption: .aes256` を明示。プロビジョニング時に `enforcePublicAccessBlock()` で 4 設定すべて true で投入する（IAM ポリシーに `s3:PutBucketPublicAccessBlock` 追加済み）。`PutBucketEncryption` でのデフォルト暗号化と、`PutBucketPolicy` での `aws:SecureTransport=true` 強制は据置き。
+**Status:** 🟢 Fixed (HTTPS 強制まで完了 2026-06-23・Issue #26 / B) — `putObject`（および `createMultipartUpload`）に `serverSideEncryption: .aes256` を明示。プロビジョニング時に `enforcePublicAccessBlock()` で 4 設定すべて true で投入。**`enforceTLSBucketPolicy()` で `aws:SecureTransport=false` を Deny するバケットポリシー（`Sid: TideDenyInsecureTransport`）を冪等にマージ適用**（純粋ロジック `BucketPolicyBuilder` + S3 シーム、`BucketPolicyBuilderTests` で固定）。適用はセットアップ時（ウィザード）＋起動時の両方で**冪等・非致命**（多層防御＝Tide 自身の通信は SDK が常に HTTPS。守るのは外部ツールの HTTP アクセス。`s3:Get/PutBucketPolicy` を IAM に追加・外しても同期は動く）。既存 statement は保持し Tide の statement だけ差し替える。残るは `PutBucketEncryption` でのバケットデフォルト暗号化のみ（**optional 据置き**＝per-object SSE-S3 を全経路で明示済みなので実害なし）。
 
-**該当箇所:** `Tide/S3/Uploader.swift:90-95`、`Tide/S3/S3Client.swift:50-127`
+**該当箇所（対応コード）:** SSE-S3 = `Tide/S3/S3Client.swift` の `putObject` / `createMultipartUpload`（ともに `serverSideEncryption: .aes256`）。プロビジョニング = 同ファイルの `enforcePublicAccessBlock` / `enforceTLSBucketPolicy` + 純粋マージ `Tide/S3/BucketPolicyBuilder.swift`。配線 = `Tide/UI/SetupWizardWindow.swift` の `finishProvisioning`（セットアップ時）と `Tide/App/AppEnvironment.swift` の `launchEngineFromCurrentConfig`（起動時・非致命）。
 
 - `PutObjectInput` に `serverSideEncryption: .aes256`（または KMS）を指定していないため、バケット側でデフォルト暗号化が無いと**平文で保存**される（2023 以降の新規バケットは SSE-S3 がデフォルトだが明示すべき）。
 - `createBucket` / `ensureLifecycleRules` で **`PutPublicAccessBlock` を発行していない**。ユーザが将来コンソール等で誤ってパブリック化するリスクをアプリ側で防げる（BlockPublicAcls / IgnorePublicAcls / BlockPublicPolicy / RestrictPublicBuckets を全部 true でセット）。
 - `PutBucketEncryption` で SSE-S3 / SSE-KMS をデフォルト化するのも推奨。
-- `PutBucketPolicy` で `aws:SecureTransport=true` を強制（HTTPS 強制）するのも一般的。
+- ~~`PutBucketPolicy` で `aws:SecureTransport=true` を強制（HTTPS 強制）するのも一般的。~~ → ✅ **対応済み（2026-06-23・#26）**。`aws:SecureTransport=false` を Deny するポリシーを `enforceTLSBucketPolicy()` で冪等適用（上記 Status 参照）。

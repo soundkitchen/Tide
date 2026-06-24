@@ -91,6 +91,40 @@ final class TideS3Client: @unchecked Sendable {
         _ = try await client.putPublicAccessBlock(input: input)
     }
 
+    enum TLSPolicyStatus: Sendable {
+        case alreadyEnforced
+        case updated
+    }
+
+    /// TLS 非使用リクエストを拒否する Deny ポリシー（C3 後半・Issue #26 / B）を冪等にマージして投入する。
+    /// `getBucketPolicy`（`NoSuchBucketPolicy`/notFound は空扱い）→ `BucketPolicyBuilder` で Tide の statement
+    /// （`Sid: TideDenyInsecureTransport`）だけ差し替え（他は保持）→ `putBucketPolicy`。既に同内容で入って
+    /// いれば put しない（毎起動の無駄な書込を避ける）。多層防御（SDK 既定 HTTPS）なので呼び出し側は非致命に扱う。
+    /// Block Public Access の後に呼んでよい（Deny statement は "public" 判定にならず `blockPublicPolicy` に弾かれない）。
+    @discardableResult
+    func enforceTLSBucketPolicy() async throws -> TLSPolicyStatus {
+        let current: String?
+        do {
+            let output = try await client.getBucketPolicy(input: GetBucketPolicyInput(bucket: bucket))
+            current = output.policy
+        } catch {
+            if String(describing: error).contains("NoSuchBucketPolicy")
+                || S3ErrorClassifier.isNotFound(error) {
+                current = nil
+            } else {
+                throw error
+            }
+        }
+        if BucketPolicyBuilder.isTLSDenyEnforced(in: current, bucket: bucket) {
+            return .alreadyEnforced
+        }
+        let merged = try BucketPolicyBuilder.mergeTLSDenyStatement(into: current, bucket: bucket)
+        _ = try await client.putBucketPolicy(
+            input: PutBucketPolicyInput(bucket: bucket, policy: merged)
+        )
+        return .updated
+    }
+
     enum LifecycleStatus: Sendable {
         case alreadyConfigured
         case updated
