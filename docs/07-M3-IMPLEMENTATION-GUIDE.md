@@ -105,9 +105,15 @@ M1 で導入した「100 MB を超えたら `sync_log` にエラーを残して�
 - 既定テンプレート: `SyncIgnoreMatcher.defaultTemplate`（`node_modules/` 等）を **新規バケットのセットアップ時のみ** `AppEnvironment.completeSetup` で `<syncRoot>/.syncignore` に自動生成。既存バケット参加時は競合回避のため作らない。`.git/` は含めない（同期対象のまま）。
 - テスト: `SyncIgnoreMatcherTests`（意味論全件 + 線形時間回帰 `testPathologicalPatternMatchesInLinearTime` + 旧 regex との differential fuzz `testLinearMatcherMatchesReferenceRegex`）/ `IgnoreDecisionTests`。
 
+### ネスト `.syncignore`（[#27] / C1・✅ 2026-06-25 追加）
+- **ディレクトリごとの `.syncignore`（git 風の階層的オーバーライド）に対応**。同期ルート配下の全 `.syncignore` を収集し、対象パスの祖先ディレクトリの `.syncignore` を**浅い→深い順**に合成して判定する（深い層が浅い層を上書き＝単一ファイル内の last-match-wins を階層へ拡張。マッチ無しの層は上位層の判定を維持）。各層には「その層のディレクトリからの相対パス」を渡すので、パターンはそのディレクトリにアンカーされる（先頭 `/` も当該ディレクトリ基準）。
+- 実装: `SyncIgnoreMatcher.evaluate` を三状態（`unmatched`/`ignored`/`included`）化し、新 `LayeredSyncIgnore`（`[dir 相対パス: SyncIgnoreMatcher]` を束ねる `Sendable` 値型・`SyncIgnoreMatcher.swift` 内）が層合成を担う。`IgnoreDecision.shouldSkip` は `LayeredSyncIgnore` を受け取る。自己保護はネスト `.syncignore`（末尾 `/.syncignore`）へ拡張（共有判定 `IgnoreDecision.isSyncignoreFile`）。
+- **キャッシュ戦略 = 変更時フル再構築**: in-memory の dir→matcher 辞書がキャッシュ本体で**評価ホットパスは I/O ゼロ**（祖先 dir を辞書引きするだけ）。辞書の再構築（`SyncEngine.loadLayeredIgnore` のツリー走査）は起動時と実際の `.syncignore` 変更時のみ — ローカルは FSEvents（`isSyncignoreFile`）、リモートは pull が `.syncignore` を触ったときだけ（過大近似で取りこぼし防止）。定常 pull / 通常ファイル編集ではツリーを再走査しない。走査は symlink 非追従・機密網ディレクトリ丸ごとスキップ・`LayeredSyncIgnore.maxFiles`(1000) で有界。
+- Settings はディレクトリ単位にグルーピング表示（`LayeredSyncIgnore.directoryGroups`）。
+- テスト: `SyncIgnoreMatcherTests`（三状態 + ネスト/オーバーライド/否定再包含/相対アンカー/グループ並び）/ `IgnoreDecisionTests`（ネスト自己保護・機密網優先・深い層再包含）。
+
 ### 既知の制限 / 将来タスク
-- **ディレクトリごとの `.syncignore`（git 風の階層的オーバーライド）は未対応**。現状はルートの `<syncRoot>/.syncignore` 1 ファイルのみを読む。サブディレクトリの `.syncignore` はただの同期対象ファイル扱い。→ **将来タスク**（各ファイル位置でのアンカー / 変更検知リロード / `*/.syncignore` の self-protect 拡張が必要）。
-- 親ディレクトリが除外された配下のファイルを `!` で再包含する gitignore の挙動は厳密には再現しない（同一階層の否定は正しく動く）。
+- 親ディレクトリが除外された配下のファイルを `!` で再包含する gitignore の挙動は厳密には再現しない（同一階層・別階層の否定は正しく動く）。
 - ~~**ReDoS の構造的解消（F1 / L8）は将来タスク**~~ → ✅ **完了（2026-06-04）**。`NSRegularExpression` を廃し、グロブをトークン列へコンパイルして reachable-set DP で評価する線形時間照合へ置換した（`**` / 否定 / アンカー / dirOnly のセマンティクスを移植）。`SyncIgnoreMatcherTests` の既存意味論テストを回帰オラクルに維持し、旧 regex 実装との differential fuzz（`testLinearMatcherMatchesReferenceRegex`）で同値を確認。
 - マッチングは case-sensitive（gitignore 既定）。
 - `ManifestReader` には ignore 判定を入れず、ダウンロード可否は `reconcileRemoteEntry` で gate する（削除検出が完全な remoteMap に依存するため）。

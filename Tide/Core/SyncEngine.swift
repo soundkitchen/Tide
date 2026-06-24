@@ -19,8 +19,8 @@ final class SyncEngine {
     /// 隔離し、既定表示は分類サマリのみ（F4 / H2 UI 残の解消）。
     var recentIssues: [SyncIssue] = []
 
-    /// 現在有効な `.syncignore` のパターン行（Settings 表示用）。
-    var activeIgnorePatterns: [String] = []
+    /// 現在有効な `.syncignore` のパターン（Settings 表示用）。ネスト対応でディレクトリ単位にグルーピング。
+    var activeIgnorePatterns: [LayeredSyncIgnore.DirectoryGroup] = []
 
     /// 進行中の転送（メニューバーのポップオーバー表示用）。off-main の Uploader / Downloader が
     /// `@Sendable` reporter を通じて MainActor で更新する。(path, direction) で一意。
@@ -54,7 +54,7 @@ final class SyncEngine {
     @ObservationIgnored private var pendingManualPull: Bool = false
     private var paused: Bool = false
     private var running: Bool = false
-    private var ignoreMatcher: SyncIgnoreMatcher = .empty
+    private var ignoreMatcher: LayeredSyncIgnore = .empty
     /// 読込中に変化し続けて安定しないファイル（L6 A-detect の延期対象）で、既に「未バックアップ」警告を
     /// 出した path。recentIssues への重複表示を防ぐ。キューから消えた path はアイドル周回で間引く
     /// （= 安定して同期完了 or 除去されたら再エピソードでまた警告できる）。
@@ -385,37 +385,70 @@ final class SyncEngine {
 
     // MARK: - .syncignore
 
-    /// `<syncRoot>/.syncignore` を読み直して除外マッチャと Settings 表示用パターンを更新する。
+    /// 同期ルート配下の全 `.syncignore`（ルート + ネスト）を読み直して層状マッチャと
+    /// Settings 表示用パターンを更新する。
     func reloadIgnoreMatcher() async {
-        let matcher = await Self.loadIgnoreMatcher(syncRoot: syncRoot)
+        let matcher = await Self.loadLayeredIgnore(syncRoot: syncRoot)
         ignoreMatcher = matcher
-        activeIgnorePatterns = matcher.sourceLines
-        AppLogger.sync.info("Reloaded .syncignore: \(matcher.sourceLines.count) pattern(s)")
+        activeIgnorePatterns = matcher.directoryGroups
+        AppLogger.sync.info("Reloaded .syncignore: \(matcher.fileCount) file(s)")
     }
 
-    /// `.syncignore` を安全に読み込んでマッチャを構築する。無い/大きすぎる/symlink の時は空。
-    private static func loadIgnoreMatcher(syncRoot: URL) async -> SyncIgnoreMatcher {
-        let url: URL
-        do {
-            url = try PathValidator.resolveSafely(relativePath: ".syncignore", syncRoot: syncRoot)
-        } catch {
-            return .empty
-        }
-        return await Task.detached(priority: .utility) { () -> SyncIgnoreMatcher in
+    /// 同期ルート配下の全 `.syncignore` を安全に収集して層状マッチャ（`LayeredSyncIgnore`）を構築する。
+    /// 各ファイルは symlink 非追従 / `PathValidator` で root エスケープ拒否 / 256KB 上限。
+    /// 機密網ディレクトリ（`.tide` / `.aws` 等）と symlink ディレクトリは丸ごとスキップ（配下を走査しない）。
+    /// `.syncignore` 数は `LayeredSyncIgnore.maxFiles` で防御的に有界化する。
+    /// 「変更時フル再構築」戦略（`docs/08`）: 起動時と実際の `.syncignore` 変更時にのみ呼ぶ。
+    private static func loadLayeredIgnore(syncRoot: URL) async -> LayeredSyncIgnore {
+        await Task.detached(priority: .utility) { () -> LayeredSyncIgnore in
             let fm = FileManager.default
-            guard fm.fileExists(atPath: url.path) else { return .empty }
-            // セキュリティゲート: シンボリックリンクは絶対に追従しない（判定は PathValidator に一本化）
-            if PathValidator.isSymbolicLink(at: url) {
-                AppLogger.sync.error("Refusing to read symlinked .syncignore")
-                return .empty
+            guard let walker = fm.enumerator(
+                at: syncRoot,
+                includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey],
+                options: []
+            ) else { return .empty }
+
+            var matchers: [String: SyncIgnoreMatcher] = [:]
+            while let url = walker.nextObject() as? URL {
+                if matchers.count >= LayeredSyncIgnore.maxFiles {
+                    AppLogger.sync.error("Too many .syncignore files (>\(LayeredSyncIgnore.maxFiles)); ignoring the rest")
+                    break
+                }
+                guard let values = try? url.resourceValues(
+                    forKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey]
+                ) else { continue }
+
+                // セキュリティゲート: シンボリックリンクは絶対に追従しない（ディレクトリリンクなら配下もスキップ）。
+                if values.isSymbolicLink == true {
+                    walker.skipDescendants()
+                    continue
+                }
+
+                let relative = Self.relativePath(of: url, root: syncRoot)
+                if values.isDirectory == true {
+                    // 機密網ディレクトリ（.tide / .aws / .ssh …）は丸ごとスキップ。配下の .syncignore も読まない
+                    // （配下のファイルは常にハードコード除外され、適用余地が無い）。
+                    if HardcodedIgnoreRules.shouldIgnore(relativePath: relative) {
+                        walker.skipDescendants()
+                    }
+                    continue
+                }
+                guard values.isRegularFile == true, url.lastPathComponent == ".syncignore" else { continue }
+                // 機密網配下の .syncignore（ディレクトリ判定をすり抜けた場合の保険）は読まない。
+                if HardcodedIgnoreRules.shouldIgnore(relativePath: relative) { continue }
+
+                // 安全読込: PathValidator で root エスケープ拒否 + symlink 再確認 + サイズ上限。
+                guard let safeURL = try? PathValidator.resolveSafely(relativePath: relative, syncRoot: syncRoot),
+                      !PathValidator.isSymbolicLink(at: safeURL),
+                      let data = try? Data(contentsOf: safeURL),
+                      data.count <= SyncIgnoreMatcher.maxBytes else { continue }
+
+                let text = String(decoding: data, as: UTF8.self)
+                // dir 相対パス（".syncignore" を落とす）。ルート直下は ""。
+                let dir = (relative as NSString).deletingLastPathComponent
+                matchers[dir] = SyncIgnoreMatcher.parse(text)
             }
-            guard let data = try? Data(contentsOf: url) else { return .empty }
-            if data.count > SyncIgnoreMatcher.maxBytes {
-                AppLogger.sync.error(".syncignore too large (\(data.count) bytes); ignoring")
-                return .empty
-            }
-            let text = String(decoding: data, as: UTF8.self)
-            return SyncIgnoreMatcher.parse(text)
+            return LayeredSyncIgnore(matchers: matchers)
         }.value
     }
 
@@ -704,13 +737,24 @@ final class SyncEngine {
 
         // 2) 削除反映: 変更があったシャードに属するファイルで、remoteMap に無いもの
         let affected = result.updatedShards.union(result.removedShards)
+        // 今回の pull で .syncignore（ルート/ネスト）が変化したか。変化時のみ層状マッチャを再構築し、
+        // 定常 pull でのツリー再走査を避ける（「変更時フル再構築」戦略・docs/08）。
+        // 過大近似: shard が変化 ∧ path が .syncignore なら（reconcile が no-op でも）再構築する＝取りこぼし防止。
+        var syncignoreTouched = false
         if !affected.isEmpty {
+            for path in remoteMap.keys
+            where IgnoreDecision.isSyncignoreFile(path) && affected.contains(ManifestSharding.shardId(for: path)) {
+                syncignoreTouched = true
+                break
+            }
             let dbPaths: [String] = try await db.pool.read { db in
                 try FileRecord.fetchAll(db).map { $0.path }
             }
             for path in dbPaths where remoteMap[path] == nil {
                 let sid = ManifestSharding.shardId(for: path)
                 guard affected.contains(sid) else { continue }
+                // リモート削除された .syncignore も再構築の契機にする。
+                if IgnoreDecision.isSyncignoreFile(path) { syncignoreTouched = true }
                 do {
                     _ = try await dl.applyRemoteDeletion(relativePath: path)
                 } catch {
@@ -723,8 +767,11 @@ final class SyncEngine {
             }
         }
 
-        // リモート由来の .syncignore 変更を反映（FSEvents 経由でも拾えるが初回 pull の保険）
-        await reloadIgnoreMatcher()
+        // リモート由来の .syncignore 変更を反映（FSEvents 経由でも拾えるが pull の保険）。
+        // 変化が無ければ再走査しない（定常 pull のホットパスを軽く保つ）。起動時の初期ロードは start() が行う。
+        if syncignoreTouched {
+            await reloadIgnoreMatcher()
+        }
         await refreshQueueDepth()
     }
 
@@ -848,9 +895,9 @@ final class SyncEngine {
         let path = event.relativePath
         let now = Date().timeIntervalSince1970
 
-        // .syncignore の変更/削除はルールを再読込し、フルスキャンで全体を再評価する。
+        // .syncignore（ルート/ネスト）の変更/削除はルールを再読込し、フルスキャンで全体を再評価する。
         // .syncignore 自身は同期対象（Q2）なので、この後の通常処理（アップロード/削除）も継続する。
-        if path == ".syncignore" {
+        if IgnoreDecision.isSyncignoreFile(path) {
             await reloadIgnoreMatcher()
             Task { [weak self] in await self?.triggerFullScan() }
         }

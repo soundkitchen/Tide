@@ -123,6 +123,95 @@ final class SyncIgnoreMatcherTests: XCTestCase {
         XCTAssertEqual(s.sourceLines.count, SyncIgnoreMatcher.maxPatterns)
     }
 
+    // MARK: - 三状態評価（LayeredSyncIgnore の層合成に必要）
+
+    func testEvaluateTriState() {
+        let s = m("*.log\n!keep.log")
+        XCTAssertEqual(s.evaluate("foo.log"), .ignored)       // 除外パターンにマッチ
+        XCTAssertEqual(s.evaluate("keep.log"), .included)     // 否定で再包含
+        XCTAssertEqual(s.evaluate("foo.txt"), .unmatched)     // どのパターンにもマッチ無し
+        XCTAssertEqual(SyncIgnoreMatcher.empty.evaluate("x"), .unmatched)
+    }
+
+    // MARK: - LayeredSyncIgnore（ネスト .syncignore・階層オーバーライド）
+
+    private func layered(_ map: [String: String]) -> LayeredSyncIgnore {
+        LayeredSyncIgnore(matchers: map.mapValues { SyncIgnoreMatcher.parse($0) })
+    }
+
+    func testLayeredEmptyIgnoresNothing() {
+        XCTAssertFalse(LayeredSyncIgnore.empty.isIgnored("a/b.txt"))
+        XCTAssertEqual(LayeredSyncIgnore.empty.evaluate("a/b.txt"), .unmatched)
+    }
+
+    func testLayeredRootEquivalentToSingleMatcher() {
+        // ルート 1 枚だけなら従来の単一マッチャと同値。
+        let single = m("*.log")
+        let lay = LayeredSyncIgnore(root: single)
+        XCTAssertEqual(lay.isIgnored("foo.log"), single.isIgnored("foo.log"))
+        XCTAssertEqual(lay.isIgnored("a/b/foo.log"), single.isIgnored("a/b/foo.log"))
+        XCTAssertEqual(lay.isIgnored("foo.txt"), single.isIgnored("foo.txt"))
+    }
+
+    func testLayeredPatternsAreRelativeToTheirDirectory() {
+        // a/b/.syncignore の `secret.txt` は a/b 配下にだけ効く（ルート相対では無い）。
+        let lay = layered(["a/b": "secret.txt"])
+        XCTAssertTrue(lay.isIgnored("a/b/secret.txt"))
+        XCTAssertTrue(lay.isIgnored("a/b/deep/secret.txt"))  // スラッシュ無し → 配下の任意階層
+        XCTAssertFalse(lay.isIgnored("secret.txt"))           // 別ディレクトリには効かない
+        XCTAssertFalse(lay.isIgnored("a/secret.txt"))
+        XCTAssertFalse(lay.isIgnored("a/c/secret.txt"))
+    }
+
+    func testLayeredRootAnchorIsRelativeToDirectory() {
+        // 先頭 `/` は「その .syncignore のディレクトリ」にアンカーされる。
+        let lay = layered(["a": "/top.txt"])
+        XCTAssertTrue(lay.isIgnored("a/top.txt"))
+        XCTAssertFalse(lay.isIgnored("a/sub/top.txt"))  // a 直下のみ
+        XCTAssertFalse(lay.isIgnored("top.txt"))
+    }
+
+    func testLayeredDeeperOverridesShallowerReinclude() {
+        // ルートで *.log 除外 → 深い層で否定再包含。深い層が勝つ。
+        let lay = layered(["": "*.log", "keep": "!*.log"])
+        XCTAssertTrue(lay.isIgnored("foo.log"))
+        XCTAssertTrue(lay.isIgnored("other/foo.log"))   // keep 以外は除外のまま
+        XCTAssertFalse(lay.isIgnored("keep/foo.log"))   // 深い層で再包含
+        XCTAssertFalse(lay.isIgnored("keep/deep/foo.log"))
+    }
+
+    func testLayeredDeeperOverridesShallowerReExclude() {
+        // ルートで再包含（!important.log）→ 深い層で再び除外。深い層が勝つ。
+        let lay = layered(["": "*.log\n!important.log", "build": "important.log"])
+        XCTAssertFalse(lay.isIgnored("important.log"))        // ルートで再包含
+        XCTAssertTrue(lay.isIgnored("build/important.log"))   // 深い層で再除外
+    }
+
+    func testLayeredUnmatchedDeeperKeepsShallowerVerdict() {
+        // 深い層が当該パスにマッチしなければ、浅い層の判定を維持する。
+        let lay = layered(["": "*.log", "sub": "*.tmp"])
+        XCTAssertTrue(lay.isIgnored("sub/foo.log"))   // sub/.syncignore は *.log に無関心 → ルートの除外が残る
+        XCTAssertTrue(lay.isIgnored("sub/foo.tmp"))   // sub/.syncignore が除外
+        XCTAssertFalse(lay.isIgnored("sub/foo.dat"))  // どの層もマッチしない
+    }
+
+    func testLayeredDirectoryOwnSyncignoreDoesNotApplyToItself() {
+        // a/b/.syncignore は a/b 配下にのみ効き、a/b というディレクトリ自身（祖先評価）には効かない。
+        let lay = layered(["a/b": "*"])
+        XCTAssertTrue(lay.isIgnored("a/b/x"))   // 配下は除外
+        XCTAssertFalse(lay.isIgnored("a/b"))    // ディレクトリ自身は対象外（自分のルールでは消せない）
+    }
+
+    func testDirectoryGroupsSortedShallowToDeep() {
+        let lay = layered(["a/b": "x", "": "y", "a": "z"])
+        XCTAssertEqual(lay.directoryGroups.map(\.directory), ["", "a", "a/b"])
+        XCTAssertEqual(lay.fileCount, 3)
+        // パターン無し（コメントのみ）のファイルは groups から除外される。
+        let lay2 = layered(["": "*.log", "empty": "# only comment"])
+        XCTAssertEqual(lay2.directoryGroups.map(\.directory), [""])
+        XCTAssertEqual(lay2.fileCount, 1)
+    }
+
     // MARK: - ReDoS 速攻ガード (F1 / L8)
 
     /// k 個のワイルドカードを持つグロブを生成（`*s0*s1*…`）。
