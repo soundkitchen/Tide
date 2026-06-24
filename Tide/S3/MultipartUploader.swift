@@ -9,6 +9,9 @@ protocol MultipartUploadClient: Sendable {
     func uploadPart(key: String, uploadId: String, partNumber: Int, body: Data) async throws -> String
     func completeMultipartUpload(key: String, uploadId: String, parts: [(partNumber: Int, etag: String)]) async throws -> TideS3Client.PutObjectResult
     func abortMultipartUpload(key: String, uploadId: String) async throws
+    /// stale UploadId 復旧用。complete が `NoSuchUpload` で空振りしたとき、本体が既に上がっているかを
+    /// 確認して identity（etag/versionId）を回収する。404 → nil。
+    func headObject(key: String, versionId: String?) async throws -> TideS3Client.ObjectHead?
 }
 
 extension TideS3Client: MultipartUploadClient {}
@@ -221,9 +224,24 @@ struct MultipartUploader {
             }
 
             let sha = HashCalculator.hex(hasher.finalize())
-            let put = try await client.completeMultipartUpload(
-                key: key, uploadId: uploadId, parts: parts
-            )
+            // [stale UploadId] complete が NoSuchUpload = この UploadId は既に消費済み（前回セッションで
+            // complete 成功 → clearUpload の前にクラッシュ）。本体は S3 に安全に上がっているので、headObject で
+            // identity（etag/versionId）を回収して成功扱いにする（docs/09 #7a / Issue #33）。回収不能（本体が
+            // 無い／サイズ不一致＝MPU が本当に失われた）なら rethrow し、下の catch が checkpoint を破棄して
+            // 次回フル再開（新規 createMultipartUpload）に委ねる。
+            let put: TideS3Client.PutObjectResult
+            do {
+                put = try await client.completeMultipartUpload(
+                    key: key, uploadId: uploadId, parts: parts
+                )
+            } catch where S3ErrorClassifier.isNoSuchUpload(error) {
+                guard let head = try await client.headObject(key: key, versionId: nil),
+                      head.size == bytesRead else {
+                    throw error
+                }
+                AppLogger.s3.info("Recovered stale multipart for \(key, privacy: .private) via HeadObject (\(bytesRead) bytes)")
+                put = TideS3Client.PutObjectResult(etag: head.etag, versionId: head.versionId)
+            }
             if let resume {
                 try await resume.store.clearUpload(path: resume.path)
             }
@@ -234,16 +252,22 @@ struct MultipartUploader {
             // 旧パートを使い続けてしまう）。
             let fileChanged: Bool
             if case SyncError.fileChangedDuringUpload = error { fileChanged = true } else { fileChanged = false }
+            // [stale UploadId] uploadPart / complete が NoSuchUpload = この MPU は既に死んでいる（7 日ライフ
+            // サイクル失効 / complete 後の本体消失など）。保持して再開しても毎周回 NoSuchUpload で空振りし続け、
+            // そのファイルは変更されるまで永久に上がらない。checkpoint を破棄して次回フル再開に委ねる（Issue #33 経路2）。
+            let noSuchUpload = S3ErrorClassifier.isNoSuchUpload(error)
 
-            if resume == nil || fileChanged {
+            if (resume == nil || fileChanged) && !noSuchUpload {
                 // resume なしの従来挙動 or 不安定: best-effort で中止
                 // （残骸はライフサイクル tide-abort-incomplete-multipart が掃除）。
+                // NoSuchUpload の MPU は既に存在しないので、ここでは abort しない（no-op で無意味）＝
+                // resume の有無に関わらず !noSuchUpload で除外する。
                 try? await client.abortMultipartUpload(key: key, uploadId: uploadId)
             }
-            if fileChanged, let resume {
+            if let resume, fileChanged || noSuchUpload {
                 try? await resume.store.clearUpload(path: resume.path)
             }
-            // resume あり & 不安定でない（瞬断等）: MPU と checkpoint を保持して次回再開に委ねる（abort/clear しない）。
+            // resume あり & 不安定でない & NoSuchUpload でない（瞬断等）: MPU と checkpoint を保持して次回再開に委ねる。
             throw error
         }
     }
@@ -263,6 +287,10 @@ struct MultipartUploader {
                     key: key, uploadId: uploadId, partNumber: partNumber, body: body
                 )
             } catch {
+                // NoSuchUpload は失効/完了済み UploadId に対する決定的な恒久失敗。リトライしても必ず再失敗
+                // するので即 throw し、外側 catch の checkpoint 破棄（経路2 フル再開）へ素早く渡す
+                // （瞬断バックオフ ≈6 秒を浪費しない）。
+                if S3ErrorClassifier.isNoSuchUpload(error) { throw error }
                 attempt += 1
                 if attempt >= policy.maxAttempts { throw error }
                 // 指数バックオフ + ジッタ（上限 cap）。

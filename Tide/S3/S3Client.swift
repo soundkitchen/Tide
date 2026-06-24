@@ -626,6 +626,14 @@ enum S3ErrorClassifier {
             || desc.contains("status code: 404")
     }
 
+    /// マルチパートの UploadId が無効（完了済み / abort 済み / 7 日ライフサイクル失効）のとき
+    /// S3 が complete/uploadPart に返す `NoSuchUpload`。
+    /// NB: S3 ではこれも HTTP 404 で返るため `isNotFound` とも一致し得る。再開時の stale UploadId
+    /// 判定として、コード文字列で明示的に切り分ける（NoSuchKey 等の一般 404 と混同しない）。
+    static func isNoSuchUpload(_ error: Error) -> Bool {
+        String(describing: error).contains("NoSuchUpload")
+    }
+
     static func isForbidden(_ error: Error) -> Bool {
         let desc = String(describing: error)
         return desc.contains("Forbidden")
