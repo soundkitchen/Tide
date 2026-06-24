@@ -229,9 +229,9 @@ struct HashCalculator {
 - リトライ、エラーハンドリングの統一
 - 認証情報の解決
 
-公開 API（現状の主要メソッド。M2〜M4 で拡張済み）:
+公開 API（現状の主要メソッド。M2〜M4 で拡張済み。ファイル名は `S3Client.swift` だが実型名は `TideS3Client`）:
 ```swift
-final class S3Client {
+final class TideS3Client: @unchecked Sendable {
     init(credentials: AWSCredentials, region: String, bucket: String, deviceId: String) throws
 
     // Bucket
