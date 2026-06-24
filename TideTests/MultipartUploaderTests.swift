@@ -495,11 +495,169 @@ final class MultipartUploaderTests: XCTestCase {
         XCTAssertNotNil(surviving)
         XCTAssertEqual(surviving?.uploadId, "upload-id-xyz")
     }
+
+    // MARK: - stale UploadId 回復（Issue #33）
+
+    /// 経路1: complete 成功 → clearUpload 前にクラッシュ → 次回再開で死んだ UploadId を complete →
+    /// NoSuchUpload。本体は既に S3 に上がっているので headObject で identity を回収して成功扱いにする。
+    func testNoSuchUploadOnCompleteRecoversViaHeadObject() async throws {
+        let dir = tempDir()
+        let data = deterministicBytes(4500)            // 5 パート @1024
+        let url = try writeFile(data, in: dir)
+        let reader = try NoFollowFileReader(path: url.path)
+        defer { reader.close() }
+        let info = try reader.info()
+
+        // 全 5 パート完了済みの checkpoint（= complete 済みでクラッシュした状態の再現）。mtime/size 一致。
+        let seed = UploadResumeState(
+            uploadId: "completed-up", partSize: 1024,
+            completedParts: (1...5).map { CompletedPart(n: $0, etag: "seed-\($0)") },
+            fileMtime: info.mtime.timeIntervalSince1970, fileSize: info.size
+        )
+        let ckpt = FakeUploadCheckpointStore(seed: ["blob.bin": seed])
+        // complete は NoSuchUpload、headObject は本体（サイズ一致）を返す。
+        let recoveredHead = TideS3Client.ObjectHead(
+            etag: "recovered-etag", versionId: "recovered-v", size: info.size, metadata: [:]
+        )
+        let fake = FakeMultipartClient(
+            completeError: DescribedS3Error.noSuchUpload, headResult: recoveredHead
+        )
+        let resume = MultipartUploader.ResumeContext(
+            path: "blob.bin", fileMtime: info.mtime.timeIntervalSince1970, fileSize: info.size, store: ckpt
+        )
+
+        let uploader = MultipartUploader(s3: fake, retryPolicy: Self.fastPolicy)
+        let result = try await uploader.upload(
+            key: "files/blob.bin", reader: reader, partSize: 1024, resume: resume
+        )
+
+        // headObject で回収した identity が結果に乗る。
+        XCTAssertEqual(result.put.etag, "recovered-etag")
+        XCTAssertEqual(result.put.versionId, "recovered-v")
+        // 全体 SHA は元データ一致（既送分も読み順に hash 更新したため）。
+        XCTAssertEqual(result.sha256, HashCalculator.hex(SHA256.hash(data: data)))
+        // 全パート完了済み＝新規 uploadPart なし、create/begin なし。
+        let bodyKeys = (await fake.bodies).keys.sorted()
+        let createCount = await fake.createCount
+        XCTAssertEqual(bodyKeys, [])
+        XCTAssertEqual(createCount, 0)
+        // headObject は対象キーへ 1 回。
+        let headCount = await fake.headCount
+        let headKey = await fake.lastHeadKey
+        XCTAssertEqual(headCount, 1)
+        XCTAssertEqual(headKey, "files/blob.bin")
+        // 成功扱いなので checkpoint をクリア・abort なし。
+        let clearCount = await ckpt.clearCount
+        let abortCount = await fake.abortCount
+        XCTAssertEqual(clearCount, 1)
+        XCTAssertEqual(abortCount, 0)
+        let leftover = try await ckpt.loadUpload(path: "blob.bin")
+        XCTAssertNil(leftover)
+    }
+
+    /// complete が NoSuchUpload だが本体も存在しない（MPU が本当に失われた）→ 成功扱いにできない。
+    /// stale checkpoint を破棄して rethrow し、次回フル再開に委ねる。
+    func testNoSuchUploadOnCompleteWithMissingObjectClearsAndRethrows() async throws {
+        let dir = tempDir()
+        let data = deterministicBytes(4500)
+        let url = try writeFile(data, in: dir)
+        let reader = try NoFollowFileReader(path: url.path)
+        defer { reader.close() }
+        let info = try reader.info()
+
+        let seed = UploadResumeState(
+            uploadId: "completed-up", partSize: 1024,
+            completedParts: (1...5).map { CompletedPart(n: $0, etag: "seed-\($0)") },
+            fileMtime: info.mtime.timeIntervalSince1970, fileSize: info.size
+        )
+        let ckpt = FakeUploadCheckpointStore(seed: ["blob.bin": seed])
+        // complete は NoSuchUpload、headObject は nil（本体が無い）。
+        let fake = FakeMultipartClient(
+            completeError: DescribedS3Error.noSuchUpload, headResult: nil
+        )
+        let resume = MultipartUploader.ResumeContext(
+            path: "blob.bin", fileMtime: info.mtime.timeIntervalSince1970, fileSize: info.size, store: ckpt
+        )
+
+        let uploader = MultipartUploader(s3: fake, retryPolicy: Self.fastPolicy)
+        do {
+            _ = try await uploader.upload(key: "files/blob.bin", reader: reader, partSize: 1024, resume: resume)
+            XCTFail("回収不能な NoSuchUpload は throw すべき")
+        } catch let e as DescribedS3Error {
+            XCTAssertTrue(e.description.contains("NoSuchUpload"))
+        }
+
+        // headObject を引いたが nil → checkpoint を破棄（次回フル再開）。abort はしない。
+        let headCount = await fake.headCount
+        let clearCount = await ckpt.clearCount
+        let abortCount = await fake.abortCount
+        XCTAssertEqual(headCount, 1)
+        XCTAssertEqual(clearCount, 1)
+        XCTAssertEqual(abortCount, 0)
+        let leftover = try await ckpt.loadUpload(path: "blob.bin")
+        XCTAssertNil(leftover)
+    }
+
+    /// 経路2: 7 日ライフサイクルで失効した MPU を再開 → uploadPart が NoSuchUpload。保持して再開し続ける
+    /// と「変更されるまで永久に上がらない」ので、stale checkpoint を破棄して次回フル再開に委ねる。
+    func testNoSuchUploadOnUploadPartClearsCheckpointForFreshRestart() async throws {
+        let dir = tempDir()
+        let data = deterministicBytes(4500)            // 5 パート @1024
+        let url = try writeFile(data, in: dir)
+        let reader = try NoFollowFileReader(path: url.path)
+        defer { reader.close() }
+        let info = try reader.info()
+
+        // パート 1..3 完了済み（mtime/size 一致）→ 4,5 を送ろうとする。
+        let seed = UploadResumeState(
+            uploadId: "expired-up", partSize: 1024,
+            completedParts: (1...3).map { CompletedPart(n: $0, etag: "seed-\($0)") },
+            fileMtime: info.mtime.timeIntervalSince1970, fileSize: info.size
+        )
+        let ckpt = FakeUploadCheckpointStore(seed: ["blob.bin": seed])
+        // 未送パートの uploadPart が NoSuchUpload で失効を表現。
+        let fake = FakeMultipartClient(
+            alwaysFailParts: [4, 5], partFailureError: DescribedS3Error.noSuchUpload
+        )
+        let resume = MultipartUploader.ResumeContext(
+            path: "blob.bin", fileMtime: info.mtime.timeIntervalSince1970, fileSize: info.size, store: ckpt
+        )
+
+        let uploader = MultipartUploader(s3: fake, retryPolicy: Self.fastPolicy)
+        do {
+            _ = try await uploader.upload(key: "files/blob.bin", reader: reader, partSize: 1024, resume: resume)
+            XCTFail("失効 MPU の NoSuchUpload は throw すべき")
+        } catch let e as DescribedS3Error {
+            XCTAssertTrue(e.description.contains("NoSuchUpload"))
+        }
+
+        // 既存 MPU 再開なので create/begin なし。
+        let createCount = await fake.createCount
+        let beginCount = await ckpt.beginCount
+        XCTAssertEqual(createCount, 0)
+        XCTAssertEqual(beginCount, 0)
+        // checkpoint を破棄して次回フル再開（保持し続けない）。abort はしない（MPU は既に無い）。
+        let clearCount = await ckpt.clearCount
+        let abortCount = await fake.abortCount
+        XCTAssertEqual(clearCount, 1)
+        XCTAssertEqual(abortCount, 0)
+        let leftover = try await ckpt.loadUpload(path: "blob.bin")
+        XCTAssertNil(leftover)
+    }
 }
 
 // MARK: - フェイク S3 クライアント
 
 private enum FakeS3Error: Error { case injected }
+
+/// `String(describing:)` に任意のコード文字列を載せられるエラー。`S3ErrorClassifier` が
+/// 文字列マッチで分類するので、NoSuchUpload 等の S3 エラーを注入するのに使う。
+private struct DescribedS3Error: Error, CustomStringConvertible {
+    let description: String
+    static let noSuchUpload = DescribedS3Error(
+        description: "NoSuchUpload(message: \"The specified multipart upload does not exist.\")"
+    )
+}
 
 /// `MultipartUploadClient` のテスト用フェイク。並行 `uploadPart` を actor で安全に記録し、
 /// パート単位の失敗注入（一時/恒久）に対応する。
@@ -515,20 +673,31 @@ private actor FakeMultipartClient: MultipartUploadClient {
     private(set) var completedParts: [(partNumber: Int, etag: String)]?
     private(set) var abortCount = 0
     private(set) var abortedUploadIds: [String] = []
+    private(set) var headCount = 0
+    private(set) var lastHeadKey: String?
 
     private var failuresByPart: [Int: Int]                // partNumber -> 残り失敗回数（一時障害）
     private let alwaysFailParts: Set<Int>                 // 恒久失敗
+    private let partFailureError: Error                   // 上記失敗時に投げるエラー（既定 .injected）
+    private let completeError: Error?                     // complete を強制失敗させる（stale UploadId 模擬）
+    private let headResult: TideS3Client.ObjectHead?      // headObject の返値（stale 復旧の検証用）
 
     init(
         uploadId: String = "upload-id-xyz",
         completeResult: TideS3Client.PutObjectResult = .init(etag: "complete-etag", versionId: "v1"),
         failuresByPart: [Int: Int] = [:],
-        alwaysFailParts: Set<Int> = []
+        alwaysFailParts: Set<Int> = [],
+        partFailureError: Error = FakeS3Error.injected,
+        completeError: Error? = nil,
+        headResult: TideS3Client.ObjectHead? = nil
     ) {
         self.uploadId = uploadId
         self.completeResult = completeResult
         self.failuresByPart = failuresByPart
         self.alwaysFailParts = alwaysFailParts
+        self.partFailureError = partFailureError
+        self.completeError = completeError
+        self.headResult = headResult
     }
 
     func createMultipartUpload(key: String, contentType: String, metadata: [String: String]) async throws -> String {
@@ -541,11 +710,11 @@ private actor FakeMultipartClient: MultipartUploadClient {
     func uploadPart(key: String, uploadId: String, partNumber: Int, body: Data) async throws -> String {
         attemptsByPart[partNumber, default: 0] += 1
         if alwaysFailParts.contains(partNumber) {
-            throw FakeS3Error.injected
+            throw partFailureError
         }
         if let remaining = failuresByPart[partNumber], remaining > 0 {
             failuresByPart[partNumber] = remaining - 1
-            throw FakeS3Error.injected
+            throw partFailureError
         }
         bodies[partNumber] = body
         return "etag-\(partNumber)"
@@ -553,12 +722,19 @@ private actor FakeMultipartClient: MultipartUploadClient {
 
     func completeMultipartUpload(key: String, uploadId: String, parts: [(partNumber: Int, etag: String)]) async throws -> TideS3Client.PutObjectResult {
         completedParts = parts
+        if let completeError { throw completeError }
         return completeResult
     }
 
     func abortMultipartUpload(key: String, uploadId: String) async throws {
         abortCount += 1
         abortedUploadIds.append(uploadId)
+    }
+
+    func headObject(key: String, versionId: String?) async throws -> TideS3Client.ObjectHead? {
+        headCount += 1
+        lastHeadKey = key
+        return headResult
     }
 }
 

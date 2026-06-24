@@ -40,4 +40,13 @@ final class S3ErrorClassifierTests: XCTestCase {
         XCTAssertTrue(S3ErrorClassifier.isForbidden(FakeError(description: "AccessDenied")))
         XCTAssertFalse(S3ErrorClassifier.isNotFound(FakeError(description: "missingRequiredData")))
     }
+
+    func testNoSuchUpload() {
+        // 失効/完了済み UploadId に対する complete/uploadPart が返す NoSuchUpload（Issue #33）。
+        let e = FakeError(description: "NoSuchUpload(message: \"The specified multipart upload does not exist.\")")
+        XCTAssertTrue(S3ErrorClassifier.isNoSuchUpload(e))
+        // NoSuchKey 等の一般 404 を NoSuchUpload と取り違えない。
+        XCTAssertFalse(S3ErrorClassifier.isNoSuchUpload(FakeError(description: "NoSuchKey")))
+        XCTAssertFalse(S3ErrorClassifier.isNoSuchUpload(FakeError(description: "status code: 404")))
+    }
 }
