@@ -10,8 +10,8 @@ struct SettingsWindow: View {
     /// 診断エクスポートの結果メッセージ（成功/失敗の一過性表示）。
     @State private var exportMessage: String?
 
-    /// 現在有効な `.syncignore` のパターン（閲覧のみ）。
-    private var syncignorePatterns: [String] {
+    /// 現在有効な `.syncignore` のパターン（閲覧のみ・ディレクトリ単位）。ネスト対応で階層ごとに表示する。
+    private var ignoreGroups: [LayeredSyncIgnore.DirectoryGroup] {
         env.engine?.activeIgnorePatterns ?? []
     }
 
@@ -116,12 +116,19 @@ struct SettingsWindow: View {
                 }
             }
             Section(".syncignore") {
-                if syncignorePatterns.isEmpty {
+                if ignoreGroups.isEmpty {
                     Text("No .syncignore patterns").foregroundStyle(.secondary)
                 } else {
-                    ForEach(syncignorePatterns, id: \.self) { p in
-                        // ユーザが書いた除外パターンを verbatim 表示する
-                        Text(p).font(.system(.body, design: .monospaced))
+                    ForEach(ignoreGroups) { group in
+                        // ディレクトリ見出し（ルート直下は "/"）。パスは生文字列なので verbatim 表示。
+                        Text(verbatim: group.directory.isEmpty ? "/" : group.directory + "/")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        ForEach(group.patterns, id: \.self) { p in
+                            // ユーザが書いた除外パターンを verbatim 表示する
+                            Text(verbatim: p)
+                                .font(.system(.body, design: .monospaced))
+                        }
                     }
                 }
             }

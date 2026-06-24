@@ -153,19 +153,36 @@ struct SyncIgnoreMatcher: Sendable {
         return SyncIgnoreMatcher(patterns: compiled, sourceLines: sources)
     }
 
+    /// 1 枚の `.syncignore` の照合結果。ネスト時の層合成（`LayeredSyncIgnore`）では「マッチ無し」と
+    /// 「否定で再包含」を区別する必要があるため、Bool ではなく三状態で返す。
+    enum Verdict: Sendable, Equatable {
+        /// どのパターンにもマッチしなかった（上位/下位層の判定を覆さない）。
+        case unmatched
+        /// 最終マッチが除外パターン。
+        case ignored
+        /// 最終マッチが否定パターン（`!` 再包含）。
+        case included
+    }
+
+    /// 相対パス（POSIX 区切り、先頭 `/` なし）に対する三状態の照合結果。
+    /// gitignore と同様、後に書かれたパターンが優先（否定で再包含）。
+    func evaluate(_ relativePath: String) -> Verdict {
+        guard !patterns.isEmpty else { return .unmatched }
+        // 防御的サニティ上限: 異常に長い入力は照合せず「マッチ無し」を返す（安全側）。
+        guard relativePath.count <= Self.maxMatchPathLength else { return .unmatched }
+        let pathChars = Array(relativePath)
+        let n = pathChars.count
+        var verdict: Verdict = .unmatched
+        for p in patterns where Self.matches(p, pathChars: pathChars, n: n) {
+            verdict = p.negated ? .included : .ignored
+        }
+        return verdict
+    }
+
     /// 相対パス（POSIX 区切り、先頭 `/` なし）が除外対象か。
     /// gitignore と同様、後に書かれたパターンが優先（否定で再包含）。
     func isIgnored(_ relativePath: String) -> Bool {
-        guard !patterns.isEmpty else { return false }
-        // 防御的サニティ上限: 異常に長い入力は照合せず「除外しない」を返す（安全側）。
-        guard relativePath.count <= Self.maxMatchPathLength else { return false }
-        let pathChars = Array(relativePath)
-        let n = pathChars.count
-        var ignored = false
-        for p in patterns where Self.matches(p, pathChars: pathChars, n: n) {
-            ignored = !p.negated
-        }
-        return ignored
+        evaluate(relativePath) == .ignored
     }
 
     // MARK: - glob → tokens
@@ -274,5 +291,99 @@ struct SyncIgnoreMatcher: Sendable {
     private static func firstReachable(_ set: [Bool]) -> Int? {
         for (i, v) in set.enumerated() where v { return i }
         return nil
+    }
+}
+
+/// ディレクトリごとの `.syncignore`（git 風の階層オーバーライド）を束ねる不変・`Sendable` な層状マッチャ。
+///
+/// 各エントリは「`.syncignore` が置かれたディレクトリの**同期ルートからの相対パス**」→ そのファイルの
+/// `SyncIgnoreMatcher`。ルート直下 `<syncRoot>/.syncignore` のキーは `""`（空文字）。
+///
+/// 評価規則（git 準拠・`docs/07` サブタスク B / `docs/08`）: 対象パスの祖先ディレクトリのうち
+/// `.syncignore` を持つものを **浅い→深い順**に走査し、各層には「その層のディレクトリからの相対パス」を
+/// 渡して三状態評価する。**深い層が浅い層を上書き**する（単一ファイル内の last-match-wins を階層へ拡張）。
+/// マッチ無しの層は上位層の判定を維持する。
+///
+/// セキュリティ不変条件（機密網が最優先 / `.syncignore` 自身は除外しない / 未追跡のみ）は
+/// 呼び出し側 `IgnoreDecision` が担う。本型は純粋に「ユーザパターンの層状判定」のみを行う。
+///
+/// 値型 + `Sendable` なので `performFullScan` の `Task.detached` へスナップショットを安全に渡せる。
+struct LayeredSyncIgnore: Sendable {
+    /// 読み込む `.syncignore` ファイル数の防御的上限（資源消費の有界化）。超過分は読み込み側で打ち切る。
+    static let maxFiles = 1_000
+
+    /// dir 相対パス（POSIX、ルートは `""`）→ そのディレクトリの `.syncignore` マッチャ。
+    /// 空（パターン無し）のマッチャは `init` で除外済み。
+    private let matchers: [String: SyncIgnoreMatcher]
+    /// 評価順を固定するため、`matchers` のキーを **浅い→深い**（ディレクトリ深さ昇順）に並べたもの。
+    private let orderedDirs: [String]
+
+    init(matchers: [String: SyncIgnoreMatcher]) {
+        let nonEmpty = matchers.filter { !$0.value.sourceLines.isEmpty }
+        self.matchers = nonEmpty
+        self.orderedDirs = nonEmpty.keys.sorted {
+            let d0 = Self.depth($0), d1 = Self.depth($1)
+            return d0 != d1 ? d0 < d1 : $0 < $1
+        }
+    }
+
+    /// 単一ルートマッチャから構築（後方互換・テスト用）。
+    init(root: SyncIgnoreMatcher) {
+        self.init(matchers: ["": root])
+    }
+
+    /// `.syncignore` が 1 枚も無い空マッチャ。
+    static let empty = LayeredSyncIgnore(matchers: [:])
+
+    /// 読み込まれている `.syncignore` ファイル数（ログ用）。
+    var fileCount: Int { matchers.count }
+
+    /// Settings 表示用: (ディレクトリ相対パス, パターン行) をディレクトリ順で返す。
+    var directoryGroups: [DirectoryGroup] {
+        orderedDirs.map { DirectoryGroup(directory: $0, patterns: matchers[$0]!.sourceLines) }
+    }
+
+    /// Settings 表示用のディレクトリ単位グループ。`directory == ""` は同期ルート直下。
+    struct DirectoryGroup: Identifiable, Sendable, Equatable {
+        var id: String { directory }
+        let directory: String
+        let patterns: [String]
+    }
+
+    /// 同期ルートからの相対パス（POSIX、先頭 `/` なし）がユーザパターンで除外されるか。
+    func isIgnored(_ relativePath: String) -> Bool {
+        evaluate(relativePath) == .ignored
+    }
+
+    /// 祖先ディレクトリの `.syncignore` を浅い→深い順に合成した三状態の照合結果。
+    func evaluate(_ relativePath: String) -> SyncIgnoreMatcher.Verdict {
+        guard !matchers.isEmpty else { return .unmatched }
+        var verdict: SyncIgnoreMatcher.Verdict = .unmatched
+        for dir in orderedDirs {
+            // その層のディレクトリからの相対パス（dir 配下でなければ nil、dir 自身なら空）。
+            guard let sub = Self.relativize(relativePath, under: dir), !sub.isEmpty else { continue }
+            switch matchers[dir]!.evaluate(sub) {
+            case .ignored: verdict = .ignored
+            case .included: verdict = .included
+            case .unmatched: break  // 上位層の判定を維持
+            }
+        }
+        return verdict
+    }
+
+    /// ディレクトリ深さ（`"" = 0`、`"a" = 1`、`"a/b" = 2`）。同深さ内の順序は判定に影響しない
+    /// （単一パスの祖先は各深さに高々 1 つ）。
+    private static func depth(_ dir: String) -> Int {
+        dir.isEmpty ? 0 : dir.reduce(1) { $1 == "/" ? $0 + 1 : $0 }
+    }
+
+    /// `path` を `dir` からの相対パスへ。`dir == ""` は全体、`path == dir`（ディレクトリ自身）は `""`、
+    /// `dir` 配下でなければ `nil`。
+    private static func relativize(_ path: String, under dir: String) -> String? {
+        if dir.isEmpty { return path }
+        if path == dir { return "" }
+        let prefix = dir + "/"
+        guard path.hasPrefix(prefix) else { return nil }
+        return String(path.dropFirst(prefix.count))
     }
 }
