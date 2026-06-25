@@ -5,12 +5,24 @@ import SwiftUI
 @MainActor
 @Observable
 final class VersionHistoryModel {
-    /// 過去バージョン参照タブ: ユーザが入力する相対パス。
+    /// 過去バージョン参照タブ: ユーザが入力する相対パス。同期一覧の絞り込み検索も兼ねる
+    /// （打鍵で `filteredSyncedPaths` がライブに絞られ、Enter で任意パスを直接読込）。
     var pathInput: String = ""
     /// 直近に版を読み込んだ相対パス。
     var loadedPath: String? = nil
     /// `loadedPath` の版（時系列降順）。
     var versions: [FileVersion] = []
+
+    /// ローカル DB（`files`）にある同期済み相対パス一覧（自然順ソート済み）。
+    /// オープン/タブ表示時に 1 回読み、絞り込みはメモリ内で完結（I/O ゼロ）。
+    var syncedPaths: [String] = []
+
+    /// `pathInput` を部分一致クエリとして `syncedPaths` を絞った結果（空入力なら全件）。
+    var filteredSyncedPaths: [String] {
+        let q = pathInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return syncedPaths }
+        return syncedPaths.filter { $0.localizedCaseInsensitiveContains(q) }
+    }
 
     var isLoading = false
     var isRestoring = false
@@ -28,9 +40,23 @@ final class VersionHistoryModel {
     /// 復帰後の state 書込が新スキャンを潰しうるため、各書込前に世代一致を確認して stale を捨てる。
     @ObservationIgnored private var scanGeneration = 0
 
+    /// ローカル DB の `files` から同期済み相対パスを取り込み、自然順にソートして保持する。
+    /// 失敗しても致命ではない（一覧が空のまま手入力で代替できる）ので握りつぶす。
+    func loadSyncedPaths(env: AppEnvironment) async {
+        guard let db = env.database else { return }
+        do {
+            let paths = try await db.pool.read { db in
+                try FileRecord.fetchAll(db).map(\.path)
+            }
+            syncedPaths = paths.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        } catch {
+            AppLogger.ui.error("Failed to load synced paths: \(String(describing: error), privacy: .private)")
+        }
+    }
+
     /// 指定相対パスの全バージョン（delete marker 含む）を列挙して時系列降順に並べる。
     func loadVersions(for relativePathRaw: String, env: AppEnvironment) async {
-        // ボタンは isLoading で disabled だが onSubmit / Choose… 経由は素通しなので再入をここで止める。
+        // ボタンは isLoading で disabled だが onSubmit / 同期一覧の行クリック経由は素通しなので再入をここで止める。
         if isLoading { return }
         let relativePath = relativePathRaw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !relativePath.isEmpty else { return }
