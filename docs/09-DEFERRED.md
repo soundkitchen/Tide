@@ -53,6 +53,29 @@
 - **新しい App Extension ターゲットが要り、拡張は別プロセスでサンドボックス必須＝L1（App Sandbox）と密結合**。同期コア（`S3Client` / `Manifest` / `LocalDatabase`）を拡張プロセスから呼べる形に再編が必要。**L1 の security-scoped bookmark 対応もこの版で一度に行う**（arbitrary-folder モデルのまま 0.2.0 で先行サンドボックス化すると、ドメインへ移る本版で作り直しになるため＝二度手間回避。L1 / H3 を 0.2.0 から外した理由）。
 - **最小プロトタイプ**＝ドメイン登録 + `enumerator` + `fetchContents` で実現性を確認してから本実装に入る段取り。
 
+## ストレージバックエンド移植性（Cloudflare R2 / Google Cloud Storage）— 将来の任意検討（Issue 化せず本メモで追跡）
+
+現状 `Tide/S3/`（`S3Client`/`Uploader`/`Downloader`/`ManifestReader`）は aws-sdk-swift と AWS S3 の機能に密結合。将来 R2 / GCS へ広げる場合に「すでに塞がっている機能」を 2026-06 時点の公式ドキュメント調査で評価した結論を記録する（**0.2.0 では実装しない**）。
+
+**最 load-bearing な依存 = オブジェクトバージョニング。** 版指定取得（`GetObject(versionId)`）・版列挙（`ListObjectVersions`）・delete marker が、版履歴 UI / 過去版復元（M2・M4）・削除済み復元（M4「Deleted files」）・**アップロード競合解決（#25 = `Downloader.download(versionId:)` で相手版を取り直す不変条件**, CLAUDE.md §7）・削除の非破壊セマンティクス（`DeleteObject`＝delete marker）・ライフサイクル「旧版/marker 失効」に全面的に効いている。`docs` も「S3 versioning mandatory」と明記。
+
+### R2 — 土台が塞がっている（再設計が必要）
+R2 は S3 互換 API でも**バージョニングを一切持たない**（公式確認・高確度）。版が無いので版履歴・過去版復元・削除済み復元・#25 の versionId 取得が**成立しない**。`DeleteObject` は即時・完全削除で delete marker が無く「データ損失 < 重複」原則が崩れる。R2 対応 = R2 が版を実装するのを待つか、**Tide 側で版履歴を自前管理（content-addressed キー + tombstone 論理削除 + 版対応の競合解決）する再設計**の二択。なお TLS 強制ポリシー（#26）は R2 に `PutBucketPolicy` が無いが**非致命実装なので実害小**（R2 は HTTPS 可）。
+
+### GCS — 適応レベルで届く見込み（再設計は不要）
+GCS は**ネイティブに版（generation）を持ち**、S3 互換 XML API でも `?versions` 列挙・版指定取得が**報告上は可**（generation を versionId 相当に使用・要実証）。ライフサイクルの noncurrent 失効も XML API で可。ただし以下の**ターゲットを絞った適応**が要る:
+1. **削除モデル**: GCS に **delete marker 概念が無い**（削除＝noncurrent 化）。`ObjectVersionHistory.deletedFiles`（`isDeleteMarker` 前提）と削除復元経路を GCS 向けに分岐（「live 版が無く noncurrent 版がある」を削除済みと判定）。
+2. **`If-None-Match: *`（存在しなければ作成）** を GCS の `x-goog-if-generation-match: 0` 方式へ（SDK の `*` がそのまま通るか要実証）。
+3. **aws SDK の checksum 検証**（2025 以降 GCS interop で非互換）を `when_required` 相当に無効化する設定が必須。
+4. **エンドポイント/認証/版ID↔generation マッピングの実証**（aws-sdk-swift × GCS は公式未確認）。
+ETag は GCS が MD5/`-n` を保証しない（CRC32C）が、**Tide は sha256 を真実とし ETag を不透明値として往復**しているため影響小（条件付き `If-Match` のシャード楽観ロック=#25 も不透明 ETag で動く）。バケットポリシー・SSE は R2 同様に実害小。
+
+### どのバックエンドでも共通して要る土台
+`S3Client` の**ストレージバックエンド抽象化**（エンドポイント注入・認証モデル・**バケット初期設定** `CreateBucket`/`PutBucketVersioning`/`PutPublicAccessBlock`/ポリシー/ライフサイクルを「任意・差し替え可」に）。ここが今いちばん AWS の形に貼り付いている部分。条件付きリクエスト・マルチパート（5MiB/16MiB）・Range・メタデータ・`ListObjectsV2` は R2/GCS とも概ね互換。
+
+### 確度と再評価トリガ
+高確度: 版が「R2 に無い」「GCS にネイティブで有る」「GCS に delete marker が無い」「GCS ETag が MD5 でない」。中〜要実証: GCS の S3 互換 API 経由 versionId↔generation が aws-sdk-swift でそのまま動くか、`If-None-Match:*` の扱い、aws-sdk-swift × GCS/R2 の実動。**実装着手する場合は最小 PoC（エンドポイント差し替え + 版列挙/版取得/条件付き作成の 4 操作）で要実証項目を潰してから本作業に入る。** 設計含意: 今後さらにバージョニング前提の機能を増やすほど移植コストが上がるので、R2/GCS が視野にあるなら抽象化境界を早めに意識する。
+
 ---
 
 - **C3 後半（✅ 解消済み 2026-06-23・Issue #26 / B）**: HTTPS 強制バケットポリシー。`enforceTLSBucketPolicy()` で `aws:SecureTransport=false` を Deny する statement（`Sid: TideDenyInsecureTransport`）を `BucketPolicyBuilder` で冪等にマージし、セットアップ時＋起動時に**非致命**で適用（SDK 既定 HTTPS の多層防御。他 statement は保持・既存バケット/ドリフトは起動時に自己修復）。`PutBucketEncryption` のバケットデフォルト暗号化のみ optional 据置き（per-object SSE-S3 明示済みで実害なし）。`security/critical.md` C3 / `docs/06` IAM。
