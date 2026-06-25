@@ -518,6 +518,17 @@
         }
       }
     },
+    "Filter synced files or type a relative path" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "同期済みファイルを絞り込む / 相対パスを入力"
+          }
+        }
+      }
+    },
     "Load versions" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -529,6 +540,28 @@
         }
       }
     },
+    "No match — press Return to load this path." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "一致なし — Return でこのパスを読み込みます。"
+          }
+        }
+      }
+    },
+    "No synced files yet." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "同期済みのファイルがまだありません。"
+          }
+        }
+      }
+    },
     "No versions found for this file." : {
       "extractionState" : "manual",
       "localizations" : {
@@ -536,28 +569,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "このファイルのバージョンは見つかりませんでした。"
-          }
-        }
-      }
-    },
-    "Please choose a file inside the sync folder." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "同期フォルダ内のファイルを選んでください。"
-          }
-        }
-      }
-    },
-    "Relative path (e.g. docs/note.txt)" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "相対パス（例: docs/note.txt）"
           }
         }
       }

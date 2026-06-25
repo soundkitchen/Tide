@@ -1,5 +1,4 @@
 import SwiftUI
-import AppKit
 
 /// 過去バージョン参照 + 復元のウィンドウ（M4・サブ D）。
 /// 削除済みファイル一覧（サブ E）は後でタブとして同居させる。
@@ -43,13 +42,50 @@ struct VersionHistoryWindow: View {
     // MARK: - ファイル選択
 
     private var fileChooser: some View {
-        HStack(spacing: 8) {
-            TextField("Relative path (e.g. docs/note.txt)", text: $model.pathInput)
-                .textFieldStyle(.roundedBorder)
-                .onSubmit { load() }
-            Button("Choose…") { chooseFile() }
-            Button("Load versions") { load() }
-                .disabled(model.pathInput.trimmingCharacters(in: .whitespaces).isEmpty || model.isLoading)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                // 1 本の欄が「同期一覧の絞り込み検索」と「任意パスの手入力」を兼ねる。
+                TextField("Filter synced files or type a relative path", text: $model.pathInput)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { load() }
+                Button("Load versions") { load() }
+                    .disabled(model.pathInput.trimmingCharacters(in: .whitespaces).isEmpty || model.isLoading)
+            }
+            syncedFileList
+        }
+        .task { await model.loadSyncedPaths(env: env) }
+    }
+
+    /// 同期済みファイル（ローカル DB の `files`）のインライン一覧。`pathInput` で絞り込み、
+    /// 行クリックでそのファイルの版を読み込む。一覧に無いパスは Enter で直接読み込める。
+    @ViewBuilder
+    private var syncedFileList: some View {
+        let matches = model.filteredSyncedPaths
+        if model.syncedPaths.isEmpty {
+            Text("No synced files yet.")
+                .font(.caption).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else if matches.isEmpty {
+            Text("No match — press Return to load this path.")
+                .font(.caption).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            List(matches, id: \.self) { path in
+                Button { selectSyncedPath(path) } label: {
+                    HStack(spacing: 6) {
+                        Text(verbatim: path)
+                            .lineLimit(1).truncationMode(.middle)
+                        Spacer()
+                        if path == model.loadedPath {
+                            Image(systemName: "checkmark")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            .frame(height: 150)
         }
     }
 
@@ -186,26 +222,10 @@ struct VersionHistoryWindow: View {
         Task { await model.loadVersions(for: model.pathInput, env: env) }
     }
 
-    private func chooseFile() {
-        guard let rootPath = env.config.syncRootPath, !rootPath.isEmpty else { return }
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = true
-        panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = false
-        panel.directoryURL = URL(fileURLWithPath: rootPath, isDirectory: true)
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        // NSOpenPanel は実パスを返しがちなので、syncRoot 設定値が symlink を含む場合に備えて
-        // 両辺とも symlink 解決してから比較する（さもないと正当な選択を弾く）。
-        let root = URL(fileURLWithPath: rootPath, isDirectory: true)
-            .standardizedFileURL.resolvingSymlinksInPath()
-        let rootStr = root.path.hasSuffix("/") ? root.path : root.path + "/"
-        let picked = url.standardizedFileURL.resolvingSymlinksInPath().path
-        if picked.hasPrefix(rootStr) {
-            model.pathInput = String(picked.dropFirst(rootStr.count))
-            load()
-        } else {
-            model.errorMessage = String(localized: "Please choose a file inside the sync folder.")
-        }
+    /// 同期一覧の行を選んだとき: 入力欄をそのパスにし（一覧も当該パスへ絞られる）、版を読み込む。
+    private func selectSyncedPath(_ path: String) {
+        model.pathInput = path
+        load()
     }
 
     private static func dateString(_ date: Date?) -> String {
