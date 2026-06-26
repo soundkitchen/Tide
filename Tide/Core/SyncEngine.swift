@@ -454,7 +454,9 @@ final class SyncEngine {
 
     /// SHA-256 計算を detached（off-main・.utility）で実行する共通ヘルパ。
     /// @MainActor のメソッドから呼んでもメインスレッドをブロックしない（pull / event 両経路で共用）。
-    private static func computeHashDetached(_ url: URL) async -> String? {
+    /// nonisolated: actor 状態を一切触らないので、reconcile の nonisolated static 本体（#30 / D1）から
+    /// MainActor ホップなしで呼べる（`statSizeAndMtime` と同じ扱い）。既存の @MainActor 呼び元にも影響なし。
+    nonisolated private static func computeHashDetached(_ url: URL) async -> String? {
         await Task.detached(priority: .utility) {
             try? HashCalculator.sha256(of: url)
         }.value
@@ -775,10 +777,21 @@ final class SyncEngine {
         await refreshQueueDepth()
     }
 
-    private func reconcileRemoteEntry(
+    /// `reconcileRemoteEntry` の本体（依存注入の nonisolated static）。判定 → 実 I/O の switch 配線を
+    /// 結合テスト可能にするため、`resolveUploadConflict` と同型で @MainActor から切り出した（#30 / D1）。
+    /// @MainActor 固有の副作用は注入クロージャで配線し、@MainActor 側は下の薄いラッパに退避する。
+    /// - Parameters:
+    ///   - postConflictCopy: 衝突コピー生成の通知（fire-and-forget。ラッパが MainActor へ Task で逃がす）。
+    ///   - recordIssue: エラーの構造化記録（@MainActor の `recordIssue(_:logAs:)` へ委譲）。
+    nonisolated static func reconcileRemoteEntry(
         path: String,
         entry: ManifestFileEntry,
-        dl: Downloader
+        dl: Downloader,
+        db: LocalDatabase,
+        syncRoot: URL,
+        matcher: LayeredSyncIgnore,
+        postConflictCopy: @Sendable (_ path: String, _ localCopyPath: String) -> Void,
+        recordIssue: @Sendable (_ issue: SyncIssue, _ logAs: String?) async -> Void
     ) async {
         // C1: マニフェスト由来の path はここでも検証（Downloader 側でも検証するが UI 経由で扱う前に弾く）
         let fullURL: URL
@@ -792,7 +805,7 @@ final class SyncEngine {
                     id: UUID(), date: Date(), path: nil, category: .unsafePath,
                     rawDetail: "Unsafe remote path rejected (manifest)"
                 ),
-                logAs: "Unsafe remote path rejected (manifest)"
+                "Unsafe remote path rejected (manifest)"
             )
             return
         }
@@ -808,7 +821,7 @@ final class SyncEngine {
 
         // 除外判定: リモート新規（未追跡）が除外対象ならダウンロードしない。既存追跡は触らない。
         let tracked = (localRec?.lastSyncedAt != nil)
-        if IgnoreDecision.shouldSkip(relativePath: path, isAlreadyTracked: tracked, matcher: ignoreMatcher) {
+        if IgnoreDecision.shouldSkip(relativePath: path, isAlreadyTracked: tracked, matcher: matcher) {
             AppLogger.sync.info("Skipping ignored remote entry: \(path, privacy: .private)")
             return
         }
@@ -838,7 +851,7 @@ final class SyncEngine {
             // ローカル状態。不在 / 存在するがハッシュ不能 / SHA 取得済み を区別して decide() へ渡す。
             // stat 成功なら存在確定。stat 失敗時のみ fileExists で absent（不在）と unreadable（在るが
             // stat 不能＝権限/ディレクトリ等）を分ける（不在を unreadable 扱いすると renameLocalForConflict が空振る）。
-            // @MainActor なので hash は detached で（pull 中のメインスレッドブロックを解消）。
+            // hash は detached で（pull 中のメインスレッドブロックを解消）。
             let exists = stat != nil || FileManager.default.fileExists(atPath: fullURL.path)
             let localState: LocalState
             if exists {
@@ -862,7 +875,7 @@ final class SyncEngine {
                 let localCopy = try dl.renameLocalForConflict(relativePath: path)
                 // 手動マージが要る可能性があるので通知（退避自体は成功＝download 失敗でも知らせる）。
                 // fire-and-forget: 初回の許可プロンプト待ちで同期処理を止めない（PR #18 レビュー Medium）。
-                Task { await self.notifier?.post(.conflictCopyCreated(path: path, localCopyPath: localCopy)) }
+                postConflictCopy(path, localCopy)
                 try await dl.download(relativePath: path, entry: entry)
             case .deleteLocal, .keepLocalRemoteDeleted, .noop:
                 // remote が非 nil のここでは到達しない。来たら decide() のロジックバグ。
@@ -872,9 +885,31 @@ final class SyncEngine {
             AppLogger.sync.error("Remote reconcile \(path, privacy: .private) failed: \(String(describing: error), privacy: .private)")
             await recordIssue(
                 SyncIssueClassifier.classify(error: error, path: path),
-                logAs: "Remote reconcile failed"
+                "Remote reconcile failed"
             )
         }
+    }
+
+    /// `reconcileRemoteEntry` static 本体への @MainActor ラッパ。@MainActor 固有の副作用
+    /// （notifier 通知の fire-and-forget・`recentIssues` への記録）を注入クロージャで配線する。
+    /// `performRemotePull` からの呼び出し（path/entry/dl の 3 引数）はこのラッパを通る。
+    private func reconcileRemoteEntry(
+        path: String,
+        entry: ManifestFileEntry,
+        dl: Downloader
+    ) async {
+        await Self.reconcileRemoteEntry(
+            path: path, entry: entry, dl: dl,
+            db: db, syncRoot: syncRoot, matcher: ignoreMatcher,
+            postConflictCopy: { [weak self] p, c in
+                Task { @MainActor in
+                    await self?.notifier?.post(.conflictCopyCreated(path: p, localCopyPath: c))
+                }
+            },
+            recordIssue: { [weak self] issue, logAs in
+                await self?.recordIssue(issue, logAs: logAs)
+            }
+        )
     }
 
     // MARK: - Event handling
