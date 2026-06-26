@@ -408,8 +408,10 @@ struct Downloader {
 
     private func currentLocalSha(at url: URL) throws -> String? {
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-        // #31 / D2: O_NOFOLLOW でリンク先を読まない（最終コンポーネントが symlink なら
-        // FileOpenError.isSymbolicLink を投げて呼び元へ伝播＝従来の throw 契約どおり安全側）。
+        // #31 / D2: O_NOFOLLOW でリンク先を読まない。最終コンポーネントが symlink なら
+        // FileOpenError.isSymbolicLink を投げて呼び元へ伝播する（旧 sha256(of:) は symlink を追従して
+        // リンク先を hash していたので、これは新たな throw ケース。ただし download() 入口の
+        // isSymbolicLink ガードで通常は到達せず、発火は差し替え TOCTOU 窓のみ＝書込中断で安全側）。
         return try HashCalculator.sha256NoFollow(of: url)
     }
 
