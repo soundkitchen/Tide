@@ -458,7 +458,10 @@ final class SyncEngine {
     /// MainActor ホップなしで呼べる（`statSizeAndMtime` と同じ扱い）。既存の @MainActor 呼び元にも影響なし。
     nonisolated private static func computeHashDetached(_ url: URL) async -> String? {
         await Task.detached(priority: .utility) {
-            try? HashCalculator.sha256(of: url)
+            // #31 / D2: scan/event の SHA ゲートと reconcile の localState 判定はこの 1 箇所を通る。
+            // O_NOFOLLOW でリンク先を読まない（symlink なら nil → scan/event は enqueue・reconcile は
+            // unreadable の安全側へ倒れる）。
+            try? HashCalculator.sha256NoFollow(of: url)
         }.value
     }
 

@@ -307,7 +307,9 @@ struct Downloader {
         }
         // ここに来た時点でファイルは必ず存在（上の guard）。SHA 取得済み or unreadable のいずれか。
         // 競合解決は ThreeWayMerge に一本化（remote = nil の削除側）。unreadable は decide() 側で温存に倒れる。
-        let localState: LocalState = (try? HashCalculator.sha256(of: fullURL)).map(LocalState.present) ?? .unreadable
+        // #31 / D2: O_NOFOLLOW でリンク先を読まない（上の isSymbolicLink ガード後の TOCTOU 窓も塞ぐ＝
+        // 差し替えられても nil → .unreadable → keepLocalRemoteDeleted で温存）。
+        let localState: LocalState = (try? HashCalculator.sha256NoFollow(of: fullURL)).map(LocalState.present) ?? .unreadable
         let decision = ThreeWayMerge.decide(base: dbRec?.sha256, local: localState, remote: nil)
 
         switch decision {
@@ -406,7 +408,9 @@ struct Downloader {
 
     private func currentLocalSha(at url: URL) throws -> String? {
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-        return try HashCalculator.sha256(of: url)
+        // #31 / D2: O_NOFOLLOW でリンク先を読まない（最終コンポーネントが symlink なら
+        // FileOpenError.isSymbolicLink を投げて呼び元へ伝播＝従来の throw 契約どおり安全側）。
+        return try HashCalculator.sha256NoFollow(of: url)
     }
 
     private func parseISO8601(_ s: String) -> Date? {
