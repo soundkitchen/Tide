@@ -62,6 +62,52 @@ func seedLogs(_ db: LocalDatabase, count: Int, types: [SyncLogEventType] = [.upl
     }
 }
 
+/// 親ディレクトリを作ってから temp syncRoot 配下にファイルを書く（配線テスト共通）。
+@discardableResult
+func writeFile(_ root: URL, _ relative: String, _ data: Data) throws -> URL {
+    let url = root.appendingPathComponent(relative)
+    try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try data.write(to: url)
+    return url
+}
+
+/// path の FileRecord を取得（無ければ nil）。
+func fetchFileRecord(_ db: LocalDatabase, path: String) async throws -> FileRecord? {
+    try await db.pool.read { db in try FileRecord.fetchOne(db, key: path) }
+}
+
+/// FileRecord をシードする（追跡済みファイルの想定）。mtime / etag / versionId / updatedAt /
+/// lastSyncedAt はデフォルト引数で、配線テスト 3 スイートが同一の基準フィクスチャを共有する
+/// （別設定でシードして暗黙に食い違うのを防ぐ・PR #42 レビュー nit）。
+func seedFileRecord(
+    _ db: LocalDatabase, path: String, sha: String, size: Int64,
+    mtime: Double = 1_780_000_000.5, etag: String = "etag-base",
+    versionId: String? = "ver-base", updatedAt: Double = 1_780_000_000,
+    lastSyncedAt: Double? = 1_780_000_000
+) async throws {
+    try await db.pool.write { db in
+        var rec = FileRecord(
+            path: path, size: size, mtime: mtime, sha256: sha,
+            s3VersionId: versionId, s3Etag: etag, lastSyncedAt: lastSyncedAt, updatedAt: updatedAt
+        )
+        try rec.save(db)
+    }
+}
+
+/// 値として用意した FileRecord を永続化する（`existing` 引数と DB を意図的に食い違わせる CAS テスト用）。
+func saveFileRecord(_ db: LocalDatabase, _ rec: FileRecord) async throws {
+    try await db.pool.write { db in var r = rec; try r.save(db) }
+}
+
+/// テスト用 Downloader。download を呼ばない経路（削除等）はダミークライアントでよい。
+/// 3 スイートで同一構成の Downloader を使うための単一構築点（PR #42 レビュー nit）。
+func makeTestDownloader(
+    client: any RangedDownloadClient = FakeRangedDownloadClient(fullData: Data()),
+    db: LocalDatabase, syncRoot: URL, tmpDir: URL, store: TransferStateStore, deviceId: String = "devL"
+) -> Downloader {
+    Downloader(downloadClient: client, db: db, syncRoot: syncRoot, tmpDir: tmpDir, deviceId: deviceId, transferStore: store)
+}
+
 /// テスト用の決定的データ生成。
 enum TestData {
     /// 決定的で非自明なバイト列（全部同じバイトだと連結検証が緩くなるため）。`salt` で内容をずらす。

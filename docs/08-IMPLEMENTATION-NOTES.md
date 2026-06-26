@@ -185,8 +185,41 @@
   2. **`.localMatchesRemote` を `download()` から分離**: ゲートを抜けた `.localMatchesRemote`（= 実際に mtime ドリフト / etag ドリフトの修復が要るケースだけ残る）は専用 **`Downloader.markSynced`**（= 旧 `updateDBEntryWithoutWrite`）へ。`download()` 内の二度目 hash（`currentLocalSha`）を排除。`.download` / `.conflictThenDownload` は従来どおり `download()`（早期 return の安全網は温存）。
   3. **残る hash を off-main 化**: ゲートを抜けて hash が要るケースの `HashCalculator.sha256` を `Task.detached(priority:.utility)` へ（`processEventToQueue` と同パターン）＝pull 中のメインブロック解消。
 - **ゲートの厳密さ = 厳密版（no-op 証明可能）を採用**（会話で確定）。クロスデバイスで同一内容が再 UL され etag だけ変わった場合はゲートが外れ、通常経路の hash → `.localMatchesRemote` → `markSynced` で DB の etag/versionId が最新化される（より正しい方向）。**S3 マニフェストは Uploader しか書かない**ので、ゲートで etag/versionId 更新を省いても S3 汚染の経路は無い（再合成は read 専用）。
-- **安全性**: ゲートは `preDecision`（既存の SHA ゲートと同じ「size+mtime 一致 → 内容不変とみなす」前提）を流用＝`performFullScan` と同じ accepted な前提を継承し新たな取りこぼし窓を作らない。`localRec.sha256 != entry.sha256`（リモート変化）/ size or mtime ドリフト / 未追跡 のいずれでもゲートは外れ通常経路へ落ちる。`ChangeDetectorTests` の `reconcileIsNoop` 群で全分岐固定（一致 → no-op / sha・etag・versionId 差 / size・mtime 差 / known nil / 未同期 / 空 etag + nil versionId）。配線（reconcile → I/O）の結合テストは docs/09 の scan/event 配線と同じく未整備のまま据え置き。
+- **安全性**: ゲートは `preDecision`（既存の SHA ゲートと同じ「size+mtime 一致 → 内容不変とみなす」前提）を流用＝`performFullScan` と同じ accepted な前提を継承し新たな取りこぼし窓を作らない。`localRec.sha256 != entry.sha256`（リモート変化）/ size or mtime ドリフト / 未追跡 のいずれでもゲートは外れ通常経路へ落ちる。`ChangeDetectorTests` の `reconcileIsNoop` 群で全分岐固定（一致 → no-op / sha・etag・versionId 差 / size・mtime 差 / known nil / 未同期 / 空 etag + nil versionId）。配線（判定 → I/O）の結合テストは下記「判定 → 実 I/O 配線の結合テスト」（D1 / #30）で整備済み。
 - **実機受け入れ消化済み（✅ 2026-06-16・対話形式・チェックリストは運用どおり削除）**: 観測信号は `files.updated_at`（pull のたびに reconcile が全行 DB write すれば bump される）。**BEFORE**＝変更前ビルド（旧 running app）が、内容無変更のまま poll のたびに全 3 ファイルの updated_at を bump（03:28:48→03:31:49→03:34:51・180s 間隔）し、しかも `.syncignore` の shard は再 fetch されていない（etag キャッシュ）のに updated_at が進む＝再合成 entry でも全行 write する無駄を実機確認。**AFTER**＝新ビルド（PR）に差し替えると、起動 pull・周期 poll を跨いでも updated_at 凍結（ゲート発火＝write 無し・余計な sync_log 無し）。**実変更の往復**＝`perf-b.txt` を編集→新ビルドがアップロード（DB/S3/sha 更新）→ 次 poll で **shard 46 が S3 から再 fetch された**のに perf-b の updated_at は進まず（DB 再合成 entry だけでなく S3 から取り直した生 entry に対してもゲートが正しく no-op 化・再 UL ループ無し）。pull の `.download`/`.conflictThenDownload` 分岐は本 PR で不変（同一 `dl.download()`・`DownloaderTests` + reviewer 解析で担保）なため move-out による live `.download` 検証は不採用（起動時 `performFullScan` の missing→削除キュー投入が pull の再 DL と競合し S3 削除を伝播しうるため）。bucket `dev-tide` / sync root `/Users/hige/Tide` で実施、後始末でテストファイルを削除し S3/DB を元状態へ復元。
+
+### 判定 → 実 I/O 配線の結合テストと nonisolated static 抽出（D1 / #30・2026-06-27）
+
+純粋判定（`ThreeWayMerge.decide` / `ChangeDetector.preDecision`/`postHash`）は全分岐網羅済みだったが、
+その判定を実 I/O（download / DB write / enqueue / 削除）へ振り分ける switch マッピングが結合テスト未整備で、
+取り違え（データ損失 / 再アップロードストーム / 無エラー乖離）を回帰検出できなかった。Issue #25 / A が導入した
+**「`nonisolated static`/struct + 依存注入 + 実 temp DB + フェイク S3（`FakeRangedDownloadClient`）」型**を 4 配線へ横展開した。
+
+- **テスタブル化の分担パターン**: @MainActor 固有の副作用（`notifier.post` の fire-and-forget・`recentIssues` への
+  append・`refreshQueueDepth`・`reloadIgnoreMatcher`/`triggerFullScan`）は `@MainActor` の薄いラッパに残し、
+  **判定 → I/O の本体を `nonisolated static` へ純粋移設**して注入クロージャ（`postConflictCopy` / `recordIssue`）で
+  副作用を配線する（`resolveUploadConflict` / `pruneOrphanTransfers` と同型）。
+- **抽出した static（すべて `SyncEngine` 上）**:
+  - `reconcileRemoteEntry(path:entry:dl:db:syncRoot:matcher:postConflictCopy:recordIssue:)` — pull 取り込み。
+    `performRemotePull` からは 3 引数の `@MainActor` ラッパ経由（無変更）。
+  - `classifyLocalChange(existing:fileURL:size:mtime:relativePath:db:) -> FileSyncDecision` — scan/event 共通の
+    per-file 判定（preDecision → verifyHash → postHash → mtime CAS）。hash は `computeHashDetached` で off-main
+    （`computeHashDetached` も `nonisolated` 化）なので @MainActor の event 経路からも安全に呼べる。CAS の
+    repaired/no-op を `FileSyncDecision`（`.skip`/`.enqueue`/`.mtimeRepaired`/`.mtimeCASNoop`）で区別する
+    （scan は repaired のみカウント、event は 3 種とも早期 return）。
+  - `enqueueUpload(db:path:now:onConflict:)` — upload 1 行投入。**onConflict は scan=`.ignore`（リトライ中の
+    attempts を巻き戻さない）/ event=`.replace`（処理中の同 path を置換＝L6 安定化）の差を呼び元が決める**。
+  - `enqueueScanDeletions(db:foundPaths:now:) -> Int` — `knownPaths − foundPaths` を delete キューへ。
+- **元関数に残すもの**: `performFullScan` のツリー走査・symlink skip・`PathValidator`・`HardcodedIgnoreRules`
+  プレフィルタ・foundPaths 簿記・`Task.detached`/off-main・カウント集計。`processEventToQueue` の
+  `.syncignore` reload + `triggerFullScan` ディスパッチ・`.deleted` / file-gone → `enqueueDelete`・除外判定の
+  位置（event は判定後・scan は判定前）。
+- **純粋移設の担保**: 各リファクタ直後に**既存テスト全通**で振る舞い不変を確認 → その後で新規テストを足し、
+  各新規テストは**フェイルファースト**（分岐を故意誤配線して落ちる）で配線検出力を確認。新規テストは
+  `RemoteDeletionTests` / `ReconcileWiringTests` / `ScanEventWiringTests`。
+- **残ギャップ（@MainActor 直接駆動面なし＝スコープ外）**: `.syncignore` reload/triggerFullScan ディスパッチ、
+  event の `.deleted` / file-gone → `enqueueDelete`、scan の巨大クロージャ本体（走査）。単一走査リライト
+  （`docs/09` ネスト `.syncignore` の「効率: ツリー二重走査」）の前提だった「先に scan 結合テスト」は本タスクで満たした。
 
 ### バージョン単一化と診断エクスポート（2026-06-19・PR #24）
 

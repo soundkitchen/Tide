@@ -454,7 +454,9 @@ final class SyncEngine {
 
     /// SHA-256 計算を detached（off-main・.utility）で実行する共通ヘルパ。
     /// @MainActor のメソッドから呼んでもメインスレッドをブロックしない（pull / event 両経路で共用）。
-    private static func computeHashDetached(_ url: URL) async -> String? {
+    /// nonisolated: actor 状態を一切触らないので、reconcile の nonisolated static 本体（#30 / D1）から
+    /// MainActor ホップなしで呼べる（`statSizeAndMtime` と同じ扱い）。既存の @MainActor 呼び元にも影響なし。
+    nonisolated private static func computeHashDetached(_ url: URL) async -> String? {
         await Task.detached(priority: .utility) {
             try? HashCalculator.sha256(of: url)
         }.value
@@ -491,7 +493,6 @@ final class SyncEngine {
 
     private func performFullScan() async throws {
         let root = self.syncRoot
-        let dev = self.deviceId
         let db = self.db
         let matcher = self.ignoreMatcher
         let now = Date().timeIntervalSince1970
@@ -551,90 +552,117 @@ final class SyncEngine {
 
                 foundPaths.insert(relative)
 
-                // 変更判定は ChangeDetector（純粋関数）に集約。size 一致 + mtime 不一致は SHA で
-                // 「実変更か mtime ドリフトか」を判定し、ドリフトなら DB の mtime を修復して
-                // 再アップロードしない（docs/04 仕様の SHA ゲート。マニフェスト秒精度 mtime での
-                // DB 汚染や setAttributes 失敗の残差を自己修復する安全網）。
-                let known = existing.map {
-                    ChangeDetector.Known(
-                        size: $0.size, mtime: $0.mtime,
-                        sha256: $0.sha256, isSynced: $0.lastSyncedAt != nil
-                    )
-                }
-                let needsEnqueue: Bool
-                switch ChangeDetector.preDecision(known: known, size: size, mtime: mtime) {
-                case .skip:
-                    needsEnqueue = false
+                // 変更判定（preDecision → verifyHash → postHash → mtime CAS）は classifyLocalChange に集約。
+                // scan / event 両経路が同一ロジックを共有し、判定 → 実 I/O の配線を結合テストで固定する（#30 / D1）。
+                switch try await Self.classifyLocalChange(
+                    existing: existing, fileURL: next, size: size, mtime: mtime,
+                    relativePath: relative, db: db
+                ) {
+                case .skip, .mtimeCASNoop:
+                    break
+                case .mtimeRepaired:
+                    // カウントは実際に修復した行のみ（ログ "repaired N mtimes" は自己修復の観測点なので
+                    // CAS no-op を数えない。PR #12 レビュー Low-1）。
+                    mtimesRepaired += 1
                 case .enqueue:
-                    needsEnqueue = true
-                case .verifyHash:
-                    // verifyHash は known 非 nil のときのみ返る（空 sha フォールバックは常に enqueue 側）。
-                    let knownSha = known?.sha256 ?? ""
-                    let computed = try? HashCalculator.sha256(of: next)
-                    switch ChangeDetector.postHash(knownSha: knownSha, computedSha: computed) {
-                    case .refreshMtimeOnly:
-                        // CAS: 判定〜書込の間に並行 pull が同 path を更新していたら no-op
-                        // （新しい sha / s3VersionId / s3Etag を巻き戻さない）。
-                        // カウントは返値どおり = 実際に修復した行のみ（ログ "repaired N mtimes" は
-                        // 自己修復の観測点なので no-op を数えない。PR #12 レビュー Low-1）。
-                        if try await db.refreshMtimeIfShaUnchanged(
-                            path: relative, expectedSha: knownSha, newMtime: mtime
-                        ) {
-                            mtimesRepaired += 1
-                        }
-                        needsEnqueue = false
-                    case .enqueue:
-                        needsEnqueue = true
-                    }
-                }
-
-                if needsEnqueue {
-                    try await db.pool.write { db in
-                        var rec = UploadQueueRecord(
-                            id: nil,
-                            path: relative,
-                            operation: "upload",
-                            enqueuedAt: now,
-                            attempts: 0,
-                            nextRetryAt: nil,
-                            lastError: nil
-                        )
-                        try rec.insert(db, onConflict: .ignore)
-                    }
+                    // scan は onConflict: .ignore（リトライ中の attempts を巻き戻さない）。
+                    try await Self.enqueueUpload(db: db, path: relative, now: now, onConflict: .ignore)
                     newEnqueued += 1
                 }
-                _ = dev
             }
 
-            // DB にあって実体がないファイルを delete キューへ
-            let knownPaths: Set<String> = try await db.pool.read { db in
-                let all = try FileRecord.fetchAll(db)
-                return Set(all.map { $0.path })
-            }
-            let missing = knownPaths.subtracting(foundPaths)
-            if !missing.isEmpty {
-                try await db.pool.write { db in
-                    for p in missing {
-                        var rec = UploadQueueRecord(
-                            id: nil,
-                            path: p,
-                            operation: "delete",
-                            enqueuedAt: now,
-                            attempts: 0,
-                            nextRetryAt: nil,
-                            lastError: nil
-                        )
-                        try rec.insert(db, onConflict: .ignore)
-                    }
-                }
-                deletedEnqueued = missing.count
-            }
+            // DB にあって実体走査で見つからなかった path を delete キューへ（集合差分 → enqueue の配線）。
+            deletedEnqueued = try await Self.enqueueScanDeletions(db: db, foundPaths: foundPaths, now: now)
 
             return (newEnqueued, deletedEnqueued, mtimesRepaired)
         }.value
 
         AppLogger.sync.info("Full scan: enqueued \(result.newEnqueued) uploads, \(result.deletedEnqueued) deletes, repaired \(result.mtimesRepaired) mtimes")
         await refreshQueueDepth()
+    }
+
+    /// scan / event 共通の per-file 変更判定 → mtime 修復（CAS）。判定 → 実 I/O の配線を結合テスト可能に
+    /// するため切り出した（#30 / D1）。アップロードの実 enqueue（onConflict が scan=.ignore /
+    /// event=.replace で異なる）・除外判定・foundPaths 簿記は呼び元に残す。
+    /// hash は `computeHashDetached` で off-main 実行するので @MainActor の event 経路からも安全に呼べる。
+    enum FileSyncDecision: Equatable, Sendable {
+        case skip            // size/mtime 一致 → 変更なし
+        case enqueue         // 要アップロード
+        case mtimeRepaired   // mtime ドリフトのみ → CAS で DB mtime を修復した
+        case mtimeCASNoop    // refreshMtimeOnly だが CAS が並行更新で no-op（mtime を巻き戻さない）
+    }
+
+    nonisolated static func classifyLocalChange(
+        existing: FileRecord?,
+        fileURL: URL,
+        size: Int64,
+        mtime: Double,
+        relativePath: String,
+        db: LocalDatabase
+    ) async throws -> FileSyncDecision {
+        let known = existing.map {
+            ChangeDetector.Known(
+                size: $0.size, mtime: $0.mtime,
+                sha256: $0.sha256, isSynced: $0.lastSyncedAt != nil
+            )
+        }
+        switch ChangeDetector.preDecision(known: known, size: size, mtime: mtime) {
+        case .skip:
+            return .skip
+        case .enqueue:
+            return .enqueue
+        case .verifyHash:
+            // verifyHash は known 非 nil のときのみ返る（空 sha フォールバックは常に enqueue 側）。
+            let knownSha = known?.sha256 ?? ""
+            let computed = await Self.computeHashDetached(fileURL)
+            switch ChangeDetector.postHash(knownSha: knownSha, computedSha: computed) {
+            case .refreshMtimeOnly:
+                // CAS: 判定〜書込の間に並行 pull が同 path を更新していたら no-op
+                // （新しい sha / s3VersionId / s3Etag を巻き戻さない）。
+                let repaired = try await db.refreshMtimeIfShaUnchanged(
+                    path: relativePath, expectedSha: knownSha, newMtime: mtime
+                )
+                return repaired ? .mtimeRepaired : .mtimeCASNoop
+            case .enqueue:
+                return .enqueue
+            }
+        }
+    }
+
+    /// アップロードキューへ 1 行投入する。onConflict は scan=.ignore（attempts 保持）/
+    /// event=.replace（処理中の同 path を置換）で呼び元が決める（#30 / D1 で配線テスト）。
+    nonisolated static func enqueueUpload(
+        db: LocalDatabase, path: String, now: Double, onConflict: Database.ConflictResolution
+    ) async throws {
+        try await db.pool.write { db in
+            var rec = UploadQueueRecord(
+                id: nil, path: path, operation: "upload",
+                enqueuedAt: now, attempts: 0, nextRetryAt: nil, lastError: nil
+            )
+            try rec.insert(db, onConflict: onConflict)
+        }
+    }
+
+    /// DB にあって実体走査で見つからなかった path を delete キューへ投入する（フルスキャンの削除検出）。
+    /// - Returns: enqueue した削除件数。
+    nonisolated static func enqueueScanDeletions(
+        db: LocalDatabase, foundPaths: Set<String>, now: Double
+    ) async throws -> Int {
+        let knownPaths: Set<String> = try await db.pool.read { db in
+            Set(try FileRecord.fetchAll(db).map { $0.path })
+        }
+        let missing = knownPaths.subtracting(foundPaths)
+        guard !missing.isEmpty else { return 0 }
+        try await db.pool.write { db in
+            for p in missing {
+                var rec = UploadQueueRecord(
+                    id: nil, path: p, operation: "delete",
+                    enqueuedAt: now, attempts: 0, nextRetryAt: nil, lastError: nil
+                )
+                try rec.insert(db, onConflict: .ignore)
+            }
+        }
+        return missing.count
     }
 
     nonisolated static func relativePath(of url: URL, root: URL) -> String {
@@ -775,10 +803,21 @@ final class SyncEngine {
         await refreshQueueDepth()
     }
 
-    private func reconcileRemoteEntry(
+    /// `reconcileRemoteEntry` の本体（依存注入の nonisolated static）。判定 → 実 I/O の switch 配線を
+    /// 結合テスト可能にするため、`resolveUploadConflict` と同型で @MainActor から切り出した（#30 / D1）。
+    /// @MainActor 固有の副作用は注入クロージャで配線し、@MainActor 側は下の薄いラッパに退避する。
+    /// - Parameters:
+    ///   - postConflictCopy: 衝突コピー生成の通知（fire-and-forget。ラッパが MainActor へ Task で逃がす）。
+    ///   - recordIssue: エラーの構造化記録（@MainActor の `recordIssue(_:logAs:)` へ委譲）。
+    nonisolated static func reconcileRemoteEntry(
         path: String,
         entry: ManifestFileEntry,
-        dl: Downloader
+        dl: Downloader,
+        db: LocalDatabase,
+        syncRoot: URL,
+        matcher: LayeredSyncIgnore,
+        postConflictCopy: @Sendable (_ path: String, _ localCopyPath: String) -> Void,
+        recordIssue: @Sendable (_ issue: SyncIssue, _ logAs: String?) async -> Void
     ) async {
         // C1: マニフェスト由来の path はここでも検証（Downloader 側でも検証するが UI 経由で扱う前に弾く）
         let fullURL: URL
@@ -792,7 +831,7 @@ final class SyncEngine {
                     id: UUID(), date: Date(), path: nil, category: .unsafePath,
                     rawDetail: "Unsafe remote path rejected (manifest)"
                 ),
-                logAs: "Unsafe remote path rejected (manifest)"
+                "Unsafe remote path rejected (manifest)"
             )
             return
         }
@@ -808,7 +847,7 @@ final class SyncEngine {
 
         // 除外判定: リモート新規（未追跡）が除外対象ならダウンロードしない。既存追跡は触らない。
         let tracked = (localRec?.lastSyncedAt != nil)
-        if IgnoreDecision.shouldSkip(relativePath: path, isAlreadyTracked: tracked, matcher: ignoreMatcher) {
+        if IgnoreDecision.shouldSkip(relativePath: path, isAlreadyTracked: tracked, matcher: matcher) {
             AppLogger.sync.info("Skipping ignored remote entry: \(path, privacy: .private)")
             return
         }
@@ -838,7 +877,7 @@ final class SyncEngine {
             // ローカル状態。不在 / 存在するがハッシュ不能 / SHA 取得済み を区別して decide() へ渡す。
             // stat 成功なら存在確定。stat 失敗時のみ fileExists で absent（不在）と unreadable（在るが
             // stat 不能＝権限/ディレクトリ等）を分ける（不在を unreadable 扱いすると renameLocalForConflict が空振る）。
-            // @MainActor なので hash は detached で（pull 中のメインスレッドブロックを解消）。
+            // hash は detached で（pull 中のメインスレッドブロックを解消）。
             let exists = stat != nil || FileManager.default.fileExists(atPath: fullURL.path)
             let localState: LocalState
             if exists {
@@ -862,7 +901,7 @@ final class SyncEngine {
                 let localCopy = try dl.renameLocalForConflict(relativePath: path)
                 // 手動マージが要る可能性があるので通知（退避自体は成功＝download 失敗でも知らせる）。
                 // fire-and-forget: 初回の許可プロンプト待ちで同期処理を止めない（PR #18 レビュー Medium）。
-                Task { await self.notifier?.post(.conflictCopyCreated(path: path, localCopyPath: localCopy)) }
+                postConflictCopy(path, localCopy)
                 try await dl.download(relativePath: path, entry: entry)
             case .deleteLocal, .keepLocalRemoteDeleted, .noop:
                 // remote が非 nil のここでは到達しない。来たら decide() のロジックバグ。
@@ -872,9 +911,31 @@ final class SyncEngine {
             AppLogger.sync.error("Remote reconcile \(path, privacy: .private) failed: \(String(describing: error), privacy: .private)")
             await recordIssue(
                 SyncIssueClassifier.classify(error: error, path: path),
-                logAs: "Remote reconcile failed"
+                "Remote reconcile failed"
             )
         }
+    }
+
+    /// `reconcileRemoteEntry` static 本体への @MainActor ラッパ。@MainActor 固有の副作用
+    /// （notifier 通知の fire-and-forget・`recentIssues` への記録）を注入クロージャで配線する。
+    /// `performRemotePull` からの呼び出し（path/entry/dl の 3 引数）はこのラッパを通る。
+    private func reconcileRemoteEntry(
+        path: String,
+        entry: ManifestFileEntry,
+        dl: Downloader
+    ) async {
+        await Self.reconcileRemoteEntry(
+            path: path, entry: entry, dl: dl,
+            db: db, syncRoot: syncRoot, matcher: ignoreMatcher,
+            postConflictCopy: { [weak self] p, c in
+                Task { @MainActor in
+                    await self?.notifier?.post(.conflictCopyCreated(path: p, localCopyPath: c))
+                }
+            },
+            recordIssue: { [weak self] issue, logAs in
+                await self?.recordIssue(issue, logAs: logAs)
+            }
+        )
     }
 
     // MARK: - Event handling
@@ -919,32 +980,16 @@ final class SyncEngine {
             let existing = try await db.pool.read { db in
                 try FileRecord.fetchOne(db, key: path)
             }
-            // 変更判定はフルスキャンと同じ ChangeDetector（SHA ゲート込み）に集約。
-            let known = existing.map {
-                ChangeDetector.Known(
-                    size: $0.size, mtime: $0.mtime,
-                    sha256: $0.sha256, isSynced: $0.lastSyncedAt != nil
-                )
-            }
-            switch ChangeDetector.preDecision(known: known, size: size, mtime: mtime) {
-            case .skip:
-                return  // unchanged
+            // 変更判定（preDecision → verifyHash → postHash → mtime CAS）はフルスキャンと同じ
+            // classifyLocalChange に集約（hash は off-main・#30 / D1 で配線テスト）。
+            switch try await Self.classifyLocalChange(
+                existing: existing, fileURL: fullURL, size: size, mtime: mtime,
+                relativePath: path, db: db
+            ) {
+            case .skip, .mtimeRepaired, .mtimeCASNoop:
+                return  // 無変更 or mtime 修復のみ（アップロード不要）
             case .enqueue:
                 break
-            case .verifyHash:
-                // @MainActor なので hash は detached で（メインスレッドをブロックしない）。
-                let knownSha = known?.sha256 ?? ""
-                let computed = await Self.computeHashDetached(fullURL)
-                switch ChangeDetector.postHash(knownSha: knownSha, computedSha: computed) {
-                case .refreshMtimeOnly:
-                    // mtime ドリフトのみ → CAS で修復してアップロードしない（performFullScan と同じ）。
-                    try await db.refreshMtimeIfShaUnchanged(
-                        path: path, expectedSha: knownSha, newMtime: mtime
-                    )
-                    return
-                case .enqueue:
-                    break
-                }
             }
 
             // 除外判定（新規被マッチはスキップ。既存追跡・.syncignore 自身は通す）
@@ -953,18 +998,8 @@ final class SyncEngine {
                 return
             }
 
-            try await db.pool.write { db in
-                var rec = UploadQueueRecord(
-                    id: nil,
-                    path: path,
-                    operation: "upload",
-                    enqueuedAt: now,
-                    attempts: 0,
-                    nextRetryAt: nil,
-                    lastError: nil
-                )
-                try rec.insert(db, onConflict: .replace)
-            }
+            // event は onConflict: .replace（処理中の同 path の新イベントで置換＝L6 安定化設計）。
+            try await Self.enqueueUpload(db: db, path: path, now: now, onConflict: .replace)
             await refreshQueueDepth()
 
         case .deleted:
