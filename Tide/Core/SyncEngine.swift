@@ -1394,13 +1394,24 @@ final class SyncEngine {
         }
     }
 
-    /// 分類済み issue を recentIssues に積む（上限 50・FIFO）。`logAs` に英語固定文を渡すと
-    /// sync_log("error") にも 1 行残す（message = 固定文、details = rawDetail）。nil は
+    /// recentIssues への積み方（純粋関数）。**同一 (path, category) は最新のみ保持**してから末尾へ積み、
+    /// 上限 `cap` の FIFO で古いものを落とす。リトライごとに同一エラーが積み上がり（give-up までに同カテゴリ
+    /// 最大 5 件）、上限到達時に他カテゴリを押し流すのを防ぐ（#32 / D3・PR #17 nit-4）。古い同一キーを除いて
+    /// から末尾へ足すので「最新が末尾」の不変条件（`MenuBarPresentation.groupIssues` は reversed で新しい順に走査）
+    /// を保つ。path は `String?` で nil 同士も同一キー（path なしの pull 全体失敗等も最新のみ残る）。
+    nonisolated static func appendDeduped(_ issues: [SyncIssue], _ issue: SyncIssue, cap: Int = 50) -> [SyncIssue] {
+        var next = issues.filter { !($0.path == issue.path && $0.category == issue.category) }
+        next.append(issue)
+        if next.count > cap { next.removeFirst(next.count - cap) }
+        return next
+    }
+
+    /// 分類済み issue を recentIssues に積む（同一 (path, category) は最新のみ・上限 50・FIFO＝`appendDeduped`）。
+    /// `logAs` に英語固定文を渡すと sync_log("error") にも 1 行残す（message = 固定文、details = rawDetail）。nil は
     /// 呼び元が自前の write Tx 内で原子的に書く箇所（fileTooLarge / give-up / 不安定警告）か、
     /// リトライごとの重複記録を避けたい箇所（give-up 前の各失敗）。
     private func recordIssue(_ issue: SyncIssue, logAs logMessage: String? = nil) async {
-        recentIssues.append(issue)
-        if recentIssues.count > 50 { recentIssues.removeFirst(recentIssues.count - 50) }
+        recentIssues = Self.appendDeduped(recentIssues, issue)
         guard let logMessage else { return }
         do {
             try await db.appendLog(

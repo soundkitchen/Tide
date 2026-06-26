@@ -16,7 +16,7 @@
 - **C3 = [#29]（ストレッチ）**: 残りの復元 UI 拡張（同 (a) CopyObject / (b) 削除一覧の増分化 / 設定 export）。
 - **D1 = [#30]（✅ 解消済み 2026-06-27）**: reconcile/削除/scan 配線の結合テスト整備。下方「reconcile/削除/scan の配線部が未結合テスト」項参照。
 - **D2 = [#31]**: ローカル hash 経路の NoFollow 一括化。
-- **D3 = [#32]**: `recentIssues` の (path, category) dedupe（PR #17 nit-4）。
+- **D3 = [#32]（✅ 解消済み 2026-06-27）**: `recentIssues` の (path, category) dedupe（PR #17 nit-4）。下方「PR #17 レビューの据え置き（nit-4）」項参照。
 - **D4 = [#33]（✅ 解消済み 2026-06-25）**: マルチパートの stale UploadId 回復（NoSuchUpload を成功扱い・サブ D PR #4 レビュー (a)）。下方の「サブD PR #4 レビューの据え置き」(a) 参照。
 - **D5 = [#34]（ストレッチ）**: `RestoreService` と pull の直列化。
 
@@ -108,4 +108,4 @@ ETag は GCS が MD5/`-n` を保証しない（CRC32C）が、**Tide は sha256 
 - **M4 復元 UI の据え置き（2026-06-10）**: (a) **S3 内 CopyObject 方式**: 巨大ファイルをローカル往復させない復元。マニフェスト整合（sha256/etag）を別途解決する設計が要るため別タスク（現状は「書き戻し → 再アップロード」一本）。(b) **大規模バケットの全削除済み列挙コスト**: 「Deleted files」タブは `files/` 全体を毎回フル列挙するため、巨大バケットでは増分インデックス/キャッシュが望ましい（現状は明示ボタン + 逐次表示 + キャンセルで緩和）。(c) **マルチパート過去版の etag 整合チェック**: `<md5>-<n>` 形式で MD5 一致しないため整合判定に使っていない（サイズ + 復元後の再ハッシュで担保）。(d) **delete marker の直接削除による「完全削除取り消し」別経路**（CopyObject せず復活）は UI スコープ外。(e) **過去バージョン参照のファイル選択** ✅ **解消済み（2026-06-26・[#28]）**: ローカル DB `files` の同期済みパスをインライン一覧（インクリメンタル絞り込み）で選べるようにした。入力欄 1 本が「一覧の絞り込み検索」と「任意パスの手入力（Enter で直接読込・DB に無いパスも参照可）」を兼ね、同期一覧と重複する `NSOpenPanel`（Choose…）は撤去。なお**削除済みファイルの版履歴ブラウズ**は引き続き「Deleted files」タブ（delete marker 列挙）の管轄＝本タブのスコープ外で未対応のまま。
 - **`RestoreService` / 復元 UI の reconcile 競合**: 復元の atomic move は専用 tmp 名（`restore-<hash>.part`）で `Downloader` の `dl-` tmp とは非衝突だが、復元書込と並行 `triggerRemotePull` の reconcile が同一 path に同時に触れる窓は厳密には未閉鎖（手動操作 + フルスキャン委譲で実害は出ていない）。pull 単一ゲートと同様の直列化が要るなら別タスク。
 - **`bootstrapFailure` / `VersionHistoryModel.errorMessage` の生エラー文字列表示（F4 の残り面・据え置き）**: F4 本体（`recentIssues` / `.error`）は 2026-06-11 に分類サマリ化で解消したが、この 2 面は意図的に生文字列のまま — bootstrapFailure はセットアップ復旧に全文が要り、復元 UI のエラーは操作直後の文脈でデバッグ実利が大きい。露出はメタデータのみ・本人画面のみ（旧 F4 と同評価）。他人配布前に再評価（`security/README.md` 参照）。
-- **PR #17 レビューの据え置き（nit-4）**: リトライごとに同一エラーが `recentIssues` に積まれる（give-up までに同カテゴリ最大 5 件）。旧 `recentErrors` と同挙動で、カテゴリ別グルーピングが重複を緩和するので現状可。上限 50 の FIFO で他カテゴリを押し流す方向に働くため、気になったら (path, category) で最新のみ残す dedupe を将来検討。
+- **PR #17 レビューの据え置き（nit-4・[#32] / D3・✅ 解消済み 2026-06-27）**: リトライごとに同一エラーが `recentIssues` に積まれていた（give-up までに同カテゴリ最大 5 件）。上限 50 の FIFO で他カテゴリを押し流す方向に働くため、(path, category) で最新のみ残す dedupe を入れた。純粋関数 `SyncEngine.appendDeduped(_:_:cap:)`（同一 (path, category) の既存を除いてから末尾へ積み、上限 cap の FIFO）に切り出し、`recordIssue` が `recentIssues = Self.appendDeduped(recentIssues, issue)` で通す。「最新が末尾」の不変条件（`MenuBarPresentation.groupIssues` は reversed で新しい順に走査）は保持。path は `String?` で nil 同士も同一キー（path なしの pull 全体失敗等も最新のみ）。`SyncEngineTests` の `appendDeduped` 群で固定（最新のみ保持・path/category 区別・nil path collapse・末尾移動・FIFO 上限）。
