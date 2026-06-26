@@ -21,4 +21,55 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertTrue(SyncEngine.shouldWarnUnstable(pendingAge: 30))
         XCTAssertTrue(SyncEngine.shouldWarnUnstable(pendingAge: 100))
     }
+
+    // MARK: - recentIssues の (path, category) dedupe（#32 / D3）
+
+    private func issue(_ path: String?, _ category: SyncIssue.Category, detail: String = "d") -> SyncIssue {
+        SyncIssue(id: UUID(), date: Date(), path: path, category: category, rawDetail: detail)
+    }
+
+    func testAppendDedupedKeepsLatestForSamePathCategory() {
+        var issues: [SyncIssue] = []
+        issues = SyncEngine.appendDeduped(issues, issue("a.txt", .network, detail: "first"))
+        issues = SyncEngine.appendDeduped(issues, issue("a.txt", .network, detail: "second"))
+        issues = SyncEngine.appendDeduped(issues, issue("a.txt", .network, detail: "third"))
+        // 同一 (path, category) はリトライで積み上がらず最新のみ。
+        XCTAssertEqual(issues.count, 1)
+        XCTAssertEqual(issues.last?.rawDetail, "third")
+    }
+
+    func testAppendDedupedDistinguishesPathAndCategory() {
+        var issues: [SyncIssue] = []
+        issues = SyncEngine.appendDeduped(issues, issue("a.txt", .network))
+        issues = SyncEngine.appendDeduped(issues, issue("b.txt", .network))   // 別 path
+        issues = SyncEngine.appendDeduped(issues, issue("a.txt", .localIO))   // 別 category
+        XCTAssertEqual(issues.count, 3, "path か category が違えば別エントリ")
+    }
+
+    func testAppendDedupedNilPathSameCategoryCollapses() {
+        var issues: [SyncIssue] = []
+        issues = SyncEngine.appendDeduped(issues, issue(nil, .network, detail: "old"))
+        issues = SyncEngine.appendDeduped(issues, issue(nil, .network, detail: "new"))
+        XCTAssertEqual(issues.count, 1, "path なし同士・同 category も最新のみ（pull 全体失敗の積み上がり防止）")
+        XCTAssertEqual(issues.last?.rawDetail, "new")
+    }
+
+    func testAppendDedupedMovesUpdatedIssueToNewestEnd() {
+        var issues: [SyncIssue] = []
+        issues = SyncEngine.appendDeduped(issues, issue("a.txt", .network))
+        issues = SyncEngine.appendDeduped(issues, issue("b.txt", .localIO))
+        // a を再記録 → 古い a を除いて末尾へ＝「最新が末尾」の不変条件を維持。
+        issues = SyncEngine.appendDeduped(issues, issue("a.txt", .network, detail: "again"))
+        XCTAssertEqual(issues.map(\.path), ["b.txt", "a.txt"])
+        XCTAssertEqual(issues.last?.rawDetail, "again")
+    }
+
+    func testAppendDedupedEnforcesFIFOCap() {
+        var issues: [SyncIssue] = []
+        for i in 0..<5 {
+            issues = SyncEngine.appendDeduped(issues, issue("f\(i).txt", .network), cap: 3)
+        }
+        // 上限 3 で最古から押し出される。
+        XCTAssertEqual(issues.map(\.path), ["f2.txt", "f3.txt", "f4.txt"])
+    }
 }
