@@ -43,6 +43,7 @@
 		5BE0DB13AD7C865881AA99AF /* LocalDatabase.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C08DD3532C0C011010E53F2 /* LocalDatabase.swift */; };
 		5F924B1D5938B20402709207 /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA3C0DA079E4E103465665CD /* KeychainStore.swift */; };
 		61DB11E9448AB80DC1C16813 /* TransferProgress.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8365D23DF63BE91A08BA2396 /* TransferProgress.swift */; };
+		621CB09BF0E22C06E10EE7ED /* RemoteDeletionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0D68AB09D02E462ACB191F1 /* RemoteDeletionTests.swift */; };
 		642CDCBE726F73F932CC4471 /* TestSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = C03D88F728230F27E9AF7EC0 /* TestSupport.swift */; };
 		6713D52E474D2DE81405414C /* ManifestShardingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57ED617F25861D75B21F4EE8 /* ManifestShardingTests.swift */; };
 		682CA6BBC7DAB4A2AF4DBE1C /* PartPlanTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F70D2AA788DB745DCCCD3F01 /* PartPlanTests.swift */; };
@@ -188,6 +189,7 @@
 		ADC61A4E5F7528718FC1A7C8 /* Migrations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Migrations.swift; sourceTree = "<group>"; };
 		AEA12CE95BED997B40130772 /* NoFollowFileReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoFollowFileReader.swift; sourceTree = "<group>"; };
 		B0A0C2B81618658098C69DC2 /* HashCalculator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HashCalculator.swift; sourceTree = "<group>"; };
+		B0D68AB09D02E462ACB191F1 /* RemoteDeletionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteDeletionTests.swift; sourceTree = "<group>"; };
 		B3F335F0F614571E0FC11BCC /* MenuBarPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarPresentation.swift; sourceTree = "<group>"; };
 		B5CA66881F9B9E5508D609E2 /* AppLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLogger.swift; sourceTree = "<group>"; };
 		B664427DD4577E4CDF8BCAE8 /* PathValidatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PathValidatorTests.swift; sourceTree = "<group>"; };
@@ -303,6 +305,7 @@
 				F70D2AA788DB745DCCCD3F01 /* PartPlanTests.swift */,
 				B664427DD4577E4CDF8BCAE8 /* PathValidatorTests.swift */,
 				55A63530A904BB8A91710C73 /* RateLimiterTests.swift */,
+				B0D68AB09D02E462ACB191F1 /* RemoteDeletionTests.swift */,
 				99DE7A484340CA1A25A27706 /* RestoreServiceTests.swift */,
 				F5BEAC74205EE85F1B3D85E4 /* RestoreTargetTests.swift */,
 				EE08152918F7A54DA6988A54 /* S3ErrorClassifierTests.swift */,
@@ -604,6 +607,7 @@
 				682CA6BBC7DAB4A2AF4DBE1C /* PartPlanTests.swift in Sources */,
 				3BC2C69B981F941D2727FF08 /* PathValidatorTests.swift in Sources */,
 				54582D1A90D493B8A49F7392 /* RateLimiterTests.swift in Sources */,
+				621CB09BF0E22C06E10EE7ED /* RemoteDeletionTests.swift in Sources */,
 				FD35F8C47AB1658EC0890532 /* RestoreServiceTests.swift in Sources */,
 				1360C8F6BC2EE0FD99458D93 /* RestoreTargetTests.swift in Sources */,
 				529B7156361F472B78B3E3AE /* S3ErrorClassifierTests.swift in Sources */,
