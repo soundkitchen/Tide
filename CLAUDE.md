@@ -186,6 +186,7 @@
 - **[pull 直列化]** すべてのリモート pull は `SyncEngine.triggerRemotePull` の単一ゲート（`isRemotePulling`）を通す。並行 pull は共有 tmp `dl-<sha>.part` を破壊する。→ `docs/04` / `docs/08`
 - **[DL サイズ検証]** `Downloader.download` は commit（tmp→本体 move）前に「実 tmp サイズ == `entry.size`」を検証する。
 - **[reconcile ゲート]** pull 取り込みは入口で純粋関数 `ChangeDetector.reconcileIsNoop` を通し、no-op（ローカル==DB==リモート）を skip（hash も DB write もしない）。→ `docs/04`
+- **[リモート削除反映]** `Downloader.applyRemoteDeletion` は `ThreeWayMerge.decide(remote:nil)` で削除可否を決める＝`.deleteLocal`（base==local＝未編集）のみ実削除、編集済み/未追跡/unreadable は `.keepLocalRemoteDeleted` で**温存**（無条件削除はリモート削除でローカル編集を消す＝他端末由来のデータ損失）。symlink は削除せず、ローカル不在は孤児 `FileRecord` のみ掃除。判定→I/O の配線は `RemoteDeletionTests` で固定（#30 / D1）。→ `docs/08` / `docs/09`
 - **[prune 順序]** 中断転送の prune は download 行を落とす**前に**必ず `invalidateShardCache(forPath:)` を実行する（逆順だと中断 DL がシャード変化まで永久に再 DL されず＝クリーンインストール復旧で一部ファイル欠落）。→ `docs/09`
 - **[mtime 不変条件]** `FileRecord.mtime` = 最後に同期した時点の**ローカル stat 実値**。マニフェスト ISO8601 秒精度値で上書きしない（毎起動再アップロードの自己持続サイクルになる）。`Downloader.markSynced` も stat 実値を記録。**マニフェスト mtime に fractional seconds を足さない**（`parseISO8601` が nil → now フォールバックでパース全滅）。
 - **[キュー行 id 基準]** アップロードキュー行の完了/失敗処理は **`item.id` 基準**で消す（`path` 基準にしない）。処理中に置換された新 id 行を巻き込むと無エラー乖離になる。
