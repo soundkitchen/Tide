@@ -19,28 +19,12 @@ final class ScanEventWiringTests: XCTestCase {
         return (e.db, e.root)
     }
 
-    @discardableResult
-    private func writeFile(_ root: URL, _ relative: String, _ data: Data) throws -> URL {
-        let url = root.appendingPathComponent(relative)
-        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try data.write(to: url)
-        return url
-    }
-
     /// 永続化せず値として渡す FileRecord（CAS no-op で DB と食い違う `existing` を作るのに使う）。
     private func makeRecord(path: String, sha: String, size: Int64, mtime: Double) -> FileRecord {
         FileRecord(
             path: path, size: size, mtime: mtime, sha256: sha,
             s3VersionId: "v", s3Etag: "e", lastSyncedAt: 1_000, updatedAt: 1_000
         )
-    }
-
-    private func seedFileRecord(_ db: LocalDatabase, _ rec: FileRecord) async throws {
-        try await db.pool.write { db in var r = rec; try r.save(db) }
-    }
-
-    private func fetchRecord(_ db: LocalDatabase, path: String) async throws -> FileRecord? {
-        try await db.pool.read { db in try FileRecord.fetchOne(db, key: path) }
     }
 
     @discardableResult
@@ -81,7 +65,7 @@ final class ScanEventWiringTests: XCTestCase {
         let bytes = TestData.deterministicBytes(100, salt: 2)
         let url = try writeFile(env.root, path, bytes)
         let rec = makeRecord(path: path, sha: TestData.shaHex(bytes), size: 100, mtime: 1_000)
-        try await seedFileRecord(env.db, rec)
+        try await saveFileRecord(env.db, rec)
         let d = try await SyncEngine.classifyLocalChange(
             existing: rec, fileURL: url, size: 100, mtime: 1_000, relativePath: path, db: env.db
         )
@@ -107,13 +91,13 @@ final class ScanEventWiringTests: XCTestCase {
         let shaA = TestData.shaHex(bytes)
         let url = try writeFile(env.root, path, bytes)
         let rec = makeRecord(path: path, sha: shaA, size: 300, mtime: 1_000)
-        try await seedFileRecord(env.db, rec)
+        try await saveFileRecord(env.db, rec)
 
         let d = try await SyncEngine.classifyLocalChange(
             existing: rec, fileURL: url, size: 300, mtime: 1_000.5, relativePath: path, db: env.db
         )
         XCTAssertEqual(d, .mtimeRepaired, "mtime ドリフト・内容同一は CAS で mtime 修復")
-        let updated = try await fetchRecord(env.db, path: path)
+        let updated = try await fetchFileRecord(env.db, path: path)
         XCTAssertEqual(updated?.mtime ?? 0, 1_000.5, accuracy: 0.000_01, "DB mtime が新 stat 値へ修復")
     }
 
@@ -123,13 +107,13 @@ final class ScanEventWiringTests: XCTestCase {
         let onDisk = TestData.deterministicBytes(300, salt: 4)         // 実内容（sha 変化）
         let url = try writeFile(env.root, path, onDisk)
         let rec = makeRecord(path: path, sha: TestData.shaHex(TestData.deterministicBytes(300, salt: 99)), size: 300, mtime: 1_000)
-        try await seedFileRecord(env.db, rec)
+        try await saveFileRecord(env.db, rec)
 
         let d = try await SyncEngine.classifyLocalChange(
             existing: rec, fileURL: url, size: 300, mtime: 1_000.5, relativePath: path, db: env.db
         )
         XCTAssertEqual(d, .enqueue, "mtime ドリフト + 内容変化は enqueue")
-        let after = try await fetchRecord(env.db, path: path)
+        let after = try await fetchFileRecord(env.db, path: path)
         XCTAssertEqual(after?.mtime ?? 0, 1_000, accuracy: 0.000_01, "enqueue 経路は mtime を修復しない")
     }
 
@@ -140,7 +124,7 @@ final class ScanEventWiringTests: XCTestCase {
         let shaA = TestData.shaHex(bytes)
         let url = try writeFile(env.root, path, bytes)
         // DB は別 sha（並行 pull が判定〜CAS の間に同 path を更新した状況の模擬）。
-        try await seedFileRecord(env.db, makeRecord(path: path, sha: "shaB-deadbeef", size: 300, mtime: 2_000))
+        try await saveFileRecord(env.db, makeRecord(path: path, sha: "shaB-deadbeef", size: 300, mtime: 2_000))
         // 渡す existing は stale read（shaA）。
         let stale = makeRecord(path: path, sha: shaA, size: 300, mtime: 1_000)
 
@@ -148,7 +132,7 @@ final class ScanEventWiringTests: XCTestCase {
             existing: stale, fileURL: url, size: 300, mtime: 1_000.5, relativePath: path, db: env.db
         )
         XCTAssertEqual(d, .mtimeCASNoop, "CAS は DB の現 sha と食い違うと no-op")
-        let after = try await fetchRecord(env.db, path: path)
+        let after = try await fetchFileRecord(env.db, path: path)
         XCTAssertEqual(after?.mtime ?? 0, 2_000, accuracy: 0.000_01, "CAS no-op は DB mtime を巻き戻さない")
         XCTAssertEqual(after?.sha256, "shaB-deadbeef", "並行更新の sha を保持")
     }
@@ -157,7 +141,7 @@ final class ScanEventWiringTests: XCTestCase {
         let env = try makeEnv()
         let path = "a.txt"
         let rec = makeRecord(path: path, sha: "deadbeef", size: 300, mtime: 1_000)
-        try await seedFileRecord(env.db, rec)
+        try await saveFileRecord(env.db, rec)
         // file を作らない: verifyHash に入るが hash 不能（nil）→ enqueue。
         let d = try await SyncEngine.classifyLocalChange(
             existing: rec, fileURL: env.root.appendingPathComponent(path),
@@ -194,7 +178,7 @@ final class ScanEventWiringTests: XCTestCase {
     func testDeletionEnqueuesMissingPaths() async throws {
         let env = try makeEnv()
         for p in ["a", "b", "c"] {
-            try await seedFileRecord(env.db, makeRecord(path: p, sha: "s", size: 1, mtime: 1))
+            try await saveFileRecord(env.db, makeRecord(path: p, sha: "s", size: 1, mtime: 1))
         }
         let n = try await SyncEngine.enqueueScanDeletions(db: env.db, foundPaths: ["a", "b"], now: 7_000)
         XCTAssertEqual(n, 1, "実体が見つからない c のみ削除キューへ")
@@ -207,7 +191,7 @@ final class ScanEventWiringTests: XCTestCase {
     func testDeletionNoneWhenAllFound() async throws {
         let env = try makeEnv()
         for p in ["a", "b"] {
-            try await seedFileRecord(env.db, makeRecord(path: p, sha: "s", size: 1, mtime: 1))
+            try await saveFileRecord(env.db, makeRecord(path: p, sha: "s", size: 1, mtime: 1))
         }
         let n = try await SyncEngine.enqueueScanDeletions(db: env.db, foundPaths: ["a", "b"], now: 7_000)
         XCTAssertEqual(n, 0)

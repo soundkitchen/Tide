@@ -15,35 +15,9 @@ final class RemoteDeletionTests: XCTestCase {
         return (e.db, e.store, e.root, e.tmp)
     }
 
-    /// 削除は S3 を触らないのでダミークライアントでよい（streamObject は呼ばれない）。
+    /// 削除は S3 を触らないので共通ヘルパのダミークライアントでよい（streamObject は呼ばれない）。
     private func makeDownloader(env: (db: LocalDatabase, store: TransferStateStore, root: URL, tmp: URL)) -> Downloader {
-        Downloader(
-            downloadClient: FakeRangedDownloadClient(fullData: Data()),
-            db: env.db, syncRoot: env.root, tmpDir: env.tmp, deviceId: "devL", transferStore: env.store
-        )
-    }
-
-    @discardableResult
-    private func writeFile(_ root: URL, _ relative: String, _ data: Data) throws -> URL {
-        let url = root.appendingPathComponent(relative)
-        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try data.write(to: url)
-        return url
-    }
-
-    private func seedFileRecord(_ db: LocalDatabase, path: String, sha: String, size: Int64) async throws {
-        try await db.pool.write { db in
-            var rec = FileRecord(
-                path: path, size: size, mtime: 1_780_000_000.5, sha256: sha,
-                s3VersionId: "ver-base", s3Etag: "etag-base",
-                lastSyncedAt: 1_780_000_000, updatedAt: 1_780_000_000
-            )
-            try rec.save(db)
-        }
-    }
-
-    private func fetchRecord(_ db: LocalDatabase, path: String) async throws -> FileRecord? {
-        try await db.pool.read { db in try FileRecord.fetchOne(db, key: path) }
+        makeTestDownloader(db: env.db, syncRoot: env.root, tmpDir: env.tmp, store: env.store)
     }
 
     private func countLogs(_ db: LocalDatabase, type: SyncLogEventType, path: String) async throws -> Int {
@@ -67,7 +41,7 @@ final class RemoteDeletionTests: XCTestCase {
 
         XCTAssertTrue(removed, "未編集ならリモート削除を反映して削除する")
         XCTAssertFalse(FileManager.default.fileExists(atPath: url.path), "ローカルファイルが削除される")
-        let rec = try await fetchRecord(env.db, path: path)
+        let rec = try await fetchFileRecord(env.db, path: path)
         XCTAssertNil(rec, "FileRecord も削除される")
         let deleteLogs = try await countLogs(env.db, type: .delete, path: path)
         XCTAssertEqual(deleteLogs, 1, "sync_log に delete が 1 件積まれる")
@@ -87,7 +61,7 @@ final class RemoteDeletionTests: XCTestCase {
 
         XCTAssertFalse(removed, "ローカル編集済みなら温存する（データ損失を防ぐ）")
         XCTAssertEqual(try Data(contentsOf: url), onDisk, "ローカルファイルは無変更で残る")
-        let rec = try await fetchRecord(env.db, path: path)
+        let rec = try await fetchFileRecord(env.db, path: path)
         XCTAssertNotNil(rec, "FileRecord も残る")
         let conflictLogs = try await countLogs(env.db, type: .conflict, path: path)
         XCTAssertEqual(conflictLogs, 1, "sync_log に conflict（温存）が 1 件積まれる")
@@ -118,7 +92,7 @@ final class RemoteDeletionTests: XCTestCase {
 
         XCTAssertFalse(removed, "unreadable は保守的に温存（.keepLocalRemoteDeleted）")
         XCTAssertTrue(FileManager.default.fileExists(atPath: dir.path), "実体は温存")
-        let rec = try await fetchRecord(env.db, path: path)
+        let rec = try await fetchFileRecord(env.db, path: path)
         XCTAssertNotNil(rec, "温存分岐は FileRecord を削除しない")
     }
 
@@ -139,7 +113,7 @@ final class RemoteDeletionTests: XCTestCase {
         XCTAssertFalse(removed, "symlink はリンク先実体を消さないため削除しない")
         XCTAssertEqual(try Data(contentsOf: target), targetBytes, "リンク先実体は無変更")
         XCTAssertTrue(FileManager.default.fileExists(atPath: link.path), "symlink 自体も残る")
-        let rec = try await fetchRecord(env.db, path: linkRel)
+        let rec = try await fetchFileRecord(env.db, path: linkRel)
         XCTAssertNotNil(rec, "symlink は DB に触れる前に早期 return＝FileRecord 未削除")
     }
 
@@ -154,7 +128,7 @@ final class RemoteDeletionTests: XCTestCase {
         let removed = try await makeDownloader(env: env).applyRemoteDeletion(relativePath: path)
 
         XCTAssertFalse(removed, "削除は実行しない（ファイルが無い）")
-        let rec = try await fetchRecord(env.db, path: path)
+        let rec = try await fetchFileRecord(env.db, path: path)
         XCTAssertNil(rec, "孤児 FileRecord は掃除される")
         let deleteLogs = try await countLogs(env.db, type: .delete, path: path)
         XCTAssertEqual(deleteLogs, 0, "不在掃除はログを積まない")

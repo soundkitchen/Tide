@@ -32,7 +32,7 @@ final class ReconcileWiringTests: XCTestCase {
     }
 
     private func makeDownloader(client: any RangedDownloadClient, env: (db: LocalDatabase, store: TransferStateStore, root: URL, tmp: URL)) -> Downloader {
-        Downloader(downloadClient: client, db: env.db, syncRoot: env.root, tmpDir: env.tmp, deviceId: "devL", transferStore: env.store)
+        makeTestDownloader(client: client, db: env.db, syncRoot: env.root, tmpDir: env.tmp, store: env.store)
     }
 
     private func remoteEntry(for data: Data, versionId: String = "ver-remote", etag: String = "etag-remote") -> ManifestFileEntry {
@@ -42,34 +42,8 @@ final class ReconcileWiringTests: XCTestCase {
         )
     }
 
-    @discardableResult
-    private func writeFile(_ root: URL, _ relative: String, _ data: Data) throws -> URL {
-        let url = root.appendingPathComponent(relative)
-        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try data.write(to: url)
-        return url
-    }
-
     private func setMtime(_ url: URL, _ t: Double) throws {
         try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: t)], ofItemAtPath: url.path)
-    }
-
-    private func seedFileRecord(
-        _ db: LocalDatabase, path: String, sha: String, size: Int64, mtime: Double = 1_780_000_000.5,
-        etag: String = "etag-base", versionId: String? = "ver-base", updatedAt: Double = 1_780_000_000
-    ) async throws {
-        try await db.pool.write { db in
-            var rec = FileRecord(
-                path: path, size: size, mtime: mtime, sha256: sha,
-                s3VersionId: versionId, s3Etag: etag,
-                lastSyncedAt: 1_780_000_000, updatedAt: updatedAt
-            )
-            try rec.save(db)
-        }
-    }
-
-    private func fetchRecord(_ db: LocalDatabase, path: String) async throws -> FileRecord? {
-        try await db.pool.read { db in try FileRecord.fetchOne(db, key: path) }
     }
 
     /// reconcileRemoteEntry の static 本体を共通引数で駆動する。
@@ -101,7 +75,7 @@ final class ReconcileWiringTests: XCTestCase {
         XCTAssertEqual(fake.callCount, 1, "ローカル欠落 → リモートを取得")
         let url = env.root.appendingPathComponent(path)
         XCTAssertEqual(try Data(contentsOf: url), remoteBytes, "リモート内容が書き込まれる")
-        let rec = try await fetchRecord(env.db, path: path)
+        let rec = try await fetchFileRecord(env.db, path: path)
         XCTAssertEqual(rec?.sha256, TestData.shaHex(remoteBytes), "FileRecord がリモート identity を反映")
         let copyCalls = copySpy.calls
         XCTAssertTrue(copyCalls.isEmpty, "download 分岐は衝突通知しない")
@@ -147,7 +121,7 @@ final class ReconcileWiringTests: XCTestCase {
 
         XCTAssertEqual(fake.callCount, 0, "内容一致は download せず markSynced のみ")
         XCTAssertEqual(try Data(contentsOf: url), bytes, "ファイルは無変更")
-        let rec = try await fetchRecord(env.db, path: path)
+        let rec = try await fetchFileRecord(env.db, path: path)
         XCTAssertEqual(rec?.s3Etag, "etag-remote", "DB の etag がリモートへ追従")
         XCTAssertEqual(rec?.s3VersionId, "ver-remote", "DB の versionId がリモートへ追従")
         // markSynced はローカル stat 実値を mtime に記録（マニフェスト秒精度で上書きしない＝毎起動再 UL 防止）。
@@ -223,7 +197,7 @@ final class ReconcileWiringTests: XCTestCase {
         await reconcile(path: path, entry: entry, dl: makeDownloader(client: fake, env: env), env: env, copySpy: copySpy, issueSpy: issueSpy)
 
         XCTAssertEqual(fake.callCount, 0, "証明可能な no-op は download しない")
-        let rec = try await fetchRecord(env.db, path: path)
+        let rec = try await fetchFileRecord(env.db, path: path)
         XCTAssertEqual(rec?.updatedAt, sentinel, "no-op は DB write もしない（updatedAt 不変）")
     }
 
