@@ -52,6 +52,9 @@ final class SyncEngine {
     private var pathMonitor: NWPathMonitor?
     /// pull 進行中に手動「Pull from S3」が押されたら立て、現 pull 終了後にもう 1 周する（coalescing）。
     @ObservationIgnored private var pendingManualPull: Bool = false
+    /// pull と restore を直列化する単一ゲート（#34 / D5）。pull は `tryAcquire`（busy ならドロップ/pending）、
+    /// restore は `acquire`（待機）で取得する。`isRemotePulling` は UI 表示専用に残す（pull 中のみ true）。
+    @ObservationIgnored private let remoteOpGate = RemoteOpGate()
     private var paused: Bool = false
     private var running: Bool = false
     private var ignoreMatcher: LayeredSyncIgnore = .empty
@@ -488,7 +491,24 @@ final class SyncEngine {
         let service = RestoreService(
             client: s3, db: db, syncRoot: syncRoot, tmpDir: tmpDir, downloadLimiter: downloadLimiter
         )
-        let result = try await service.restore(relativePath: relativePath, versionId: versionId)
+        // pull と同一ゲートで直列化（#34 / D5）: in-flight pull / 先行 restore の完了を待ってから書き戻す。
+        // これで復元の atomic move（remove → move）と pull の reconcile / 削除反映が同一 path に同時に
+        // 触れる窓を構造的に閉じる。重い DL〜move は RestoreService 内で off-main に走る。
+        await remoteOpGate.acquire()
+        let result: RestoreService.RestoreResult
+        do {
+            result = try await service.restore(relativePath: relativePath, versionId: versionId)
+        } catch {
+            remoteOpGate.release()
+            throw error
+        }
+        remoteOpGate.release()
+        // 復元中に手動「Pull from S3」が押されていたら（ゲート busy で pending 化）、ここで 1 周消化する
+        // ＝ pull 中押下の coalescing を restore 経路にも拡張する。release 直後・await 前なので、ゲートは
+        // 確実に空いており triggerRemotePull が取得して走る（pendingManualPull は同メソッドが落とす）。
+        if pendingManualPull {
+            await triggerRemotePull(reason: .manual)
+        }
         // 書き戻したファイルを拾わせる（FileWatcher の取りこぼし保険＝確実に再アップロードへ乗せる）。
         await triggerFullScan()
         return result
@@ -710,19 +730,24 @@ final class SyncEngine {
     /// ログするので、並行で弾かれた契機を「triggered」と誤記録しない（PR #9 レビュー ⑥。
     /// 旧 `triggerRemotePullSafely` ラッパを本メソッドへ畳み込んで廃止した）。
     func triggerRemotePull(reason: PullReason = .manual) async {
-        // 並行 pull を構造的に禁止する単一ゲート。start()（起動時）・メニューの「S3 から取得」・
-        // poll / wake / network のすべてがこの公開メソッドを通るので、ここで排他すれば
-        // 同一ファイルが複数の reconcile から同時にダウンロードされ、決定的 tmp
-        // （dl-<sha(path)>.part）への並行追記で破損するのを防げる。
-        // @MainActor なので check と set の間に await が無く、2 つの呼びが割り込まずに直列化される。
-        if isRemotePulling {
-            // 手動押下だけはドロップせず pending 化して、現 pull 終了後にもう 1 周する（coalescing・
-            // PR #9 レビュー ④）。poll/wake/network は次の周期が必ず来るので従来どおりドロップで良い。
+        // 並行 pull を構造的に禁止する単一ゲート（restore とも共有＝#34 / D5）。start()（起動時）・
+        // メニューの「S3 から取得」・poll / wake / network のすべてがこの公開メソッドを通るので、ここで
+        // 排他すれば同一ファイルが複数の reconcile から同時にダウンロードされ、決定的 tmp
+        // （dl-<sha(path)>.part）への並行追記で破損するのを防げる。restore（acquire 保持中）とも排他され、
+        // 復元の atomic move と pull の reconcile / 削除反映が同一 path に同時に触れる窓も閉じる。
+        // @MainActor なので tryAcquire は同期 ＝ check と set の間に await が無く割り込まずに直列化される。
+        guard remoteOpGate.tryAcquire() else {
+            // 手動押下だけはドロップせず pending 化して、現 pull / restore 終了後にもう 1 周する
+            // （coalescing・PR #9 レビュー ④）。poll/wake/network は次の周期が必ず来るので従来どおりドロップ。
+            // restore 保持中の pending は restore 完了側で drain する（#34）。
             if reason == .manual { pendingManualPull = true }
             return
         }
         isRemotePulling = true
-        defer { isRemotePulling = false }
+        defer {
+            isRemotePulling = false
+            remoteOpGate.release()
+        }
         var currentReason = reason
         repeat {
             pendingManualPull = false

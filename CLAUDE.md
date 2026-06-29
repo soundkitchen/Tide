@@ -183,7 +183,7 @@
 毎起動再アップロード等の事故になる）。理由・経緯・テスト名は docs/08 と該当 `docs/0X` を参照。
 §3 のセキュリティゲート/規約と併せて必読。
 
-- **[pull 直列化]** すべてのリモート pull は `SyncEngine.triggerRemotePull` の単一ゲート（`isRemotePulling`）を通す。並行 pull は共有 tmp `dl-<sha>.part` を破壊する。→ `docs/04` / `docs/08`
+- **[pull/restore 直列化]** すべてのリモート pull と復元（`SyncEngine.restore`）は単一ゲート `RemoteOpGate`（`@MainActor` 非再入 async ロック）を通す。pull は `tryAcquire`（busy ならドロップ／手動は pending）、restore は `acquire`（FIFO 待機）。並行 pull は共有 tmp `dl-<sha>.part` を破壊し、復元の atomic move と pull の reconcile/削除反映が同一 path に同時に触れると壊れる。`isRemotePulling` は UI 表示専用に残す（#34 / D5）。→ `docs/04` / `docs/08`
 - **[DL サイズ検証]** `Downloader.download` は commit（tmp→本体 move）前に「実 tmp サイズ == `entry.size`」を検証する。
 - **[reconcile ゲート]** pull 取り込みは入口で純粋関数 `ChangeDetector.reconcileIsNoop` を通し、no-op（ローカル==DB==リモート）を skip（hash も DB write もしない）。→ `docs/04`
 - **[リモート削除反映]** `Downloader.applyRemoteDeletion` は `ThreeWayMerge.decide(remote:nil)` で削除可否を決める＝`.deleteLocal`（base==local＝未編集）のみ実削除、編集済み/未追跡/unreadable は `.keepLocalRemoteDeleted` で**温存**（無条件削除はリモート削除でローカル編集を消す＝他端末由来のデータ損失）。symlink は削除せず、ローカル不在は孤児 `FileRecord` のみ掃除。判定→I/O の配線は `RemoteDeletionTests` で固定（#30 / D1）。→ `docs/08` / `docs/09`
