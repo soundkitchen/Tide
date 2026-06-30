@@ -241,5 +241,5 @@
 - **接続 vs tunables の分離適用**: 接続設定（bucket / region / syncRoot）はローカル DB がバケットに紐づくため**ホットスワップしない**。`apply`（接続 + tunables 全部・エンジン未起動経路＝ウィザード専用）と `applyTunables`（polling / サイズ上限 / 帯域 / 通知のみ・エンジン稼働中でも安全）を分ける。
 - **導線は 2 つ**:
   - **Settings 画面**（`SettingsWindow`）: 「Export Settings…」で書き出し、「Import Settings…」で読込。import は tunables を即適用 → UI 即反映（`loadStateFromConfig`）し、接続が現設定と異なるときだけ `env.pendingImportedSettings` に payload を載せて `openWindow(id:"setup")`（ホットスワップ回避＝ウィザードで再プロビジョニング）。
-  - **セットアップウィザード**（`SetupWizardWindow`）: 「Import settings…」で接続フィールドを事前充填（新 Mac の主経路。AWS キーだけ手入力）。`onAppear` で `env.pendingImportedSettings` を消費して同じ事前充填を行う（Settings → ウィザードのハンドオフ）。
+  - **セットアップウィザード**（`SetupWizardWindow`）: 「Import settings…」で接続フィールドを事前充填（新 Mac の主経路。AWS キーだけ手入力）。Settings → ウィザードのハンドオフ（`env.pendingImportedSettings`）の消費は **`.onChange(of:initial:true)`**（`.onAppear` ではない）。`"setup"` は単一・常駐の `Window` で、既に開いている状態で `openWindow(id:"setup")` を呼んでも `.onAppear` は再発火しない＝事前充填が無言で失われ、未消費 payload が将来の appear まで居残る（#46 レビュー指摘）。`initial:true` で「初回 appear（先に payload を立ててから開く）」と「既開で後から payload が立つ」の両方を消費し、消費後 nil クリアで居残りも防ぐ。
 - **IO 経路**: 出力先は `NSSavePanel`、入力元は `NSOpenPanel`（`.json`）でユーザが選んだ場所のみ。LSUIElement なので panel 前に `NSApp.activate(ignoringOtherApps:)`。

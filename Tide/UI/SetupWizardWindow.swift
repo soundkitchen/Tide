@@ -81,8 +81,12 @@ struct SetupWizardWindow: View {
             }
         }
         .padding(20)
-        .onAppear {
-            // Settings 画面の import から引き渡された設定があれば事前充填して消費する（#29）。
+        // Settings 画面の import から引き渡された設定があれば事前充填して消費する（#29）。
+        // `"setup"` は単一・常駐の `Window` なので、既に開いている状態で `openWindow(id:"setup")` を
+        // 呼んでも `.onAppear` は再発火しない。`.onChange(initial: true)` にすることで「初回 appear
+        // （Settings が payload を立ててから開いた場合）」と「既に開いていて後から payload が立った場合」の
+        // 両方で消費でき、消費後は nil に戻すので古い payload が将来の appear まで居残らない。
+        .onChange(of: env.pendingImportedSettings, initial: true) {
             if let pending = env.pendingImportedSettings {
                 applyImported(pending)
                 env.pendingImportedSettings = nil
