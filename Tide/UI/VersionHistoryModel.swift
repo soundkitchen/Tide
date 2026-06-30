@@ -36,12 +36,22 @@ final class VersionHistoryModel {
     /// 走査済みの版・marker 件数（進捗表示用）。
     var deletedScanned = 0
     /// 削除一覧の軽量キャッシュ（#29 (b)）を最後にフル列挙した時刻。nil＝まだ一度も列挙していない。
-    /// UI は「Last updated …」表示と、ボタン文言（Refresh / Search）の出し分けに使う。
+    /// **フル完走した一覧にのみ対応する**（中断/失敗の部分結果には進めない）。UI は「Last updated …」
+    /// 表示と、ボタン文言（Refresh / Search）・空状態文言（「No deleted files.」断定）の出し分けに使う。
     var deletedCacheUpdatedAt: Date? = nil
     @ObservationIgnored private var scanTask: Task<Void, Never>?
     /// 再検索 / キャンセルのたびに進める世代。cancel は in-flight の await を即座には止められず、
     /// 復帰後の state 書込が新スキャンを潰しうるため、各書込前に世代一致を確認して stale を捨てる。
     @ObservationIgnored private var scanGeneration = 0
+    /// スキャン開始直前の一覧スナップショット。中断/失敗時はこれへ戻す（#47 レビュー #1：空＋古い
+    /// 「Last updated」を断定表示する後退を防ぐ＝未完走のときは直前のキャッシュ一覧をそのまま見せる）。
+    @ObservationIgnored private var preScanDeleted: [FileVersionHistory] = []
+    /// 現在 in-memory に保持している削除一覧が属する bucket（load/フル完走 save 時に確定）。
+    /// restore 後の再保存は現在 config ではなくこれをキーに使う（#47 レビュー #2：表示中の bucket 変更で
+    /// 旧一覧を新 bucket キーに汚染しない）。
+    @ObservationIgnored private var deletedCacheBucket: String? = nil
+    /// 削除一覧キャッシュ書込の直列化チェーン（#47 レビュー #3：複数 detached 書込の last-writer-wins 防止）。
+    @ObservationIgnored private var cacheSaveTask: Task<Void, Never>?
 
     /// ローカル DB の `files` から同期済み相対パスを取り込み、自然順にソートして保持する。
     /// 失敗しても致命ではない（一覧が空のまま手入力で代替できる）ので握りつぶす。
@@ -121,6 +131,12 @@ final class VersionHistoryModel {
                 ? String(localized: "Restored as a copy:")
                 : String(localized: "Restored to:")
             restoreNote = "\(label) \(result.writtenRelativePath)"
+            // 削除済みだったパスを Versions タブから原パス復元したら、Deleted 一覧/キャッシュからも外す
+            // （#47 レビュー #5：restoreDeleted との対称性。2 つの復元経路で削除一覧の扱いを揃える）。
+            if !result.diverted, deletedFiles.contains(where: { $0.relativePath == path }) {
+                deletedFiles.removeAll { $0.relativePath == path }
+                persistDeletedCacheAfterRemoval()
+            }
             // 復元で新しい現行版が増えるので履歴を更新。
             await loadVersions(for: path, env: env)
         } catch {
@@ -141,6 +157,36 @@ final class VersionHistoryModel {
         guard let payload, !isScanningDeleted, deletedFiles.isEmpty, deletedCacheUpdatedAt == nil else { return }
         deletedFiles = payload.files
         deletedCacheUpdatedAt = payload.updatedAt
+        deletedCacheBucket = bucket
+    }
+
+    /// 削除一覧キャッシュのスナップショットを永続化する。全書込を 1 本のチェーンに直列化し（FIFO）、
+    /// 複数 detached 書込の last-writer-wins を防ぐ（#47 レビュー #3）。`advanceTimestamp` のときは
+    /// **書込成功後に** `deletedCacheUpdatedAt` / `deletedCacheBucket` を確定する（#47 レビュー #4：
+    /// 書込失敗時に「Last updated 今」だけ進んでディスクが古い、という齟齬を作らない）。
+    private func persistDeletedCacheSnapshot(
+        files: [FileVersionHistory], bucket: String, updatedAt: Date, advanceTimestamp: Bool
+    ) {
+        let previous = cacheSaveTask
+        // 非 detached の Task は @MainActor を継承する（state 更新は安全）。前のチェーン書込を待ってから
+        // 実 IO だけ detached（Sendable 値のみキャプチャ・self は渡さない）で main から外す。
+        cacheSaveTask = Task { [weak self] in
+            await previous?.value
+            let ok = await Task.detached(priority: .utility) { () -> Bool in
+                do {
+                    try DeletedFilesCache.save(files: files, bucket: bucket, updatedAt: updatedAt)
+                    return true
+                } catch {
+                    AppLogger.ui.error("Failed to save deleted-files cache: \(String(describing: error), privacy: .private)")
+                    return false
+                }
+            }.value
+            guard let self else { return }
+            if ok && advanceTimestamp {
+                self.deletedCacheUpdatedAt = updatedAt
+                self.deletedCacheBucket = bucket
+            }
+        }
     }
 
     /// `files/` 全体を明示的にフル列挙し、現在削除済み（最新が delete marker）かつ復元可能なファイルを集める。
@@ -158,6 +204,7 @@ final class VersionHistoryModel {
         isScanningDeleted = true
         errorMessage = nil
         restoreNote = nil
+        preScanDeleted = deletedFiles  // 中断/失敗時に戻すため直前の一覧を退避（#47 レビュー #1）
         deletedFiles = []
         deletedScanned = 0
         // @MainActor メソッド内の Task は MainActor を継承する（state 更新は安全）。
@@ -200,18 +247,16 @@ final class VersionHistoryModel {
             }
             if generation == self.scanGeneration {
                 self.isScanningDeleted = false
-                // フル完走したときだけキャッシュ更新（途中キャンセル/エラーの部分結果は保存しない）。
                 if completedFully, let bucket {
-                    let now = Date()
-                    self.deletedCacheUpdatedAt = now
-                    let snapshot = self.deletedFiles
-                    Task.detached(priority: .utility) {
-                        do {
-                            try DeletedFilesCache.save(files: snapshot, bucket: bucket, updatedAt: now)
-                        } catch {
-                            AppLogger.ui.error("Failed to save deleted-files cache: \(String(describing: error), privacy: .private)")
-                        }
-                    }
+                    // フル完走したときだけキャッシュ更新（part 結果は保存しない）。updatedAt は
+                    // 書込成功後に確定する（#47 レビュー #4・persistDeletedCacheSnapshot 内）。
+                    self.persistDeletedCacheSnapshot(
+                        files: self.deletedFiles, bucket: bucket, updatedAt: Date(), advanceTimestamp: true
+                    )
+                } else {
+                    // 中断（エラー）したら直前の一覧へ戻す（#47 レビュー #1：空＋古い「Last updated」の矛盾表示を防ぐ）。
+                    // cancel 経路は世代不一致でここに来ないので cancelDeletedScan 側で戻す。
+                    self.deletedFiles = self.preScanDeleted
                 }
             }
         }
@@ -221,6 +266,10 @@ final class VersionHistoryModel {
         scanTask?.cancel()
         scanGeneration += 1  // cancel が間に合わなかった stale 書込（await 復帰後）も世代不一致で抑止
         isScanningDeleted = false
+        // 中断したら直前の一覧へ戻す（#47 レビュー #1）。deletedCacheUpdatedAt は未完走では進めていないので
+        // 直前の値のまま＝一覧とタイムスタンプが整合する。
+        deletedFiles = preScanDeleted
+        deletedScanned = 0
     }
 
     /// 削除済みファイルを、delete marker 直前の実体版で復元する。
@@ -247,17 +296,18 @@ final class VersionHistoryModel {
             // delete marker のまま＝引き続き「現在削除済み」なので残す。
             if !result.diverted {
                 deletedFiles.removeAll { $0.relativePath == history.relativePath }
-                // キャッシュも整合させる（在庫から外す）。これは単発除去でフル再列挙ではないので
-                // updatedAt は前回フル列挙時の値を保つ（「Last updated」を進めない）。
-                if let updatedAt = deletedCacheUpdatedAt, let bucket = env.config.bucketName {
-                    let snapshot = deletedFiles
-                    Task.detached(priority: .utility) {
-                        try? DeletedFilesCache.save(files: snapshot, bucket: bucket, updatedAt: updatedAt)
-                    }
-                }
+                persistDeletedCacheAfterRemoval()
             }
         } catch {
             errorMessage = String(describing: error)
         }
+    }
+
+    /// 一覧から 1 件除去した後にキャッシュを整合させる（フル再列挙ではないので `updatedAt` は進めない）。
+    /// 保存先 bucket は走査/読込時に確定した `deletedCacheBucket` を使う（#47 レビュー #2：表示中の
+    /// bucket 変更で旧一覧を新 bucket キーへ汚染しない）。書込は直列化チェーン経由（#47 レビュー #3）。
+    private func persistDeletedCacheAfterRemoval() {
+        guard let updatedAt = deletedCacheUpdatedAt, let bucket = deletedCacheBucket else { return }
+        persistDeletedCacheSnapshot(files: deletedFiles, bucket: bucket, updatedAt: updatedAt, advanceTimestamp: false)
     }
 }

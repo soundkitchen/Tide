@@ -251,6 +251,8 @@
 - **保存場所**: `~/Library/Caches/Tide/deleted-files-cache.json`。派生データ（S3 からいつでも再生成可能）なので Caches。`factoryReset` が `Caches/Tide` ごと消す＝キャッシュも自動で消える。OS が Caches を purge しても次回 Refresh で再生成。
 - **中身**: `schemaVersion` + `bucket` + `updatedAt` + `[FileVersionHistory]`（削除済みファイルの相対パス + 版メタデータ）。**認証情報は無い**。露出はローカル DB が既に持つパスメタデータと同等。`FileVersion` / `FileVersionHistory` を `Codable` 化して往復。
 - **bucket キー**: `load(bucket:)` は現在 bucket と `payload.bucket` が一致したときだけ通す（純粋関数 `validate`）。別バケットへ切替後に旧バケットの削除一覧を出さない。スキーマ不一致・壊れ・欠落はすべて nil（無効）扱いのベストエフォート。
-- **更新タイミング**: フル完走（`completedFully`＝最終ページまで列挙）したときだけ `save`（途中キャンセル/エラーの部分結果は保存しない）。`restoreDeleted` が原パス復元で一覧から外したときは、`updatedAt` を進めずに（単発除去でフル再列挙ではない）スナップショットだけ整合させる。
-- **読込タイミング**: `VersionHistoryWindow` の `.task`（オープン時 1 回）で `loadDeletedCache`。未スキャン・一覧が空・`deletedCacheUpdatedAt == nil` のときだけ反映＝ライブなスキャン結果を後追いで潰さない。読込/保存はいずれも off-main（`Task.detached`）。
+- **更新タイミング**: フル完走（`completedFully`＝最終ページまで列挙）したときだけ `save`（途中キャンセル/エラーの部分結果は保存しない）。`restoreDeleted` / Versions タブの `restore`（#47 レビュー #5＝両復元経路で対称）が原パス復元で一覧から外したときは、`updatedAt` を進めずに（単発除去でフル再列挙ではない）スナップショットだけ整合させる。
+- **中断/失敗時の復帰（#47 レビュー #1）**: スキャン開始時に直前一覧を `preScanDeleted` に退避し、**未完走（cancel/error）なら一覧をそれへ戻す**。`deletedCacheUpdatedAt` は完走時しか進めない＝「空の一覧＋古い Last updated を断定表示（No deleted files.）」という後退を作らない。cancel は世代を進めて in-flight 書込を捨てるため、戻しは `cancelDeletedScan` 側でも行う（完了ブロックは世代不一致で来ない）。
+- **書込の直列化とタイムスタンプ確定（#47 レビュー #3/#4）**: 全キャッシュ書込は 1 本の `cacheSaveTask` チェーン（前の `.value` を待つ FIFO）で直列化＝scan 完了 save と restore 後 save の last-writer-wins を防ぐ。`advanceTimestamp` のときは**書込成功後に** `deletedCacheUpdatedAt`/`deletedCacheBucket` を確定（失敗時に Last updated だけ進む齟齬を作らない）。保存 bucket は走査/読込時に確定した `deletedCacheBucket` を使う（#47 レビュー #2＝表示中の bucket 変更で旧一覧を新キーへ汚染しない）。
+- **読込タイミング**: `VersionHistoryWindow` の `.task`（オープン時 1 回）で `loadDeletedCache`。未スキャン・一覧が空・`deletedCacheUpdatedAt == nil` のときだけ反映＝ライブなスキャン結果を後追いで潰さない。実 IO（読込/保存）は `Task.detached` で main から外し、state 更新は MainActor 継承 Task 上で行う。
 - **UI**: キャッシュありなら「Last updated …（相対時刻・自動更新）」+ ボタンは Refresh、未列挙なら従来どおり「Search deleted files」。純粋部分（encode/decode/validate）は `DeletedFilesCacheTests` で固定。
