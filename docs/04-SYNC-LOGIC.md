@@ -463,7 +463,9 @@ M2 で **S3 → ローカルの取り込み** が追加された。ローカル 
 2. **wake 復帰**: `NSWorkspace.didWakeNotification` を購読
 3. **network 復帰**: `NWPathMonitor` で `unsatisfied → satisfied` を検出
 
-これら 3 つに加え、起動時 pull（`start()`）とメニューの「S3 から取得」も含め、**すべて `triggerRemotePull(reason:)` の単一ゲートを通り、`isRemotePulling` フラグで直列化される**（並行 pull を構造的に禁止＝同一ファイルの並行ダウンロードによる共有 tmp 破損を防ぐ）。`reason` はログ用で、ゲート通過後にのみ出力する。
+これら 3 つに加え、起動時 pull（`start()`）とメニューの「S3 から取得」も含め、**すべて `triggerRemotePull(reason:)` の単一ゲート（`RemoteOpGate`）を通って直列化される**（並行 pull を構造的に禁止＝同一ファイルの並行ダウンロードによる共有 tmp 破損を防ぐ）。`reason` はログ用で、ゲート通過後にのみ出力する。
+
+**このゲートは復元（`SyncEngine.restore`）とも共有する**（#34 / D5）。pull は `tryAcquire`（busy ならドロップ）、復元は `acquire`（FIFO 待機）で取得するので、復元の atomic move と pull の reconcile / 削除反映が同一 path に同時に触れる窓が構造的に閉じる（復元は in-flight pull / 先行復元の完了を待ってから書き戻す）。`isRemotePulling` は UI 表示専用（pull 中のみ true）に残す。詳細は `docs/08`「リモート pull の単一ゲート化」。
 
 pull 進行中の再入は原則ドロップだが、**手動（`reason == .manual`）だけは pending 化し、現 pull 終了後にもう 1 周する**（coalescing・PR #9 レビュー ④。長い復元 pull 中の押下でも「最新を取得したい」意図が確実に反映される。reason は `.manualCoalesced`＝ログには `manual-coalesced`）。`reason` は coalescing の分岐条件を持ったため `SyncEngine.PullReason` enum（ログは rawValue）。poll/wake/network は次の周期が必ず来るので従来どおりドロップ。coalesced ラウンドは `running && !Task.isCancelled` も条件に含み、**`stop()` 後や呼び元タスク cancel 後に新ラウンドを開始しない**（in-flight の 1 周は走り切る）。`isRemotePulling` は `@Observable` な公開状態で、メニューバーの「Pull from S3」ボタンが pull 中はスピナー + 「Pulling…」表示に切り替わる（ボタンは enabled のまま＝押下が coalescing の入口）。
 

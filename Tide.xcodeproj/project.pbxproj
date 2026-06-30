@@ -22,6 +22,7 @@
 		274736C1DFBC4F29E2A8D2D7 /* NotificationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8DB10BCAF7E41F7945E67A7 /* NotificationManager.swift */; };
 		2934320120BBFB444BED2195 /* ObjectVersionHistoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 218BF6C59F9429D95309C74F /* ObjectVersionHistoryTests.swift */; };
 		2A7293E041FA3050D24D52C9 /* ReconcileWiringTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6BC290FF01368C3B9C4056E2 /* ReconcileWiringTests.swift */; };
+		2F7BD8C37D51AF732E20C74A /* RemoteOpGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B51C567451A4C1C023697EF /* RemoteOpGate.swift */; };
 		34C9CD59AD38354487CAE58D /* SettingsWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC8E5DD109E48D0F8ABF0455 /* SettingsWindow.swift */; };
 		3858DAA7CA5E2ED41BB7BB7B /* AppEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C7D544B462DF81DFB84FC44 /* AppEnvironment.swift */; };
 		3BC2C69B981F941D2727FF08 /* PathValidatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B664427DD4577E4CDF8BCAE8 /* PathValidatorTests.swift */; };
@@ -67,6 +68,7 @@
 		94B6E32FF56C436F3042B41A /* ScanEventWiringTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E99A908A59789817D3F1C947 /* ScanEventWiringTests.swift */; };
 		96D3E563D295F74B4FE173C7 /* IgnoreDecisionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C85FC12C4DE0E0E2B6F890D6 /* IgnoreDecisionTests.swift */; };
 		96D7C21D7103303A59A8C4BB /* HardcodedIgnoreRulesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1BD4B605839107E1638A0D11 /* HardcodedIgnoreRulesTests.swift */; };
+		9779D5E5CF6A521C2FB6B58C /* RemoteOpGateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9FD545711AF3F55FD805DD20 /* RemoteOpGateTests.swift */; };
 		97804E5C6115352D58467D1A /* IgnoreDecision.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3598608EB5993E7770BA6922 /* IgnoreDecision.swift */; };
 		97F05A6602848F714764765E /* AboutWindowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DC06B8D465A6783D6EC5327A /* AboutWindowTests.swift */; };
 		9B793A724C6B1B17CE22B11F /* HashCalculatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 16ED0B8D39615582C0CD3596 /* HashCalculatorTests.swift */; };
@@ -154,6 +156,7 @@
 		3E6C42C9F1EF0B6B378A1D24 /* KnownRegions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KnownRegions.swift; sourceTree = "<group>"; };
 		4292EC731F5D275D86CFDAE2 /* SetupWizardWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SetupWizardWindow.swift; sourceTree = "<group>"; };
 		45BAEBEBA92C44451EB1201D /* TideApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TideApp.swift; sourceTree = "<group>"; };
+		4B51C567451A4C1C023697EF /* RemoteOpGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteOpGate.swift; sourceTree = "<group>"; };
 		52A253BAA0EB5A4D52C3E77A /* SyncEvent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncEvent.swift; sourceTree = "<group>"; };
 		55A63530A904BB8A91710C73 /* RateLimiterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RateLimiterTests.swift; sourceTree = "<group>"; };
 		56AE2B52ED6D9C94B5C06BBF /* BucketPolicyBuilderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BucketPolicyBuilderTests.swift; sourceTree = "<group>"; };
@@ -186,6 +189,7 @@
 		985B368E3DE66BEAAE35740C /* PartPlan.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PartPlan.swift; sourceTree = "<group>"; };
 		99D1891D0E5852D1D03BFDFE /* VersionHistoryWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VersionHistoryWindow.swift; sourceTree = "<group>"; };
 		99DE7A484340CA1A25A27706 /* RestoreServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RestoreServiceTests.swift; sourceTree = "<group>"; };
+		9FD545711AF3F55FD805DD20 /* RemoteOpGateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteOpGateTests.swift; sourceTree = "<group>"; };
 		A48D1D203B73E12004B1CCD1 /* VersionHistoryModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VersionHistoryModel.swift; sourceTree = "<group>"; };
 		AA3EC9EECDC0494A932931BA /* SyncIssue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncIssue.swift; sourceTree = "<group>"; };
 		AAAD1B304E2B82467B78B4F5 /* MenuBarPresentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarPresentationTests.swift; sourceTree = "<group>"; };
@@ -311,6 +315,7 @@
 				55A63530A904BB8A91710C73 /* RateLimiterTests.swift */,
 				6BC290FF01368C3B9C4056E2 /* ReconcileWiringTests.swift */,
 				B0D68AB09D02E462ACB191F1 /* RemoteDeletionTests.swift */,
+				9FD545711AF3F55FD805DD20 /* RemoteOpGateTests.swift */,
 				99DE7A484340CA1A25A27706 /* RestoreServiceTests.swift */,
 				F5BEAC74205EE85F1B3D85E4 /* RestoreTargetTests.swift */,
 				EE08152918F7A54DA6988A54 /* S3ErrorClassifierTests.swift */,
@@ -377,6 +382,7 @@
 				0D95DADDA96CB84EE0944646 /* NotificationPolicy.swift */,
 				7D5A3FCD54C910A40D3A0DF3 /* PathValidator.swift */,
 				00B6282F69A7E9AC81A74334 /* RateLimiter.swift */,
+				4B51C567451A4C1C023697EF /* RemoteOpGate.swift */,
 				68B67C8D931416D1FFDFD498 /* RestoreService.swift */,
 				DCFA3DA2A1A742EFCCADC9FC /* StabilityCheck.swift */,
 				075300181A2D09025E384D3B /* SyncEngine.swift */,
@@ -562,6 +568,7 @@
 				09B21DBA24A84B9EC078A22C /* PartPlan.swift in Sources */,
 				D45DBF8182C8CDB7CDF3ED25 /* PathValidator.swift in Sources */,
 				C04DAF629454E3C7FEC700C7 /* RateLimiter.swift in Sources */,
+				2F7BD8C37D51AF732E20C74A /* RemoteOpGate.swift in Sources */,
 				23A360C00976634BDC6D7A69 /* RestoreService.swift in Sources */,
 				B4526FDEB3B4C457DF3F76D6 /* S3Client.swift in Sources */,
 				34C9CD59AD38354487CAE58D /* SettingsWindow.swift in Sources */,
@@ -615,6 +622,7 @@
 				54582D1A90D493B8A49F7392 /* RateLimiterTests.swift in Sources */,
 				2A7293E041FA3050D24D52C9 /* ReconcileWiringTests.swift in Sources */,
 				621CB09BF0E22C06E10EE7ED /* RemoteDeletionTests.swift in Sources */,
+				9779D5E5CF6A521C2FB6B58C /* RemoteOpGateTests.swift in Sources */,
 				FD35F8C47AB1658EC0890532 /* RestoreServiceTests.swift in Sources */,
 				1360C8F6BC2EE0FD99458D93 /* RestoreTargetTests.swift in Sources */,
 				529B7156361F472B78B3E3AE /* S3ErrorClassifierTests.swift in Sources */,
