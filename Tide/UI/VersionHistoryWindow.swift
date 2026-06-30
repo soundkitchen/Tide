@@ -37,6 +37,8 @@ struct VersionHistoryWindow: View {
         }
         .padding(16)
         .frame(minWidth: 540, minHeight: 460)
+        // 削除一覧の軽量キャッシュ（#29 (b)）をオープン時に 1 回読み、Deleted タブを即表示できるようにする。
+        .task { await model.loadDeletedCache(env: env) }
     }
 
     // MARK: - ファイル選択
@@ -168,7 +170,18 @@ struct VersionHistoryWindow: View {
                 Text("Scanning…").foregroundStyle(.secondary)
                 Text(verbatim: "(\(model.deletedScanned))").font(.caption).foregroundStyle(.secondary)
             } else {
-                Button("Search deleted files") { model.scanDeletedFiles(env: env) }
+                // 一度でもフル列挙済み（キャッシュあり）なら再列挙＝Refresh、未列挙なら初回 Search。
+                if model.deletedCacheUpdatedAt != nil {
+                    Button("Refresh") { model.scanDeletedFiles(env: env) }
+                } else {
+                    Button("Search deleted files") { model.scanDeletedFiles(env: env) }
+                }
+            }
+            if let updated = model.deletedCacheUpdatedAt, !model.isScanningDeleted {
+                HStack(spacing: 4) {
+                    Text("Last updated").font(.caption).foregroundStyle(.secondary)
+                    Text(updated, style: .relative).font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                }
             }
             Spacer()
         }
@@ -180,8 +193,13 @@ struct VersionHistoryWindow: View {
         }
         if model.deletedFiles.isEmpty {
             if !model.isScanningDeleted {
-                Text("No deleted files found. Press Search to scan.")
-                    .foregroundStyle(.secondary)
+                // キャッシュあり（列挙済み）で空＝本当に削除済みが無い。未列挙なら初回 Search を促す。
+                if model.deletedCacheUpdatedAt != nil {
+                    Text("No deleted files.").foregroundStyle(.secondary)
+                } else {
+                    Text("No deleted files found. Press Search to scan.")
+                        .foregroundStyle(.secondary)
+                }
             }
             Spacer()
         } else {
