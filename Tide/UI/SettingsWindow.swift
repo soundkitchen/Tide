@@ -10,6 +10,9 @@ struct SettingsWindow: View {
     /// 診断エクスポートの結果メッセージ（成功/失敗の一過性表示）。
     @State private var exportMessage: String?
 
+    /// 設定 export/import（#29）の結果メッセージ（成功/失敗の一過性表示）。
+    @State private var settingsMessage: String?
+
     /// 現在有効な `.syncignore` のパターン（閲覧のみ・ディレクトリ単位）。ネスト対応で階層ごとに表示する。
     private var ignoreGroups: [LayeredSyncIgnore.DirectoryGroup] {
         env.engine?.activeIgnorePatterns ?? []
@@ -132,6 +135,18 @@ struct SettingsWindow: View {
                     }
                 }
             }
+            Section("Settings file") {
+                Button("Export Settings…") { exportSettings() }
+                Button("Import Settings…") { importSettings() }
+                if let settingsMessage {
+                    Text(settingsMessage)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Text("Export saves your bucket, region, folder, and preferences (no AWS credentials) to a JSON file. Import restores preferences immediately; bucket/region/folder changes open the Setup Wizard.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Section("Diagnostics") {
                 Button("Export Diagnostics…") { exportDiagnostics() }
                 if let exportMessage {
@@ -158,17 +173,7 @@ struct SettingsWindow: View {
         }
         .formStyle(.grouped)
         .padding()
-        .onAppear {
-            let bytes = env.config.uploadSizeLimitBytes
-            if bytes < 0 {
-                noLimit = true
-            } else {
-                noLimit = false
-                limitGB = min(Self.maxLimitGB, max(1, Double(bytes / Self.oneGiB)))
-            }
-            loadBandwidth()
-            notificationsEnabled = env.config.notificationsEnabled
-        }
+        .onAppear { loadStateFromConfig() }
         .onChange(of: notificationsEnabled) { _, newValue in
             env.config.notificationsEnabled = newValue
         }
@@ -178,6 +183,19 @@ struct SettingsWindow: View {
         .onChange(of: uploadBwMBps) { _, _ in persistBandwidth() }
         .onChange(of: noDownloadBwLimit) { _, _ in persistBandwidth() }
         .onChange(of: downloadBwMBps) { _, _ in persistBandwidth() }
+    }
+
+    /// ConfigStore の現値を @State へ読み込む（初回表示と import 反映後の再読込で共用）。
+    private func loadStateFromConfig() {
+        let bytes = env.config.uploadSizeLimitBytes
+        if bytes < 0 {
+            noLimit = true
+        } else {
+            noLimit = false
+            limitGB = min(Self.maxLimitGB, max(1, Double(bytes / Self.oneGiB)))
+        }
+        loadBandwidth()
+        notificationsEnabled = env.config.notificationsEnabled
     }
 
     /// config のバイト/秒値を (無制限フラグ, MB/s クランプ値) に変換する（`<= 0` = 無制限）。
@@ -218,5 +236,67 @@ struct SettingsWindow: View {
                 exportMessage = String(localized: "Export failed.")
             }
         }
+    }
+
+    // MARK: - 設定 export / import（#29）
+
+    /// 非機密設定を JSON で書き出す。保存先は NSSavePanel でユーザが選んだ場所のみ。
+    /// LSUIElement アプリなので panel を前面に出すため NSApp.activate を前置する。
+    private func exportSettings() {
+        NSApp.activate(ignoringOtherApps: true)
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "Tide-Settings.json"
+        panel.allowedContentTypes = [.json]
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        settingsMessage = nil
+        do {
+            try SettingsTransfer.export(to: url, config: env.config)
+            settingsMessage = String(localized: "Saved settings.")
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        } catch {
+            AppLogger.ui.error("Settings export failed: \(String(describing: error), privacy: .private)")
+            settingsMessage = String(localized: "Export failed.")
+        }
+    }
+
+    /// JSON から設定を読み込む。tunables（サイズ上限/帯域/通知/ポーリング）は即適用し、
+    /// 接続設定（bucket/region/folder）が現設定と異なるときだけ、ローカル DB がバケットに紐づく安全のため
+    /// ホットスワップせずセットアップウィザードへ事前充填して誘導する。
+    private func importSettings() {
+        NSApp.activate(ignoringOtherApps: true)
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.json]
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        settingsMessage = nil
+        do {
+            let payload = try SettingsTransfer.read(from: url)
+            SettingsTransfer.applyTunables(payload, to: env.config)
+            loadStateFromConfig()  // 反映を即座に UI へ
+            if connectionDiffers(from: payload) {
+                env.pendingImportedSettings = payload
+                NSApp.activate(ignoringOtherApps: true)
+                openWindow(id: "setup")
+                settingsMessage = String(localized: "Preferences imported. Opening Setup Wizard to apply bucket/region/folder changes.")
+            } else {
+                settingsMessage = String(localized: "Settings imported.")
+            }
+        } catch {
+            AppLogger.ui.error("Settings import failed: \(String(describing: error), privacy: .private)")
+            settingsMessage = (error as? LocalizedError)?.errorDescription ?? String(localized: "Import failed.")
+        }
+    }
+
+    /// import payload の接続設定が現在の config と異なるか（前後空白を無視して比較）。
+    private func connectionDiffers(from payload: SettingsTransfer.Payload) -> Bool {
+        func norm(_ s: String?) -> String {
+            (s ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return norm(payload.bucketName) != norm(env.config.bucketName)
+            || norm(payload.region) != norm(env.config.region)
+            || norm(payload.syncRootPath) != norm(env.config.syncRootPath)
     }
 }

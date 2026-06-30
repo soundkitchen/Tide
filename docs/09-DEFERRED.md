@@ -13,7 +13,7 @@
 - **B = [#26]**: C3 後半 — HTTPS 強制バケットポリシー。✅ **解消済み（2026-06-23）**。`enforceTLSBucketPolicy()` で `aws:SecureTransport=false` を Deny するポリシーを冪等適用（純粋 `BucketPolicyBuilder` + セットアップ時＋起動時の非致命適用）。`security/critical.md` C3 / `docs/06` IAM 参照。
 - **C1 = [#27]**: ネスト `.syncignore`。✅ **解消済み（2026-06-25）**。下方「ネスト `.syncignore`」項参照。
 - **C2 = [#28]**: 復元 UI — 同期一覧からのファイル選択。✅ **解消済み（2026-06-26）**。下方「M4 復元 UI の据え置き」(e) 参照。「Versions」タブのチューザを、ローカル DB `files` の同期済みパスのインライン一覧（インクリメンタル絞り込み + 行クリックで版読込）に置き換え。入力欄 1 本が絞り込み検索と任意パス手入力（Enter で直接読込）を兼ね、重複していた `NSOpenPanel`（Choose…）は撤去。
-- **C3 = [#29]（ストレッチ）**: 残りの復元 UI 拡張（同 (a) CopyObject / (b) 削除一覧の増分化 / 設定 export）。
+- **C3 = [#29]（ストレッチ）**: 残りの復元 UI 拡張（同 (a) CopyObject / (b) 削除一覧の増分化 / 設定 export）。**設定 export/import は解消済み（2026-07-01）**＝`SettingsTransfer`（非機密設定のみの JSON 往復・認証情報/deviceId は構造的に非混入）+ Settings / セットアップウィザード両導線。docs/08「設定 export / import」項参照。残りの (a) CopyObject 巨大復元 / (b) 削除一覧の増分化は引き続きストレッチとして据え置き。
 - **D1 = [#30]（✅ 解消済み 2026-06-27）**: reconcile/削除/scan 配線の結合テスト整備。下方「reconcile/削除/scan の配線部が未結合テスト」項参照。
 - **D2 = [#31]（✅ 解消済み 2026-06-27）**: ローカル hash 経路の NoFollow 一括化。下方「ローカル hash 経路の symlink 追従の一括 NoFollow 化」項参照。
 - **D3 = [#32]（✅ 解消済み 2026-06-27）**: `recentIssues` の (path, category) dedupe（PR #17 nit-4）。下方「PR #17 レビューの据え置き（nit-4）」項参照。

@@ -1,6 +1,138 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "Settings file" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "設定ファイル"
+          }
+        }
+      }
+    },
+    "Export Settings…" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "設定をエクスポート…"
+          }
+        }
+      }
+    },
+    "Import Settings…" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "設定をインポート…"
+          }
+        }
+      }
+    },
+    "Export saves your bucket, region, folder, and preferences (no AWS credentials) to a JSON file. Import restores preferences immediately; bucket/region/folder changes open the Setup Wizard." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "エクスポートはバケット・リージョン・フォルダと環境設定（AWS 認証情報を除く）を JSON ファイルに保存します。インポートは環境設定をすぐに復元し、バケット／リージョン／フォルダの変更はセットアップウィザードを開いて適用します。"
+          }
+        }
+      }
+    },
+    "Saved settings." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "設定を保存しました。"
+          }
+        }
+      }
+    },
+    "Settings imported." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "設定をインポートしました。"
+          }
+        }
+      }
+    },
+    "Preferences imported. Opening Setup Wizard to apply bucket/region/folder changes." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "環境設定をインポートしました。バケット／リージョン／フォルダの変更を適用するためセットアップウィザードを開きます。"
+          }
+        }
+      }
+    },
+    "Import failed." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "インポートに失敗しました。"
+          }
+        }
+      }
+    },
+    "This settings file (version %lld) is newer than this app supports (version %lld)." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "この設定ファイル（バージョン %lld）は、このアプリが対応するバージョン（%lld）より新しいです。"
+          }
+        }
+      }
+    },
+    "The settings file is not a valid Tide settings export." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "この設定ファイルは有効な Tide の設定エクスポートではありません。"
+          }
+        }
+      }
+    },
+    "Import settings…" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "設定をインポート…"
+          }
+        }
+      }
+    },
+    "Have a Tide settings file from another Mac? Import it to pre-fill the bucket, region, and folder." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "別の Mac の Tide 設定ファイルがありますか？ インポートするとバケット・リージョン・フォルダを事前入力できます。"
+          }
+        }
+      }
+    },
     "Access denied" : {
       "extractionState" : "manual",
       "localizations" : {

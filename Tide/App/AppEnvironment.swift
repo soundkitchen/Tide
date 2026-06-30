@@ -20,6 +20,11 @@ final class AppEnvironment {
     /// 起動失敗を bootstrap が記録する。UI 側で「ウィザード強制表示」のヒントに使う。
     var bootstrapFailure: String?
 
+    /// 設定 import（#29）で Settings 画面からセットアップウィザードへ接続設定を引き渡すための一時バッファ。
+    /// 接続変更はローカル DB がバケットに紐づくためホットスワップせず、ウィザードで再プロビジョニングする。
+    /// ウィザードは onAppear でこれを読んでフィールドを事前充填し、消費後に nil へ戻す。
+    var pendingImportedSettings: SettingsTransfer.Payload?
+
     /// bootstrap の再入ガード。eager（AppDelegate）と遅延（MenuBarContent.task）の 2 経路が
     /// 並行して呼ばれ得るため、`engine` がまだ nil の `await launchEngineFromCurrentConfig()` 実行中に
     /// もう一方が guard を抜けて二重に SyncEngine を起動するのを防ぐ。

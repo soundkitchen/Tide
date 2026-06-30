@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 struct SetupWizardWindow: View {
     @Environment(AppEnvironment.self) private var env
@@ -80,6 +81,13 @@ struct SetupWizardWindow: View {
             }
         }
         .padding(20)
+        .onAppear {
+            // Settings 画面の import から引き渡された設定があれば事前充填して消費する（#29）。
+            if let pending = env.pendingImportedSettings {
+                applyImported(pending)
+                env.pendingImportedSettings = nil
+            }
+        }
         .alert("Bucket not found", isPresented: $pendingCreateBucket) {
             Button("Cancel", role: .cancel) {
                 step = .bucket
@@ -128,6 +136,13 @@ struct SetupWizardWindow: View {
                 .textFieldStyle(.roundedBorder)
             SecureField("Secret Access Key", text: $secretAccessKey)
                 .textFieldStyle(.roundedBorder)
+            Divider()
+            HStack {
+                Button("Import settings…") { importSettings() }
+                Text("Have a Tide settings file from another Mac? Import it to pre-fill the bucket, region, and folder.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -361,6 +376,35 @@ struct SetupWizardWindow: View {
             let detail = String(describing: error)
             errorMessage = String(localized: "Failed to start sync engine: \(detail)")
         }
+    }
+
+    /// 設定 JSON を選ばせて接続フィールドを事前充填する（#29）。AWS 認証情報はファイルに無いので手入力のまま。
+    private func importSettings() {
+        NSApp.activate(ignoringOtherApps: true)
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.json]
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let payload = try SettingsTransfer.read(from: url)
+            applyImported(payload)
+            errorMessage = nil
+        } catch {
+            AppLogger.ui.error("Settings import failed: \(String(describing: error), privacy: .private)")
+            errorMessage = (error as? LocalizedError)?.errorDescription ?? String(localized: "Import failed.")
+        }
+    }
+
+    /// payload の tunables を config に反映し、接続フィールド（@State）を事前充填する。
+    /// 接続設定は provisioning で使うため @State にだけ入れ（completeSetup が最終的に config へ確定する）、
+    /// tunables はウィザードに UI が無いものも含めて config に持ち回る。
+    private func applyImported(_ payload: SettingsTransfer.Payload) {
+        SettingsTransfer.applyTunables(payload, to: env.config)
+        if let b = payload.bucketName, !b.isEmpty { bucket = b }
+        if let r = payload.region, !r.isEmpty { region = r }
+        if let s = payload.syncRootPath, !s.isEmpty { syncRootPath = s }
     }
 
     private func chooseFolder() {
