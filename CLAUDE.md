@@ -122,6 +122,7 @@
 - **新しい dotfile / 拡張子で「機密が紛れ込みそう」と思ったら、`HardcodedIgnoreRules` に即追加**。
 - `PutObject` は常に `serverSideEncryption: .aes256` を指定。**マルチパートも `createMultipartUpload` で同様に SSE-S3 を必ず付ける**（漏らすと暗号化なし保存）。
 - Keychain クエリは `kSecUseDataProtectionKeychain=true`, `kSecAttrAccessible=AfterFirstUnlock`, `kSecAttrSynchronizable=false` を必ず含める。
+- **ファイルに書き出す export 系（`DiagnosticsExporter` / `SettingsTransfer`）には AWS 認証情報・`deviceId` を絶対に入れない**。`SettingsTransfer.Payload` は非機密設定のみ（フィールドが無く構造的に漏れない）＝フィールド追加時に機密を足さない。認証情報は Data Protection Keychain のみ。`security/low.md` L13/L14。
 - `factoryReset` は Application Support / Caches / UserDefaults / Keychain を完全に消す（`make reset` と挙動を揃える）。
 
 ### SwiftUI 起き上がり

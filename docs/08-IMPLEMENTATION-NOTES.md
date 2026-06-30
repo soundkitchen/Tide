@@ -231,3 +231,15 @@
   - **DB スナップショット**: `LocalDatabase.snapshot(to:)` が `VACUUM main INTO ?`（`writeWithoutTransaction`＝VACUUM はトランザクション内不可）で WAL を取り込んだ一貫単一ファイルを出力。出力先は事前非存在であること。
   - **メインスレッドを塞がない**: env からの値収集だけ `@MainActor`（`export`）で行い、log 取得・staging 書き出し・スナップショット・zip 化は `nonisolated` の `writeArchive` に分離してメインアクター外で実行（CLAUDE.md「重い処理はメインから外す」）。
   - **純粋関数 + 結合テスト**: `diagnosticsText` / `logText` は純粋関数（`DiagnosticsExporterTests` がシークレット非混入を含め固定）。`writeArchive` は temp DB + サンプル入力で「zip が生成され diagnostics.txt / sync-log.txt / db.sqlite を含む」ことを結合テストで固定。zip 展開時の最上位フォルダ名は `Tide-Diagnostics`（UUID は親 temp 側に付ける）。
+
+### 設定 export / import（C3・Issue #29・2026-07-01）
+
+非機密のアプリ設定を 1 つの JSON（`Tide-Settings.json`）に書き出し / 読み込みする。主目的はクリーンインストール後の復旧と複数 Mac 間での設定の持ち回り。実装は `Tide/Core/SettingsTransfer.swift`。
+
+- **セキュリティ境界**: AWS 認証情報（Keychain）と `deviceId`（端末固有 ID）と `setupCompleted`（状態）は **export 対象に含めない**（`Payload` にフィールドが無く構造的に漏れない）。新しい Mac へ移すときは AWS キーをウィザードで再入力する＝「認証情報は Data Protection Keychain のみ」の不変条件を崩さない（`DiagnosticsExporter` と同じ姿勢）。`SettingsTransferTests` が JSON に `deviceId` / `accesskey` / `secret` が出ないことを固定。
+- **スキーマ版**: `Payload.schemaVersion`（現 `1`）。`decode` は **この値以下のみ受理**し、新しすぎる版は `TransferError.unsupportedVersion`、解釈不能は `.malformed` に正規化（呼び出し側が `LocalizedError` を UI 文言に使える）。`encode` は `.sortedKeys` + `.prettyPrinted` で差分を読みやすく。
+- **接続 vs tunables の分離適用**: 接続設定（bucket / region / syncRoot）はローカル DB がバケットに紐づくため**ホットスワップしない**。`apply`（接続 + tunables 全部・エンジン未起動経路＝ウィザード専用）と `applyTunables`（polling / サイズ上限 / 帯域 / 通知のみ・エンジン稼働中でも安全）を分ける。
+- **導線は 2 つ**:
+  - **Settings 画面**（`SettingsWindow`）: 「Export Settings…」で書き出し、「Import Settings…」で読込。import は tunables を即適用 → UI 即反映（`loadStateFromConfig`）し、接続が現設定と異なるときだけ `env.pendingImportedSettings` に payload を載せて `openWindow(id:"setup")`（ホットスワップ回避＝ウィザードで再プロビジョニング）。
+  - **セットアップウィザード**（`SetupWizardWindow`）: 「Import settings…」で接続フィールドを事前充填（新 Mac の主経路。AWS キーだけ手入力）。Settings → ウィザードのハンドオフ（`env.pendingImportedSettings`）の消費は **`.onChange(of:initial:true)`**（`.onAppear` ではない）。`"setup"` は単一・常駐の `Window` で、既に開いている状態で `openWindow(id:"setup")` を呼んでも `.onAppear` は再発火しない＝事前充填が無言で失われ、未消費 payload が将来の appear まで居残る（#46 レビュー指摘）。`initial:true` で「初回 appear（先に payload を立ててから開く）」と「既開で後から payload が立つ」の両方を消費し、消費後 nil クリアで居残りも防ぐ。
+- **IO 経路**: 出力先は `NSSavePanel`、入力元は `NSOpenPanel`（`.json`）でユーザが選んだ場所のみ。LSUIElement なので panel 前に `NSApp.activate(ignoringOtherApps:)`。

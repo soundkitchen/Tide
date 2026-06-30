@@ -217,3 +217,16 @@ symlink を辿り、リンク先（例: `~/.ssh/id_rsa`）の中身を S3 へ送
 - **含む**: DB スナップショット（`VACUUM INTO`）と `sync-log.txt` に、同期フォルダ配下の**ファイル名/相対パス**・バケット名・リージョン・deviceId。診断目的で必要。
 - **明示**: CLAUDE.md が path を常に `privacy: .private` で扱う方針に合わせ、**テスターが驚かないよう**「含む/含まない」を Settings の文言と `diagnostics.txt` の Note に明記（生成物を第三者に送る前提のため）。
 - **出力先**: `NSSavePanel` でユーザが選んだ場所のみ。重い IO は `writeArchive`（nonisolated）でメインアクター外で実行。`DiagnosticsExporterTests` が純粋テキスト（シークレット非混入）と zip 生成（同梱 3 ファイル）を回帰固定。
+
+## L14. 設定 export / import の同梱範囲（プライバシー境界）
+
+**Status:** ✅ Reviewed — 非機密設定の JSON export/import 機能を追加。**認証情報・`deviceId` を構造的に含めない**境界を確認した (2026-07-01・Issue #29)。
+
+**該当箇所:** `Tide/Core/SettingsTransfer.swift`、`Tide/UI/SettingsWindow.swift`（「Export/Import Settings…」）、`Tide/UI/SetupWizardWindow.swift`（「Import settings…」）。
+
+**重要度:** Low（攻撃者前提なし。本人画面の操作で本人の設定を本人が選んだ場所に書き出す/読み込むだけ。露出はバケット名/リージョン/syncRoot パスと tunables のみで、**認証情報・deviceId は含まない**）。
+
+**境界と対策:**
+- **含まない**: AWS 認証情報（Keychain）と `deviceId`（端末固有 ID）と `setupCompleted`。`SettingsTransfer.Payload` にフィールドが無く構造的に漏れない。新 Mac へは AWS キーをウィザードで再入力＝「認証情報は Data Protection Keychain のみ」を維持。`SettingsTransferTests` が JSON に `deviceId` / `accesskey` / `secret` が出ないことを回帰固定。
+- **含む**: バケット名・リージョン・syncRoot 絶対パス・tunables（polling / サイズ上限 / 帯域 / 通知）。L13 同様メタデータのみ。
+- **入出力先**: export は `NSSavePanel`、import は `NSOpenPanel`（`.json`）でユーザが選んだ場所のみ。import のスキーマ版検証は **現版以下のみ受理**（`unsupportedVersion` / `malformed` を `LocalizedError` で UI へ）。
