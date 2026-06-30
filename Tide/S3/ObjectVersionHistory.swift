@@ -2,7 +2,7 @@ import Foundation
 
 /// 1 つの相対パス（S3 key から `files/` を剥がしたもの）に紐づく 1 バージョン。
 /// 実体版（`isDeleteMarker == false`）と delete marker（`true`）の両方をこの型で表す。
-struct FileVersion: Sendable, Identifiable, Equatable {
+struct FileVersion: Sendable, Identifiable, Equatable, Codable {
     /// バージョン ID。バージョニング無効バケットの "null" もそのまま保持する。
     let versionId: String?
     /// 実体版のサイズ（バイト）。delete marker は nil。
@@ -20,7 +20,7 @@ struct FileVersion: Sendable, Identifiable, Equatable {
 }
 
 /// 1 つの相対パスに対するバージョン群（実体版 + delete marker）を**時系列降順（新しい順）**でまとめたもの。
-struct FileVersionHistory: Sendable, Identifiable, Equatable {
+struct FileVersionHistory: Sendable, Identifiable, Equatable, Codable {
     /// `files/` を剥がし `PathValidator` を通した相対パス（POSIX）。
     let relativePath: String
     /// 時系列降順（先頭が最新）。

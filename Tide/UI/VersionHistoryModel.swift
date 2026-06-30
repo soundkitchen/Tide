@@ -35,6 +35,9 @@ final class VersionHistoryModel {
     var isScanningDeleted = false
     /// 走査済みの版・marker 件数（進捗表示用）。
     var deletedScanned = 0
+    /// 削除一覧の軽量キャッシュ（#29 (b)）を最後にフル列挙した時刻。nil＝まだ一度も列挙していない。
+    /// UI は「Last updated …」表示と、ボタン文言（Refresh / Search）の出し分けに使う。
+    var deletedCacheUpdatedAt: Date? = nil
     @ObservationIgnored private var scanTask: Task<Void, Never>?
     /// 再検索 / キャンセルのたびに進める世代。cancel は in-flight の await を即座には止められず、
     /// 復帰後の state 書込が新スキャンを潰しうるため、各書込前に世代一致を確認して stale を捨てる。
@@ -127,13 +130,28 @@ final class VersionHistoryModel {
 
     // MARK: - 削除済みファイル（サブ E）
 
+    /// 削除一覧の軽量キャッシュ（#29 (b)）を読み、タブを開いた瞬間に前回スナップショットを即表示する。
+    /// 現在 bucket と一致するキャッシュがあり、かつ未スキャン・一覧が空のときだけ反映する
+    /// （ライブなスキャン結果を後追いで潰さない）。読込は off-main、失敗は無視（ベストエフォート）。
+    func loadDeletedCache(env: AppEnvironment) async {
+        guard let bucket = env.config.bucketName else { return }
+        let payload = await Task.detached(priority: .utility) {
+            DeletedFilesCache.load(bucket: bucket)
+        }.value
+        guard let payload, !isScanningDeleted, deletedFiles.isEmpty, deletedCacheUpdatedAt == nil else { return }
+        deletedFiles = payload.files
+        deletedCacheUpdatedAt = payload.updatedAt
+    }
+
     /// `files/` 全体を明示的にフル列挙し、現在削除済み（最新が delete marker）かつ復元可能なファイルを集める。
     /// ページングしながら逐次表示し、キャンセル可能。ポーリングには乗せない（手動操作のみ）。
+    /// フル完走したスナップショットは `DeletedFilesCache` に保存し、次回オープン時に即表示できるようにする。
     func scanDeletedFiles(env: AppEnvironment) {
         guard let s3 = env.s3 else {
             errorMessage = String(localized: "Not configured")
             return
         }
+        let bucket = env.config.bucketName
         scanTask?.cancel()
         scanGeneration += 1
         let generation = scanGeneration
@@ -152,6 +170,7 @@ final class VersionHistoryModel {
             var allMarkers: [TideS3Client.S3DeleteMarkerRaw] = []
             var keyMarker: String? = nil
             var versionIdMarker: String? = nil
+            var completedFully = false
             do {
                 while !Task.isCancelled {
                     let page = try await s3.listObjectVersions(
@@ -171,7 +190,7 @@ final class VersionHistoryModel {
                     guard generation == self.scanGeneration else { return }
                     self.deletedFiles = deleted
                     self.deletedScanned = allVersions.count + allMarkers.count
-                    guard page.isTruncated else { break }
+                    guard page.isTruncated else { completedFully = true; break }
                     keyMarker = page.nextKeyMarker
                     versionIdMarker = page.nextVersionIdMarker
                 }
@@ -181,6 +200,19 @@ final class VersionHistoryModel {
             }
             if generation == self.scanGeneration {
                 self.isScanningDeleted = false
+                // フル完走したときだけキャッシュ更新（途中キャンセル/エラーの部分結果は保存しない）。
+                if completedFully, let bucket {
+                    let now = Date()
+                    self.deletedCacheUpdatedAt = now
+                    let snapshot = self.deletedFiles
+                    Task.detached(priority: .utility) {
+                        do {
+                            try DeletedFilesCache.save(files: snapshot, bucket: bucket, updatedAt: now)
+                        } catch {
+                            AppLogger.ui.error("Failed to save deleted-files cache: \(String(describing: error), privacy: .private)")
+                        }
+                    }
+                }
             }
         }
     }
@@ -215,6 +247,14 @@ final class VersionHistoryModel {
             // delete marker のまま＝引き続き「現在削除済み」なので残す。
             if !result.diverted {
                 deletedFiles.removeAll { $0.relativePath == history.relativePath }
+                // キャッシュも整合させる（在庫から外す）。これは単発除去でフル再列挙ではないので
+                // updatedAt は前回フル列挙時の値を保つ（「Last updated」を進めない）。
+                if let updatedAt = deletedCacheUpdatedAt, let bucket = env.config.bucketName {
+                    let snapshot = deletedFiles
+                    Task.detached(priority: .utility) {
+                        try? DeletedFilesCache.save(files: snapshot, bucket: bucket, updatedAt: updatedAt)
+                    }
+                }
             }
         } catch {
             errorMessage = String(describing: error)

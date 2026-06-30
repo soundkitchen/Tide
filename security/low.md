@@ -230,3 +230,16 @@ symlink を辿り、リンク先（例: `~/.ssh/id_rsa`）の中身を S3 へ送
 - **含まない**: AWS 認証情報（Keychain）と `deviceId`（端末固有 ID）と `setupCompleted`。`SettingsTransfer.Payload` にフィールドが無く構造的に漏れない。新 Mac へは AWS キーをウィザードで再入力＝「認証情報は Data Protection Keychain のみ」を維持。`SettingsTransferTests` が JSON に `deviceId` / `accesskey` / `secret` が出ないことを回帰固定。
 - **含む**: バケット名・リージョン・syncRoot 絶対パス・tunables（polling / サイズ上限 / 帯域 / 通知）。L13 同様メタデータのみ。
 - **入出力先**: export は `NSSavePanel`、import は `NSOpenPanel`（`.json`）でユーザが選んだ場所のみ。import のスキーマ版検証は **現版以下のみ受理**（`unsupportedVersion` / `malformed` を `LocalizedError` で UI へ）。
+
+## L15. 削除済み一覧キャッシュの at-rest 内容（プライバシー境界）
+
+**Status:** ✅ Reviewed — 「Deleted files」タブの軽量キャッシュを追加。**認証情報を含まず、保存するのは削除済みファイルの相対パス + 版メタデータ + bucket 名のみ**で、露出はローカル DB が既に持つパスメタデータと同等であることを確認した (2026-07-01・Issue #29 (b))。
+
+**該当箇所:** `Tide/Core/DeletedFilesCache.swift`（`~/Library/Caches/Tide/deleted-files-cache.json`）、`Tide/UI/VersionHistoryModel.swift`。
+
+**重要度:** Low（攻撃者前提なし。本人のホーム配下 Caches に派生データを置くだけ。新規の機密露出は無し）。
+
+**境界と対策:**
+- **含まない**: AWS 認証情報。`DeletedFilesCache.Payload` は `schemaVersion` / `bucket` / `updatedAt` / `[FileVersionHistory]`（相対パス + 版メタデータ）のみ。
+- **at-rest 場所**: `~/Library/Caches/Tide/`（本人ホーム配下）。派生データ＝S3 `listObjectVersions` からいつでも再生成可能。`factoryReset` が `Caches/Tide` ごと削除＝キャッシュも消える。
+- **bucket キー**: `load(bucket:)` は現 bucket 一致時のみ採用（別バケットの一覧を出さない）。スキーマ不一致・壊れは nil（無効）扱い。

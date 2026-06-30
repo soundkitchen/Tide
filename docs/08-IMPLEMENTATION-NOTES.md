@@ -243,3 +243,14 @@
   - **Settings 画面**（`SettingsWindow`）: 「Export Settings…」で書き出し、「Import Settings…」で読込。import は tunables を即適用 → UI 即反映（`loadStateFromConfig`）し、接続が現設定と異なるときだけ `env.pendingImportedSettings` に payload を載せて `openWindow(id:"setup")`（ホットスワップ回避＝ウィザードで再プロビジョニング）。
   - **セットアップウィザード**（`SetupWizardWindow`）: 「Import settings…」で接続フィールドを事前充填（新 Mac の主経路。AWS キーだけ手入力）。Settings → ウィザードのハンドオフ（`env.pendingImportedSettings`）の消費は **`.onChange(of:initial:true)`**（`.onAppear` ではない）。`"setup"` は単一・常駐の `Window` で、既に開いている状態で `openWindow(id:"setup")` を呼んでも `.onAppear` は再発火しない＝事前充填が無言で失われ、未消費 payload が将来の appear まで居残る（#46 レビュー指摘）。`initial:true` で「初回 appear（先に payload を立ててから開く）」と「既開で後から payload が立つ」の両方を消費し、消費後 nil クリアで居残りも防ぐ。
 - **IO 経路**: 出力先は `NSSavePanel`、入力元は `NSOpenPanel`（`.json`）でユーザが選んだ場所のみ。LSUIElement なので panel 前に `NSApp.activate(ignoringOtherApps:)`。
+
+### 削除済みファイル一覧の軽量キャッシュ（C3 (b)・Issue #29・2026-07-01）
+
+「Deleted files」タブは `listObjectVersions` で `files/` 全体を毎回フル列挙する（巨大バケットで体感が悪い）。直近のフル列挙結果をスナップショットとして永続化し、タブを開いた瞬間に即表示・Refresh で再列挙する軽量キャッシュを追加（実装は `Tide/Core/DeletedFilesCache.swift`）。**増分インデックス（削除伝播パスへの hook）ではなく、削除系コードに触れない低リスクなキャッシュ**を選択（#29 で user 選択）。
+
+- **保存場所**: `~/Library/Caches/Tide/deleted-files-cache.json`。派生データ（S3 からいつでも再生成可能）なので Caches。`factoryReset` が `Caches/Tide` ごと消す＝キャッシュも自動で消える。OS が Caches を purge しても次回 Refresh で再生成。
+- **中身**: `schemaVersion` + `bucket` + `updatedAt` + `[FileVersionHistory]`（削除済みファイルの相対パス + 版メタデータ）。**認証情報は無い**。露出はローカル DB が既に持つパスメタデータと同等。`FileVersion` / `FileVersionHistory` を `Codable` 化して往復。
+- **bucket キー**: `load(bucket:)` は現在 bucket と `payload.bucket` が一致したときだけ通す（純粋関数 `validate`）。別バケットへ切替後に旧バケットの削除一覧を出さない。スキーマ不一致・壊れ・欠落はすべて nil（無効）扱いのベストエフォート。
+- **更新タイミング**: フル完走（`completedFully`＝最終ページまで列挙）したときだけ `save`（途中キャンセル/エラーの部分結果は保存しない）。`restoreDeleted` が原パス復元で一覧から外したときは、`updatedAt` を進めずに（単発除去でフル再列挙ではない）スナップショットだけ整合させる。
+- **読込タイミング**: `VersionHistoryWindow` の `.task`（オープン時 1 回）で `loadDeletedCache`。未スキャン・一覧が空・`deletedCacheUpdatedAt == nil` のときだけ反映＝ライブなスキャン結果を後追いで潰さない。読込/保存はいずれも off-main（`Task.detached`）。
+- **UI**: キャッシュありなら「Last updated …（相対時刻・自動更新）」+ ボタンは Refresh、未列挙なら従来どおり「Search deleted files」。純粋部分（encode/decode/validate）は `DeletedFilesCacheTests` で固定。
