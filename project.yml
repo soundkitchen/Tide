@@ -72,7 +72,11 @@ targets:
         # 機能セットが揃った節目で 0.2.0（minor）。リリースのタグはこの値を唯一のソースとする。
         # 0.1.1: #25 / A（アップロード側の並行更新検出）を着地（v0.2.0 タスクの最初の実コード）。
         # 0.1.2: #26 / B（HTTPS 強制バケットポリシー）を着地。
-        MARKETING_VERSION: "0.1.2"
+        # 0.2.0: v0.2.0 機能セット完了の節目（minor）。#27〜#34（ネスト .syncignore / 復元ピッカー /
+        #   設定 export-import / 削除一覧キャッシュ / 配線結合テスト / NoFollow / dedupe / stale UploadId /
+        #   pull-restore 直列化）を着地。#29(a) CopyObject はマニフェスト再設計前提で "not planned"。
+        #   #33 等で省いた per-task patch bump はここで吸収（version はタスク数と 1:1 ではない）。
+        MARKETING_VERSION: "0.2.0"
         CURRENT_PROJECT_VERSION: "1"
     dependencies:
       - package: AWSSwiftSDK
