@@ -495,23 +495,34 @@ final class SyncEngine {
         // これで復元の atomic move（remove → move）と pull の reconcile / 削除反映が同一 path に同時に
         // 触れる窓を構造的に閉じる。重い DL〜move は RestoreService 内で off-main に走る。
         await remoteOpGate.acquire()
-        let result: RestoreService.RestoreResult
         do {
-            result = try await service.restore(relativePath: relativePath, versionId: versionId)
-        } catch {
+            let result = try await service.restore(relativePath: relativePath, versionId: versionId)
             remoteOpGate.release()
+            // 復元中に押された手動 Pull を消化（成功/失敗どちらの経路でも対称に＝下記 catch と同様）。
+            await drainPendingManualPull()
+            // 書き戻したファイルを拾わせる（FileWatcher の取りこぼし保険＝確実に再アップロードへ乗せる）。
+            // フルスキャンは成功時のみ（復元できなかったファイルを上げ直す必要は無い）。
+            await triggerFullScan()
+            return result
+        } catch {
+            // 復元が失敗しても、その間に押された手動 Pull は独立した意図なので落とさず消化する
+            // （pull 経路の repeat-while-pending が失敗時もセルフ drain するのと対称）。
+            remoteOpGate.release()
+            await drainPendingManualPull()
             throw error
         }
-        remoteOpGate.release()
-        // 復元中に手動「Pull from S3」が押されていたら（ゲート busy で pending 化）、ここで 1 周消化する
-        // ＝ pull 中押下の coalescing を restore 経路にも拡張する。release 直後・await 前なので、ゲートは
-        // 確実に空いており triggerRemotePull が取得して走る（pendingManualPull は同メソッドが落とす）。
+    }
+
+    /// 復元中に手動「Pull from S3」が押されていた場合（ゲート busy で `pendingManualPull` が立つ）に
+    /// 1 周消化する＝ pull 進行中押下の coalescing（PR #9 ④）を restore 経路へ拡張する（#34 / D5）。
+    /// ゲート解放直後に呼ぶ前提。`triggerRemotePull` は `guard remoteOpGate.tryAcquire()` まで await を
+    /// 挟まないので、**先行する待機 restore が無ければ**ゲートは空いていて取得・実行される。待機 restore が
+    /// いる場合は `release()` が所有権をそれへ引き渡す（`locked` は true のまま）ため tryAcquire は失敗して
+    /// 再 pending 化されるが、所有権を受け取った restore が完了時に再度ここを通るので取りこぼしは無い。
+    private func drainPendingManualPull() async {
         if pendingManualPull {
             await triggerRemotePull(reason: .manual)
         }
-        // 書き戻したファイルを拾わせる（FileWatcher の取りこぼし保険＝確実に再アップロードへ乗せる）。
-        await triggerFullScan()
-        return result
     }
 
     private func performFullScan() async throws {
