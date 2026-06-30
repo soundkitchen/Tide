@@ -22,7 +22,8 @@ final class AppEnvironment {
 
     /// 設定 import（#29）で Settings 画面からセットアップウィザードへ接続設定を引き渡すための一時バッファ。
     /// 接続変更はローカル DB がバケットに紐づくためホットスワップせず、ウィザードで再プロビジョニングする。
-    /// ウィザードは onAppear でこれを読んでフィールドを事前充填し、消費後に nil へ戻す。
+    /// ウィザードは `.onChange(of:initial:true)` でこれを読んでフィールドを事前充填し、消費後に nil へ戻す
+    /// （単一・常駐 Window なので onAppear 再発火に頼れない。詳細は SetupWizardWindow / docs/08）。
     var pendingImportedSettings: SettingsTransfer.Payload?
 
     /// bootstrap の再入ガード。eager（AppDelegate）と遅延（MenuBarContent.task）の 2 経路が
