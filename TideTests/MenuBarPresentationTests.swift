@@ -1,5 +1,6 @@
 import AppKit
 import XCTest
+import TideCore
 @testable import Tide
 
 final class MenuBarPresentationTests: XCTestCase {

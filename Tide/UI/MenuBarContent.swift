@@ -1,3 +1,4 @@
+import TideCore
 import SwiftUI
 
 struct MenuBarContent: View {

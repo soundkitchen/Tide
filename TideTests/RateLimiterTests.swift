@@ -1,4 +1,5 @@
 import XCTest
+import TideCore
 @testable import Tide
 
 /// 帯域制御（サブ E）の網羅。純粋関数 `TokenBucket` を時刻注入で決定的に検証し（大半）、

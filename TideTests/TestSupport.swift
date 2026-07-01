@@ -1,5 +1,6 @@
 import XCTest
 import CryptoKit
+import TideCore
 @testable import Tide
 
 /// 複数テストで重複していたセットアップ / フィクスチャ生成の共通基盤。

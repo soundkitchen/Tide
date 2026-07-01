@@ -1,4 +1,5 @@
 import XCTest
+import TideCore
 @testable import Tide
 
 /// `RemoteOpGate`（pull / restore 直列化の単一ゲート・#34 / D5）の不変条件を固定する。

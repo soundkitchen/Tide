@@ -1,4 +1,5 @@
 import XCTest
+import TideCore
 @testable import Tide
 
 /// `transfer_state` テーブルと `TransferStateStore` の永続化挙動を実 DB（一時ファイル）で検証する。

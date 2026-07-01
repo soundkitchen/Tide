@@ -1,3 +1,4 @@
+import TideCore
 import SwiftUI
 
 /// UI 層で複数の View が共有する小さな表示ヘルパ群。

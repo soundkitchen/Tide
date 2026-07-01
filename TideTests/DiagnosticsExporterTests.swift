@@ -1,4 +1,5 @@
 import XCTest
+import TideCore
 @testable import Tide
 
 /// `DiagnosticsExporter` の純粋なテキスト組み立てを固定する。

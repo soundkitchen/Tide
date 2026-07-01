@@ -1,4 +1,5 @@
 import XCTest
+import TideCore
 @testable import Tide
 
 /// `StabilityCheck.isStable`（torn read 防止の安定化判定）の純粋ロジック網羅。

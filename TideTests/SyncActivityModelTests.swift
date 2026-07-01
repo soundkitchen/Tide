@@ -1,4 +1,5 @@
 import XCTest
+import TideCore
 @testable import Tide
 
 /// SyncActivityModel の reload / loadMore / フィルタの結合テスト（実 SQLite の temp DB に直 seed）。

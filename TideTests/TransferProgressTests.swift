@@ -1,4 +1,5 @@
 import XCTest
+import TideCore
 @testable import Tide
 
 /// `TransferProgress.reduce` の集約セマンティクス（begin/update/end + out-of-order 耐性）を固定する。

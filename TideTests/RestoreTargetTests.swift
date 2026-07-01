@@ -1,4 +1,5 @@
 import XCTest
+import TideCore
 @testable import Tide
 
 /// 復元先決定（ハイブリッド）の純粋ロジック全分岐。

@@ -1,6 +1,7 @@
 import XCTest
 import CryptoKit
 import GRDB
+import TideCore
 @testable import Tide
 
 /// アップロード側の並行更新検出（Issue #25 / A）の解決配線を、フェイクの S3 ストリーミングシームと

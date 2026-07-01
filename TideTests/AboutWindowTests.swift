@@ -1,5 +1,6 @@
 import XCTest
 import AppKit
+import TideCore
 @testable import Tide
 
 /// About ウィンドウのアプリアイコンは `NSImage(named: "AppIcon")`（バンドルのコンパイル済み

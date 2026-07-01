@@ -1,5 +1,6 @@
 import XCTest
 import GRDB
+import TideCore
 @testable import Tide
 
 /// リモート削除の適用配線（D1 / #30）。`Downloader.applyRemoteDeletion` は `ThreeWayMerge.decide(remote:nil)`

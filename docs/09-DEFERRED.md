@@ -46,6 +46,8 @@
 
 ## M5 / Files On-Demand（File Provider）— 0.3.0 以降の独立マイルストーン（Issue 化せず本メモで追跡）
 
+**進捗（2026-07-02〜・実装着手）**: PoC 先行の 7 フェーズで進行。**Phase 1 = `TideCore` framework 分離 完了**（`Tide/{S3,Storage,Models}/` 全ファイルと `Tide/Core/` の純粋型 17 を、app と拡張が共有する `TideCore` framework へ移設。`APPLICATION_EXTENSION_API_ONLY=YES` で拡張安全ビルドを確認＝aws-sdk-swift + GRDB が app-extension で動く最大リスクを実ビルドで解消。344 tests green、実 S3(dev)でアップロード→削除同期を確認。branch `feature/m5-tidecore-extraction`）。`SyncEngine`/`RemoteOpGate`/`FileWatcher`/`DebounceQueue` 等の MainActor/駆動層は `Tide/Core/` に残置。次: **Phase 2**（App Group へ DB/Config/Keychain 移設 + App Sandbox 下地。FSEvents モードのまま動作維持）→ **Phase 3**（`TideFileProvider.appex` で読み取り materialize の最小 PoC＝`~/Library/CloudStorage/Tide` にプレースホルダ表示→ダブルクリックで S3 取得）。移行方針は既存 FSEvents モードを残して File Provider を **opt-in 並走**（未ソークの新モードが既存バックアップ経路を汚さない）。**Phase 1 の留意（PR #48 レビュー指摘2）**: public 化で汎用名（`ISO8601` / `ManifestJSON` / `TransferProgressReporter` 等）がモジュール外公開になった。Phase 3 で `TideFileProvider.appex` が `import TideCore` する前に、名前衝突を避けるため `TideISO8601` 等へのリネームを検討する（今回は無害のため未対応）。
+
 オンラインのみ実体・ローカルは参照（プレースホルダ）にし、ファイルを開いた瞬間に実体を取得（materialize）する Dropbox / Google Drive 風の挙動。ユーザ要望（「オンラインのみ実態を保存、ローカルは参照のみ」）に対する実現性調査の結論を記録する。**0.2.0 では実装しない。**
 
 - **唯一の正規手段は Apple の File Provider フレームワーク**（`NSFileProviderReplicatedExtension`）。Dropbox / Google Drive / OneDrive が旧 kernel extension 方式から移行した先で、これ以外に dataset を dataless プレースホルダ化する公開 API は無い。

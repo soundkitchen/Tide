@@ -1,3 +1,4 @@
+import TideCore
 import Foundation
 
 /// 非機密のアプリ設定を 1 つの JSON ファイルへ書き出し / 読み込みする（設定の export / import）。

@@ -1,4 +1,5 @@
 import XCTest
+import TideCore
 @testable import Tide
 
 /// `LocalDatabase.refreshMtimeIfShaUnchanged`（SHA ゲートの CAS 更新）の回帰テスト。
