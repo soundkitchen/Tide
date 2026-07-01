@@ -1,4 +1,5 @@
 import XCTest
+import TideCore
 @testable import Tide
 
 /// `SyncEngine` の純粋な静的ヘルパ（不安定ファイル延期のバックオフ/警告閾値）の回帰固定。

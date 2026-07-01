@@ -1,5 +1,6 @@
 import XCTest
 import CryptoKit
+import TideCore
 @testable import Tide
 
 /// `RestoreService.restore` を、フェイクの versionId 対応 S3 シームと実 DB（一時ファイル）+ 一時 syncRoot で

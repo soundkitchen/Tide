@@ -1,3 +1,4 @@
+import TideCore
 import Foundation
 
 /// 診断情報（アプリ/OS バージョン・設定の要約・最近の sync_log・DB スナップショット）を

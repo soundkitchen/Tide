@@ -54,6 +54,7 @@
   - M2 ダウンロード / 復元 / ポーリング（実装済み・MVP ゴール）
   - M3 双方向同期 / 競合解決 / マルチパート（サブ A〜E 実装済み: マルチパート / `.syncignore` / 3-way merge / 中断・再開 / 帯域制御。**M3 完了**。`docs/09` の据え置き数件あり）
   - M4 運用機能と磨き込み（復元/バージョン UI・Sync Activity/エラー履歴・通知・pull コスト削減。**M4 完了**。詳細は `docs/00-OVERVIEW.md` と `docs/08-IMPLEMENTATION-NOTES.md`）
+  - M5 Files-On-Demand（File Provider）— オンラインのみ実体化: **着手中**。Phase 1（`TideCore` framework 分離）完了。同期先は最終的に `~/Library/CloudStorage/Tide` 固定（既存 FSEvents の任意フォルダモードと opt-in 並走）。設計・進捗は `docs/09-DEFERRED.md` の M5 節
 
 ### 主要な確定パラメータ
 - Bundle ID: `org.izukawa.Tide`
@@ -163,17 +164,21 @@
 |---|---|
 | `project.yml` | xcodegen の唯一のソース。Bundle ID / 依存 / ターゲット設定 |
 | `Makefile` | ビルド / テスト / リセットの統合 |
+| `TideCore/`（framework） | **app と File Provider 拡張が共有する同期コア**（M5 Phase 1 で分離）。下記 S3/Storage/Models と Core 純粋型を収容。`APPLICATION_EXTENSION_API_ONLY=YES`（拡張安全 API のみ）|
+| `TideCore/S3/` | S3Client / Uploader / Downloader / ManifestReader / KnownRegions |
+| `TideCore/Storage/` | GRDB DB / KeychainStore / ConfigStore / Migrations |
+| `TideCore/Models/` | 構造体（AWSCredentials / SyncStatus 等） |
+| `TideCore/Core/` | 純粋 Core（MainActor 非依存）: ThreeWayMerge / ChangeDetector / PathValidator / HashCalculator / RateLimiter / RestoreService / IgnoreDecision / IgnoreRules / SyncIgnoreMatcher / ConflictNamer / StabilityCheck / NoFollowFileReader / SyncError / SyncIssueClassifier / DeletedFilesCache / TideTmpDirectory / AppLogger |
 | `Tide/App/` | エントリポイント / `AppEnvironment` |
 | `Tide/UI/` | SwiftUI ビュー（MenuBar / Setup wizard / Settings） |
-| `Tide/Core/` | SyncEngine / FileWatcher / DebounceQueue / PathValidator / TideTmpDirectory 等 |
-| `Tide/Storage/` | GRDB DB / KeychainStore / ConfigStore / Migrations |
-| `Tide/S3/` | S3Client / Uploader / Downloader / ManifestReader / KnownRegions |
-| `Tide/Models/` | 構造体（AWSCredentials / SyncStatus 等） |
+| `Tide/Core/` | **app-bound な駆動層/殻**（TideCore に移さず残す）: SyncEngine / RemoteOpGate / FileWatcher / DebounceQueue / DiagnosticsExporter / NotificationPolicy / SettingsTransfer |
 | `Tide/Resources/` | `Localizable.xcstrings` / アセット |
 | `TideTests/` | ユニットテスト |
 | `docs/` | 設計書（spec）。`00`〜`07` が仕様、`08-IMPLEMENTATION-NOTES.md` が実装ノート（旧 §7）、`09-DEFERRED.md` が据え置き/バックログ（旧 §8） |
 | `security/` | セキュリティレビューと対応サマリ |
 | `tmp/` | 動作チェックリスト等の使い捨て（`.gitignore` 済み） |
+
+> **docs パス参照の読み替え（M5 Phase 1 以降）**: `docs/*` や本ファイル内に残る旧 `Tide/S3|Storage|Models/…` と、Core 純粋型（`ThreeWayMerge`/`ChangeDetector`/`PathValidator`/`HashCalculator`/`RateLimiter`/`RestoreService`/`IgnoreDecision`/`IgnoreRules`/`SyncIgnoreMatcher`/`ConflictNamer`/`StabilityCheck`/`NoFollowFileReader`/`SyncError`/`SyncIssueClassifier`/`DeletedFilesCache`/`TideTmpDirectory`/`AppLogger`）のパスは、物理的には `TideCore/…` 配下へ移設済み（**ファイル名・型名は不変**なので個別の書き換えはしていない）。`SyncEngine`/`RemoteOpGate`/`FileWatcher`/`DebounceQueue`/`DiagnosticsExporter`/`NotificationPolicy`/`SettingsTransfer` は駆動層/殻として `Tide/Core/` に残る。
 
 ---
 

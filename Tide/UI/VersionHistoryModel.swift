@@ -1,3 +1,4 @@
+import TideCore
 import SwiftUI
 
 /// 「Version History」ウィンドウの状態。S3 のバージョン列挙・復元アクションのドライバ。

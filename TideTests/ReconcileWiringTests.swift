@@ -1,5 +1,6 @@
 import XCTest
 import GRDB
+import TideCore
 @testable import Tide
 
 /// リモート pull の取り込み配線（D1 / #30）。`SyncEngine.reconcileRemoteEntry`（nonisolated static）を

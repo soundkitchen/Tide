@@ -1,4 +1,5 @@
 import XCTest
+import TideCore
 @testable import Tide
 
 /// `ChangeDetector`（フルスキャン / FSEvents の変更判定 + SHA ゲート）の全分岐を固定する。

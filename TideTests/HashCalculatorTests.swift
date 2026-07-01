@@ -1,5 +1,6 @@
 import XCTest
 import CryptoKit
+import TideCore
 @testable import Tide
 
 final class HashCalculatorTests: XCTestCase {

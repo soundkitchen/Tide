@@ -1,3 +1,4 @@
+import TideCore
 import Foundation
 import CoreServices
 

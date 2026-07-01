@@ -1,3 +1,4 @@
+import TideCore
 import Foundation
 
 /// 同一キー（パス）のイベントを最後の到着から `interval` 秒間無音になるまで集約する。

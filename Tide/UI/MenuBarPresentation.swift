@@ -1,3 +1,4 @@
+import TideCore
 import Foundation
 
 /// メニューバーポップオーバーの見出し状態の決定（副作用ゼロの純粋ロジック・

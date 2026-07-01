@@ -1,3 +1,4 @@
+import TideCore
 import SwiftUI
 
 /// 過去バージョン参照 + 復元のウィンドウ（M4・サブ D）。

@@ -1,5 +1,6 @@
 import XCTest
 import GRDB
+import TideCore
 @testable import Tide
 
 /// scan / event 共通の「判定 → CAS / enqueue」配線（D1 / #30）。`performFullScan` と

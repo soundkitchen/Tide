@@ -1,5 +1,6 @@
 import XCTest
 import CryptoKit
+import TideCore
 @testable import Tide
 
 /// `Downloader.download` の取得・再開・破棄ロジックを、フェイクの S3 ストリーミングシームと

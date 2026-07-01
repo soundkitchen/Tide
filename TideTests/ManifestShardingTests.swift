@@ -1,4 +1,5 @@
 import XCTest
+import TideCore
 @testable import Tide
 
 final class ManifestShardingTests: XCTestCase {

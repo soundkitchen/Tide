@@ -1,5 +1,6 @@
 import XCTest
 import GRDB
+import TideCore
 @testable import Tide
 
 final class SyncIssueClassifierTests: XCTestCase {

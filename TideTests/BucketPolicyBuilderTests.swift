@@ -1,4 +1,5 @@
 import XCTest
+import TideCore
 @testable import Tide
 
 /// `BucketPolicyBuilder` の JSON マージ純粋ロジック（C3 後半・Issue #26 / B）を固定する。

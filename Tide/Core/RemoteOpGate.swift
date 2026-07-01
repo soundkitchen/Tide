@@ -1,3 +1,4 @@
+import TideCore
 import Foundation
 
 /// pull と restore が「リモート由来の内容を同一 path のローカル FS へ書き込む」フェーズで

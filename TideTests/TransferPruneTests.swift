@@ -1,4 +1,5 @@
 import XCTest
+import TideCore
 @testable import Tide
 
 /// `SyncEngine.pruneOrphanTransfers`（static 本体）の分岐 → 実 I/O の配線を、実 DB（一時ファイル）で

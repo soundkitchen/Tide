@@ -1,3 +1,4 @@
+import TideCore
 import Foundation
 
 /// ユーザに OS 通知で知らせるべき同期イベント。

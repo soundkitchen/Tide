@@ -30,6 +30,33 @@ packages:
     from: 7.10.0
 
 targets:
+  TideCore:
+    type: framework
+    platform: macOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: TideCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.izukawa.TideCore
+        PRODUCT_NAME: TideCore
+        DEFINES_MODULE: YES
+        # framework にも Info.plist が要る（無いと codesign が bundle format 不正で失敗）。
+        GENERATE_INFOPLIST_FILE: YES
+        # 拡張(TideFileProvider)からもリンクするため拡張安全 API のみを強制する。
+        # aws-sdk-swift は Apple では URLSession 既定でネットワークは Foundation、
+        # fork/AppKit/@available(ApplicationExtension,unavailable) を含まない（Phase 0 調査）。
+        APPLICATION_EXTENSION_API_ONLY: YES
+    dependencies:
+      - package: AWSSwiftSDK
+        product: AWSS3
+      - package: AWSSwiftSDK
+        product: AWSClientRuntime
+      - package: AWSSwiftSDK
+        product: AWSSDKIdentity
+      - package: GRDB
+        product: GRDB
+
   Tide:
     type: application
     platform: macOS
@@ -79,6 +106,7 @@ targets:
         MARKETING_VERSION: "0.2.0"
         CURRENT_PROJECT_VERSION: "1"
     dependencies:
+      - target: TideCore
       - package: AWSSwiftSDK
         product: AWSS3
       - package: AWSSwiftSDK
@@ -96,6 +124,11 @@ targets:
       - path: TideTests
     dependencies:
       - target: Tide
+      # core を TideCore framework へ分離したため、テストも TideCore と、
+      # テスト内で直接使う GRDB API（fetchCount/filter/DatabasePool 等）にリンクする。
+      - target: TideCore
+      - package: GRDB
+        product: GRDB
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: org.izukawa.TideTests
