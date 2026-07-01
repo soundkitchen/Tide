@@ -45,7 +45,6 @@
 		541C356ED2F55E5CF1379093 /* StabilityCheckTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20F5F66DB9903E0F42061DAA /* StabilityCheckTests.swift */; };
 		54582D1A90D493B8A49F7392 /* RateLimiterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 55A63530A904BB8A91710C73 /* RateLimiterTests.swift */; };
 		587C235534B792BD5FCA8E6F /* TideCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 5239E4D2F62809A68F07CFCE /* TideCore.framework */; };
-		59403A709AC7BCBD0A22D194 /* AWSClientRuntime in Frameworks */ = {isa = PBXBuildFile; productRef = A50D20ED5B5AEECF1F032839 /* AWSClientRuntime */; };
 		5C259B9E9FD8A01379711B38 /* S3Client.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88605F9B48FCB78A345BA0E1 /* S3Client.swift */; };
 		61041DF6FC224E4E889AEA59 /* RestoreService.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA79B58B863B37EB569088A6 /* RestoreService.swift */; };
 		621CB09BF0E22C06E10EE7ED /* RemoteDeletionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0D68AB09D02E462ACB191F1 /* RemoteDeletionTests.swift */; };
@@ -70,9 +69,7 @@
 		8459D413B21B7A2F84C679E0 /* ChangeDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7041FFAA1F9DFD04F9230C4 /* ChangeDetector.swift */; };
 		865CD91F057ABA7320778FCF /* SyncIgnoreMatcherTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E0C66E505C9788FC626A5F38 /* SyncIgnoreMatcherTests.swift */; };
 		876DE341084A9646C3DE440E /* PartPlan.swift in Sources */ = {isa = PBXBuildFile; fileRef = 247AD143645CCEE156530544 /* PartPlan.swift */; };
-		88CE1058350DE5CE715BDB27 /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = 868B594F3D527CF261BDC653 /* GRDB */; };
 		8A2492FBD381EC905AC4AC87 /* MenuBarContent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 026AC3AAA816DBF9DF595080 /* MenuBarContent.swift */; };
-		8A98F6AF29BC306DD893499F /* AWSSDKIdentity in Frameworks */ = {isa = PBXBuildFile; productRef = B70DC5D65F2DCBFC4293FC8E /* AWSSDKIdentity */; };
 		90276C63902A408F2EA29B5B /* Manifest.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D575C0984B4BABFC8234BB1 /* Manifest.swift */; };
 		9051EDC4B0D31967E13CD22E /* SyncEvent.swift in Sources */ = {isa = PBXBuildFile; fileRef = F210251B285ACE9A5ECED1A8 /* SyncEvent.swift */; };
 		90A6EB78AF3A3DD31CF27760 /* SetupWizardWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4292EC731F5D275D86CFDAE2 /* SetupWizardWindow.swift */; };
@@ -85,7 +82,7 @@
 		97F05A6602848F714764765E /* AboutWindowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DC06B8D465A6783D6EC5327A /* AboutWindowTests.swift */; };
 		99F9EE4A6DC9EC6905F09A21 /* SyncIssueClassifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8815BF2DB0DE7101D71508D5 /* SyncIssueClassifier.swift */; };
 		9B793A724C6B1B17CE22B11F /* HashCalculatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 16ED0B8D39615582C0CD3596 /* HashCalculatorTests.swift */; };
-		9FF79ED9D02C034D4A29C8CB /* AWSS3 in Frameworks */ = {isa = PBXBuildFile; productRef = 9D164DF37935E502C6D53EB6 /* AWSS3 */; };
+		9FF79ED9D02C034D4A29C8CB /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = 868B594F3D527CF261BDC653 /* GRDB */; };
 		A19456E45B5E3A10A3233CE2 /* SettingsTransfer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D6159D935D2BCDF5F10B9BA /* SettingsTransfer.swift */; };
 		A3DD7D936C5EB50A1769BC5E /* TransferProgressTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28C008109E7A3765EE5A18E7 /* TransferProgressTests.swift */; };
 		A674AB99F3B090F076F6C29B /* TideApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45BAEBEBA92C44451EB1201D /* TideApp.swift */; };
@@ -290,10 +287,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				587C235534B792BD5FCA8E6F /* TideCore.framework in Frameworks */,
-				9FF79ED9D02C034D4A29C8CB /* AWSS3 in Frameworks */,
-				59403A709AC7BCBD0A22D194 /* AWSClientRuntime in Frameworks */,
-				8A98F6AF29BC306DD893499F /* AWSSDKIdentity in Frameworks */,
-				88CE1058350DE5CE715BDB27 /* GRDB in Frameworks */,
+				9FF79ED9D02C034D4A29C8CB /* GRDB in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -594,9 +588,6 @@
 			);
 			name = Tide;
 			packageProductDependencies = (
-				9D164DF37935E502C6D53EB6 /* AWSS3 */,
-				A50D20ED5B5AEECF1F032839 /* AWSClientRuntime */,
-				B70DC5D65F2DCBFC4293FC8E /* AWSSDKIdentity */,
 				868B594F3D527CF261BDC653 /* GRDB */,
 			);
 			productName = Tide;
@@ -1185,21 +1176,6 @@
 			isa = XCSwiftPackageProductDependency;
 			package = D8F7CF3246F1E8AAF506C2BB /* XCRemoteSwiftPackageReference "GRDB.swift" */;
 			productName = GRDB;
-		};
-		9D164DF37935E502C6D53EB6 /* AWSS3 */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 35759C9667E160527ABC276E /* XCRemoteSwiftPackageReference "aws-sdk-swift" */;
-			productName = AWSS3;
-		};
-		A50D20ED5B5AEECF1F032839 /* AWSClientRuntime */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 35759C9667E160527ABC276E /* XCRemoteSwiftPackageReference "aws-sdk-swift" */;
-			productName = AWSClientRuntime;
-		};
-		B70DC5D65F2DCBFC4293FC8E /* AWSSDKIdentity */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 35759C9667E160527ABC276E /* XCRemoteSwiftPackageReference "aws-sdk-swift" */;
-			productName = AWSSDKIdentity;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

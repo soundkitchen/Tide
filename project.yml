@@ -107,12 +107,8 @@ targets:
         CURRENT_PROJECT_VERSION: "1"
     dependencies:
       - target: TideCore
-      - package: AWSSwiftSDK
-        product: AWSS3
-      - package: AWSSwiftSDK
-        product: AWSClientRuntime
-      - package: AWSSwiftSDK
-        product: AWSSDKIdentity
+      # AWS SDK は app 側で直接 import しない（S3 系は全て TideCore へ移動済み）。
+      # TideCore 経由の transitive リンクで足りる。GRDB は SyncEngine が直接 import するため残す。
       - package: GRDB
         product: GRDB
 
