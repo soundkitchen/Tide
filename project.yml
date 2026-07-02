@@ -85,6 +85,18 @@ targets:
       properties:
         keychain-access-groups:
           - $(AppIdentifierPrefix)org.izukawa.Tide
+        # App Group（M5 Phase 2）: DB / 設定を app と File Provider 拡張で共有する土台。
+        # TideCore の TideAppGroup.identifier と一致させる。
+        com.apple.security.application-groups:
+          - group.org.izukawa.Tide
+        # App Sandbox（M5 Phase 2・security L1）。File Provider 拡張はサンドボックス必須なので
+        # app 側もここで一括対応する。同期フォルダへのアクセスは security-scoped bookmark で永続化。
+        com.apple.security.app-sandbox: true
+        # NSOpenPanel / NSSavePanel（powerbox）でユーザが選んだパスへの読み書き
+        # （同期フォルダ選択・診断 zip / 設定 JSON の書き出し・読み込み）。
+        com.apple.security.files.user-selected.read-write: true
+        # aws-sdk-swift の S3 通信（サンドボックス下では明示が必要）。
+        com.apple.security.network.client: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: org.izukawa.Tide

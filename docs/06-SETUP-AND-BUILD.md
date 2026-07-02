@@ -118,7 +118,7 @@ ls ./build/Build/Products/Debug/Tide.app
 
 ### コード署名と Keychain entitlement（初回のみ Mac の登録が必要）
 
-Tide は AWS 認証情報を **Data Protection Keychain**（`kSecUseDataProtectionKeychain=true`、セキュリティ対応 H1）に保存する。これを使うにはアプリに `keychain-access-groups` entitlement が必要で、`project.yml` の `entitlements` から `Tide/Tide.entitlements`（`$(AppIdentifierPrefix)org.izukawa.Tide`）が生成され署名に埋め込まれる。
+Tide は AWS 認証情報を **Data Protection Keychain**（`kSecUseDataProtectionKeychain=true`、セキュリティ対応 H1）に保存する。これを使うにはアプリに `keychain-access-groups` entitlement が必要で、`project.yml` の `entitlements` から `Tide/Tide.entitlements`（`$(AppIdentifierPrefix)org.izukawa.Tide`）が生成され署名に埋め込まれる。M5 Phase 2 からはこれに加えて **App Group entitlement**（`com.apple.security.application-groups` = `group.org.izukawa.Tide`）と **App Sandbox 一式**（`com.apple.security.app-sandbox` / `files.user-selected.read-write` / `network.client`）も署名に埋め込まれる（DB / 設定の置き場所が App Group コンテナになり、アプリ自体がサンドボックスで動くため）。automatic signing が App Group capability を App ID / プロファイルに反映できない場合は、Keychain と同様に初回だけ Xcode GUI でのビルドが要る。サンドボックス化後、同期フォルダへのアクセスは security-scoped bookmark（セットアップ時に発行）で維持される。サンドボックス化前の版からアップグレードした初回起動では、同期フォルダの再許可パネルが一度だけ表示される（設定済みのフォルダをそのまま選択する）。
 
 automatic signing でこの entitlement を付与するには **Mac App Development プロビジョニングプロファイル**が要り、その生成には **この Mac が開発者アカウントにデバイス登録**されている必要がある。未登録だとビルドが
 `Device "…" isn't registered in your developer account` で失敗し、実行時には Keychain 保存が `OSStatus 34018 (errSecMissingEntitlement)` になる。

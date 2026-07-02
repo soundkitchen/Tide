@@ -15,12 +15,28 @@ public final class ConfigStore: @unchecked Sendable {
         static let uploadBandwidthBytesPerSec = "tide.uploadBandwidthBytesPerSec"
         static let downloadBandwidthBytesPerSec = "tide.downloadBandwidthBytesPerSec"
         static let notificationsEnabled = "tide.notificationsEnabled"
+        static let syncRootBookmark = "tide.syncRootBookmark"
     }
 
     /// 1 ファイルあたりのアップロードサイズ上限の既定値（1 GiB）。
     public static let defaultUploadSizeLimitBytes: Int64 = 1 * 1024 * 1024 * 1024
 
-    public init(defaults: UserDefaults = .standard) {
+    /// `LegacyStateMigrator` が旧 standard defaults から group suite へコピーするキー一覧。
+    /// deviceId を含む（マニフェスト上のデバイス識別を移行後も維持する）。
+    public static let migratableKeys: [String] = [
+        Key.bucketName, Key.region, Key.syncRootPath, Key.deviceId,
+        Key.pollingIntervalSeconds, Key.setupCompleted,
+        Key.uploadSizeLimitBytes,
+        Key.uploadBandwidthBytesPerSec, Key.downloadBandwidthBytesPerSec,
+        Key.notificationsEnabled
+    ]
+
+    /// セットアップ完了フラグの defaults キー（`LegacyStateMigrator` の移行要否判定用）。
+    public static var setupCompletedDefaultsKey: String { Key.setupCompleted }
+
+    /// 既定は App Group 共有 suite（M5 Phase 2 で標準 defaults から移設）。
+    /// 旧 standard defaults からの一度きり移行は `LegacyStateMigrator` が行う。
+    public init(defaults: UserDefaults = TideAppGroup.sharedDefaults()) {
         self.defaults = defaults
     }
 
@@ -34,6 +50,11 @@ public final class ConfigStore: @unchecked Sendable {
         set { defaults.set(newValue, forKey: Key.region) }
     }
 
+    /// 同期フォルダのパス。**書くときは `syncRootBookmark` と対で更新すること**
+    /// （不変条件・PR #49 再レビュー #2）: `resolveSyncRootAccess` は「両者の乖離＝外部リネーム由来」
+    /// を前提に bookmark が指す実体へパスを追随させるため、bookmark を伴わずここだけ書き換えると
+    /// 次回起動で旧フォルダのパスへ黙って巻き戻される。正規の書き手はセットアップ確定
+    /// （`AppEnvironment.completeSetup`）と `resolveSyncRootAccess` 自身のみ。
     public var syncRootPath: String? {
         get { defaults.string(forKey: Key.syncRootPath) }
         set { defaults.set(newValue, forKey: Key.syncRootPath) }
@@ -97,6 +118,14 @@ public final class ConfigStore: @unchecked Sendable {
         set { defaults.set(newValue, forKey: Key.notificationsEnabled) }
     }
 
+    /// 同期フォルダの security-scoped bookmark（App Sandbox 下での再アクセス手段・M5 Phase 2）。
+    /// セットアップ時（パネル選択）に発行し、bootstrap が解決して scoped アクセスを開始する。
+    /// デバイス固有バイナリなので `migratableKeys` / `SettingsTransfer` には含めない。
+    public var syncRootBookmark: Data? {
+        get { defaults.data(forKey: Key.syncRootBookmark) }
+        set { defaults.set(newValue, forKey: Key.syncRootBookmark) }
+    }
+
     /// 初回アクセス時に UUID を自動生成して保存する。以降不変。
     public var deviceId: String {
         if let existing = defaults.string(forKey: Key.deviceId), !existing.isEmpty {
@@ -111,14 +140,14 @@ public final class ConfigStore: @unchecked Sendable {
     }
 
     /// 接続情報を消すが deviceId は残す。
+    /// キー一覧は `migratableKeys` から導出して二重管理を避ける（PR #49 レビュー #6）。
+    /// 差分は deviceId（reset では残す）と syncRootBookmark（デバイス固有で移行対象外だが
+    /// reset では消す）の 2 つだけで、それぞれ明示的に扱う。
     public func reset() {
-        for key in [Key.bucketName, Key.region, Key.syncRootPath,
-                    Key.pollingIntervalSeconds, Key.setupCompleted,
-                    Key.uploadSizeLimitBytes,
-                    Key.uploadBandwidthBytesPerSec, Key.downloadBandwidthBytesPerSec,
-                    Key.notificationsEnabled] {
+        for key in Self.migratableKeys where key != Key.deviceId {
             defaults.removeObject(forKey: key)
         }
+        defaults.removeObject(forKey: Key.syncRootBookmark)
     }
 
     /// deviceId も含めて完全に消す（factoryReset 用）。

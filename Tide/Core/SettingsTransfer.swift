@@ -99,16 +99,11 @@ enum SettingsTransfer {
         )
     }
 
-    /// import した payload を **すべて**（接続 + tunables）ConfigStore に反映する。
-    /// `deviceId` / `setupCompleted` / 認証情報は触らない。
-    /// 接続設定の書き込みを伴うので、エンジン未起動の経路（セットアップウィザード）でのみ使う。
-    @MainActor
-    static func apply(_ payload: Payload, to config: ConfigStore) {
-        config.bucketName = payload.bucketName
-        config.region = payload.region
-        config.syncRootPath = payload.syncRootPath
-        applyTunables(payload, to: config)
-    }
+    // NOTE: かつてあった「接続設定込みで全部反映する apply()」は削除した（PR #49 再レビュー #2）。
+    // `syncRootPath` は `syncRootBookmark` と**対で**更新する不変条件があり（completeSetup が唯一の
+    // 正規の書き手。乖離＝外部リネーム由来とみなして resolveSyncRootAccess が bookmark 側の実体へ
+    // パスを巻き戻す）、bookmark 無しで syncRootPath だけ書く API は将来の呼び出しがフットガンになる。
+    // インポート導線は applyTunables + ウィザードの @State 事前充填（確定は completeSetup）で足りている。
 
     /// tunables（polling / サイズ上限 / 帯域 / 通知）だけを反映する。接続設定は触らない。
     /// エンジン稼働中（Settings 画面）でも安全に即適用できる部分集合。

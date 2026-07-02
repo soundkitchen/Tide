@@ -47,19 +47,22 @@
 ## 1. プロジェクト概要
 
 - **目的**: macOS のクリーンインストール後の復旧を主目的とした、Dropbox 風 S3 同期ツール。
-- **アーキテクチャ**: macOS 26+ 専用、Swift 6（strict concurrency: complete）、SwiftUI、メニューバー常駐 (`LSUIElement = YES`)。
+- **アーキテクチャ**: macOS 26+ 専用、Swift 6（strict concurrency: complete）、SwiftUI、メニューバー常駐 (`LSUIElement = YES`)、App Sandbox 有効（M5 Phase 2〜。同期フォルダは security-scoped bookmark でアクセス）。
 - **設計の原典**: `docs/00-OVERVIEW.md` から `docs/06-SETUP-AND-BUILD.md` まで。**仕様に迷ったら先に docs/ を読むこと。**
 - **マイルストーン**: 
   - M1 ローカル → S3 一方向アップロード（実装済み）
   - M2 ダウンロード / 復元 / ポーリング（実装済み・MVP ゴール）
   - M3 双方向同期 / 競合解決 / マルチパート（サブ A〜E 実装済み: マルチパート / `.syncignore` / 3-way merge / 中断・再開 / 帯域制御。**M3 完了**。`docs/09` の据え置き数件あり）
   - M4 運用機能と磨き込み（復元/バージョン UI・Sync Activity/エラー履歴・通知・pull コスト削減。**M4 完了**。詳細は `docs/00-OVERVIEW.md` と `docs/08-IMPLEMENTATION-NOTES.md`）
-  - M5 Files-On-Demand（File Provider）— オンラインのみ実体化: **着手中**。Phase 1（`TideCore` framework 分離）完了。同期先は最終的に `~/Library/CloudStorage/Tide` 固定（既存 FSEvents の任意フォルダモードと opt-in 並走）。設計・進捗は `docs/09-DEFERRED.md` の M5 節
+  - M5 Files-On-Demand（File Provider）— オンラインのみ実体化: **着手中**。Phase 1（`TideCore` framework 分離）・Phase 2（App Group 移設 + App Sandbox 化 + security-scoped bookmark）完了。次は Phase 3（`TideFileProvider.appex` の読み取り materialize PoC）。同期先は最終的に `~/Library/CloudStorage/Tide` 固定（既存 FSEvents の任意フォルダモードと opt-in 並走）。設計・進捗は `docs/09-DEFERRED.md` の M5 節
 
 ### 主要な確定パラメータ
 - Bundle ID: `org.izukawa.Tide`
 - DEVELOPMENT_TEAM: `G5G54TCH8W`
-- ローカル DB: `~/Library/Application Support/Tide/db.sqlite`（GRDB.swift / WAL）
+- App Group: `group.org.izukawa.Tide`（M5 Phase 2〜。定数は `TideAppGroup`）
+- ローカル DB: `~/Library/Group Containers/group.org.izukawa.Tide/Library/Application Support/Tide/db.sqlite`（GRDB.swift / WAL。M5 Phase 2 で App Group コンテナへ移設。旧パスからは `LegacyStateMigrator` が一度きり移行）
+- 設定: group suite の UserDefaults（`TideAppGroup.sharedDefaults()`）。Keychain は `kSecAttrAccessGroup` 明示（`$(AppIdentifierPrefix)org.izukawa.Tide`）
+- 同期フォルダのアクセス権: `ConfigStore.syncRootBookmark`（security-scoped bookmark。セットアップ時発行 → 起動時 `resolveSyncRootAccess` で解決。リネーム/移動は bookmark が追跡し `syncRootPath` を追随更新。欠落時は再許可パネル・設定と**同一実体でない**フォルダは拒否＝判定は `PathValidator.isSameFileSystemObject`）
 - ダウンロード一時ディレクトリ: `~/Library/Caches/Tide/tmp/`（同期ルートと別ボリュームの時のみ `<syncRoot>/.tide/tmp/` にフォールバック）
 - S3 マニフェスト: `.tide/index.json` + `.tide/shards/XX.json`（XX は SHA-1 先頭 1 バイト、256 シャード）
 - ローカル相対パスは常に POSIX、ハッシュは SHA-256 hex 小文字、時刻は ISO8601 UTC
@@ -124,7 +127,7 @@
 - `PutObject` は常に `serverSideEncryption: .aes256` を指定。**マルチパートも `createMultipartUpload` で同様に SSE-S3 を必ず付ける**（漏らすと暗号化なし保存）。
 - Keychain クエリは `kSecUseDataProtectionKeychain=true`, `kSecAttrAccessible=AfterFirstUnlock`, `kSecAttrSynchronizable=false` を必ず含める。
 - **ファイルに書き出す export 系（`DiagnosticsExporter` / `SettingsTransfer`）には AWS 認証情報・`deviceId` を絶対に入れない**。`SettingsTransfer.Payload` は非機密設定のみ（フィールドが無く構造的に漏れない）＝フィールド追加時に機密を足さない。認証情報は Data Protection Keychain のみ。`security/low.md` L13/L14。
-- `factoryReset` は Application Support / Caches / UserDefaults / Keychain を完全に消す（`make reset` と挙動を揃える）。
+- `factoryReset` は**アプリから届く範囲で** `make reset` に揃える: App Group コンテナ（DB）/ コンテナ内 Caches / UserDefaults（group + standard）/ Keychain を消す。sandbox 下では実ホームの旧ロケーション残置分（pre-sandbox の db.sqlite / Caches）に届かない — 完全削除は `make reset`（sandbox 外）のみ。→ `docs/08`
 
 ### SwiftUI 起き上がり
 - **メニューバーポップオーバーから `openWindow(id:)` を呼ぶときは必ず `NSApp.activate(ignoringOtherApps: true)` を前置する**。LSUIElement = YES のアプリだとアプリがフォアグラウンドに来ておらず、ウィンドウが見えないまま開かれる事故が起きる。

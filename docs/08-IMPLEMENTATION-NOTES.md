@@ -40,7 +40,19 @@
 - **Settings UI**: `SettingsWindow` の **「Bandwidth」セクション**に「No upload/download bandwidth limit」トグル＋ MB/s スライダ（1〜100・1 刻み・トグル off で表示）。`ConfigStore.uploadBandwidthBytesPerSec` / `downloadBandwidthBytesPerSec`（bytes/sec、**`<= 0`=無制限・既定 `-1`**）。MB/s は decimal（1 MB/s = 1,000,000 bytes/s）。`@State` + `onAppear`/`onChange` write-through。新規 xcstrings キーは `extractionState:"manual"`。**既定は無制限**（オプトイン）。
 
 ### リセット / クリーンアップ
-- **`AppEnvironment.factoryReset` は `make reset` と同じ振る舞いに揃える**: Application Support / Caches / UserDefaults / Keychain を全部消す。deviceId も含めて消す（`ConfigStore.resetIncludingDeviceId`）。
+- **`AppEnvironment.factoryReset` は「アプリから届く範囲で」`make reset` に揃える**: App Group コンテナ（DB）/ コンテナ内 Caches（tmp・削除一覧キャッシュ）/ UserDefaults（group suite + standard＝コンテナ側 plist）/ Keychain を消す。deviceId も含めて消す（`ConfigStore.resetIncludingDeviceId`）。**sandbox 下では実ホームの旧ロケーション残置分（移行元 `db.sqlite`・旧 Caches）には届かない** — 旧残置分の完全削除は `make reset`（sandbox 外）でのみ可能（PR #49 レビュー #5）。standard defaults も消すのは、OS がサンドボックス初回起動時に旧 preferences plist をコンテナへ自動移行してくるため（残しても設定移行は legacy DB 実在ゲートで発火しないが、判定材料を残さない多層防御）。
+
+### App Group への状態移設（M5 Phase 2）
+- **置き場所**: DB は `TideAppGroup.supportDirectoryURL()`（group container 内 `Library/Application Support/Tide/`）、設定は group suite の UserDefaults（`TideAppGroup.sharedDefaults()`）、Keychain は従来の access group（`$(AppIdentifierPrefix)org.izukawa.Tide`）を `kSecAttrAccessGroup` で明示。将来の `TideFileProvider` 拡張が同じ 3 点を共有する。
+- **一度きり移行 = `LegacyStateMigrator`**: bootstrap 冒頭（`setupCompleted` 判定より前）で冪等に実行。DB は「group 側本体 db.sqlite の有無」、設定は「**legacy DB が実在し group 側に揃っている** ∧ group 側 `setupCompleted` キー無し ∧ 旧側セットアップ完了」で要否判定。DB コピーは WAL/SHM → 本体の順（本体の有無が冪等キーなので途中クラッシュから頭やり直しできる）、失敗時は部分コピーを消し**設定移行ごとスキップ**して次回再試行（設定だけ先に移すと launchEngine が空 DB を生成して冪等キーを汚し、DB 移行リトライが永久に潰れる — PR #49 レビュー #4）。旧ファイル・旧キーは温存（データ損失 < 重複）。
+- **2 段コミット移行戦略**: 移行コードは App Sandbox ON より前のビルドに入れて一度起動する（旧パスが読めるうちに移行）。Sandbox ON 後は旧 DB がコンテナ内に解決されて見えなくなる。**注意: 旧 preferences plist は macOS がサンドボックス初回起動時にコンテナへ自動移行（move）するため「旧設定だけは見える」**（PR #49 レビュー #1・実機検証済み）。設定移行を legacy DB 実在でゲートしているのはこのため — さもないと中間ビルドを飛ばした環境が「設定あり・DB 空」で起動し、全ファイル未追跡の全量再アップロード・競合コピー量産・ローカル削除済みファイルのリモートからの復活を起こす。ゲートにより一足飛び経路は全体として no-op（新規状態＝ウィザード再設定）に落ちる。
+- **同期フォルダのリネーム/移動追跡**: bookmark はファイル ID で追跡するため解決後の URL は新パスを返す。`resolveSyncRootAccess` は解決成功を「同一フォルダ」とみなし `syncRootPath` を新パスへ追随更新する（パス等値で拒否すると Finder のリネームだけで「満たせない再許可パネル」が毎起動出続ける — PR #49 レビュー #2）。再許可パネルの受け入れ判定も文字列等値ではなく `PathValidator.isSameFileSystemObject`（volume + file id）で行う。
+
+### App Sandbox / security-scoped bookmark（M5 Phase 2・security L1）
+- **entitlements**: `com.apple.security.app-sandbox` + `files.user-selected.read-write`（powerbox パネル）+ `network.client`（aws-sdk-swift）。File Provider 拡張（Phase 3〜）はサンドボックス必須なので app 側で先に整えた。
+- **同期フォルダのアクセス権 = `ConfigStore.syncRootBookmark`**（security-scoped bookmark）。発行はセットアップ確定時（`AppEnvironment.completeSetup`。**setupCompleted を立てる前に**発行し、手入力パス等で権限が無ければ確定前に失敗させる）。解決は `resolveSyncRootAccess`（launchEngine の入口。存在チェックより前＝アクセス確立後でないと fileExists 自体が成立しない）。stale なら再発行。アクセスはメニューバー常駐の生存中ずっと保持（stopAccessing はフォルダ変更時のみ）。
+- **bookmark 欠落/失効時の再許可**: 起動時に `requestSyncRootAccessViaPanel` が NSOpenPanel（現行フォルダを初期位置・説明メッセージ付き）を一度だけ出す。キャンセルは bootstrapFailure（ポップオーバー再表示で bootstrap 経由の再試行）。**設定済みパスと不一致のフォルダ選択は拒否**する — 別フォルダを黙って受けると既存 DB との突き合わせで大量の「ローカル削除」誤検出（＝リモート削除の伝播）を起こしうるため。
+- **Caches の移設は暗黙**: `TideTmpDirectory` / `DeletedFilesCache` は `.cachesDirectory` 相対のままサンドボックスのコンテナ内へ自然に移る（中断転送の `.part` は失われるが Range 再開が頭からやり直すだけ・削除一覧キャッシュは再列挙で再生成）。
 
 ### ダウンロード一時ディレクトリ
 - **`TideTmpDirectory.resolve(for:)` で同一ボリュームの tmp を返す**。第一選択は `~/Library/Caches/Tide/tmp/`。同期ルートと別ボリュームになる時のみ `<syncRoot>/.tide/tmp/` にフォールバック。`moveItem` の atomic 性を保つため。

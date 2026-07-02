@@ -2128,6 +2128,28 @@
           }
         }
       }
+    },
+    "Tide needs access to the sync folder again. Select the folder shown to continue syncing." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tide が同期フォルダへ再度アクセスできるよう、表示されているフォルダをそのまま選択してください。"
+          }
+        }
+      }
+    },
+    "Grant Access" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "アクセスを許可"
+          }
+        }
+      }
     }
   },
   "version" : "1.1"

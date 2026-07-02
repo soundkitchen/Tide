@@ -101,24 +101,9 @@ final class SettingsTransferTests: XCTestCase {
         XCTAssertFalse(p.notificationsEnabled)
     }
 
-    @MainActor
-    func testApplySetsAllFieldsAndKeepsDeviceId() {
-        let config = makeStore()
-        let originalDeviceId = config.deviceId  // 生成 & 固定
-        SettingsTransfer.apply(samplePayload(), to: config)
-
-        XCTAssertEqual(config.bucketName, "my-bucket")
-        XCTAssertEqual(config.region, "ap-northeast-1")
-        XCTAssertEqual(config.syncRootPath, "/Users/test/Sync")
-        XCTAssertEqual(config.pollingIntervalSeconds, 300)
-        XCTAssertEqual(config.uploadSizeLimitBytes, 50 * 1024 * 1024 * 1024)
-        XCTAssertEqual(config.uploadBandwidthBytesPerSec, 10_000_000)
-        XCTAssertEqual(config.downloadBandwidthBytesPerSec, -1)
-        XCTAssertFalse(config.notificationsEnabled)
-        // deviceId / setupCompleted は import 対象外
-        XCTAssertEqual(config.deviceId, originalDeviceId)
-        XCTAssertFalse(config.setupCompleted)
-    }
+    // NOTE: 接続設定込みの apply() は削除済み（PR #49 再レビュー #2 — syncRootPath は
+    // syncRootBookmark と対更新の不変条件があり、bookmark 無しで書く API はフットガン）。
+    // 接続設定の確定経路は completeSetup のみで、インポートはウィザード事前充填 + applyTunables。
 
     @MainActor
     func testApplyTunablesLeavesConnectionUntouched() {

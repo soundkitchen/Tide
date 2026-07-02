@@ -9,6 +9,11 @@ PROJECT    := $(APP_NAME).xcodeproj
 APP_PATH   := build/Build/Products/Debug/$(APP_NAME).app
 SUPPORT    := $(HOME)/Library/Application Support/$(APP_NAME)
 CACHES     := $(HOME)/Library/Caches/$(APP_NAME)
+# App Group コンテナ（M5 Phase 2 以降の DB / 設定の正位置）
+GROUP_ID        := group.org.izukawa.Tide
+GROUP_CONTAINER := $(HOME)/Library/Group Containers/$(GROUP_ID)
+# App Sandbox コンテナ（M5 Phase 2 以降、Caches / 標準 UserDefaults はここに解決される）
+APP_CONTAINER   := $(HOME)/Library/Containers/$(BUNDLE_ID)
 
 XCODEBUILD := xcodebuild \
 	-project $(PROJECT) \
@@ -34,15 +39,22 @@ help: ## 利用可能なターゲット一覧
 # Reset (ローカル状態のクリア)
 
 .PHONY: reset
-reset: stop ## ローカル設定をリセット（Application Support + UserDefaults + Keychain + Caches）
+reset: stop ## ローカル設定をリセット（App Group + Sandbox コンテナ + Application Support + UserDefaults + Keychain + Caches）
+	rm -rf "$(GROUP_CONTAINER)"
+	rm -rf "$(APP_CONTAINER)"
 	rm -rf "$(SUPPORT)"
 	rm -rf "$(CACHES)"
 	-defaults delete $(BUNDLE_ID) 2>/dev/null
+	@# group suite の plist は group container ごと消したが、cfprefsd のキャッシュに残った値が
+	@# 次回起動で読めてしまうことがあるので明示的に落とす（自動で再起動される）。
+	-killall cfprefsd 2>/dev/null
 	@# `-s` で 1 件ずつ削除しかできないので、無くなるまで繰り返す
 	@while security delete-generic-password -s $(BUNDLE_ID) >/dev/null 2>&1; do :; done
+	@echo "✓ Cleared: $(GROUP_CONTAINER)"
+	@echo "✓ Cleared: $(APP_CONTAINER)"
 	@echo "✓ Cleared: $(SUPPORT)"
 	@echo "✓ Cleared: $(CACHES)"
-	@echo "✓ Cleared: UserDefaults($(BUNDLE_ID))"
+	@echo "✓ Cleared: UserDefaults($(BUNDLE_ID) / $(GROUP_ID))"
 	@echo "✓ Cleared: Keychain entries (service=$(BUNDLE_ID))"
 
 .PHONY: stop

@@ -4,10 +4,13 @@
 
 ローカル状態管理に SQLite を使用。GRDB.swift をラッパとして採用。
 
-データベースファイルの場所:
+データベースファイルの場所（M5 Phase 2 で App Group コンテナへ移設。app と File Provider 拡張が共有）:
 ```
-~/Library/Application Support/Tide/db.sqlite
+~/Library/Group Containers/group.org.izukawa.Tide/Library/Application Support/Tide/db.sqlite
 ```
+
+旧ロケーション `~/Library/Application Support/Tide/db.sqlite` からは、初回 bootstrap 時に
+`LegacyStateMigrator` が一度きりコピー移行する（冪等・旧ファイルは温存）。
 
 WAL モードで運用。
 
