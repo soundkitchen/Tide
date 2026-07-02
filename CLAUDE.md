@@ -127,7 +127,7 @@
 - `PutObject` は常に `serverSideEncryption: .aes256` を指定。**マルチパートも `createMultipartUpload` で同様に SSE-S3 を必ず付ける**（漏らすと暗号化なし保存）。
 - Keychain クエリは `kSecUseDataProtectionKeychain=true`, `kSecAttrAccessible=AfterFirstUnlock`, `kSecAttrSynchronizable=false` を必ず含める。
 - **ファイルに書き出す export 系（`DiagnosticsExporter` / `SettingsTransfer`）には AWS 認証情報・`deviceId` を絶対に入れない**。`SettingsTransfer.Payload` は非機密設定のみ（フィールドが無く構造的に漏れない）＝フィールド追加時に機密を足さない。認証情報は Data Protection Keychain のみ。`security/low.md` L13/L14。
-- `factoryReset` は Application Support / Caches / UserDefaults / Keychain を完全に消す（`make reset` と挙動を揃える）。
+- `factoryReset` は**アプリから届く範囲で** `make reset` に揃える: App Group コンテナ（DB）/ コンテナ内 Caches / UserDefaults（group + standard）/ Keychain を消す。sandbox 下では実ホームの旧ロケーション残置分（pre-sandbox の db.sqlite / Caches）に届かない — 完全削除は `make reset`（sandbox 外）のみ。→ `docs/08`
 
 ### SwiftUI 起き上がり
 - **メニューバーポップオーバーから `openWindow(id:)` を呼ぶときは必ず `NSApp.activate(ignoringOtherApps: true)` を前置する**。LSUIElement = YES のアプリだとアプリがフォアグラウンドに来ておらず、ウィンドウが見えないまま開かれる事故が起きる。

@@ -50,6 +50,11 @@ public final class ConfigStore: @unchecked Sendable {
         set { defaults.set(newValue, forKey: Key.region) }
     }
 
+    /// 同期フォルダのパス。**書くときは `syncRootBookmark` と対で更新すること**
+    /// （不変条件・PR #49 再レビュー #2）: `resolveSyncRootAccess` は「両者の乖離＝外部リネーム由来」
+    /// を前提に bookmark が指す実体へパスを追随させるため、bookmark を伴わずここだけ書き換えると
+    /// 次回起動で旧フォルダのパスへ黙って巻き戻される。正規の書き手はセットアップ確定
+    /// （`AppEnvironment.completeSetup`）と `resolveSyncRootAccess` 自身のみ。
     public var syncRootPath: String? {
         get { defaults.string(forKey: Key.syncRootPath) }
         set { defaults.set(newValue, forKey: Key.syncRootPath) }
