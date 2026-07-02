@@ -1,4 +1,5 @@
 import TideCore
+import AppKit
 import Foundation
 import Observation
 
@@ -31,6 +32,11 @@ final class AppEnvironment {
     /// 並行して呼ばれ得るため、`engine` がまだ nil の `await launchEngineFromCurrentConfig()` 実行中に
     /// もう一方が guard を抜けて二重に SyncEngine を起動するのを防ぐ。
     @ObservationIgnored private var isBootstrapping = false
+
+    /// 現在 security-scoped アクセスを保持している同期フォルダ（App Sandbox・M5 Phase 2）。
+    /// メニューバー常駐でアプリ生存中はアクセスを保持し続けるので stopAccessing は基本呼ばない。
+    /// ウィザード再設定でフォルダが変わった時だけ古い方を明示的に手放す。
+    @ObservationIgnored private var accessedSyncRootURL: URL?
 
     init() {
         let config = ConfigStore()
@@ -120,8 +126,10 @@ final class AppEnvironment {
             deviceId: config.deviceId
         )
 
-        // syncRoot バリデーション
-        let url = URL(fileURLWithPath: rootPath, isDirectory: true)
+        // syncRoot アクセス解決（App Sandbox・M5 Phase 2）: security-scoped bookmark を解決して
+        // アクセスを開始する。bookmark 欠落/失効（サンドボックス化前の版からのアップグレード等）は
+        // 起動時の再許可パネルで一度だけ取り直す。存在チェックはアクセス確立後でないと成立しない。
+        let url = try await resolveSyncRootAccess(rootPath: rootPath)
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else {
             throw SyncError.invalidSyncRoot("does not exist or is not a directory: \(rootPath)")
@@ -155,6 +163,79 @@ final class AppEnvironment {
         }
     }
 
+    /// 同期フォルダへの security-scoped アクセスを確立して実 URL を返す（App Sandbox・M5 Phase 2）。
+    /// 1) 保存済み bookmark を解決（stale なら再発行）→ 2) 欠落/失効/パス不一致なら再許可パネル。
+    private func resolveSyncRootAccess(rootPath: String) async throws -> URL {
+        let expected = URL(fileURLWithPath: rootPath, isDirectory: true).standardizedFileURL
+
+        // 再入（bootstrap リトライ / ウィザード再設定）: 同じフォルダなら確立済みアクセスを使い回す。
+        // フォルダが変わっていたら古いアクセスを手放してから取り直す。
+        if let current = accessedSyncRootURL {
+            if current.standardizedFileURL.path == expected.path { return current }
+            current.stopAccessingSecurityScopedResource()
+            accessedSyncRootURL = nil
+        }
+
+        if let data = config.syncRootBookmark {
+            var stale = false
+            if let url = try? URL(
+                resolvingBookmarkData: data, options: [.withSecurityScope],
+                relativeTo: nil, bookmarkDataIsStale: &stale
+            ), url.standardizedFileURL.path == expected.path,
+               url.startAccessingSecurityScopedResource() {
+                if stale, let fresh = try? url.bookmarkData(options: [.withSecurityScope]) {
+                    config.syncRootBookmark = fresh
+                }
+                accessedSyncRootURL = url
+                return url
+            }
+        }
+
+        let url = try await requestSyncRootAccessViaPanel(expected: expected)
+        accessedSyncRootURL = url
+        return url
+    }
+
+    /// bookmark 欠落/失効時の一度きり再許可導線: 現行フォルダを初期位置にした NSOpenPanel を出し、
+    /// 同じフォルダの選択で bookmark を再発行する。キャンセル/別フォルダ選択は throw して
+    /// bootstrapFailure に載せる（ポップオーバーを開き直せば bootstrap 経由で再試行できる）。
+    private func requestSyncRootAccessViaPanel(expected: URL) async throws -> URL {
+        // LSUIElement アプリはフォアグラウンドに居ないとパネルが見えないまま開く（CLAUDE.md §3 の作法）
+        NSApp.activate(ignoringOtherApps: true)
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = expected
+        panel.message = String(localized: "Tide needs access to the sync folder again. Select the folder shown to continue syncing.")
+        panel.prompt = String(localized: "Grant Access")
+        let response = await withCheckedContinuation { continuation in
+            panel.begin { continuation.resume(returning: $0) }
+        }
+        guard response == .OK, let chosen = panel.url else {
+            throw SyncError.notConfigured(reason: "Sync folder access was not granted: \(expected.path)")
+        }
+        guard chosen.standardizedFileURL.path == expected.path else {
+            // 別フォルダへの付け替えを黙って受けると、既存 DB との突き合わせで
+            // 大量の「ローカル削除」誤検出（＝リモート削除の伝播）を起こしうるので拒否する。
+            throw SyncError.notConfigured(
+                reason: "Selected folder does not match the configured sync folder: \(chosen.path)")
+        }
+        // パネル選択でこのセッションのアクセスは既に得ているが、以後の起動のために bookmark を
+        // 発行し、それを解決した URL で scoped アクセスを開始する（保存済み bookmark 経路と同じ形に揃える）。
+        let bookmark = try chosen.bookmarkData(options: [.withSecurityScope])
+        config.syncRootBookmark = bookmark
+        var stale = false
+        let resolved = try URL(
+            resolvingBookmarkData: bookmark, options: [.withSecurityScope],
+            relativeTo: nil, bookmarkDataIsStale: &stale
+        )
+        guard resolved.startAccessingSecurityScopedResource() else {
+            throw SyncError.notConfigured(reason: "Could not start scoped access to: \(resolved.path)")
+        }
+        return resolved
+    }
+
     /// セットアップウィザード完了時に呼ぶ。
     func completeSetup(
         credentials: AWSCredentials,
@@ -162,10 +243,23 @@ final class AppEnvironment {
         region: String,
         syncRootPath: String
     ) async throws {
+        // App Sandbox 下で以後の起動でも同期フォルダへアクセスできるよう、確定前に
+        // security-scoped bookmark を発行する（ウィザードの Choose… パネルで選択済みなら成立）。
+        // 手入力パス等でアクセス権が無ければここで失敗し、setupCompleted を立てる前に中断する。
+        let syncRootURL = URL(fileURLWithPath: syncRootPath, isDirectory: true)
+        let bookmark: Data
+        do {
+            bookmark = try syncRootURL.bookmarkData(options: [.withSecurityScope])
+        } catch {
+            throw SyncError.invalidSyncRoot(
+                "cannot access the folder (select it with the Choose… button): \(error)")
+        }
+
         try keychain.save(credentials)
         config.bucketName = bucket
         config.region = region
         config.syncRootPath = syncRootPath
+        config.syncRootBookmark = bookmark
         config.setupCompleted = true
 
         // 二重起動防止（PR #7 レビュー Low）: setupCompleted を立てた後の seed/launch の await 中に、

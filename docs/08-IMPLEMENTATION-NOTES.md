@@ -47,6 +47,12 @@
 - **一度きり移行 = `LegacyStateMigrator`**: bootstrap 冒頭（`setupCompleted` 判定より前）で冪等に実行。DB は「group 側本体 db.sqlite の有無」、設定は「group 側 `setupCompleted` キーの有無 ∧ 旧側セットアップ完了」で要否判定。DB コピーは WAL/SHM → 本体の順（本体の有無が冪等キーなので途中クラッシュから頭やり直しできる）、失敗時は部分コピーを消して次回再試行。旧ファイル・旧キーは温存（データ損失 < 重複）。
 - **2 段コミット移行戦略**: 移行コードは App Sandbox ON より前のビルドに入れて一度起動する（旧パスが読めるうちに移行）。Sandbox ON 後は旧パスがコンテナ内に解決されて見えなくなるため、未移行のまま Sandbox 版へ飛んだ環境では自然に no-op（新規状態＝ウィザード再設定）。
 
+### App Sandbox / security-scoped bookmark（M5 Phase 2・security L1）
+- **entitlements**: `com.apple.security.app-sandbox` + `files.user-selected.read-write`（powerbox パネル）+ `network.client`（aws-sdk-swift）。File Provider 拡張（Phase 3〜）はサンドボックス必須なので app 側で先に整えた。
+- **同期フォルダのアクセス権 = `ConfigStore.syncRootBookmark`**（security-scoped bookmark）。発行はセットアップ確定時（`AppEnvironment.completeSetup`。**setupCompleted を立てる前に**発行し、手入力パス等で権限が無ければ確定前に失敗させる）。解決は `resolveSyncRootAccess`（launchEngine の入口。存在チェックより前＝アクセス確立後でないと fileExists 自体が成立しない）。stale なら再発行。アクセスはメニューバー常駐の生存中ずっと保持（stopAccessing はフォルダ変更時のみ）。
+- **bookmark 欠落/失効時の再許可**: 起動時に `requestSyncRootAccessViaPanel` が NSOpenPanel（現行フォルダを初期位置・説明メッセージ付き）を一度だけ出す。キャンセルは bootstrapFailure（ポップオーバー再表示で bootstrap 経由の再試行）。**設定済みパスと不一致のフォルダ選択は拒否**する — 別フォルダを黙って受けると既存 DB との突き合わせで大量の「ローカル削除」誤検出（＝リモート削除の伝播）を起こしうるため。
+- **Caches の移設は暗黙**: `TideTmpDirectory` / `DeletedFilesCache` は `.cachesDirectory` 相対のままサンドボックスのコンテナ内へ自然に移る（中断転送の `.part` は失われるが Range 再開が頭からやり直すだけ・削除一覧キャッシュは再列挙で再生成）。
+
 ### ダウンロード一時ディレクトリ
 - **`TideTmpDirectory.resolve(for:)` で同一ボリュームの tmp を返す**。第一選択は `~/Library/Caches/Tide/tmp/`。同期ルートと別ボリュームになる時のみ `<syncRoot>/.tide/tmp/` にフォールバック。`moveItem` の atomic 性を保つため。
 

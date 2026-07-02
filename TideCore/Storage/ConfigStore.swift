@@ -15,6 +15,7 @@ public final class ConfigStore: @unchecked Sendable {
         static let uploadBandwidthBytesPerSec = "tide.uploadBandwidthBytesPerSec"
         static let downloadBandwidthBytesPerSec = "tide.downloadBandwidthBytesPerSec"
         static let notificationsEnabled = "tide.notificationsEnabled"
+        static let syncRootBookmark = "tide.syncRootBookmark"
     }
 
     /// 1 ファイルあたりのアップロードサイズ上限の既定値（1 GiB）。
@@ -112,6 +113,14 @@ public final class ConfigStore: @unchecked Sendable {
         set { defaults.set(newValue, forKey: Key.notificationsEnabled) }
     }
 
+    /// 同期フォルダの security-scoped bookmark（App Sandbox 下での再アクセス手段・M5 Phase 2）。
+    /// セットアップ時（パネル選択）に発行し、bootstrap が解決して scoped アクセスを開始する。
+    /// デバイス固有バイナリなので `migratableKeys` / `SettingsTransfer` には含めない。
+    public var syncRootBookmark: Data? {
+        get { defaults.data(forKey: Key.syncRootBookmark) }
+        set { defaults.set(newValue, forKey: Key.syncRootBookmark) }
+    }
+
     /// 初回アクセス時に UUID を自動生成して保存する。以降不変。
     public var deviceId: String {
         if let existing = defaults.string(forKey: Key.deviceId), !existing.isEmpty {
@@ -131,7 +140,7 @@ public final class ConfigStore: @unchecked Sendable {
                     Key.pollingIntervalSeconds, Key.setupCompleted,
                     Key.uploadSizeLimitBytes,
                     Key.uploadBandwidthBytesPerSec, Key.downloadBandwidthBytesPerSec,
-                    Key.notificationsEnabled] {
+                    Key.notificationsEnabled, Key.syncRootBookmark] {
             defaults.removeObject(forKey: key)
         }
     }
