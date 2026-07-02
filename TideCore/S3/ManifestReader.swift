@@ -60,13 +60,21 @@ public struct ManifestReader {
         }
         let removed = Set(cached.keys).subtracting(remoteShardEtags.keys)
 
-        // 並列でシャードを取得（最大 8 並列）
+        // 並列でシャードを取得（最大 8 並列）。
+        // 上限到達時に消費する `group.next()` の結果も**必ず回収する**こと — `_ =` で捨てると
+        // 変更シャード数 > 並列上限のとき完了分が失われる。ここでは「未変更シャードは DB から補完」の
+        // フォールバックが欠落を偶然マスクするが、捨てられたシャードの shard_state が更新されず
+        // 毎周回再取得になる（ManifestSnapshotLoader では実ファイル欠落として顕在化した同型バグ。
+        // Phase 3 で両方修正）。
         let fetched = try await withThrowingTaskGroup(of: (String, ManifestShard, String)?.self) { group in
+            var acc: [(String, ManifestShard, String)] = []
             var inflight = 0
             let limit = 8
             for shardId in toFetch {
                 if inflight >= limit {
-                    _ = try await group.next()
+                    if let finished = try await group.next(), let item = finished {
+                        acc.append(item)
+                    }
                     inflight -= 1
                 }
                 let s3 = self.s3
@@ -76,7 +84,6 @@ public struct ManifestReader {
                 }
                 inflight += 1
             }
-            var acc: [(String, ManifestShard, String)] = []
             for try await item in group {
                 if let item { acc.append(item) }
             }
