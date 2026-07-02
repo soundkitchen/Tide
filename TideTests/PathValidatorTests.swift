@@ -139,4 +139,50 @@ final class PathValidatorTests: XCTestCase {
         XCTAssertThrowsError(try PathValidator.validateShardId("g0"))     // 範囲外
         XCTAssertThrowsError(try PathValidator.validateShardId("0z"))
     }
+
+    // MARK: - isSameFileSystemObject（同期フォルダの同一性判定・PR #49 レビュー #2）
+
+    func testSameFileSystemObjectForSameDirectory() throws {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("identity-\(UUID().uuidString)")
+        let dir = base.appendingPathComponent("real", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: base) }
+
+        // 同一パス表記
+        XCTAssertTrue(PathValidator.isSameFileSystemObject(dir, dir))
+        // symlink 経由の別表記（保存パスに symlink を含むケース）
+        let link = base.appendingPathComponent("link")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: dir)
+        XCTAssertTrue(PathValidator.isSameFileSystemObject(link, dir))
+        // リネーム後の新パス（bookmark が追跡した想定）と、リネーム前実体は同一
+        let renamed = base.appendingPathComponent("renamed", isDirectory: true)
+        try FileManager.default.moveItem(at: dir, to: renamed)
+        XCTAssertTrue(PathValidator.isSameFileSystemObject(renamed, renamed))
+    }
+
+    func testDifferentDirectoriesAreNotSame() throws {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("identity-\(UUID().uuidString)")
+        let a = base.appendingPathComponent("a", isDirectory: true)
+        let b = base.appendingPathComponent("b", isDirectory: true)
+        try FileManager.default.createDirectory(at: a, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: b, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: base) }
+
+        XCTAssertFalse(PathValidator.isSameFileSystemObject(a, b))
+    }
+
+    func testMissingPathIsNeverSame() throws {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("identity-\(UUID().uuidString)")
+        let a = base.appendingPathComponent("a", isDirectory: true)
+        try FileManager.default.createDirectory(at: a, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: base) }
+        let missing = base.appendingPathComponent("missing", isDirectory: true)
+
+        // 「同一と確認できない」は安全側（false）に倒す
+        XCTAssertFalse(PathValidator.isSameFileSystemObject(a, missing))
+        XCTAssertFalse(PathValidator.isSameFileSystemObject(missing, missing))
+    }
 }

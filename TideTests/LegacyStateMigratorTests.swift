@@ -121,7 +121,8 @@ final class LegacyStateMigratorTests: XCTestCase {
 
     // MARK: - Config
 
-    func testMigratesConfigWhenLegacySetupCompleted() {
+    func testMigratesConfigWhenLegacySetupCompleted() throws {
+        try writeLegacyDB()
         let legacy = ConfigStore(defaults: legacyDefaults)
         legacy.bucketName = "legacy-bucket"
         legacy.region = "ap-northeast-1"
@@ -141,7 +142,8 @@ final class LegacyStateMigratorTests: XCTestCase {
         XCTAssertEqual(group.deviceId, legacyDeviceId)
     }
 
-    func testDoesNotMigrateConfigWhenGroupAlreadySetUp() {
+    func testDoesNotMigrateConfigWhenGroupAlreadySetUp() throws {
+        try writeLegacyDB()
         let legacy = ConfigStore(defaults: legacyDefaults)
         legacy.bucketName = "legacy-bucket"
         legacy.setupCompleted = true
@@ -155,8 +157,9 @@ final class LegacyStateMigratorTests: XCTestCase {
         XCTAssertEqual(group.bucketName, "group-bucket")
     }
 
-    func testDoesNotMigrateConfigWhenLegacySetupIncomplete() {
+    func testDoesNotMigrateConfigWhenLegacySetupIncomplete() throws {
         // 旧側にキーはあるがセットアップ未完了 → 移すべき確定状態が無いので no-op
+        try writeLegacyDB()
         let legacy = ConfigStore(defaults: legacyDefaults)
         legacy.bucketName = "half-configured"
 
@@ -164,5 +167,69 @@ final class LegacyStateMigratorTests: XCTestCase {
 
         XCTAssertFalse(outcome.configMigrated)
         XCTAssertNil(ConfigStore(defaults: groupDefaults).bucketName)
+    }
+
+    // MARK: - Config は legacy DB の実在でゲート（PR #49 レビュー #1/#4）
+
+    func testDoesNotMigrateConfigWithoutLegacyDatabase() {
+        // 一足飛びアップグレード相当: macOS が旧 preferences plist をコンテナへ自動移行するため
+        // 「旧設定だけが見える」が、legacy DB は sandbox で見えない。config-only 移行を許すと
+        // 「設定あり・DB 空」で起動して全量再アップロードに至るので、移行しないこと。
+        let legacy = ConfigStore(defaults: legacyDefaults)
+        legacy.bucketName = "legacy-bucket"
+        legacy.setupCompleted = true
+
+        let outcome = runMigration()
+
+        XCTAssertFalse(outcome.databaseMigrated)
+        XCTAssertFalse(outcome.configMigrated)
+        let group = ConfigStore(defaults: groupDefaults)
+        XCTAssertNil(group.bucketName)
+        XCTAssertFalse(group.setupCompleted)
+    }
+
+    func testSkipsConfigMigrationWhenDatabaseCopyFailsAndRetriesNextRun() throws {
+        // DB コピー失敗の回に設定だけ移行すると、bootstrap がそのまま launchEngine へ進んで
+        // group パスに空 DB を生成し冪等キーを汚す（DB 移行リトライが永久に潰れる）。
+        // 設定移行ごとスキップし、次回起動で両方とも頭からやり直せること。
+        try writeLegacyDB(main: "main")
+        let legacyDBURL = legacyDir.appendingPathComponent("db.sqlite")
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o000], ofItemAtPath: legacyDBURL.path)
+        let legacy = ConfigStore(defaults: legacyDefaults)
+        legacy.bucketName = "legacy-bucket"
+        legacy.setupCompleted = true
+
+        let failed = runMigration()
+
+        XCTAssertFalse(failed.databaseMigrated)
+        XCTAssertFalse(failed.configMigrated)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: groupDir.appendingPathComponent("db.sqlite").path))
+        XCTAssertFalse(ConfigStore(defaults: groupDefaults).setupCompleted)
+
+        // 原因解消後の次回起動 → 両方とも移行される
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o644], ofItemAtPath: legacyDBURL.path)
+        let retried = runMigration()
+
+        XCTAssertTrue(retried.databaseMigrated)
+        XCTAssertTrue(retried.configMigrated)
+        XCTAssertEqual(ConfigStore(defaults: groupDefaults).bucketName, "legacy-bucket")
+    }
+
+    func testMigratesConfigWhenGroupDatabaseAlreadyMigrated() throws {
+        // 前回起動で DB だけ移行済み（config 移行前にクラッシュ等）→ 今回は config だけ移行される
+        try writeLegacyDB(main: "legacy")
+        try FileManager.default.createDirectory(at: groupDir, withIntermediateDirectories: true)
+        try Data("already-migrated".utf8).write(to: groupDir.appendingPathComponent("db.sqlite"))
+        let legacy = ConfigStore(defaults: legacyDefaults)
+        legacy.bucketName = "legacy-bucket"
+        legacy.setupCompleted = true
+
+        let outcome = runMigration()
+
+        XCTAssertFalse(outcome.databaseMigrated)
+        XCTAssertTrue(outcome.configMigrated)
+        XCTAssertEqual(ConfigStore(defaults: groupDefaults).bucketName, "legacy-bucket")
     }
 }

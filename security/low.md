@@ -2,7 +2,7 @@
 
 ## L1. App Sandbox 無効
 
-**Status:** ✅ Fixed (2026-07-02・M5 Phase 2) — App Sandbox を有効化（`project.yml` entitlements: `com.apple.security.app-sandbox` + `files.user-selected.read-write` + `network.client`）。同期フォルダへのアクセスは security-scoped bookmark で永続化: セットアップ時（`AppEnvironment.completeSetup`）に発行して `ConfigStore.syncRootBookmark` へ保存（2026-05-24 に死蔵キーとして削除した同名キーの本実装）、起動時（`resolveSyncRootAccess`）に解決して scoped アクセスを開始・stale なら再発行。bookmark 欠落/失効（サンドボックス化前からのアップグレード）は起動時に NSOpenPanel で一度だけ再許可を取り、**設定済みパスと不一致のフォルダ選択は拒否**する（別フォルダを黙って受けると既存 DB との突き合わせで大量の削除誤検出→リモート削除伝播を起こしうるため）。File Provider 拡張（M5 Phase 3〜）はサンドボックス必須のため、その前提を app 側で先に整えた。
+**Status:** ✅ Fixed (2026-07-02・M5 Phase 2) — App Sandbox を有効化（`project.yml` entitlements: `com.apple.security.app-sandbox` + `files.user-selected.read-write` + `network.client`）。同期フォルダへのアクセスは security-scoped bookmark で永続化: セットアップ時（`AppEnvironment.completeSetup`）に発行して `ConfigStore.syncRootBookmark` へ保存（2026-05-24 に死蔵キーとして削除した同名キーの本実装）、起動時（`resolveSyncRootAccess`）に解決して scoped アクセスを開始・stale なら再発行。bookmark 欠落/失効（サンドボックス化前からのアップグレード）は起動時に NSOpenPanel で一度だけ再許可を取り、**設定済みフォルダと同一実体（`PathValidator.isSameFileSystemObject` = volume + file id）でない選択は拒否**する（別フォルダを黙って受けると既存 DB との突き合わせで大量の削除誤検出→リモート削除伝播を起こしうるため。パス文字列等値でなく同一性判定なのは、bookmark がリネーム/移動をファイル ID で追跡するため — リネーム時は `syncRootPath` を追随更新し、パネルは出さない。PR #49 レビュー #2）。File Provider 拡張（M5 Phase 3〜）はサンドボックス必須のため、その前提を app 側で先に整えた。
 
 **該当箇所:** `project.yml` entitlements / `Tide/App/AppEnvironment.swift` `resolveSyncRootAccess` `requestSyncRootAccessViaPanel` `completeSetup` / `TideCore/Storage/ConfigStore.swift` `syncRootBookmark`
 

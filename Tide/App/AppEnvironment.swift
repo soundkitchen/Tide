@@ -164,14 +164,20 @@ final class AppEnvironment {
     }
 
     /// 同期フォルダへの security-scoped アクセスを確立して実 URL を返す（App Sandbox・M5 Phase 2）。
-    /// 1) 保存済み bookmark を解決（stale なら再発行）→ 2) 欠落/失効/パス不一致なら再許可パネル。
+    /// 1) 保存済み bookmark を解決（stale なら再発行）→ 2) 欠落/失効なら再許可パネル。
+    /// 受け入れ判定はパス文字列の等値ではなく**ファイル同一性**で行う（PR #49 レビュー #2）:
+    /// bookmark はファイル ID でフォルダを追跡するため、Finder でのリネーム/移動後も解決できる。
+    /// これをパス不一致として捨てると「満たせない再許可パネル」が毎起動出続け、同期が永久に止まる。
     private func resolveSyncRootAccess(rootPath: String) async throws -> URL {
         let expected = URL(fileURLWithPath: rootPath, isDirectory: true).standardizedFileURL
 
         // 再入（bootstrap リトライ / ウィザード再設定）: 同じフォルダなら確立済みアクセスを使い回す。
         // フォルダが変わっていたら古いアクセスを手放してから取り直す。
         if let current = accessedSyncRootURL {
-            if current.standardizedFileURL.path == expected.path { return current }
+            if current.standardizedFileURL.path == expected.path
+                || PathValidator.isSameFileSystemObject(current, expected) {
+                return current
+            }
             current.stopAccessingSecurityScopedResource()
             accessedSyncRootURL = nil
         }
@@ -181,8 +187,14 @@ final class AppEnvironment {
             if let url = try? URL(
                 resolvingBookmarkData: data, options: [.withSecurityScope],
                 relativeTo: nil, bookmarkDataIsStale: &stale
-            ), url.standardizedFileURL.path == expected.path,
-               url.startAccessingSecurityScopedResource() {
+            ), url.startAccessingSecurityScopedResource() {
+                // 解決できた＝セットアップ時に許可したのと同一実体のフォルダ（bookmark と
+                // syncRootPath は completeSetup が常に対で更新するため、乖離は外部リネーム由来）。
+                // パスが変わっていたら設定を新パスへ追随させる。
+                if url.standardizedFileURL.path != expected.path {
+                    AppLogger.ui.info("Sync root was renamed/moved; following it via bookmark and updating the configured path")
+                    config.syncRootPath = url.path
+                }
                 if stale, let fresh = try? url.bookmarkData(options: [.withSecurityScope]) {
                     config.syncRootBookmark = fresh
                 }
@@ -215,11 +227,21 @@ final class AppEnvironment {
         guard response == .OK, let chosen = panel.url else {
             throw SyncError.notConfigured(reason: "Sync folder access was not granted: \(expected.path)")
         }
-        guard chosen.standardizedFileURL.path == expected.path else {
-            // 別フォルダへの付け替えを黙って受けると、既存 DB との突き合わせで
-            // 大量の「ローカル削除」誤検出（＝リモート削除の伝播）を起こしうるので拒否する。
+        // 設定済みフォルダと「同一実体」かで受け入れ判定する（PR #49 レビュー #2）。
+        // パス文字列の等値だと、symlink を含む保存パス等で正しいフォルダの選択まで拒否してしまう。
+        // 逆に同一性を確認できない別フォルダを黙って受けると、既存 DB との突き合わせで
+        // 大量の「ローカル削除」誤検出（＝リモート削除の伝播）を起こしうるので拒否する。
+        // 設定パスが既に存在しない（リネーム済みかつ bookmark も失効の二重障害）場合も
+        // 同一性を確認できないのでここに落ちる — フォルダ名を戻すかウィザード再設定で復旧。
+        guard PathValidator.isSameFileSystemObject(chosen, expected) else {
             throw SyncError.notConfigured(
-                reason: "Selected folder does not match the configured sync folder: \(chosen.path)")
+                reason: "Selected folder is not the configured sync folder (\(expected.path)). "
+                    + "If the folder was renamed or moved, rename it back or run setup again.")
+        }
+        // 同一実体でも表記が違うことはある（symlink 経由の旧保存パス等）— 以後の突き合わせが
+        // ブレないよう、実際に許可された表記へ設定を揃える。
+        if chosen.standardizedFileURL.path != expected.path {
+            config.syncRootPath = chosen.path
         }
         // パネル選択でこのセッションのアクセスは既に得ているが、以後の起動のために bookmark を
         // 発行し、それを解決した URL で scoped アクセスを開始する（保存済み bookmark 経路と同じ形に揃える）。
@@ -316,14 +338,16 @@ final class AppEnvironment {
         if let groupSupport = try? TideAppGroup.supportDirectoryURL() {
             try? FileManager.default.removeItem(at: groupSupport)
         }
-        // 旧ロケーションの Application Support 配下（移行前の残置分も一緒に消す）
+        // Application Support / Caches。sandbox 下ではどちらも**コンテナ内**に解決されるため、
+        // Caches（tmp / 削除一覧キャッシュ）は実際に消えるが、実ホームの旧ロケーション残置分
+        // （移行元 db.sqlite・旧 Caches）には届かない（sandbox が実パスへのアクセスを拒否する）。
+        // 旧残置分の完全削除は `make reset`（sandbox 外）でのみ可能（PR #49 レビュー #5）。
         if let supportRoot = try? FileManager.default.url(
             for: .applicationSupportDirectory, in: .userDomainMask,
             appropriateFor: nil, create: false
         ) {
             try? FileManager.default.removeItem(at: supportRoot.appendingPathComponent("Tide"))
         }
-        // Caches 配下の tmp / その他
         if let caches = try? FileManager.default.url(
             for: .cachesDirectory, in: .userDomainMask,
             appropriateFor: nil, create: false
@@ -332,8 +356,10 @@ final class AppEnvironment {
         }
 
         config.resetIncludingDeviceId()
-        // 旧 standard defaults 側も消す。残すと次回 bootstrap の LegacyStateMigrator が
-        // 「group 未設定 ∧ 旧側 setupCompleted あり」で消したはずの設定を復活させてしまう。
+        // standard defaults 側も消す（sandbox 下ではコンテナ内 plist ＝ OS が初回起動時に
+        // 旧 preferences を自動移行してきた置き場所）。残すと LegacyStateMigrator の
+        // 判定材料（旧側 setupCompleted）が生き残る。なお設定移行は legacy DB の実在で
+        // ゲートしているため、これが残っても設定が復活することはない（多層防御）。
         ConfigStore(defaults: .standard).resetIncludingDeviceId()
         try? keychain.delete()
         bootstrapFailure = nil

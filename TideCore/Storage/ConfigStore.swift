@@ -135,14 +135,14 @@ public final class ConfigStore: @unchecked Sendable {
     }
 
     /// 接続情報を消すが deviceId は残す。
+    /// キー一覧は `migratableKeys` から導出して二重管理を避ける（PR #49 レビュー #6）。
+    /// 差分は deviceId（reset では残す）と syncRootBookmark（デバイス固有で移行対象外だが
+    /// reset では消す）の 2 つだけで、それぞれ明示的に扱う。
     public func reset() {
-        for key in [Key.bucketName, Key.region, Key.syncRootPath,
-                    Key.pollingIntervalSeconds, Key.setupCompleted,
-                    Key.uploadSizeLimitBytes,
-                    Key.uploadBandwidthBytesPerSec, Key.downloadBandwidthBytesPerSec,
-                    Key.notificationsEnabled, Key.syncRootBookmark] {
+        for key in Self.migratableKeys where key != Key.deviceId {
             defaults.removeObject(forKey: key)
         }
+        defaults.removeObject(forKey: Key.syncRootBookmark)
     }
 
     /// deviceId も含めて完全に消す（factoryReset 用）。

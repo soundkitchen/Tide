@@ -105,6 +105,32 @@ public enum PathValidator {
         return values?.isSymbolicLink ?? false
     }
 
+    /// 2 つの URL が同一のファイルシステム実体（同一 volume + file id）を指すか。
+    /// パス文字列の等値比較では、フォルダのリネーム/移動（bookmark はファイル ID で追跡し
+    /// 新パスを返す）や symlink 経由の別表記を正しく扱えないため、同一性はこれで判定する。
+    /// `fileResourceIdentifier` は symlink 自身の ID を返すので、先に symlink を解決して
+    /// 「最終的に指しているディレクトリ」同士で比較する。
+    /// どちらかが存在しない/読めない場合は false（＝同一と確認できない側に倒す）。
+    public static func isSameFileSystemObject(_ a: URL, _ b: URL) -> Bool {
+        guard
+            let ra = try? a.resolvingSymlinksInPath()
+                .resourceValues(forKeys: [.fileResourceIdentifierKey]).fileResourceIdentifier,
+            let rb = try? b.resolvingSymlinksInPath()
+                .resourceValues(forKeys: [.fileResourceIdentifierKey]).fileResourceIdentifier
+        else { return false }
+        return ra.isEqual(rb)
+    }
+
+    /// 実ユーザホーム（`/Users/<name>`）。App Sandbox 下では `NSHomeDirectory()` が
+    /// コンテナホーム（`~/Library/Containers/<bundle id>/Data`）を返すため、
+    /// 「ホーム直下か」等の実ホーム基準の判定にはこちらを使う。
+    public static func realHomeDirectory() -> String {
+        if let pw = getpwuid(getuid()), let dir = pw.pointee.pw_dir {
+            return String(cString: dir)
+        }
+        return NSHomeDirectory()
+    }
+
     /// `^[0-9a-f]{2}$`（小文字 hex 2 桁）以外を弾く。
     public static func validateShardId(_ shardId: String) throws {
         guard shardId.count == 2 else {

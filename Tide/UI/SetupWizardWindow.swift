@@ -428,8 +428,10 @@ struct SetupWizardWindow: View {
         if lower.contains("/library/mobile documents") || lower.contains("/icloud") {
             return String(localized: "⚠️ iCloud Drive paths can cause sync conflicts; please choose another folder.")
         }
-        // ホームディレクトリ直下 / Library / システム領域は危険な選択肢
-        let home = NSHomeDirectory()
+        // ホームディレクトリ直下 / Library / システム領域は危険な選択肢。
+        // App Sandbox 下の NSHomeDirectory() はコンテナホームを返し実ホーム判定が死ぬので、
+        // 実ユーザホーム（getpwuid 由来）を使う（PR #49 レビュー #3）。
+        let home = PathValidator.realHomeDirectory()
         let normalized = (path as NSString).standardizingPath
         let dangerousExact: Set<String> = [
             home, "\(home)/Library", "/", "/Users", "/Applications", "/System", "/Library"

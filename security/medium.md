@@ -12,7 +12,7 @@
 
 ## M2. `factoryReset` が DB ファイルを残す
 
-**Status:** ✅ Fixed (2026-05-24) — `factoryReset` で `~/Library/Application Support/Tide` と `~/Library/Caches/Tide` をディレクトリごと削除し、`ConfigStore.resetIncludingDeviceId()` で deviceId も含めて UserDefaults をクリアするように変更。`make reset` と同じ挙動になる。（2026-07-02 追記・M5 Phase 2）DB/設定の正位置が App Group コンテナへ移ったのに伴い、`factoryReset` は group container 配下の DB・group suite の defaults・旧 standard defaults も併せて消す（旧 defaults を残すと `LegacyStateMigrator` が設定を復活させるため）。`make reset` も group container を消すよう更新済み。
+**Status:** ✅ Fixed (2026-05-24) — `factoryReset` で `~/Library/Application Support/Tide` と `~/Library/Caches/Tide` をディレクトリごと削除し、`ConfigStore.resetIncludingDeviceId()` で deviceId も含めて UserDefaults をクリアするように変更。`make reset` と同じ挙動になる。（2026-07-02 追記・M5 Phase 2）DB/設定の正位置が App Group コンテナへ移ったのに伴い、`factoryReset` は group container 配下の DB・group suite の defaults・standard defaults（sandbox 下ではコンテナ側 plist）も併せて消す。`make reset` も group container / app container を消すよう更新済み。（2026-07-03 追記・PR #49 レビュー #5）**sandbox 化により `factoryReset` は実ホームの旧ロケーション残置分（移行元 `~/Library/Application Support/Tide/db.sqlite`・旧 `~/Library/Caches/Tide`）には届かなくなった**（`.applicationSupportDirectory` 等がコンテナ内に解決され、実パスへのアクセスも sandbox が拒否）。旧残置分（全ファイルパス+ハッシュを含む DB、`.part` 断片）の完全削除は sandbox 外の `make reset` でのみ可能。M2 の「完全消去」は「アプリから届く範囲＝現行の正位置」に対して成立し、pre-sandbox 残置分だけが例外として残る（一度きり・以後増えない）。
 
 **該当箇所:** `Tide/App/AppEnvironment.swift:114-121`
 
