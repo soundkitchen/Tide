@@ -1,12 +1,14 @@
 import Foundation
 
-/// 旧ロケーション（非 App Group）→ App Group コンテナへの一度きり移行（M5 Phase 2）。
+/// 旧ロケーション → App Group コンテナへの一度きり移行（M5 Phase 2〜3）。
 ///
-/// 対象:
-/// - ローカル DB: `~/Library/Application Support/Tide/db.sqlite`（+ `-wal` / `-shm`）
-///   → group container 内 `Library/Application Support/Tide/`
-/// - 設定: 標準 UserDefaults（`org.izukawa.Tide`）の `tide.*` キー
-///   → group suite（`group.org.izukawa.Tide`）
+/// 移行元は 2 世代あり、**新しい順**に試す（冪等ゲートにより最初に DB を持つ移行元が勝つ）:
+/// 1. 旧 App Group コンテナ（`group.org.izukawa.Tide`・Phase 2 の一時ロケーション）。
+///    `group.` 形式は macOS では TCC 保護され UI の無い拡張プロセスが拒否されるため、
+///    Phase 3 でチーム ID プレフィックス形式（`G5G54TCH8W.org.izukawa.Tide`）へ移設した。
+///    アプリ側 entitlement に旧 group を残してあるうちだけ読める。
+/// 2. App Group 以前の実ホーム（`~/Library/Application Support/Tide` + 標準 UserDefaults）。
+///    App Sandbox 下ではパスがコンテナ内に解決されて見えず自然に no-op。
 ///
 /// 冪等: 移行先に DB / `setupCompleted` が既にあれば何もしない。旧ファイル・旧キーは
 /// 消さない（データ損失 < 重複の原則）。旧残置分の完全削除は `make reset`（sandbox 外）
@@ -28,24 +30,67 @@ public enum LegacyStateMigrator {
         public init() {}
     }
 
-    /// production 用: 実行プロセスから見た旧パス・標準 defaults を使って移行する。
-    /// 旧パス解決に失敗した場合（実質起きない）は何もしない。
+    /// 移行元 1 つぶんの指定（ディレクトリ + defaults）。
+    public struct LegacySource {
+        public let supportTideDir: URL
+        public let defaults: UserDefaults
+
+        public init(supportTideDir: URL, defaults: UserDefaults) {
+            self.supportTideDir = supportTideDir
+            self.defaults = defaults
+        }
+    }
+
+    /// production 用: 既知の移行元を新しい順に試す。冪等ゲート（移行先 DB / setupCompleted の有無）
+    /// により、最初に実体を持っていた移行元が勝ち、以降は no-op になる。
     public static func migrateIfNeeded() -> Outcome {
-        guard
-            let legacySupport = try? FileManager.default.url(
-                for: .applicationSupportDirectory, in: .userDomainMask,
-                appropriateFor: nil, create: false
-            ),
-            let groupSupport = try? TideAppGroup.supportDirectoryURL()
-        else {
-            return Outcome()
+        guard let groupSupport = try? TideAppGroup.supportDirectoryURL() else { return Outcome() }
+
+        var sources: [LegacySource] = []
+        // 1) 旧 App Group コンテナ（Phase 2 の group. 形式）
+        if let legacyGroup = TideAppGroup.legacyContainerURL(),
+           let legacyDefaults = UserDefaults(suiteName: TideAppGroup.legacyIdentifier) {
+            sources.append(LegacySource(
+                supportTideDir: legacyGroup.appendingPathComponent(
+                    "Library/Application Support/Tide", isDirectory: true),
+                defaults: legacyDefaults
+            ))
+        }
+        // 2) App Group 以前の実ホーム（Sandbox 下では見えず自然に no-op）
+        if let legacySupport = try? FileManager.default.url(
+            for: .applicationSupportDirectory, in: .userDomainMask,
+            appropriateFor: nil, create: false
+        ) {
+            sources.append(LegacySource(
+                supportTideDir: legacySupport.appendingPathComponent("Tide", isDirectory: true),
+                defaults: .standard
+            ))
         }
         return migrateIfNeeded(
-            legacySupportTideDir: legacySupport.appendingPathComponent("Tide", isDirectory: true),
-            legacyDefaults: .standard,
+            legacySources: sources,
             groupSupportTideDir: groupSupport,
             groupDefaults: TideAppGroup.sharedDefaults()
         )
+    }
+
+    /// 複数移行元の連鎖（テスト注入可能）。先頭から順に試す＝先頭が新しい世代。
+    public static func migrateIfNeeded(
+        legacySources: [LegacySource],
+        groupSupportTideDir: URL,
+        groupDefaults: UserDefaults
+    ) -> Outcome {
+        var outcome = Outcome()
+        for source in legacySources {
+            let one = migrateIfNeeded(
+                legacySupportTideDir: source.supportTideDir,
+                legacyDefaults: source.defaults,
+                groupSupportTideDir: groupSupportTideDir,
+                groupDefaults: groupDefaults
+            )
+            outcome.databaseMigrated = outcome.databaseMigrated || one.databaseMigrated
+            outcome.configMigrated = outcome.configMigrated || one.configMigrated
+        }
+        return outcome
     }
 
     /// テスト可能な注入版。

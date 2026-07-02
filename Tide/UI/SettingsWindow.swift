@@ -37,6 +37,10 @@ struct SettingsWindow: View {
     /// 通知トグル（既定 on）。ConfigStore は @Observable でないので他の設定と同じ @State write-through。
     @State private var notificationsEnabled: Bool = true
 
+    /// File Provider PoC ドメインの状態表示（M5 Phase 3）。nil = 未取得。
+    @State private var fileProviderEnabled: Bool?
+    @State private var fileProviderMessage: String?
+
     private static let bytesPerMBps: Int64 = 1_000_000
     private static let maxBwMBps: Double = 100
 
@@ -141,6 +145,7 @@ struct SettingsWindow: View {
                 Button("Import Settings…") { importSettings() }
                 if let settingsMessage {
                     Text(settingsMessage)
+                        .textSelection(.enabled)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -152,10 +157,51 @@ struct SettingsWindow: View {
                 Button("Export Diagnostics…") { exportDiagnostics() }
                 if let exportMessage {
                     Text(exportMessage)
+                        .textSelection(.enabled)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
                 Text("Saves a .zip with app logs, settings, and the local database — includes file names/paths and the bucket name, but no AWS credentials.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Section("File Provider (experimental)") {
+                if let fileProviderEnabled {
+                    Text(fileProviderEnabled
+                         ? String(localized: "Domain is enabled.")
+                         : String(localized: "Domain is not enabled."))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Button("Enable File Provider (PoC)") {
+                    Task {
+                        do {
+                            try await FileProviderPoC.enable()
+                            fileProviderMessage = String(localized: "Enabled — check “Tide” under Locations in Finder (~/Library/CloudStorage).")
+                        } catch {
+                            fileProviderMessage = String(describing: error)
+                        }
+                        fileProviderEnabled = await FileProviderPoC.isEnabled()
+                    }
+                }
+                Button("Disable File Provider") {
+                    Task {
+                        do {
+                            try await FileProviderPoC.disable()
+                            fileProviderMessage = String(localized: "File Provider domain removed.")
+                        } catch {
+                            fileProviderMessage = String(describing: error)
+                        }
+                        fileProviderEnabled = await FileProviderPoC.isEnabled()
+                    }
+                }
+                if let fileProviderMessage {
+                    Text(fileProviderMessage)
+                        .textSelection(.enabled)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Text("Read-only preview (PoC): shows synced files as cloud placeholders and downloads them when opened. Independent from the sync folder — enabling or disabling does not affect syncing.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -175,6 +221,7 @@ struct SettingsWindow: View {
         .formStyle(.grouped)
         .padding()
         .onAppear { loadStateFromConfig() }
+        .task { fileProviderEnabled = await FileProviderPoC.isEnabled() }
         .onChange(of: notificationsEnabled) { _, newValue in
             env.config.notificationsEnabled = newValue
         }

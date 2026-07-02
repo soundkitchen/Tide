@@ -21,14 +21,17 @@ public final class ConfigStore: @unchecked Sendable {
     /// 1 ファイルあたりのアップロードサイズ上限の既定値（1 GiB）。
     public static let defaultUploadSizeLimitBytes: Int64 = 1 * 1024 * 1024 * 1024
 
-    /// `LegacyStateMigrator` が旧 standard defaults から group suite へコピーするキー一覧。
+    /// `LegacyStateMigrator` が旧ロケーションの defaults から group suite へコピーするキー一覧。
     /// deviceId を含む（マニフェスト上のデバイス識別を移行後も維持する）。
+    /// syncRootBookmark も含む: 移行は常に**同一マシン内**の世代移動なので bookmark は有効なまま
+    /// （運ばないと移行のたびに再許可パネルが出る）。`SettingsTransfer`（別マシンへ渡りうる）には
+    /// Payload にフィールドが無く構造的に含まれない。
     public static let migratableKeys: [String] = [
         Key.bucketName, Key.region, Key.syncRootPath, Key.deviceId,
         Key.pollingIntervalSeconds, Key.setupCompleted,
         Key.uploadSizeLimitBytes,
         Key.uploadBandwidthBytesPerSec, Key.downloadBandwidthBytesPerSec,
-        Key.notificationsEnabled
+        Key.notificationsEnabled, Key.syncRootBookmark
     ]
 
     /// セットアップ完了フラグの defaults キー（`LegacyStateMigrator` の移行要否判定用）。
@@ -120,7 +123,8 @@ public final class ConfigStore: @unchecked Sendable {
 
     /// 同期フォルダの security-scoped bookmark（App Sandbox 下での再アクセス手段・M5 Phase 2）。
     /// セットアップ時（パネル選択）に発行し、bootstrap が解決して scoped アクセスを開始する。
-    /// デバイス固有バイナリなので `migratableKeys` / `SettingsTransfer` には含めない。
+    /// デバイス固有バイナリだが、`LegacyStateMigrator` の移行は同一マシン内の世代移動なので
+    /// `migratableKeys` に含める（別マシンへ渡りうる `SettingsTransfer` には構造的に含まれない）。
     public var syncRootBookmark: Data? {
         get { defaults.data(forKey: Key.syncRootBookmark) }
         set { defaults.set(newValue, forKey: Key.syncRootBookmark) }
@@ -141,13 +145,11 @@ public final class ConfigStore: @unchecked Sendable {
 
     /// 接続情報を消すが deviceId は残す。
     /// キー一覧は `migratableKeys` から導出して二重管理を避ける（PR #49 レビュー #6）。
-    /// 差分は deviceId（reset では残す）と syncRootBookmark（デバイス固有で移行対象外だが
-    /// reset では消す）の 2 つだけで、それぞれ明示的に扱う。
+    /// 差分は deviceId（reset では残す）のみ。
     public func reset() {
         for key in Self.migratableKeys where key != Key.deviceId {
             defaults.removeObject(forKey: key)
         }
-        defaults.removeObject(forKey: Key.syncRootBookmark)
     }
 
     /// deviceId も含めて完全に消す（factoryReset 用）。

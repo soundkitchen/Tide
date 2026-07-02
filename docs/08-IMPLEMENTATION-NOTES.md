@@ -42,8 +42,9 @@
 ### リセット / クリーンアップ
 - **`AppEnvironment.factoryReset` は「アプリから届く範囲で」`make reset` に揃える**: App Group コンテナ（DB）/ コンテナ内 Caches（tmp・削除一覧キャッシュ）/ UserDefaults（group suite + standard＝コンテナ側 plist）/ Keychain を消す。deviceId も含めて消す（`ConfigStore.resetIncludingDeviceId`）。**sandbox 下では実ホームの旧ロケーション残置分（移行元 `db.sqlite`・旧 Caches）には届かない** — 旧残置分の完全削除は `make reset`（sandbox 外）でのみ可能（PR #49 レビュー #5）。standard defaults も消すのは、OS がサンドボックス初回起動時に旧 preferences plist をコンテナへ自動移行してくるため（残しても設定移行は legacy DB 実在ゲートで発火しないが、判定材料を残さない多層防御）。
 
-### App Group への状態移設（M5 Phase 2）
-- **置き場所**: DB は `TideAppGroup.supportDirectoryURL()`（group container 内 `Library/Application Support/Tide/`）、設定は group suite の UserDefaults（`TideAppGroup.sharedDefaults()`）、Keychain は従来の access group（`$(AppIdentifierPrefix)org.izukawa.Tide`）を `kSecAttrAccessGroup` で明示。将来の `TideFileProvider` 拡張が同じ 3 点を共有する。
+### App Group への状態移設（M5 Phase 2〜3）
+- **置き場所**: DB は `TideAppGroup.supportDirectoryURL()`（group container 内 `Library/Application Support/Tide/`）、設定は group suite の UserDefaults（`TideAppGroup.sharedDefaults()`）、Keychain は従来の access group（`$(AppIdentifierPrefix)org.izukawa.Tide`）を `kSecAttrAccessGroup` で明示。`TideFileProvider` 拡張が同じ 3 点を共有する。
+- **App Group ID はチーム ID プレフィックス形式**（`G5G54TCH8W.org.izukawa.Tide`・Phase 3 で切替）: `group.` 形式は macOS では TCC 保護され、provisioning profile の正式許可が無い場合、対話 UI を持つアプリは同意フローで通る一方、**UI の無い拡張プロセスは containermanagerd に問答無用で拒否される**（Phase 3 実機で File Provider 拡張の group defaults が空になり notAuthenticated を返し続けた実害。containermanagerd ログ "Group containers identifiers should be prefixed by requestor's team ID" が根拠）。チーム ID プレフィックスなら署名のチーム一致だけでアクセス可能＝Portal / プロファイル依存ゼロ。Phase 2 の一時 ID `group.org.izukawa.Tide` は移行元としてアプリ側 entitlement にのみ残す（移行期間後に外してよい）。移行元は「旧 group コンテナ → 実ホーム」の新しい順に試す（`LegacyStateMigrator.migrateIfNeeded(legacySources:)` の連鎖・冪等ゲートで先勝ち）。
 - **一度きり移行 = `LegacyStateMigrator`**: bootstrap 冒頭（`setupCompleted` 判定より前）で冪等に実行。DB は「group 側本体 db.sqlite の有無」、設定は「**legacy DB が実在し group 側に揃っている** ∧ group 側 `setupCompleted` キー無し ∧ 旧側セットアップ完了」で要否判定。DB コピーは WAL/SHM → 本体の順（本体の有無が冪等キーなので途中クラッシュから頭やり直しできる）、失敗時は部分コピーを消し**設定移行ごとスキップ**して次回再試行（設定だけ先に移すと launchEngine が空 DB を生成して冪等キーを汚し、DB 移行リトライが永久に潰れる — PR #49 レビュー #4）。旧ファイル・旧キーは温存（データ損失 < 重複）。
 - **2 段コミット移行戦略**: 移行コードは App Sandbox ON より前のビルドに入れて一度起動する（旧パスが読めるうちに移行）。Sandbox ON 後は旧 DB がコンテナ内に解決されて見えなくなる。**注意: 旧 preferences plist は macOS がサンドボックス初回起動時にコンテナへ自動移行（move）するため「旧設定だけは見える」**（PR #49 レビュー #1・実機検証済み）。設定移行を legacy DB 実在でゲートしているのはこのため — さもないと中間ビルドを飛ばした環境が「設定あり・DB 空」で起動し、全ファイル未追跡の全量再アップロード・競合コピー量産・ローカル削除済みファイルのリモートからの復活を起こす。ゲートにより一足飛び経路は全体として no-op（新規状態＝ウィザード再設定）に落ちる。
 - **同期フォルダのリネーム/移動追跡**: bookmark はファイル ID で追跡するため解決後の URL は新パスを返す。`resolveSyncRootAccess` は解決成功を「同一フォルダ」とみなし `syncRootPath` を新パスへ追随更新する（パス等値で拒否すると Finder のリネームだけで「満たせない再許可パネル」が毎起動出続ける — PR #49 レビュー #2）。再許可パネルの受け入れ判定も文字列等値ではなく `PathValidator.isSameFileSystemObject`（volume + file id）で行う。
@@ -53,6 +54,14 @@
 - **同期フォルダのアクセス権 = `ConfigStore.syncRootBookmark`**（security-scoped bookmark）。発行はセットアップ確定時（`AppEnvironment.completeSetup`。**setupCompleted を立てる前に**発行し、手入力パス等で権限が無ければ確定前に失敗させる）。解決は `resolveSyncRootAccess`（launchEngine の入口。存在チェックより前＝アクセス確立後でないと fileExists 自体が成立しない）。stale なら再発行。アクセスはメニューバー常駐の生存中ずっと保持（stopAccessing はフォルダ変更時のみ）。
 - **bookmark 欠落/失効時の再許可**: 起動時に `requestSyncRootAccessViaPanel` が NSOpenPanel（現行フォルダを初期位置・説明メッセージ付き）を一度だけ出す。キャンセルは bootstrapFailure（ポップオーバー再表示で bootstrap 経由の再試行）。**設定済みパスと不一致のフォルダ選択は拒否**する — 別フォルダを黙って受けると既存 DB との突き合わせで大量の「ローカル削除」誤検出（＝リモート削除の伝播）を起こしうるため。
 - **Caches の移設は暗黙**: `TideTmpDirectory` / `DeletedFilesCache` は `.cachesDirectory` 相対のままサンドボックスのコンテナ内へ自然に移る（中断転送の `.part` は失われるが Range 再開が頭からやり直すだけ・削除一覧キャッシュは再列挙で再生成）。
+
+### File Provider 読み取り PoC（M5 Phase 3）
+- **拡張は DB に一切触らない**: 列挙はマニフェスト直読みの `ManifestSnapshotLoader`（index + 全シャード・shard_state キャッシュ無し・書込ゼロ）→ `ManifestTree` で path→ツリー合成。2 プロセス DB 書込競合を構造で回避する（単一書き手＝拡張への移行は Phase 6）。
+- **`fetchContents` はマニフェストの `s3VersionId` に固定して取得**し、commit 前にサイズ + SHA-256 を検証（Downloader と同じ不変条件）。列挙と取得の間に最新版が変わっても提示済み itemVersion と中身が食い違わない。
+- **書込系（create/modify/delete）は全拒否**（read-only PoC）。item capabilities も read のみ。
+- **並列 TaskGroup の結果回収**: 同時実行上限に達した時に消費する `group.next()` の結果を `_ =` で捨てない（シャード数 > 上限で完了分が黙って失われ「無エラーでファイル欠落」になる。Phase 3 実機で 15 中 6 件欠落として顕在化。`ManifestReader` にも同型の潜在バグがあり両方修正 — 本体側は「未変更シャードの DB 補完」が欠落をマスクしつつ shard_state 未更新の再取得を毎周回発生させていた）。
+- **拡張のログは既定レベル以上（notice/error）で出す**: `.info` は永続化されず `log show` で追えない。拡張プロセスは対話デバッグしづらいため、設定チェック等の診断は notice 以上に（`log stream` はリダイレクトでバッファされるので `script -q` 経由の pty で取る）。
+- **拡張の Info.plist 必須キー**: `NSExtension` 配下に `NSExtensionFileProviderDocumentGroup`（App Group 指定）と `NSExtensionFileProviderSupportsEnumeration`。欠けると `NSFileProviderManager.add` が `-2014 applicationExtensionNotFound`。初回はシステム設定（ログイン項目と機能拡張 → ファイルプロバイダ）でユーザが拡張を有効化する必要がある（それまでドメインは `user-disabled`）。
 
 ### ダウンロード一時ディレクトリ
 - **`TideTmpDirectory.resolve(for:)` で同一ボリュームの tmp を返す**。第一選択は `~/Library/Caches/Tide/tmp/`。同期ルートと別ボリュームになる時のみ `<syncRoot>/.tide/tmp/` にフォールバック。`moveItem` の atomic 性を保つため。

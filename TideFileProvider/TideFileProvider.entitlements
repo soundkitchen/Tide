@@ -7,10 +7,7 @@
 	<key>com.apple.security.application-groups</key>
 	<array>
 		<string>G5G54TCH8W.org.izukawa.Tide</string>
-		<string>group.org.izukawa.Tide</string>
 	</array>
-	<key>com.apple.security.files.user-selected.read-write</key>
-	<true/>
 	<key>com.apple.security.network.client</key>
 	<true/>
 	<key>keychain-access-groups</key>

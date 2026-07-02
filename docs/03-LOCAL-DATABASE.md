@@ -6,11 +6,14 @@
 
 データベースファイルの場所（M5 Phase 2 で App Group コンテナへ移設。app と File Provider 拡張が共有）:
 ```
-~/Library/Group Containers/group.org.izukawa.Tide/Library/Application Support/Tide/db.sqlite
+~/Library/Group Containers/G5G54TCH8W.org.izukawa.Tide/Library/Application Support/Tide/db.sqlite
 ```
 
-旧ロケーション `~/Library/Application Support/Tide/db.sqlite` からは、初回 bootstrap 時に
-`LegacyStateMigrator` が一度きりコピー移行する（冪等・旧ファイルは温存）。
+App Group ID はチーム ID プレフィックス形式（`group.` 形式は macOS では TCC 保護され、
+UI の無い File Provider 拡張がアクセス拒否されるため。Phase 3 で切替）。
+旧世代ロケーション（Phase 2 の `group.org.izukawa.Tide` コンテナ → さらに前の
+`~/Library/Application Support/Tide/db.sqlite`）からは、初回 bootstrap 時に
+`LegacyStateMigrator` が新しい世代優先で一度きりコピー移行する（冪等・旧ファイルは温存）。
 
 WAL モードで運用。
 

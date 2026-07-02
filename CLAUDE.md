@@ -54,13 +54,13 @@
   - M2 ダウンロード / 復元 / ポーリング（実装済み・MVP ゴール）
   - M3 双方向同期 / 競合解決 / マルチパート（サブ A〜E 実装済み: マルチパート / `.syncignore` / 3-way merge / 中断・再開 / 帯域制御。**M3 完了**。`docs/09` の据え置き数件あり）
   - M4 運用機能と磨き込み（復元/バージョン UI・Sync Activity/エラー履歴・通知・pull コスト削減。**M4 完了**。詳細は `docs/00-OVERVIEW.md` と `docs/08-IMPLEMENTATION-NOTES.md`）
-  - M5 Files-On-Demand（File Provider）— オンラインのみ実体化: **着手中**。Phase 1（`TideCore` framework 分離）・Phase 2（App Group 移設 + App Sandbox 化 + security-scoped bookmark）完了。次は Phase 3（`TideFileProvider.appex` の読み取り materialize PoC）。同期先は最終的に `~/Library/CloudStorage/Tide` 固定（既存 FSEvents の任意フォルダモードと opt-in 並走）。設計・進捗は `docs/09-DEFERRED.md` の M5 節
+  - M5 Files-On-Demand（File Provider）— オンラインのみ実体化: **着手中**。Phase 1（`TideCore` framework 分離）・Phase 2（App Group 移設 + App Sandbox 化 + security-scoped bookmark）・Phase 3（`TideFileProvider.appex` 読み取り materialize PoC＝dataless プレースホルダ → 開いた瞬間 S3 取得を実機実証。Phase 0 の全リスク解消）完了。次は Phase 4（増分列挙 + リモート追従）以降を継続判断。同期先は最終的に `~/Library/CloudStorage/Tide` 固定（既存 FSEvents の任意フォルダモードと opt-in 並走）。設計・進捗は `docs/09-DEFERRED.md` の M5 節
 
 ### 主要な確定パラメータ
 - Bundle ID: `org.izukawa.Tide`
 - DEVELOPMENT_TEAM: `G5G54TCH8W`
-- App Group: `group.org.izukawa.Tide`（M5 Phase 2〜。定数は `TideAppGroup`）
-- ローカル DB: `~/Library/Group Containers/group.org.izukawa.Tide/Library/Application Support/Tide/db.sqlite`（GRDB.swift / WAL。M5 Phase 2 で App Group コンテナへ移設。旧パスからは `LegacyStateMigrator` が一度きり移行）
+- App Group: `G5G54TCH8W.org.izukawa.Tide`（M5 Phase 2〜。定数は `TideAppGroup`。**チーム ID プレフィックス形式必須** — `group.` 形式は macOS では TCC 保護され、UI の無い File Provider 拡張が containermanagerd に拒否される。Phase 2 の一時 ID `group.org.izukawa.Tide` は移行元としてアプリ entitlement にのみ残存）
+- ローカル DB: `~/Library/Group Containers/G5G54TCH8W.org.izukawa.Tide/Library/Application Support/Tide/db.sqlite`（GRDB.swift / WAL。M5 Phase 2 で App Group コンテナへ移設。旧世代パスからは `LegacyStateMigrator` が一度きり移行）
 - 設定: group suite の UserDefaults（`TideAppGroup.sharedDefaults()`）。Keychain は `kSecAttrAccessGroup` 明示（`$(AppIdentifierPrefix)org.izukawa.Tide`）
 - 同期フォルダのアクセス権: `ConfigStore.syncRootBookmark`（security-scoped bookmark。セットアップ時発行 → 起動時 `resolveSyncRootAccess` で解決。リネーム/移動は bookmark が追跡し `syncRootPath` を追随更新。欠落時は再許可パネル・設定と**同一実体でない**フォルダは拒否＝判定は `PathValidator.isSameFileSystemObject`）
 - ダウンロード一時ディレクトリ: `~/Library/Caches/Tide/tmp/`（同期ルートと別ボリュームの時のみ `<syncRoot>/.tide/tmp/` にフォールバック）
@@ -176,6 +176,7 @@
 | `Tide/UI/` | SwiftUI ビュー（MenuBar / Setup wizard / Settings） |
 | `Tide/Core/` | **app-bound な駆動層/殻**（TideCore に移さず残す）: SyncEngine / RemoteOpGate / FileWatcher / DebounceQueue / DiagnosticsExporter / NotificationPolicy / SettingsTransfer |
 | `Tide/Resources/` | `Localizable.xcstrings` / アセット |
+| `TideFileProvider/` | **File Provider 拡張**（`NSFileProviderReplicatedExtension`・M5 Phase 3〜）。読み取り materialize PoC。TideCore に依存・DB 非接触 |
 | `TideTests/` | ユニットテスト |
 | `docs/` | 設計書（spec）。`00`〜`07` が仕様、`08-IMPLEMENTATION-NOTES.md` が実装ノート（旧 §7）、`09-DEFERRED.md` が据え置き/バックログ（旧 §8） |
 | `security/` | セキュリティレビューと対応サマリ |

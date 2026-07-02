@@ -334,9 +334,21 @@ final class AppEnvironment {
         s3 = nil
         database = nil
 
+        // File Provider PoC ドメインも外す（残すと CloudStorage 側に空ドメインが孤児化する）
+        try? await FileProviderPoC.disable()
+
         // App Group コンテナ配下の DB ファイル一式（M5 Phase 2 以降の正位置）
         if let groupSupport = try? TideAppGroup.supportDirectoryURL() {
             try? FileManager.default.removeItem(at: groupSupport)
+        }
+        // 旧 group. 形式コンテナ（Phase 2 の一時ロケーション・移行元）。残すと
+        // LegacyStateMigrator が次回 bootstrap で消したはずの状態を復活させる。
+        if let legacyGroup = TideAppGroup.legacyContainerURL() {
+            try? FileManager.default.removeItem(
+                at: legacyGroup.appendingPathComponent("Library/Application Support/Tide"))
+            UserDefaults(suiteName: TideAppGroup.legacyIdentifier).map {
+                ConfigStore(defaults: $0).resetIncludingDeviceId()
+            }
         }
         // Application Support / Caches。sandbox 下ではどちらも**コンテナ内**に解決されるため、
         // Caches（tmp / 削除一覧キャッシュ）は実際に消えるが、実ホームの旧ロケーション残置分

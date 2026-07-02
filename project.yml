@@ -57,6 +57,47 @@ targets:
       - package: GRDB
         product: GRDB
 
+  TideFileProvider:
+    type: app-extension
+    platform: macOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: TideFileProvider
+    info:
+      path: TideFileProvider/Info.plist
+      properties:
+        CFBundleDisplayName: Tide File Provider
+        # NSExtension の中身は Xcode の macOS File Provider テンプレートに合わせる。
+        # DocumentGroup（App Group 指定）と SupportsEnumeration が無いと、システムが
+        # replicated 拡張として認識せず NSFileProviderManager.add が
+        # -2014 applicationExtensionNotFound で失敗する（Phase 3 実機で確認）。
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.fileprovider-nonui
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).FileProviderExtension
+          NSExtensionFileProviderDocumentGroup: G5G54TCH8W.org.izukawa.Tide
+          NSExtensionFileProviderSupportsEnumeration: true
+    entitlements:
+      path: TideFileProvider/TideFileProvider.entitlements
+      properties:
+        # 拡張はサンドボックス必須。App Group / Keychain group は app と同一（DB・設定・認証情報の共有）。
+        # App Group はチーム ID プレフィックス形式（TideAppGroup.identifier 参照）— group. 形式は
+        # macOS では TCC 保護され、UI の無い拡張は containermanagerd に問答無用で拒否される。
+        com.apple.security.app-sandbox: true
+        com.apple.security.application-groups:
+          - G5G54TCH8W.org.izukawa.Tide
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)org.izukawa.Tide
+        com.apple.security.network.client: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.izukawa.Tide.FileProvider
+        PRODUCT_NAME: TideFileProvider
+        # TideCore.framework は app 側（Tide.app/Contents/Frameworks）に埋め込まれたものを共有する
+        LD_RUNPATH_SEARCH_PATHS: "@executable_path/../Frameworks @executable_path/../../../../Frameworks"
+    dependencies:
+      - target: TideCore
+        embed: false
+
   Tide:
     type: application
     platform: macOS
@@ -85,9 +126,12 @@ targets:
       properties:
         keychain-access-groups:
           - $(AppIdentifierPrefix)org.izukawa.Tide
-        # App Group（M5 Phase 2）: DB / 設定を app と File Provider 拡張で共有する土台。
-        # TideCore の TideAppGroup.identifier と一致させる。
+        # App Group（M5 Phase 2〜3）: DB / 設定を app と File Provider 拡張で共有する土台。
+        # 1 つ目 = 現行（チーム ID プレフィックス形式・TideCore の TideAppGroup.identifier と一致）。
+        # 2 つ目 = Phase 2 で一時使用した group. 形式の旧コンテナ（LegacyStateMigrator の移行元。
+        # 移行期間が終わったら外してよい）。
         com.apple.security.application-groups:
+          - G5G54TCH8W.org.izukawa.Tide
           - group.org.izukawa.Tide
         # App Sandbox（M5 Phase 2・security L1）。File Provider 拡張はサンドボックス必須なので
         # app 側もここで一括対応する。同期フォルダへのアクセスは security-scoped bookmark で永続化。
@@ -119,6 +163,9 @@ targets:
         CURRENT_PROJECT_VERSION: "1"
     dependencies:
       - target: TideCore
+      # File Provider 拡張（M5 Phase 3〜）。PlugIns/ へ埋め込む。
+      - target: TideFileProvider
+        embed: true
       # AWS SDK は app 側で直接 import しない（S3 系は全て TideCore へ移動済み）。
       # TideCore 経由の transitive リンクで足りる。GRDB は SyncEngine が直接 import するため残す。
       - package: GRDB

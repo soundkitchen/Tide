@@ -57,6 +57,7 @@ struct SetupWizardWindow: View {
 
             if let errorMessage {
                 Text(errorMessage)
+                        .textSelection(.enabled)
                     .foregroundStyle(.red)
                     .font(.callout)
             }
