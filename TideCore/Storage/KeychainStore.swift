@@ -4,9 +4,17 @@ import Security
 /// AWS 認証情報を Keychain (generic password) に保存する。
 public struct KeychainStore: Sendable {
     public let service: String
+    /// Keychain access group（M5 Phase 2 で明示化）。app と File Provider 拡張が同じ
+    /// アイテムを共有するため、既定の暗黙グループに頼らず常に同一グループを指定する。
+    /// 既存アイテムは元からこのグループ（entitlements 唯一のグループ）にあるため移行不要。
+    public let accessGroup: String?
 
-    public init(service: String = "org.izukawa.Tide") {
+    public init(
+        service: String = "org.izukawa.Tide",
+        accessGroup: String? = TideAppGroup.keychainAccessGroup
+    ) {
         self.service = service
+        self.accessGroup = accessGroup
     }
 
     private enum Account {
@@ -39,13 +47,17 @@ public struct KeychainStore: Sendable {
     /// - `kSecAttrAccessible`: AfterFirstUnlock（メニューバー常駐前提）
     /// - `kSecAttrSynchronizable`: false（iCloud Keychain 同期を防ぐ）
     private func baseQuery(account: String) -> [String: Any] {
-        return [
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
             kSecUseDataProtectionKeychain as String: true,
             kSecAttrSynchronizable as String: false
         ]
+        if let accessGroup {
+            query[kSecAttrAccessGroup as String] = accessGroup
+        }
+        return query
     }
 
     private func setItem(account: String, value: String) throws {

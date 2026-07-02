@@ -12,7 +12,7 @@
 
 ## M2. `factoryReset` が DB ファイルを残す
 
-**Status:** ✅ Fixed (2026-05-24) — `factoryReset` で `~/Library/Application Support/Tide` と `~/Library/Caches/Tide` をディレクトリごと削除し、`ConfigStore.resetIncludingDeviceId()` で deviceId も含めて UserDefaults をクリアするように変更。`make reset` と同じ挙動になる。
+**Status:** ✅ Fixed (2026-05-24) — `factoryReset` で `~/Library/Application Support/Tide` と `~/Library/Caches/Tide` をディレクトリごと削除し、`ConfigStore.resetIncludingDeviceId()` で deviceId も含めて UserDefaults をクリアするように変更。`make reset` と同じ挙動になる。（2026-07-02 追記・M5 Phase 2）DB/設定の正位置が App Group コンテナへ移ったのに伴い、`factoryReset` は group container 配下の DB・group suite の defaults・旧 standard defaults も併せて消す（旧 defaults を残すと `LegacyStateMigrator` が設定を復活させるため）。`make reset` も group container を消すよう更新済み。
 
 **該当箇所:** `Tide/App/AppEnvironment.swift:114-121`
 

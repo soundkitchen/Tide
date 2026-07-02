@@ -20,7 +20,22 @@ public final class ConfigStore: @unchecked Sendable {
     /// 1 ファイルあたりのアップロードサイズ上限の既定値（1 GiB）。
     public static let defaultUploadSizeLimitBytes: Int64 = 1 * 1024 * 1024 * 1024
 
-    public init(defaults: UserDefaults = .standard) {
+    /// `LegacyStateMigrator` が旧 standard defaults から group suite へコピーするキー一覧。
+    /// deviceId を含む（マニフェスト上のデバイス識別を移行後も維持する）。
+    public static let migratableKeys: [String] = [
+        Key.bucketName, Key.region, Key.syncRootPath, Key.deviceId,
+        Key.pollingIntervalSeconds, Key.setupCompleted,
+        Key.uploadSizeLimitBytes,
+        Key.uploadBandwidthBytesPerSec, Key.downloadBandwidthBytesPerSec,
+        Key.notificationsEnabled
+    ]
+
+    /// セットアップ完了フラグの defaults キー（`LegacyStateMigrator` の移行要否判定用）。
+    public static var setupCompletedDefaultsKey: String { Key.setupCompleted }
+
+    /// 既定は App Group 共有 suite（M5 Phase 2 で標準 defaults から移設）。
+    /// 旧 standard defaults からの一度きり移行は `LegacyStateMigrator` が行う。
+    public init(defaults: UserDefaults = TideAppGroup.sharedDefaults()) {
         self.defaults = defaults
     }
 

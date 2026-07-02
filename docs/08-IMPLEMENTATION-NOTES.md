@@ -40,7 +40,12 @@
 - **Settings UI**: `SettingsWindow` の **「Bandwidth」セクション**に「No upload/download bandwidth limit」トグル＋ MB/s スライダ（1〜100・1 刻み・トグル off で表示）。`ConfigStore.uploadBandwidthBytesPerSec` / `downloadBandwidthBytesPerSec`（bytes/sec、**`<= 0`=無制限・既定 `-1`**）。MB/s は decimal（1 MB/s = 1,000,000 bytes/s）。`@State` + `onAppear`/`onChange` write-through。新規 xcstrings キーは `extractionState:"manual"`。**既定は無制限**（オプトイン）。
 
 ### リセット / クリーンアップ
-- **`AppEnvironment.factoryReset` は `make reset` と同じ振る舞いに揃える**: Application Support / Caches / UserDefaults / Keychain を全部消す。deviceId も含めて消す（`ConfigStore.resetIncludingDeviceId`）。
+- **`AppEnvironment.factoryReset` は `make reset` と同じ振る舞いに揃える**: App Group コンテナ（DB）/ 旧 Application Support / Caches / UserDefaults（group suite + 旧 standard）/ Keychain を全部消す。deviceId も含めて消す（`ConfigStore.resetIncludingDeviceId`）。**旧 standard defaults も必ず消す**: 残すと次回 bootstrap の `LegacyStateMigrator` が「group 未設定 ∧ 旧側 setupCompleted あり」と誤認し、消したはずの設定を復活させる。
+
+### App Group への状態移設（M5 Phase 2）
+- **置き場所**: DB は `TideAppGroup.supportDirectoryURL()`（group container 内 `Library/Application Support/Tide/`）、設定は group suite の UserDefaults（`TideAppGroup.sharedDefaults()`）、Keychain は従来の access group（`$(AppIdentifierPrefix)org.izukawa.Tide`）を `kSecAttrAccessGroup` で明示。将来の `TideFileProvider` 拡張が同じ 3 点を共有する。
+- **一度きり移行 = `LegacyStateMigrator`**: bootstrap 冒頭（`setupCompleted` 判定より前）で冪等に実行。DB は「group 側本体 db.sqlite の有無」、設定は「group 側 `setupCompleted` キーの有無 ∧ 旧側セットアップ完了」で要否判定。DB コピーは WAL/SHM → 本体の順（本体の有無が冪等キーなので途中クラッシュから頭やり直しできる）、失敗時は部分コピーを消して次回再試行。旧ファイル・旧キーは温存（データ損失 < 重複）。
+- **2 段コミット移行戦略**: 移行コードは App Sandbox ON より前のビルドに入れて一度起動する（旧パスが読めるうちに移行）。Sandbox ON 後は旧パスがコンテナ内に解決されて見えなくなるため、未移行のまま Sandbox 版へ飛んだ環境では自然に no-op（新規状態＝ウィザード再設定）。
 
 ### ダウンロード一時ディレクトリ
 - **`TideTmpDirectory.resolve(for:)` で同一ボリュームの tmp を返す**。第一選択は `~/Library/Caches/Tide/tmp/`。同期ルートと別ボリュームになる時のみ `<syncRoot>/.tide/tmp/` にフォールバック。`moveItem` の atomic 性を保つため。

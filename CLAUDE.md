@@ -59,7 +59,9 @@
 ### 主要な確定パラメータ
 - Bundle ID: `org.izukawa.Tide`
 - DEVELOPMENT_TEAM: `G5G54TCH8W`
-- ローカル DB: `~/Library/Application Support/Tide/db.sqlite`（GRDB.swift / WAL）
+- App Group: `group.org.izukawa.Tide`（M5 Phase 2〜。定数は `TideAppGroup`）
+- ローカル DB: `~/Library/Group Containers/group.org.izukawa.Tide/Library/Application Support/Tide/db.sqlite`（GRDB.swift / WAL。M5 Phase 2 で App Group コンテナへ移設。旧パスからは `LegacyStateMigrator` が一度きり移行）
+- 設定: group suite の UserDefaults（`TideAppGroup.sharedDefaults()`）。Keychain は `kSecAttrAccessGroup` 明示（`$(AppIdentifierPrefix)org.izukawa.Tide`）
 - ダウンロード一時ディレクトリ: `~/Library/Caches/Tide/tmp/`（同期ルートと別ボリュームの時のみ `<syncRoot>/.tide/tmp/` にフォールバック）
 - S3 マニフェスト: `.tide/index.json` + `.tide/shards/XX.json`（XX は SHA-1 先頭 1 バイト、256 シャード）
 - ローカル相対パスは常に POSIX、ハッシュは SHA-256 hex 小文字、時刻は ISO8601 UTC

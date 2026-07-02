@@ -204,14 +204,12 @@ public final class LocalDatabase: @unchecked Sendable {
         try DBMigrations.makeMigrator().migrate(pool)
     }
 
+    /// 既定の DB パス（App Group コンテナ内・M5 Phase 2 で移設）。
+    /// app と将来の File Provider 拡張が同じ DB を共有する。旧ロケーション
+    /// （`~/Library/Application Support/Tide/db.sqlite`）からの一度きり移行は
+    /// `LegacyStateMigrator` が行う。
     public static func defaultURL() throws -> URL {
-        let support = try FileManager.default.url(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true
-        )
-        return support.appendingPathComponent("Tide/db.sqlite")
+        try TideAppGroup.supportDirectoryURL().appendingPathComponent("db.sqlite")
     }
 
     // MARK: - log

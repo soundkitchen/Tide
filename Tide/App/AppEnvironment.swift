@@ -64,6 +64,12 @@ final class AppEnvironment {
         isBootstrapping = true
         defer { isBootstrapping = false }
         bootstrapFailure = nil
+        // 旧ロケーション（非 App Group 時代）からの一度きり移行（M5 Phase 2）。冪等・非致命。
+        // setupCompleted の判定より前に行う必要がある（設定自体が移行対象のため）。
+        let migration = LegacyStateMigrator.migrateIfNeeded()
+        if migration.databaseMigrated || migration.configMigrated {
+            AppLogger.ui.info("Legacy state migrated to App Group (db: \(migration.databaseMigrated), config: \(migration.configMigrated))")
+        }
         guard config.setupCompleted else {
             AppLogger.ui.info("Setup not completed; awaiting wizard.")
             return
@@ -212,7 +218,11 @@ final class AppEnvironment {
         s3 = nil
         database = nil
 
-        // Application Support 配下の DB ファイル一式
+        // App Group コンテナ配下の DB ファイル一式（M5 Phase 2 以降の正位置）
+        if let groupSupport = try? TideAppGroup.supportDirectoryURL() {
+            try? FileManager.default.removeItem(at: groupSupport)
+        }
+        // 旧ロケーションの Application Support 配下（移行前の残置分も一緒に消す）
         if let supportRoot = try? FileManager.default.url(
             for: .applicationSupportDirectory, in: .userDomainMask,
             appropriateFor: nil, create: false
@@ -228,6 +238,9 @@ final class AppEnvironment {
         }
 
         config.resetIncludingDeviceId()
+        // 旧 standard defaults 側も消す。残すと次回 bootstrap の LegacyStateMigrator が
+        // 「group 未設定 ∧ 旧側 setupCompleted あり」で消したはずの設定を復活させてしまう。
+        ConfigStore(defaults: .standard).resetIncludingDeviceId()
         try? keychain.delete()
         bootstrapFailure = nil
     }

@@ -1,0 +1,168 @@
+import XCTest
+import TideCore
+@testable import Tide
+
+/// 旧ロケーション → App Group コンテナへの一度きり移行（M5 Phase 2）の注入版を検証する。
+final class LegacyStateMigratorTests: XCTestCase {
+    private var legacyDir: URL!
+    private var groupDir: URL!
+    private var legacyDefaults: UserDefaults!
+    private var groupDefaults: UserDefaults!
+
+    override func setUpWithError() throws {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("migrator-tests-\(UUID().uuidString)")
+        legacyDir = base.appendingPathComponent("legacy/Tide", isDirectory: true)
+        groupDir = base.appendingPathComponent("group/Tide", isDirectory: true)
+        try FileManager.default.createDirectory(at: legacyDir, withIntermediateDirectories: true)
+
+        let legacySuite = "tide-tests-legacy-\(UUID().uuidString)"
+        let groupSuite = "tide-tests-group-\(UUID().uuidString)"
+        legacyDefaults = UserDefaults(suiteName: legacySuite)!
+        groupDefaults = UserDefaults(suiteName: groupSuite)!
+        addTeardownBlock {
+            UserDefaults.standard.removePersistentDomain(forName: legacySuite)
+            UserDefaults.standard.removePersistentDomain(forName: groupSuite)
+            try? FileManager.default.removeItem(at: base)
+        }
+    }
+
+    private func runMigration() -> LegacyStateMigrator.Outcome {
+        LegacyStateMigrator.migrateIfNeeded(
+            legacySupportTideDir: legacyDir,
+            legacyDefaults: legacyDefaults,
+            groupSupportTideDir: groupDir,
+            groupDefaults: groupDefaults
+        )
+    }
+
+    private func writeLegacyDB(main: String = "main", wal: String? = nil, shm: String? = nil) throws {
+        try Data(main.utf8).write(to: legacyDir.appendingPathComponent("db.sqlite"))
+        if let wal {
+            try Data(wal.utf8).write(to: legacyDir.appendingPathComponent("db.sqlite-wal"))
+        }
+        if let shm {
+            try Data(shm.utf8).write(to: legacyDir.appendingPathComponent("db.sqlite-shm"))
+        }
+    }
+
+    // MARK: - DB
+
+    func testMigratesDatabaseWithWALAndSHM() throws {
+        try writeLegacyDB(main: "main", wal: "wal", shm: "shm")
+
+        let outcome = runMigration()
+
+        XCTAssertTrue(outcome.databaseMigrated)
+        XCTAssertEqual(
+            try String(contentsOf: groupDir.appendingPathComponent("db.sqlite"), encoding: .utf8),
+            "main"
+        )
+        XCTAssertEqual(
+            try String(contentsOf: groupDir.appendingPathComponent("db.sqlite-wal"), encoding: .utf8),
+            "wal"
+        )
+        XCTAssertEqual(
+            try String(contentsOf: groupDir.appendingPathComponent("db.sqlite-shm"), encoding: .utf8),
+            "shm"
+        )
+        // 旧ファイルは温存（データ損失 < 重複）
+        XCTAssertTrue(FileManager.default.fileExists(atPath: legacyDir.appendingPathComponent("db.sqlite").path))
+    }
+
+    func testMigratesDatabaseWithoutWAL() throws {
+        try writeLegacyDB(main: "main-only")
+
+        let outcome = runMigration()
+
+        XCTAssertTrue(outcome.databaseMigrated)
+        XCTAssertEqual(
+            try String(contentsOf: groupDir.appendingPathComponent("db.sqlite"), encoding: .utf8),
+            "main-only"
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: groupDir.appendingPathComponent("db.sqlite-wal").path))
+    }
+
+    func testDoesNotOverwriteExistingGroupDatabase() throws {
+        try writeLegacyDB(main: "legacy")
+        try FileManager.default.createDirectory(at: groupDir, withIntermediateDirectories: true)
+        try Data("already-migrated".utf8).write(to: groupDir.appendingPathComponent("db.sqlite"))
+
+        let outcome = runMigration()
+
+        XCTAssertFalse(outcome.databaseMigrated)
+        XCTAssertEqual(
+            try String(contentsOf: groupDir.appendingPathComponent("db.sqlite"), encoding: .utf8),
+            "already-migrated"
+        )
+    }
+
+    func testRetriesAfterPartialCopy() throws {
+        // 途中クラッシュ相当: WAL だけ移行先に残っている（本体 db.sqlite は無い）状態から
+        // 再実行しても、removeItem → copyItem で頭から安全にやり直せる。
+        try writeLegacyDB(main: "main", wal: "fresh-wal")
+        try FileManager.default.createDirectory(at: groupDir, withIntermediateDirectories: true)
+        try Data("stale-wal".utf8).write(to: groupDir.appendingPathComponent("db.sqlite-wal"))
+
+        let outcome = runMigration()
+
+        XCTAssertTrue(outcome.databaseMigrated)
+        XCTAssertEqual(
+            try String(contentsOf: groupDir.appendingPathComponent("db.sqlite-wal"), encoding: .utf8),
+            "fresh-wal"
+        )
+    }
+
+    func testNoLegacyDatabaseIsNoop() {
+        let outcome = runMigration()
+        XCTAssertFalse(outcome.databaseMigrated)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: groupDir.appendingPathComponent("db.sqlite").path))
+    }
+
+    // MARK: - Config
+
+    func testMigratesConfigWhenLegacySetupCompleted() {
+        let legacy = ConfigStore(defaults: legacyDefaults)
+        legacy.bucketName = "legacy-bucket"
+        legacy.region = "ap-northeast-1"
+        legacy.syncRootPath = "/Users/x/Tide"
+        legacy.setupCompleted = true
+        let legacyDeviceId = legacy.deviceId
+
+        let outcome = runMigration()
+
+        XCTAssertTrue(outcome.configMigrated)
+        let group = ConfigStore(defaults: groupDefaults)
+        XCTAssertEqual(group.bucketName, "legacy-bucket")
+        XCTAssertEqual(group.region, "ap-northeast-1")
+        XCTAssertEqual(group.syncRootPath, "/Users/x/Tide")
+        XCTAssertTrue(group.setupCompleted)
+        // deviceId（マニフェスト上のデバイス識別）を引き継ぐ
+        XCTAssertEqual(group.deviceId, legacyDeviceId)
+    }
+
+    func testDoesNotMigrateConfigWhenGroupAlreadySetUp() {
+        let legacy = ConfigStore(defaults: legacyDefaults)
+        legacy.bucketName = "legacy-bucket"
+        legacy.setupCompleted = true
+        let group = ConfigStore(defaults: groupDefaults)
+        group.bucketName = "group-bucket"
+        group.setupCompleted = true
+
+        let outcome = runMigration()
+
+        XCTAssertFalse(outcome.configMigrated)
+        XCTAssertEqual(group.bucketName, "group-bucket")
+    }
+
+    func testDoesNotMigrateConfigWhenLegacySetupIncomplete() {
+        // 旧側にキーはあるがセットアップ未完了 → 移すべき確定状態が無いので no-op
+        let legacy = ConfigStore(defaults: legacyDefaults)
+        legacy.bucketName = "half-configured"
+
+        let outcome = runMigration()
+
+        XCTAssertFalse(outcome.configMigrated)
+        XCTAssertNil(ConfigStore(defaults: groupDefaults).bucketName)
+    }
+}
