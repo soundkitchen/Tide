@@ -41,11 +41,10 @@ public enum LegacyStateMigrator {
         }
     }
 
-    /// production 用: 既知の移行元を新しい順に試す。冪等ゲート（移行先 DB / setupCompleted の有無）
-    /// により、最初に実体を持っていた移行元が勝ち、以降は no-op になる。
-    public static func migrateIfNeeded() -> Outcome {
-        guard let groupSupport = try? TideAppGroup.supportDirectoryURL() else { return Outcome() }
-
+    /// production の既知の移行元一覧（新しい順）。`AppEnvironment.factoryReset` も**同じ定義**を
+    /// 回して掃除する（手作業で複製すると、将来移行元を足したときに reset 側の追随漏れ＝
+    /// 「消したはずの状態が次回 bootstrap で復活」が起きる — PR #50 レビュー #8）。
+    public static func productionLegacySources() -> [LegacySource] {
         var sources: [LegacySource] = []
         // 1) 旧 App Group コンテナ（Phase 2 の group. 形式）
         if let legacyGroup = TideAppGroup.legacyContainerURL(),
@@ -66,8 +65,15 @@ public enum LegacyStateMigrator {
                 defaults: .standard
             ))
         }
+        return sources
+    }
+
+    /// production 用: 既知の移行元を新しい順に試す。冪等ゲート（移行先 DB / setupCompleted の有無）
+    /// により、最初に実体を持っていた移行元が勝ち、以降は no-op になる。
+    public static func migrateIfNeeded() -> Outcome {
+        guard let groupSupport = try? TideAppGroup.supportDirectoryURL() else { return Outcome() }
         return migrateIfNeeded(
-            legacySources: sources,
+            legacySources: productionLegacySources(),
             groupSupportTideDir: groupSupport,
             groupDefaults: TideAppGroup.sharedDefaults()
         )

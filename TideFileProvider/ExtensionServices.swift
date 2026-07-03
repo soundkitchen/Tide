@@ -61,6 +61,10 @@ actor ManifestTreeCache {
     private let loader: ManifestSnapshotLoader
     private let maxAge: TimeInterval
     private var cached: (tree: ManifestTree, fetchedAt: Date)?
+    /// single-flight: actor は await 中に reentrant なので、進行中ロードへ後続を合流させないと
+    /// コールドスタート（ドメイン起床直後の Finder バースト）で N 並列フルロードになる
+    /// （PR #50 レビュー #3）。
+    private var inflight: Task<ManifestTree, Error>?
 
     init(loader: ManifestSnapshotLoader, maxAge: TimeInterval = 30) {
         self.loader = loader
@@ -71,7 +75,14 @@ actor ManifestTreeCache {
         if let cached, Date().timeIntervalSince(cached.fetchedAt) < maxAge {
             return cached.tree
         }
-        let tree = ManifestTree(files: try await loader.load())
+        if let inflight {
+            return try await inflight.value
+        }
+        let loader = self.loader
+        let task = Task { ManifestTree(files: try await loader.load()) }
+        inflight = task
+        defer { inflight = nil }
+        let tree = try await task.value
         cached = (tree, Date())
         return tree
     }

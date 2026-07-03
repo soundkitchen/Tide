@@ -225,7 +225,7 @@ public struct Downloader: Sendable {
         }
 
         // mtime 復元（rename で保たれる）
-        if let mtimeDate = parseISO8601(entry.mtime) {
+        if let mtimeDate = ISO8601.parse(entry.mtime) {
             try? FileManager.default.setAttributes(
                 [.modificationDate: mtimeDate],
                 ofItemAtPath: tmpURL.path
@@ -435,17 +435,13 @@ public struct Downloader: Sendable {
         return try HashCalculator.sha256NoFollow(of: url)
     }
 
-    private func parseISO8601(_ s: String) -> Date? {
-        try? Date(s, strategy: .iso8601)
-    }
-
     private func updateDBEntryAfterDownload(
         relativePath: String,
         entry: ManifestFileEntry,
         clearQueueByPath: Bool = true
     ) async throws {
         let now = Date().timeIntervalSince1970
-        let mtime = parseISO8601(entry.mtime)?.timeIntervalSince1970 ?? now
+        let mtime = ISO8601.parse(entry.mtime)?.timeIntervalSince1970 ?? now
         try await db.pool.write { db in
             var rec = FileRecord(
                 path: relativePath,
@@ -501,7 +497,7 @@ public struct Downloader: Sendable {
         localMtime: Double?
     ) async throws {
         let now = Date().timeIntervalSince1970
-        let mtime = localMtime ?? parseISO8601(entry.mtime)?.timeIntervalSince1970 ?? now
+        let mtime = localMtime ?? ISO8601.parse(entry.mtime)?.timeIntervalSince1970 ?? now
         try await db.pool.write { db in
             var rec = FileRecord(
                 path: relativePath,

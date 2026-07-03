@@ -55,6 +55,29 @@ final class ManifestTreeTests: XCTestCase {
         // 逆順の挿入に依存しないこと（辞書順序は不定）は directory-wins ルールで担保される
     }
 
+    func testDirectoryWinsIsInsertionOrderIndependent() {
+        // Dictionary の走査順（per-process シード）に依存せず directory-wins が成立すること。
+        // 旧実装は「ファイルが先に走査された」場合に中間ディレクトリ合成が置換せず、
+        // 非フォルダを親に持つ到達不能ノードができた（PR #50 レビュー #1）。
+        // 衝突ペアを複数・深さ違いで与え、どの走査順でも全ペアがディレクトリ化することを確認する。
+        var files: [String: ManifestFileEntry] = [:]
+        for i in 0..<8 {
+            files["c\(i)"] = entry()
+            files["c\(i)/leaf.txt"] = entry()
+        }
+        files["x/y"] = entry()
+        files["x/y/z.txt"] = entry()
+
+        let tree = ManifestTree(files: files)
+
+        for i in 0..<8 {
+            XCTAssertEqual(tree.node(at: "c\(i)")?.isDirectory, true, "c\(i) should be a directory")
+            XCTAssertEqual(tree.children(of: "c\(i)")?.map(\.path), ["c\(i)/leaf.txt"])
+        }
+        XCTAssertEqual(tree.node(at: "x/y")?.isDirectory, true)
+        XCTAssertEqual(tree.children(of: "x/y")?.map(\.path), ["x/y/z.txt"])
+    }
+
     func testNodeNameAndRoot() {
         let tree = ManifestTree(files: ["docs/report.pdf": entry()])
         XCTAssertEqual(tree.node(at: "docs/report.pdf")?.name, "report.pdf")

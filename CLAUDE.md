@@ -100,7 +100,7 @@
 - 既存キーは `extractionState: "manual"` を付けて Xcode の自動 purge を防いでいる。
 
 ### Logging（os.Logger）
-- サブシステム: `org.izukawa.Tide`。カテゴリ: `sync` / `s3` / `database` / `ui` / `watcher`。
+- サブシステム: `org.izukawa.Tide`。カテゴリ: `sync` / `s3` / `database` / `ui` / `watcher` / `fileprovider`。
 - エラー / パス / リモートデータ由来の文字列は **必ず `privacy: .private`** で補間する。`.public` を使わない。
 - 例:
   ```swift

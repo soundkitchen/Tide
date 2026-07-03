@@ -43,11 +43,14 @@ public struct ManifestTree: Sendable {
             let components = path.split(separator: "/").map(String.init)
             guard !components.isEmpty else { continue }
 
-            // 中間ディレクトリを合成
+            // 中間ディレクトリを合成。「同名がファイルとして先に挿入済み」の場合も
+            // ディレクトリで**置換**する（ガードをファイル挿入側と対称にする）。
+            // さもないと Dictionary の走査順次第で directory-wins 規則が破れ、
+            // 非フォルダを親に持つ到達不能ノードができる（PR #50 レビュー #1）。
             var dir = ""
             for component in components.dropLast() {
                 let childPath = dir.isEmpty ? component : "\(dir)/\(component)"
-                if nodes[childPath] == nil {
+                if nodes[childPath]?.isDirectory != true {
                     let node = Node.directory(path: childPath)
                     nodes[childPath] = node
                     children[dir, default: [:]][component] = node
@@ -56,8 +59,8 @@ public struct ManifestTree: Sendable {
                 dir = childPath
             }
 
-            // ファイル本体。同名の合成ディレクトリが既にある場合（"a" と "a/b" が両方
-            // ファイルとして存在する壊れたマニフェスト）はディレクトリを優先して捨てる。
+            // ファイル本体。同名の合成ディレクトリが既にある場合（"a" と "a/b.txt" が両方
+            // 存在する壊れたマニフェスト）はディレクトリを優先して捨てる。
             let name = components.last!
             if nodes[path]?.isDirectory != true {
                 let node = Node.file(path: path, entry: entry)

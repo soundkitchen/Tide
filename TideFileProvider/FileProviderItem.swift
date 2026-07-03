@@ -13,13 +13,14 @@ final class FileProviderItem: NSObject, NSFileProviderItem, @unchecked Sendable 
     }
 
     var itemIdentifier: NSFileProviderItemIdentifier {
-        node.path.isEmpty ? .rootContainer : NSFileProviderItemIdentifier(node.path)
+        NSFileProviderItemIdentifier(tideRelativePath: node.path)
     }
 
     var parentItemIdentifier: NSFileProviderItemIdentifier {
         let components = node.path.split(separator: "/")
         guard components.count > 1 else { return .rootContainer }
-        return NSFileProviderItemIdentifier(components.dropLast().joined(separator: "/"))
+        return NSFileProviderItemIdentifier(
+            tideRelativePath: components.dropLast().joined(separator: "/"))
     }
 
     var filename: String {

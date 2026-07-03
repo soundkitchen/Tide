@@ -174,26 +174,14 @@ struct SettingsWindow: View {
                         .foregroundStyle(.secondary)
                 }
                 Button("Enable File Provider (PoC)") {
-                    Task {
-                        do {
-                            try await FileProviderPoC.enable()
-                            fileProviderMessage = String(localized: "Enabled — check “Tide” under Locations in Finder (~/Library/CloudStorage).")
-                        } catch {
-                            fileProviderMessage = String(describing: error)
-                        }
-                        fileProviderEnabled = await FileProviderPoC.isEnabled()
-                    }
+                    runFileProviderAction(
+                        FileProviderPoC.enable,
+                        successMessage: String(localized: "Enabled — check “Tide” under Locations in Finder (~/Library/CloudStorage)."))
                 }
                 Button("Disable File Provider") {
-                    Task {
-                        do {
-                            try await FileProviderPoC.disable()
-                            fileProviderMessage = String(localized: "File Provider domain removed.")
-                        } catch {
-                            fileProviderMessage = String(describing: error)
-                        }
-                        fileProviderEnabled = await FileProviderPoC.isEnabled()
-                    }
+                    runFileProviderAction(
+                        FileProviderPoC.disable,
+                        successMessage: String(localized: "File Provider domain removed."))
                 }
                 if let fileProviderMessage {
                     Text(fileProviderMessage)
@@ -231,6 +219,22 @@ struct SettingsWindow: View {
         .onChange(of: uploadBwMBps) { _, _ in persistBandwidth() }
         .onChange(of: noDownloadBwLimit) { _, _ in persistBandwidth() }
         .onChange(of: downloadBwMBps) { _, _ in persistBandwidth() }
+    }
+
+    /// File Provider PoC の有効化/無効化ボタン共通処理（成功文言と await する操作だけが差分）。
+    private func runFileProviderAction(
+        _ action: @escaping @MainActor () async throws -> Void,
+        successMessage: String
+    ) {
+        Task {
+            do {
+                try await action()
+                fileProviderMessage = successMessage
+            } catch {
+                fileProviderMessage = String(describing: error)
+            }
+            fileProviderEnabled = await FileProviderPoC.isEnabled()
+        }
     }
 
     /// ConfigStore の現値を @State へ読み込む（初回表示と import 反映後の再読込で共用）。

@@ -341,25 +341,18 @@ final class AppEnvironment {
         if let groupSupport = try? TideAppGroup.supportDirectoryURL() {
             try? FileManager.default.removeItem(at: groupSupport)
         }
-        // 旧 group. 形式コンテナ（Phase 2 の一時ロケーション・移行元）。残すと
-        // LegacyStateMigrator が次回 bootstrap で消したはずの状態を復活させる。
-        if let legacyGroup = TideAppGroup.legacyContainerURL() {
-            try? FileManager.default.removeItem(
-                at: legacyGroup.appendingPathComponent("Library/Application Support/Tide"))
-            UserDefaults(suiteName: TideAppGroup.legacyIdentifier).map {
-                ConfigStore(defaults: $0).resetIncludingDeviceId()
-            }
+        // 既知の移行元（旧 group コンテナ / 実ホーム + standard defaults）は LegacyStateMigrator と
+        // **同じ定義**を回して掃除する（残すと次回 bootstrap の移行が消したはずの状態を復活させる。
+        // 定義の手作業複製は移行元追加時の追随漏れの温床 — PR #50 レビュー #8 で一元化）。
+        // 注意: sandbox 下では実ホーム分がコンテナ内に解決され、旧残置分（pre-sandbox の db.sqlite 等）
+        // には届かない（完全削除は `make reset` のみ — PR #49 レビュー #5）。standard defaults の消去は
+        // OS がコンテナへ自動移行してきた旧 plist の掃除としても効く（設定復活の防止自体は
+        // legacy DB 実在ゲートが構造的に担う多層防御）。
+        for source in LegacyStateMigrator.productionLegacySources() {
+            try? FileManager.default.removeItem(at: source.supportTideDir)
+            ConfigStore(defaults: source.defaults).resetIncludingDeviceId()
         }
-        // Application Support / Caches。sandbox 下ではどちらも**コンテナ内**に解決されるため、
-        // Caches（tmp / 削除一覧キャッシュ）は実際に消えるが、実ホームの旧ロケーション残置分
-        // （移行元 db.sqlite・旧 Caches）には届かない（sandbox が実パスへのアクセスを拒否する）。
-        // 旧残置分の完全削除は `make reset`（sandbox 外）でのみ可能（PR #49 レビュー #5）。
-        if let supportRoot = try? FileManager.default.url(
-            for: .applicationSupportDirectory, in: .userDomainMask,
-            appropriateFor: nil, create: false
-        ) {
-            try? FileManager.default.removeItem(at: supportRoot.appendingPathComponent("Tide"))
-        }
+        // Caches（sandbox 下ではコンテナ内 = ダウンロード tmp / 削除一覧キャッシュ）
         if let caches = try? FileManager.default.url(
             for: .cachesDirectory, in: .userDomainMask,
             appropriateFor: nil, create: false
@@ -368,11 +361,6 @@ final class AppEnvironment {
         }
 
         config.resetIncludingDeviceId()
-        // standard defaults 側も消す（sandbox 下ではコンテナ内 plist ＝ OS が初回起動時に
-        // 旧 preferences を自動移行してきた置き場所）。残すと LegacyStateMigrator の
-        // 判定材料（旧側 setupCompleted）が生き残る。なお設定移行は legacy DB の実在で
-        // ゲートしているため、これが残っても設定が復活することはない（多層防御）。
-        ConfigStore(defaults: .standard).resetIncludingDeviceId()
         try? keychain.delete()
         bootstrapFailure = nil
     }

@@ -41,31 +41,11 @@ public struct ManifestSnapshotLoader: Sendable {
             }
         }
 
-        // 全シャードを並列取得（最大 8 並列・ManifestReader と同じ流儀）。
-        // 上限到達時に消費する `group.next()` の結果も**必ず回収する**こと —
-        // `_ =` で捨てるとシャード数 > 並列上限のとき完了分が黙って失われ、
-        // ファイル欠落として現れる（Phase 3 実機で 15 ファイル中 6 件欠落を確認した実バグ）。
-        let shards = try await withThrowingTaskGroup(of: ManifestShard?.self) { group in
-            var acc: [ManifestShard] = []
-            var inflight = 0
-            let limit = 8
-            for shardId in shardIds {
-                if inflight >= limit {
-                    if let finished = try await group.next(), let shard = finished {
-                        acc.append(shard)
-                    }
-                    inflight -= 1
-                }
-                let source = self.source
-                group.addTask {
-                    try await source.getShard(shardId)?.value
-                }
-                inflight += 1
-            }
-            for try await shard in group {
-                if let shard { acc.append(shard) }
-            }
-            return acc
+        // 全シャードを並列取得（最大 8 並列）。有界並列の骨格は BoundedParallel に一元化
+        //（`group.next()` 結果の取りこぼし罠ごと封じる — PR #50 レビュー #7）。
+        let source = self.source
+        let shards = try await BoundedParallel.compactMap(shardIds) { shardId in
+            try await source.getShard(shardId)?.value
         }
 
         // path 検証しつつ全ファイルマップへ集約

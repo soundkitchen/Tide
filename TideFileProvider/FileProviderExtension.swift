@@ -9,7 +9,9 @@ import TideCore
 ///   （2 プロセス書込競合の構造的回避。単一書き手＝拡張への移行は Phase 6）。
 /// - `fetchContents` は `streamObject`（マニフェストの `s3VersionId` に固定）+ サイズ/SHA-256 検証。
 /// - 書込系コールバック（create / modify / delete）は**すべて拒否**（read-only PoC）。
-/// - item identifier は相対 POSIX パス（マニフェスト・オブジェクトキーと 1:1。ルートは `""`）。
+/// - item identifier は `p:` + 相対 POSIX パス（マニフェスト・オブジェクトキーと 1:1。ルートは
+///   `.rootContainer`）。プレフィックスは予約 identifier（`.rootContainer` 等の rawValue）と
+///   同名のファイルパスが衝突して階層が破綻するのを構造的に防ぐ（PR #50 レビュー #4）。
 final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, @unchecked Sendable {
     private let domain: NSFileProviderDomain
     private let services: ExtensionServices?
@@ -32,16 +34,26 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
     ) -> Progress {
         let progress = Progress(totalUnitCount: 1)
         guard let services else {
+            progress.completedUnitCount = 1
             completionHandler(nil, NSFileProviderError(.notAuthenticated))
             return progress
         }
         guard let path = identifier.tideRelativePath else {
+            progress.completedUnitCount = 1
             completionHandler(nil, NSFileProviderError(.noSuchItem))
+            return progress
+        }
+        // root は定数（合成ディレクトリ）なのでマニフェストロードを経由しない —
+        // ドメインアタッチ時の余計な S3 往復と「一過性エラーで root が失敗アイテム化」を避ける。
+        if path.isEmpty {
+            progress.completedUnitCount = 1
+            completionHandler(FileProviderItem(node: .directory(path: "")), nil)
             return progress
         }
         // completion handler はどのスレッドから呼んでもよい契約なので箱で Task へ運ぶ
         let completion = UncheckedSendableBox(value: completionHandler)
         let task = Task {
+            defer { progress.completedUnitCount = progress.totalUnitCount }
             do {
                 let tree = try await services.cache.tree()
                 guard let node = tree.node(at: path) else {
@@ -53,7 +65,6 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 AppLogger.fileProvider.error("item(for:) failed: \(String(describing: error), privacy: .private)")
                 completion.value(nil, error)
             }
-            progress.completedUnitCount = 1
         }
         progress.cancellationHandler = { task.cancel() }
         return progress
@@ -69,10 +80,12 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
     ) -> Progress {
         let progress = Progress(totalUnitCount: 1)
         guard let services else {
+            progress.completedUnitCount = 1
             completionHandler(nil, nil, NSFileProviderError(.notAuthenticated))
             return progress
         }
         guard let path = itemIdentifier.tideRelativePath, !path.isEmpty else {
+            progress.completedUnitCount = 1
             completionHandler(nil, nil, NSFileProviderError(.noSuchItem))
             return progress
         }
@@ -80,6 +93,10 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         // completion handler はどのスレッドから呼んでもよい契約なので箱で Task へ運ぶ
         let completion = UncheckedSendableBox(value: completionHandler)
         let task = Task {
+            // 失敗経路（ガード / throw / キャンセル）の部分書き込み tmp をここで一元的に掃除する。
+            // 成功時は cleanupURL を nil に戻してからシステムに tmp を引き渡す（PR #50 レビュー #2）。
+            var cleanupURL: URL?
+            defer { if let cleanupURL { try? FileManager.default.removeItem(at: cleanupURL) } }
             do {
                 let tree = try await services.cache.tree()
                 guard case .file(_, let entry)? = tree.node(at: path) else {
@@ -93,6 +110,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     ?? FileManager.default.temporaryDirectory
                 let tmpURL = tmpDir.appendingPathComponent("fetch-\(UUID().uuidString)")
                 FileManager.default.createFile(atPath: tmpURL.path, contents: nil)
+                cleanupURL = tmpURL
                 let handle = try FileHandle(forWritingTo: tmpURL)
                 defer { try? handle.close() }
 
@@ -112,16 +130,14 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     progress.completedUnitCount = written
                 }
                 guard result != nil else {
-                    try? FileManager.default.removeItem(at: tmpURL)
                     completion.value(nil, nil, NSFileProviderError(.noSuchItem))
                     return
                 }
                 try handle.close()
 
                 // commit 前検証（Downloader と同じ不変条件: サイズ一致 + SHA-256 一致）
-                let sha = hasher.finalize().map { String(format: "%02x", $0) }.joined()
+                let sha = HashCalculator.hex(hasher.finalize())
                 guard written == entry.size, sha == entry.sha256 else {
-                    try? FileManager.default.removeItem(at: tmpURL)
                     AppLogger.fileProvider.error("fetchContents verification failed for \(path, privacy: .private) (size \(written)/\(entry.size))")
                     completion.value(nil, nil, NSError(
                         domain: NSCocoaErrorDomain, code: NSFileReadCorruptFileError,
@@ -130,9 +146,13 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     return
                 }
 
+                // 成功: tmp はシステムが引き取るので掃除対象から外す（作法どおり完了前に 100% へ）
+                cleanupURL = nil
+                progress.completedUnitCount = progress.totalUnitCount
                 completion.value(tmpURL, FileProviderItem(node: .file(path: path, entry: entry)), nil)
             } catch {
                 AppLogger.fileProvider.error("fetchContents failed: \(String(describing: error), privacy: .private)")
+                progress.completedUnitCount = progress.totalUnitCount
                 completion.value(nil, nil, error)
             }
         }
@@ -206,11 +226,23 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
 }
 
 extension NSFileProviderItemIdentifier {
-    /// Tide の item identifier（相対 POSIX パス）へのマッピング。ルートは `""`。
-    /// working set / trash 等の特殊 identifier は nil。
+    /// Tide の item identifier のパスプレフィックス。予約 identifier
+    /// （`NSFileProviderRootContainerItemIdentifier` 等の rawValue）と同名のファイルが
+    /// マニフェストに居ても衝突しないよう、パス由来の identifier は必ずこれを付ける。
+    static let tidePathPrefix = "p:"
+
+    /// Tide の item identifier → 相対 POSIX パス。ルートは `""`。
+    /// working set / trash / 未知の identifier（プレフィックス無し）は nil。
     var tideRelativePath: String? {
         if self == .rootContainer { return "" }
-        if self == .workingSet || self == .trashContainer { return nil }
-        return rawValue
+        guard rawValue.hasPrefix(Self.tidePathPrefix) else { return nil }
+        return String(rawValue.dropFirst(Self.tidePathPrefix.count))
+    }
+
+    /// 相対 POSIX パス → Tide の item identifier。ルート（`""`）は `.rootContainer`。
+    init(tideRelativePath path: String) {
+        self = path.isEmpty
+            ? .rootContainer
+            : NSFileProviderItemIdentifier(Self.tidePathPrefix + path)
     }
 }
