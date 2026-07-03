@@ -341,6 +341,10 @@ final class AppEnvironment {
         if let groupSupport = try? TideAppGroup.supportDirectoryURL() {
             try? FileManager.default.removeItem(at: groupSupport)
         }
+        // App Group コンテナ内 Caches（M5 Phase 4 の File Provider 世代ログ等の派生データ）
+        if let groupCaches = try? TideAppGroup.cachesDirectoryURL() {
+            try? FileManager.default.removeItem(at: groupCaches)
+        }
         // 既知の移行元（旧 group コンテナ / 実ホーム + standard defaults）は LegacyStateMigrator と
         // **同じ定義**を回して掃除する（残すと次回 bootstrap の移行が消したはずの状態を復活させる。
         // 定義の手作業複製は移行元追加時の追随漏れの温床 — PR #50 レビュー #8 で一元化）。

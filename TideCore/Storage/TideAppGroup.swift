@@ -42,6 +42,12 @@ public enum TideAppGroup {
         )
     }
 
+    /// group container 内の `Library/Caches/Tide`（派生データの置き場所。
+    /// M5 Phase 4 の File Provider 世代ログ等）。`factoryReset` / `make reset` の掃除範囲。
+    public static func cachesDirectoryURL() throws -> URL {
+        try containerURL().appendingPathComponent("Library/Caches/Tide", isDirectory: true)
+    }
+
     /// group 共有の UserDefaults suite。suiteName は固定の有効値なので nil にならない。
     public static func sharedDefaults() -> UserDefaults {
         UserDefaults(suiteName: identifier)!

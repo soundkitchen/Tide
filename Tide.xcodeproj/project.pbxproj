@@ -23,6 +23,7 @@
 		1DCC72394F897B7DA81C7A57 /* AWSS3 in Frameworks */ = {isa = PBXBuildFile; productRef = 31345D3689617337B12E0FC0 /* AWSS3 */; };
 		20963E9AE9138F8892F4B07D /* AWSSDKIdentity in Frameworks */ = {isa = PBXBuildFile; productRef = 459AE546C4795E598D134D06 /* AWSSDKIdentity */; };
 		20E9EA51FE270AE4AFD8A963 /* TransferStateStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 67C1B635F7A6B62B6D365062 /* TransferStateStore.swift */; };
+		2230B958A48B5C1E03C1DFB8 /* ManifestGenerationLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = D283FF14F141F298C9F27E9A /* ManifestGenerationLog.swift */; };
 		224A489D4BBB6C02AD07F91D /* MultipartUploader.swift in Sources */ = {isa = PBXBuildFile; fileRef = B65FE95D48D3620972574EEB /* MultipartUploader.swift */; };
 		274736C1DFBC4F29E2A8D2D7 /* NotificationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8DB10BCAF7E41F7945E67A7 /* NotificationManager.swift */; };
 		2934320120BBFB444BED2195 /* ObjectVersionHistoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 218BF6C59F9429D95309C74F /* ObjectVersionHistoryTests.swift */; };
@@ -117,6 +118,7 @@
 		C5031FFC043FF9929A518931 /* NoFollowFileReaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00F21E2E210A7F9BC778BC5D /* NoFollowFileReaderTests.swift */; };
 		C89C4AA65987A0D84B009C08 /* AboutWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 304004BC24DB5BEA9B3BE68F /* AboutWindow.swift */; };
 		CC223B1F855BCDBB5CA5310E /* LocalDatabaseTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF88A6EE0AAE77A740A190A9 /* LocalDatabaseTests.swift */; };
+		CDCA61C692F809FA5B2210CE /* ManifestGenerationLogTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1AFDD6DC6B26F6450EF4A09D /* ManifestGenerationLogTests.swift */; };
 		D5C8E829DC1C5A1734F300E6 /* ThreeWayMergeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D326FF459D50EF387EBD5E8 /* ThreeWayMergeTests.swift */; };
 		D5F9249F05BC8F54A0DE7FB8 /* PathValidator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1775C971BA4151BEBF4AA74C /* PathValidator.swift */; };
 		D6D21E2730035BBAC56857ED /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 91049E9B9B1476D00B397815 /* KeychainStore.swift */; };
@@ -230,6 +232,7 @@
 		16ED0B8D39615582C0CD3596 /* HashCalculatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HashCalculatorTests.swift; sourceTree = "<group>"; };
 		1775C971BA4151BEBF4AA74C /* PathValidator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PathValidator.swift; sourceTree = "<group>"; };
 		1A9CB8EA6B406E2E0BB8E34C /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
+		1AFDD6DC6B26F6450EF4A09D /* ManifestGenerationLogTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManifestGenerationLogTests.swift; sourceTree = "<group>"; };
 		1BD4B605839107E1638A0D11 /* HardcodedIgnoreRulesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HardcodedIgnoreRulesTests.swift; sourceTree = "<group>"; };
 		1D326FF459D50EF387EBD5E8 /* ThreeWayMergeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreeWayMergeTests.swift; sourceTree = "<group>"; };
 		1D6159D935D2BCDF5F10B9BA /* SettingsTransfer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsTransfer.swift; sourceTree = "<group>"; };
@@ -315,6 +318,7 @@
 		C85FC12C4DE0E0E2B6F890D6 /* IgnoreDecisionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IgnoreDecisionTests.swift; sourceTree = "<group>"; };
 		C8DB10BCAF7E41F7945E67A7 /* NotificationManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationManager.swift; sourceTree = "<group>"; };
 		CFE648EEA04EAF5498BA5929 /* SyncError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncError.swift; sourceTree = "<group>"; };
+		D283FF14F141F298C9F27E9A /* ManifestGenerationLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManifestGenerationLog.swift; sourceTree = "<group>"; };
 		D4BA8640DD3B95755D05E566 /* Downloader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Downloader.swift; sourceTree = "<group>"; };
 		DC06B8D465A6783D6EC5327A /* AboutWindowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AboutWindowTests.swift; sourceTree = "<group>"; };
 		DDB67AE63D5670BED8543EBA /* FileWatcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileWatcher.swift; sourceTree = "<group>"; };
@@ -470,6 +474,7 @@
 				C85FC12C4DE0E0E2B6F890D6 /* IgnoreDecisionTests.swift */,
 				4FA64F8C47733294DDECC49C /* LegacyStateMigratorTests.swift */,
 				BF88A6EE0AAE77A740A190A9 /* LocalDatabaseTests.swift */,
+				1AFDD6DC6B26F6450EF4A09D /* ManifestGenerationLogTests.swift */,
 				57ED617F25861D75B21F4EE8 /* ManifestShardingTests.swift */,
 				106416243D1436EA43CACFA6 /* ManifestSnapshotLoaderTests.swift */,
 				B8665F814F4338316C32E779 /* ManifestTreeTests.swift */,
@@ -512,6 +517,7 @@
 				D4BA8640DD3B95755D05E566 /* Downloader.swift */,
 				6D271D2FC7FABDE7DA4E91E8 /* KnownRegions.swift */,
 				7D575C0984B4BABFC8234BB1 /* Manifest.swift */,
+				D283FF14F141F298C9F27E9A /* ManifestGenerationLog.swift */,
 				072F35488FAFA4BFE2EC6119 /* ManifestReader.swift */,
 				768FFB4507784287C979E47D /* ManifestSharding.swift */,
 				263CE52DDFC37C0F3B3FA41C /* ManifestSnapshot.swift */,
@@ -821,6 +827,7 @@
 				30021E4A68B5166DFBF1DD9E /* LegacyStateMigrator.swift in Sources */,
 				4CB10F298A77BF776D38F0A5 /* LocalDatabase.swift in Sources */,
 				90276C63902A408F2EA29B5B /* Manifest.swift in Sources */,
+				2230B958A48B5C1E03C1DFB8 /* ManifestGenerationLog.swift in Sources */,
 				145BFD133A9439D84C83BF56 /* ManifestReader.swift in Sources */,
 				BF61474E3646636658F001DE /* ManifestSharding.swift in Sources */,
 				7EA58BAA4FBF6CA861AA6366 /* ManifestSnapshot.swift in Sources */,
@@ -880,6 +887,7 @@
 				96D3E563D295F74B4FE173C7 /* IgnoreDecisionTests.swift in Sources */,
 				7983C647A8E29146C17EA171 /* LegacyStateMigratorTests.swift in Sources */,
 				CC223B1F855BCDBB5CA5310E /* LocalDatabaseTests.swift in Sources */,
+				CDCA61C692F809FA5B2210CE /* ManifestGenerationLogTests.swift in Sources */,
 				6713D52E474D2DE81405414C /* ManifestShardingTests.swift in Sources */,
 				B6F899CB35C9C6872CE11EFA /* ManifestSnapshotLoaderTests.swift in Sources */,
 				FAEB8A42EB4D23963468CF15 /* ManifestTreeTests.swift in Sources */,
