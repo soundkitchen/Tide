@@ -164,7 +164,10 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     AppLogger.fileProvider.error("fetchContents verification failed for \(path, privacy: .private) (size \(written)/\(entry.size))")
                     completion.value(nil, nil, NSError(
                         domain: NSCocoaErrorDomain, code: NSFileReadCorruptFileError,
-                        userInfo: [NSLocalizedDescriptionKey: "Downloaded content failed integrity verification."]
+                        userInfo: [
+                            NSLocalizedDescriptionKey:
+                                String(localized: "Downloaded content failed integrity verification.")
+                        ]
                     ))
                     return
                 }
@@ -243,7 +246,10 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
     private static func readOnlyError() -> Error {
         NSError(
             domain: NSCocoaErrorDomain, code: NSFeatureUnsupportedError,
-            userInfo: [NSLocalizedDescriptionKey: "Tide (PoC) is read-only. Edit files in the sync folder instead."]
+            userInfo: [
+                NSLocalizedDescriptionKey:
+                    String(localized: "Tide (PoC) is read-only. Edit files in the sync folder instead.")
+            ]
         )
     }
 }

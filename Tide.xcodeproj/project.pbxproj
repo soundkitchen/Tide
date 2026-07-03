@@ -68,6 +68,7 @@
 		6AF129A12A51D9159C0986FE /* DebounceQueueTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C531B92C91BFA8DF787AA83 /* DebounceQueueTests.swift */; };
 		6B6E56093816BA745166A52F /* UIHelpers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0094822987949AB0733689CE /* UIHelpers.swift */; };
 		730136828D5D0BA466EE7EAB /* RateLimiter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12E97E750C4BF1695416B157 /* RateLimiter.swift */; };
+		73DB8020E315AD7AD03216E6 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = DEE7C2CFFC78347224C731B8 /* Localizable.xcstrings */; };
 		73E37624D0FE276B8DAFF8EB /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = 26F985F58C32DE00145022AD /* GRDB */; };
 		753EC334FCA47556D2C7BF78 /* TransferProgress.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64F4A83AA66D120162DC8DF2 /* TransferProgress.swift */; };
 		78478BC6A9413278949C2773 /* SyncStatus.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68555DFF864B01A541D4BAA7 /* SyncStatus.swift */; };
@@ -329,6 +330,7 @@
 		D4BA8640DD3B95755D05E566 /* Downloader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Downloader.swift; sourceTree = "<group>"; };
 		DC06B8D465A6783D6EC5327A /* AboutWindowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AboutWindowTests.swift; sourceTree = "<group>"; };
 		DDB67AE63D5670BED8543EBA /* FileWatcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileWatcher.swift; sourceTree = "<group>"; };
+		DEE7C2CFFC78347224C731B8 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
 		DFB0EE091C8021602553D322 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		E0C66E505C9788FC626A5F38 /* SyncIgnoreMatcherTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncIgnoreMatcherTests.swift; sourceTree = "<group>"; };
 		E3AC084C5077FA719F28246C /* NotificationPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationPolicyTests.swift; sourceTree = "<group>"; };
@@ -443,6 +445,7 @@
 		453B837FBCCBF6B0562B4FA5 /* TideFileProvider */ = {
 			isa = PBXGroup;
 			children = (
+				508B8FB447AC625863454C58 /* Resources */,
 				ACE2A02A3924D54DA4CD876E /* ExtensionServices.swift */,
 				33EF3AEF2B8867E9EBADF4BA /* FileProviderEnumerator.swift */,
 				49E1926B86F26BCDCC8D71CF /* FileProviderExtension.swift */,
@@ -519,6 +522,14 @@
 				26B8754452476E7B305F6BA3 /* UploaderConflictTests.swift */,
 			);
 			path = TideTests;
+			sourceTree = "<group>";
+		};
+		508B8FB447AC625863454C58 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				DEE7C2CFFC78347224C731B8 /* Localizable.xcstrings */,
+			);
+			path = Resources;
 			sourceTree = "<group>";
 		};
 		5D7925FCE0319332E0A65B9A /* S3 */ = {
@@ -708,6 +719,7 @@
 			buildConfigurationList = 060CE121030BB0838D0C8C76 /* Build configuration list for PBXNativeTarget "TideFileProvider" */;
 			buildPhases = (
 				7EB1F35BE361D87407AC36A7 /* Sources */,
+				1ED551D0FC4AF77A85060485 /* Resources */,
 				06ED27E3A06C2A84681A0C83 /* Frameworks */,
 			);
 			buildRules = (
@@ -777,6 +789,14 @@
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		1ED551D0FC4AF77A85060485 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				73DB8020E315AD7AD03216E6 /* Localizable.xcstrings in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		C2187F92E0C4E9A51C6D4576 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
