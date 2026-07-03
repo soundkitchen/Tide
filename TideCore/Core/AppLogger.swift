@@ -8,4 +8,6 @@ public enum AppLogger {
     public static let db = Logger(subsystem: subsystem, category: "database")
     public static let ui = Logger(subsystem: subsystem, category: "ui")
     public static let watcher = Logger(subsystem: subsystem, category: "watcher")
+    /// File Provider 拡張（TideFileProvider.appex・M5 Phase 3〜）
+    public static let fileProvider = Logger(subsystem: subsystem, category: "fileprovider")
 }

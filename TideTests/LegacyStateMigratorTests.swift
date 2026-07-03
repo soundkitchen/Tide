@@ -217,6 +217,52 @@ final class LegacyStateMigratorTests: XCTestCase {
         XCTAssertEqual(ConfigStore(defaults: groupDefaults).bucketName, "legacy-bucket")
     }
 
+    // MARK: - 複数移行元の連鎖（Phase 3: 旧 group コンテナ → 実ホームの 2 世代）
+
+    func testFirstLegacySourceWithDatabaseWins() throws {
+        // 先頭（新しい世代＝旧 group コンテナ相当）が勝ち、2 つ目は冪等ゲートで no-op になる
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("migrator-chain-\(UUID().uuidString)")
+        let newerDir = base.appendingPathComponent("newer/Tide", isDirectory: true)
+        let olderDir = base.appendingPathComponent("older/Tide", isDirectory: true)
+        try FileManager.default.createDirectory(at: newerDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: olderDir, withIntermediateDirectories: true)
+        try Data("new-gen".utf8).write(to: newerDir.appendingPathComponent("db.sqlite"))
+        try Data("old-gen".utf8).write(to: olderDir.appendingPathComponent("db.sqlite"))
+        let newerSuite = "tide-tests-newer-\(UUID().uuidString)"
+        let olderSuite = "tide-tests-older-\(UUID().uuidString)"
+        let newerDefaults = UserDefaults(suiteName: newerSuite)!
+        let olderDefaults = UserDefaults(suiteName: olderSuite)!
+        addTeardownBlock {
+            UserDefaults.standard.removePersistentDomain(forName: newerSuite)
+            UserDefaults.standard.removePersistentDomain(forName: olderSuite)
+            try? FileManager.default.removeItem(at: base)
+        }
+        let newer = ConfigStore(defaults: newerDefaults)
+        newer.bucketName = "bucket-newer"
+        newer.setupCompleted = true
+        let older = ConfigStore(defaults: olderDefaults)
+        older.bucketName = "bucket-older"
+        older.setupCompleted = true
+
+        let outcome = LegacyStateMigrator.migrateIfNeeded(
+            legacySources: [
+                .init(supportTideDir: newerDir, defaults: newerDefaults),
+                .init(supportTideDir: olderDir, defaults: olderDefaults),
+            ],
+            groupSupportTideDir: groupDir,
+            groupDefaults: groupDefaults
+        )
+
+        XCTAssertTrue(outcome.databaseMigrated)
+        XCTAssertTrue(outcome.configMigrated)
+        XCTAssertEqual(
+            try String(contentsOf: groupDir.appendingPathComponent("db.sqlite"), encoding: .utf8),
+            "new-gen"
+        )
+        XCTAssertEqual(ConfigStore(defaults: groupDefaults).bucketName, "bucket-newer")
+    }
+
     func testMigratesConfigWhenGroupDatabaseAlreadyMigrated() throws {
         // 前回起動で DB だけ移行済み（config 移行前にクラッシュ等）→ 今回は config だけ移行される
         try writeLegacyDB(main: "legacy")

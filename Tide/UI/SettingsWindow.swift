@@ -37,6 +37,10 @@ struct SettingsWindow: View {
     /// 通知トグル（既定 on）。ConfigStore は @Observable でないので他の設定と同じ @State write-through。
     @State private var notificationsEnabled: Bool = true
 
+    /// File Provider PoC ドメインの状態表示（M5 Phase 3）。nil = 未取得。
+    @State private var fileProviderEnabled: Bool?
+    @State private var fileProviderMessage: String?
+
     private static let bytesPerMBps: Int64 = 1_000_000
     private static let maxBwMBps: Double = 100
 
@@ -141,6 +145,7 @@ struct SettingsWindow: View {
                 Button("Import Settings…") { importSettings() }
                 if let settingsMessage {
                     Text(settingsMessage)
+                        .textSelection(.enabled)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -152,10 +157,39 @@ struct SettingsWindow: View {
                 Button("Export Diagnostics…") { exportDiagnostics() }
                 if let exportMessage {
                     Text(exportMessage)
+                        .textSelection(.enabled)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
                 Text("Saves a .zip with app logs, settings, and the local database — includes file names/paths and the bucket name, but no AWS credentials.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Section("File Provider (experimental)") {
+                if let fileProviderEnabled {
+                    Text(fileProviderEnabled
+                         ? String(localized: "Domain is enabled.")
+                         : String(localized: "Domain is not enabled."))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Button("Enable File Provider (PoC)") {
+                    runFileProviderAction(
+                        FileProviderPoC.enable,
+                        successMessage: String(localized: "Enabled — check “Tide” under Locations in Finder (~/Library/CloudStorage)."))
+                }
+                Button("Disable File Provider") {
+                    runFileProviderAction(
+                        FileProviderPoC.disable,
+                        successMessage: String(localized: "File Provider domain removed."))
+                }
+                if let fileProviderMessage {
+                    Text(fileProviderMessage)
+                        .textSelection(.enabled)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Text("Read-only preview (PoC): shows synced files as cloud placeholders and downloads them when opened. Independent from the sync folder — enabling or disabling does not affect syncing.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -175,6 +209,7 @@ struct SettingsWindow: View {
         .formStyle(.grouped)
         .padding()
         .onAppear { loadStateFromConfig() }
+        .task { fileProviderEnabled = await FileProviderPoC.isEnabled() }
         .onChange(of: notificationsEnabled) { _, newValue in
             env.config.notificationsEnabled = newValue
         }
@@ -184,6 +219,22 @@ struct SettingsWindow: View {
         .onChange(of: uploadBwMBps) { _, _ in persistBandwidth() }
         .onChange(of: noDownloadBwLimit) { _, _ in persistBandwidth() }
         .onChange(of: downloadBwMBps) { _, _ in persistBandwidth() }
+    }
+
+    /// File Provider PoC の有効化/無効化ボタン共通処理（成功文言と await する操作だけが差分）。
+    private func runFileProviderAction(
+        _ action: @escaping @MainActor () async throws -> Void,
+        successMessage: String
+    ) {
+        Task {
+            do {
+                try await action()
+                fileProviderMessage = successMessage
+            } catch {
+                fileProviderMessage = String(describing: error)
+            }
+            fileProviderEnabled = await FileProviderPoC.isEnabled()
+        }
     }
 
     /// ConfigStore の現値を @State へ読み込む（初回表示と import 反映後の再読込で共用）。

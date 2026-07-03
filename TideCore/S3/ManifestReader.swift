@@ -60,27 +60,13 @@ public struct ManifestReader {
         }
         let removed = Set(cached.keys).subtracting(remoteShardEtags.keys)
 
-        // 並列でシャードを取得（最大 8 並列）
-        let fetched = try await withThrowingTaskGroup(of: (String, ManifestShard, String)?.self) { group in
-            var inflight = 0
-            let limit = 8
-            for shardId in toFetch {
-                if inflight >= limit {
-                    _ = try await group.next()
-                    inflight -= 1
-                }
-                let s3 = self.s3
-                group.addTask {
-                    guard let f = try await s3.getShard(shardId) else { return nil }
-                    return (shardId, f.value, f.etag)
-                }
-                inflight += 1
-            }
-            var acc: [(String, ManifestShard, String)] = []
-            for try await item in group {
-                if let item { acc.append(item) }
-            }
-            return acc
+        // 並列でシャードを取得（最大 8 並列）。有界並列の骨格は BoundedParallel に一元化
+        //（`group.next()` 結果の取りこぼし罠ごと封じる — PR #50 レビュー #7。取りこぼすと
+        // shard_state が更新されず毎周回再取得・ManifestSnapshotLoader ではファイル欠落だった）。
+        let s3 = self.s3
+        let fetched: [(String, ManifestShard, String)] = try await BoundedParallel.compactMap(toFetch) { shardId in
+            guard let f = try await s3.getShard(shardId) else { return nil }
+            return (shardId, f.value, f.etag)
         }
 
         // shard_state を更新

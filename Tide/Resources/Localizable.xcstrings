@@ -2150,6 +2150,94 @@
           }
         }
       }
+    },
+    "File Provider (experimental)" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "File Provider（実験的）"
+          }
+        }
+      }
+    },
+    "Domain is enabled." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ドメインは有効です。"
+          }
+        }
+      }
+    },
+    "Domain is not enabled." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ドメインは無効です。"
+          }
+        }
+      }
+    },
+    "Enable File Provider (PoC)" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "File Provider を有効化（PoC）"
+          }
+        }
+      }
+    },
+    "Disable File Provider" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "File Provider を無効化"
+          }
+        }
+      }
+    },
+    "Enabled — check “Tide” under Locations in Finder (~/Library/CloudStorage)." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "有効化しました — Finder のサイドバー「場所」の「Tide」（~/Library/CloudStorage）を確認してください。"
+          }
+        }
+      }
+    },
+    "File Provider domain removed." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "File Provider ドメインを削除しました。"
+          }
+        }
+      }
+    },
+    "Read-only preview (PoC): shows synced files as cloud placeholders and downloads them when opened. Independent from the sync folder — enabling or disabling does not affect syncing." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "読み取り専用プレビュー（PoC）: 同期済みファイルをクラウドのプレースホルダとして表示し、開いた時に取得します。同期フォルダとは独立で、有効/無効は同期動作に影響しません。"
+          }
+        }
+      }
     }
   },
   "version" : "1.1"

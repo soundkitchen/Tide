@@ -388,6 +388,6 @@ struct PutObjectResult {
 
 - `os.Logger` を使用
 - サブシステム: `org.izukawa.Tide`
-- カテゴリ: `sync`, `s3`, `database`, `ui`, `watcher`
+- カテゴリ: `sync`, `s3`, `database`, `ui`, `watcher`, `fileprovider`（File Provider 拡張・M5 Phase 3〜）
 - レベル: debug / info / error
 - リリースビルドでも error は残す

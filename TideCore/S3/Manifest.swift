@@ -87,6 +87,12 @@ public enum ISO8601 {
     public static func format(_ date: Date) -> String {
         date.formatted(style)
     }
+
+    /// マニフェストの ISO8601 文字列（秒精度・UTC）を Date に戻す。パース不能なら nil。
+    /// **format 側に fractional seconds を足さないこと**（CLAUDE.md §7 [mtime 不変条件]）。
+    public static func parse(_ s: String) -> Date? {
+        try? Date(s, strategy: .iso8601)
+    }
 }
 
 public enum ManifestJSON {

@@ -9,9 +9,12 @@ PROJECT    := $(APP_NAME).xcodeproj
 APP_PATH   := build/Build/Products/Debug/$(APP_NAME).app
 SUPPORT    := $(HOME)/Library/Application Support/$(APP_NAME)
 CACHES     := $(HOME)/Library/Caches/$(APP_NAME)
-# App Group コンテナ（M5 Phase 2 以降の DB / 設定の正位置）
-GROUP_ID        := group.org.izukawa.Tide
-GROUP_CONTAINER := $(HOME)/Library/Group Containers/$(GROUP_ID)
+# App Group コンテナ（M5 Phase 2 以降の DB / 設定の正位置。Phase 3 でチーム ID プレフィックス形式へ）
+GROUP_ID            := G5G54TCH8W.org.izukawa.Tide
+GROUP_CONTAINER     := $(HOME)/Library/Group Containers/$(GROUP_ID)
+# Phase 2 で一時使用した旧 group. 形式コンテナ（移行元。reset では一緒に消す）
+OLD_GROUP_ID        := group.org.izukawa.Tide
+OLD_GROUP_CONTAINER := $(HOME)/Library/Group Containers/$(OLD_GROUP_ID)
 # App Sandbox コンテナ（M5 Phase 2 以降、Caches / 標準 UserDefaults はここに解決される）
 APP_CONTAINER   := $(HOME)/Library/Containers/$(BUNDLE_ID)
 
@@ -41,6 +44,7 @@ help: ## 利用可能なターゲット一覧
 .PHONY: reset
 reset: stop ## ローカル設定をリセット（App Group + Sandbox コンテナ + Application Support + UserDefaults + Keychain + Caches）
 	rm -rf "$(GROUP_CONTAINER)"
+	rm -rf "$(OLD_GROUP_CONTAINER)"
 	rm -rf "$(APP_CONTAINER)"
 	rm -rf "$(SUPPORT)"
 	rm -rf "$(CACHES)"
