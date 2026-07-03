@@ -35,4 +35,22 @@ enum FileProviderPoC {
         let domains = (try? await NSFileProviderManager.domains()) ?? []
         return domains.contains { $0.identifier == domain.identifier }
     }
+
+    /// リモート変化（pull がシャード変化を取り込んだ / アップロードがマニフェストを書いた）を
+    /// FP ドメインへ通知する（M5 Phase 4・アプリ側が主経路）。fire-and-forget・未登録なら no-op。
+    /// replicated 拡張への signal は `.workingSet` のみ有効（他コンテナは無視される）。
+    /// 拡張側は enumerateChanges 応答で TTL を待たず増分ロードするため、この signal が
+    /// 実質のリモート追従トリガになる。
+    static func signalRemoteChanges() {
+        Task {
+            guard await isEnabled(), let manager = NSFileProviderManager(for: domain) else { return }
+            do {
+                try await manager.signalEnumerator(for: .workingSet)
+                AppLogger.sync.debug("Signaled File Provider working set")
+            } catch {
+                // 一過性（拡張未起動等）は次の pull / ブラウズ時の自己 signal で追いつく
+                AppLogger.sync.error("File Provider signal failed: \(String(describing: error), privacy: .private)")
+            }
+        }
+    }
 }
