@@ -48,10 +48,12 @@ final class FileProviderItem: NSObject, NSFileProviderItem, @unchecked Sendable 
 
     var itemVersion: NSFileProviderItemVersion {
         switch node {
-        case .directory:
-            // ディレクトリは合成物で固有バージョンを持たない
+        case .directory(_, let mtime):
+            // ディレクトリは合成物（コンテンツは持たない）。配下の最大 mtime（合成値）を
+            // metadataVersion に載せ、配下更新でメタデータ（表示日付）が追従するようにする。
+            let meta = mtime.map { "dir-\(ISO8601.format($0))" } ?? "dir"
             return NSFileProviderItemVersion(
-                contentVersion: Data("dir".utf8), metadataVersion: Data("dir".utf8))
+                contentVersion: Data("dir".utf8), metadataVersion: Data(meta.utf8))
         case .file(_, let entry):
             let v = Data(entry.sha256.utf8)
             return NSFileProviderItemVersion(contentVersion: v, metadataVersion: v)
@@ -64,8 +66,14 @@ final class FileProviderItem: NSObject, NSFileProviderItem, @unchecked Sendable 
     }
 
     var contentModificationDate: Date? {
-        if case .file(_, let entry) = node { return ISO8601.parse(entry.mtime) }
-        return nil
+        switch node {
+        case .file(_, let entry):
+            return ISO8601.parse(entry.mtime)
+        case .directory(_, let mtime):
+            // 合成 mtime（配下ファイルの最大値）。無指定 nil のままだと Finder が 1970 を
+            // 表示する（Phase 3 PoC の既知の癖）。
+            return mtime
+        }
     }
 
     var contentPolicy: NSFileProviderContentPolicy {

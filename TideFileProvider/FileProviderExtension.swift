@@ -45,9 +45,10 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         }
         // root は定数（合成ディレクトリ）なのでマニフェストロードを経由しない —
         // ドメインアタッチ時の余計な S3 往復と「一過性エラーで root が失敗アイテム化」を避ける。
+        // mtime は常に nil（ManifestTree 側も root には畳み込まない＝itemVersion が経路で揺れない）。
         if path.isEmpty {
             progress.completedUnitCount = 1
-            completionHandler(FileProviderItem(node: .directory(path: "")), nil)
+            completionHandler(FileProviderItem(node: .directory(path: "", mtime: nil)), nil)
             return progress
         }
         // completion handler はどのスレッドから呼んでもよい契約なので箱で Task へ運ぶ

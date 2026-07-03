@@ -40,7 +40,7 @@ final class ManifestTreeTests: XCTestCase {
     func testEmptyManifestHasEmptyRoot() {
         let tree = ManifestTree(files: [:])
         XCTAssertEqual(tree.children(of: ""), [])
-        XCTAssertEqual(tree.node(at: ""), .directory(path: ""))
+        XCTAssertEqual(tree.node(at: ""), .directory(path: "", mtime: nil))
     }
 
     func testDirectoryWinsOverConflictingFilePath() {
@@ -83,5 +83,41 @@ final class ManifestTreeTests: XCTestCase {
         XCTAssertEqual(tree.node(at: "docs/report.pdf")?.name, "report.pdf")
         XCTAssertEqual(tree.node(at: "docs")?.name, "docs")
         XCTAssertEqual(tree.node(at: "")?.name, "")
+    }
+
+    // MARK: - ディレクトリの合成 mtime（M5 Phase 4）
+
+    private func entry(mtime: String, sha: String = "aa") -> ManifestFileEntry {
+        ManifestFileEntry(
+            size: 1, mtime: mtime, sha256: sha,
+            s3VersionId: nil, etag: "e", deviceId: "d", uploadedAt: mtime
+        )
+    }
+
+    func testDirectoryMtimeIsMaxOfDescendants() {
+        let tree = ManifestTree(files: [
+            "docs/old.txt": entry(mtime: "2026-01-01T00:00:00Z"),
+            "docs/sub/new.txt": entry(mtime: "2026-06-15T12:00:00Z"),
+            "docs/mid.txt": entry(mtime: "2026-03-01T00:00:00Z"),
+        ])
+        let newest = ISO8601.parse("2026-06-15T12:00:00Z")
+        XCTAssertEqual(tree.node(at: "docs"), .directory(path: "docs", mtime: newest))
+        XCTAssertEqual(tree.node(at: "docs/sub"), .directory(path: "docs/sub", mtime: newest))
+        // children(of:) 経由でも同じ mtime 付きノードが返る（注入漏れ防止）
+        XCTAssertEqual(
+            tree.children(of: "")?.first { $0.path == "docs" },
+            .directory(path: "docs", mtime: newest)
+        )
+    }
+
+    func testRootMtimeStaysNil() {
+        // root は item(for:) の高速パス（マニフェスト非依存）と itemVersion を揃えるため常に nil
+        let tree = ManifestTree(files: ["a.txt": entry(mtime: "2026-06-15T12:00:00Z")])
+        XCTAssertEqual(tree.node(at: ""), .directory(path: "", mtime: nil))
+    }
+
+    func testUnparsableMtimeLeavesDirectoryMtimeNil() {
+        let tree = ManifestTree(files: ["docs/bad.txt": entry(mtime: "not-a-date")])
+        XCTAssertEqual(tree.node(at: "docs"), .directory(path: "docs", mtime: nil))
     }
 }

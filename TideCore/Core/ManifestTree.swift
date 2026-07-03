@@ -9,13 +9,16 @@ import Foundation
 public struct ManifestTree: Sendable {
     public enum Node: Sendable, Equatable {
         case file(path: String, entry: ManifestFileEntry)
-        case directory(path: String)
+        /// `mtime` は配下ファイルの最大 mtime（合成値・M5 Phase 4 = Finder の 1970 表示解消）。
+        /// ルート（`""`）は常に nil — `item(for:)` の root 高速パスがマニフェスト非依存のため、
+        /// 経路によって root の itemVersion が揺れないよう固定する。
+        case directory(path: String, mtime: Date?)
 
         /// 相対 POSIX パス（ルートディレクトリは `""`）。
         public var path: String {
             switch self {
             case .file(let path, _): return path
-            case .directory(let path): return path
+            case .directory(let path, _): return path
             }
         }
 
@@ -32,12 +35,14 @@ public struct ManifestTree: Sendable {
 
     /// ディレクトリパス（`""` = ルート）→ 直下の子ノード（名前昇順）。
     private let childrenByDir: [String: [Node]]
-    /// パス → ノード（ルート `""` を含む）。
-    private let nodesByPath: [String: Node]
+    /// パス → ノード（ルート `""` を含む）。増分列挙の diff（`ManifestTreeDiff`）が全走査する。
+    public let nodesByPath: [String: Node]
 
     public init(files: [String: ManifestFileEntry]) {
         var children: [String: [String: Node]] = ["": [:]]  // dir → (childName → node)
-        var nodes: [String: Node] = ["": .directory(path: "")]
+        var nodes: [String: Node] = ["": .directory(path: "", mtime: nil)]
+        // ディレクトリの合成 mtime（配下ファイルの最大値）。ルートは対象外（doc コメント参照）。
+        var dirMtimes: [String: Date] = [:]
 
         for (path, entry) in files {
             let components = path.split(separator: "/").map(String.init)
@@ -51,7 +56,7 @@ public struct ManifestTree: Sendable {
             for component in components.dropLast() {
                 let childPath = dir.isEmpty ? component : "\(dir)/\(component)"
                 if nodes[childPath]?.isDirectory != true {
-                    let node = Node.directory(path: childPath)
+                    let node = Node.directory(path: childPath, mtime: nil)
                     nodes[childPath] = node
                     children[dir, default: [:]][component] = node
                     children[childPath] = children[childPath] ?? [:]
@@ -66,12 +71,32 @@ public struct ManifestTree: Sendable {
                 let node = Node.file(path: path, entry: entry)
                 nodes[path] = node
                 children[dir, default: [:]][name] = node
+
+                // 挿入が成立したファイルのみ、非ルート祖先へ mtime を畳み込む
+                if let mtime = ISO8601.parse(entry.mtime) {
+                    var ancestor = ""
+                    for component in components.dropLast() {
+                        ancestor = ancestor.isEmpty ? component : "\(ancestor)/\(component)"
+                        if let current = dirMtimes[ancestor] {
+                            dirMtimes[ancestor] = max(current, mtime)
+                        } else {
+                            dirMtimes[ancestor] = mtime
+                        }
+                    }
+                }
             }
         }
 
-        self.nodesByPath = nodes
+        // finalize: 合成 mtime をディレクトリノードへ注入（構造パスは上で確定済み）
+        func finalized(_ node: Node) -> Node {
+            if case .directory(let path, _) = node, !path.isEmpty, let mtime = dirMtimes[path] {
+                return .directory(path: path, mtime: mtime)
+            }
+            return node
+        }
+        self.nodesByPath = nodes.mapValues(finalized)
         self.childrenByDir = children.mapValues { byName in
-            byName.sorted { $0.key < $1.key }.map(\.value)
+            byName.sorted { $0.key < $1.key }.map { finalized($0.value) }
         }
     }
 
