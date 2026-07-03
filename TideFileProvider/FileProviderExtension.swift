@@ -94,6 +94,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         // completion handler はどのスレッドから呼んでもよい契約なので箱で Task へ運ぶ
         let completion = UncheckedSendableBox(value: completionHandler)
         let task = Task {
+            // どの経路（中間 guard / 成功 / catch）でも Progress を完了させる（PR #50 再レビュー #1）
+            defer { progress.completedUnitCount = progress.totalUnitCount }
             // 失敗経路（ガード / throw / キャンセル）の部分書き込み tmp をここで一元的に掃除する。
             // 成功時は cleanupURL を nil に戻してからシステムに tmp を引き渡す（PR #50 レビュー #2）。
             var cleanupURL: URL?
@@ -166,13 +168,11 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     return
                 }
 
-                // 成功: tmp はシステムが引き取るので掃除対象から外す（作法どおり完了前に 100% へ）
+                // 成功: tmp はシステムが引き取るので掃除対象から外す（Progress 完了は Task 冒頭の defer）
                 cleanupURL = nil
-                progress.completedUnitCount = progress.totalUnitCount
                 completion.value(tmpURL, FileProviderItem(node: .file(path: path, entry: entry)), nil)
             } catch {
                 AppLogger.fileProvider.error("fetchContents failed: \(String(describing: error), privacy: .private)")
-                progress.completedUnitCount = progress.totalUnitCount
                 completion.value(nil, nil, error)
             }
         }
