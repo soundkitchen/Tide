@@ -9,10 +9,16 @@ import TideCore
 @MainActor
 enum FileProviderPoC {
     /// PoC ドメイン。identifier は安定文字列（変えると別ドメイン＝別フォルダになる）。
-    static let domain = NSFileProviderDomain(
-        identifier: NSFileProviderDomainIdentifier(rawValue: "poc"),
-        displayName: "Tide"
-    )
+    static let domain: NSFileProviderDomain = {
+        let domain = NSFileProviderDomain(
+            identifier: NSFileProviderDomainIdentifier(rawValue: "poc"),
+            displayName: "Tide"
+        )
+        // PoC はゴミ箱同期を扱わない。宣言しないとデーモンが .trashContainer の列挙を
+        // 要求し続け、itemNotFound を永久リトライする（実機 fileproviderctl dump で確認）。
+        domain.supportsSyncingTrash = false
+        return domain
+    }()
 
     static func enable() async throws {
         try await NSFileProviderManager.add(domain)

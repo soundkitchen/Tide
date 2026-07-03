@@ -57,6 +57,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             do {
                 let tree = try await services.cache.tree()
                 guard let node = tree.node(at: path) else {
+                    AppLogger.fileProvider.error("item(for:): path not in manifest tree (noSuchItem): \(path, privacy: .private)")
                     completion.value(nil, NSFileProviderError(.noSuchItem))
                     return
                 }
@@ -100,6 +101,9 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             do {
                 let tree = try await services.cache.tree()
                 guard case .file(_, let entry)? = tree.node(at: path) else {
+                    // noSuchItem を返すとデーモンはプレースホルダごと item を削除する（実機確認）。
+                    // 本当に「無い」時以外に返さないこと。診断のため必ずログを残す。
+                    AppLogger.fileProvider.error("fetchContents: path not in manifest tree (noSuchItem): \(path, privacy: .private)")
                     completion.value(nil, nil, NSFileProviderError(.noSuchItem))
                     return
                 }
@@ -114,29 +118,45 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 let handle = try FileHandle(forWritingTo: tmpURL)
                 defer { try? handle.close() }
 
-                // マニフェストが指す版に固定して取得（enumerate と fetch の間に最新版が
-                // 変わっても、提示した itemVersion と中身が食い違わない）
-                var hasher = SHA256()
-                var written: Int64 = 0
-                let result = try await services.s3.streamObject(
-                    key: "files/\(path)",
-                    versionId: entry.s3VersionId,
-                    rangeStart: nil
-                ) { chunk in
-                    if progress.isCancelled { throw CancellationError() }
-                    hasher.update(data: chunk)
-                    try handle.write(contentsOf: chunk)
-                    written += Int64(chunk.count)
-                    progress.completedUnitCount = written
+                // 1 回ぶんのストリーミング取得（tmp 先頭から書き直し）。404 系は nil。
+                let s3 = services.s3
+                func download(_ versionId: String?) async throws -> (sha: String, written: Int64)? {
+                    try handle.truncate(atOffset: 0)
+                    var hasher = SHA256()
+                    var written: Int64 = 0
+                    progress.completedUnitCount = 0
+                    let result = try await s3.streamObject(
+                        key: "files/\(path)", versionId: versionId, rangeStart: nil
+                    ) { chunk in
+                        if progress.isCancelled { throw CancellationError() }
+                        hasher.update(data: chunk)
+                        try handle.write(contentsOf: chunk)
+                        written += Int64(chunk.count)
+                        progress.completedUnitCount = written
+                    }
+                    guard result != nil else { return nil }
+                    return (HashCalculator.hex(hasher.finalize()), written)
                 }
-                guard result != nil else {
+
+                // マニフェストが指す版を第一候補で取得（enumerate と fetch の間に最新版が
+                // 変わっても、提示した itemVersion と中身が食い違わない）。その版が消えている
+                // 場合（ライフサイクルの旧版失効・stale な manifest versionId）は最新版へ
+                // フォールバックする — 内容の同一性は下の SHA-256 ゲートが保証する。
+                var outcome = try await download(entry.s3VersionId)
+                if outcome == nil, entry.s3VersionId != nil {
+                    AppLogger.fileProvider.notice("fetchContents: pinned version missing; falling back to latest: \(path, privacy: .private)")
+                    outcome = try await download(nil)
+                }
+                guard let (sha, written) = outcome else {
+                    // 最新版も無い＝本当に消えている時だけ noSuchItem（デーモンが item を削除する）
+                    AppLogger.fileProvider.error("fetchContents: object not found on S3 (noSuchItem): \(path, privacy: .private)")
                     completion.value(nil, nil, NSFileProviderError(.noSuchItem))
                     return
                 }
                 try handle.close()
 
-                // commit 前検証（Downloader と同じ不変条件: サイズ一致 + SHA-256 一致）
-                let sha = HashCalculator.hex(hasher.finalize())
+                // commit 前検証（Downloader と同じ不変条件: サイズ一致 + SHA-256 一致）。
+                // 不一致は noSuchItem では**なく** I/O エラー（item を消させず後で再試行可能に）。
                 guard written == entry.size, sha == entry.sha256 else {
                     AppLogger.fileProvider.error("fetchContents verification failed for \(path, privacy: .private) (size \(written)/\(entry.size))")
                     completion.value(nil, nil, NSError(
