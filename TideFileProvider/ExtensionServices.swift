@@ -1,3 +1,4 @@
+import FileProvider
 import Foundation
 import TideCore
 
@@ -8,16 +9,19 @@ struct UncheckedSendableBox<T>: @unchecked Sendable {
 }
 
 /// 拡張プロセスの依存一式。App Group 共有の設定（group defaults）と Keychain（共有 access group）
-/// から構築する。**DB には触らない**（Phase 3 の不変条件）。
+/// から構築する。**DB には触らない**（Phase 3 からの不変条件。世代ログは App Group Caches の
+/// 拡張専用 JSON = GRDB 非接触）。
 struct ExtensionServices: Sendable {
     let s3: TideS3Client
-    let cache: ManifestTreeCache
+    let cache: ManifestGenerationCache
 
     /// 共有設定から構築する。未セットアップ / 認証情報なしなら nil
     /// （呼び出し側が `NSFileProviderError(.notAuthenticated)` に落とす）。
     /// ログは診断のため既定レベル以上（notice/error = 永続）で出す — 拡張プロセスは
     /// 対話デバッグしづらく、`log show` で追えることが重要（Phase 3 実機デバッグの教訓）。
-    static func fromSharedConfig() -> ExtensionServices? {
+    /// - Parameter domain: 機会的自己 signal（キャッシュ更新が新世代 = リモート変化を検知した
+    ///   ときの `signalEnumerator(.workingSet)`）の宛先。
+    static func fromSharedConfig(domain: NSFileProviderDomain) -> ExtensionServices? {
         let config = ConfigStore()  // 既定 = App Group 共有 suite
         let hasBucket = !(config.bucketName ?? "").isEmpty
         let hasRegion = !(config.region ?? "").isEmpty
@@ -43,47 +47,32 @@ struct ExtensionServices: Sendable {
                 credentials: credentials, region: region, bucket: bucket,
                 deviceId: config.deviceId
             )
-            return ExtensionServices(
-                s3: s3,
-                cache: ManifestTreeCache(loader: ManifestSnapshotLoader(source: s3))
+            let logURL = try? ManifestGenerationLog.defaultURL()
+            if logURL == nil {
+                AppLogger.fileProvider.error("Extension: generation log URL unavailable (persisting disabled)")
+            }
+            // NSFileProviderDomain は Sendable 注釈が無いが、signalEnumerator は
+            // どのスレッド/プロセスから呼んでもよい契約なので箱で closure へ運ぶ。
+            let boxedDomain = UncheckedSendableBox(value: domain)
+            let cache = ManifestGenerationCache(
+                loader: ManifestSnapshotLoader(source: s3),
+                bucket: bucket,
+                logURL: logURL,
+                onNewGeneration: {
+                    // ブラウズ契機のリフレッシュがリモート変化に気づいた時の自己 signal。
+                    // replicated 拡張への signal は .workingSet のみ有効（他は無視される）。
+                    // アプリ側の pull 後 signal が主経路で、これはアプリ非起動時の補完。
+                    NSFileProviderManager(for: boxedDomain.value)?.signalEnumerator(for: .workingSet) { error in
+                        if let error {
+                            AppLogger.fileProvider.error("Self-signal failed: \(String(describing: error), privacy: .private)")
+                        }
+                    }
+                }
             )
+            return ExtensionServices(s3: s3, cache: cache)
         } catch {
             AppLogger.fileProvider.error("Extension: failed to construct S3 client: \(String(describing: error), privacy: .private)")
             return nil
         }
-    }
-}
-
-/// マニフェストスナップショット（→ `ManifestTree`）の短期キャッシュ。
-/// 列挙は item / enumerator から細かく呼ばれるので、TTL 内は同じツリーを返して
-/// S3 への index/シャード GET を抑える。書込ゼロ・プロセス内メモリのみ。
-actor ManifestTreeCache {
-    private let loader: ManifestSnapshotLoader
-    private let maxAge: TimeInterval
-    private var cached: (tree: ManifestTree, fetchedAt: Date)?
-    /// single-flight: actor は await 中に reentrant なので、進行中ロードへ後続を合流させないと
-    /// コールドスタート（ドメイン起床直後の Finder バースト）で N 並列フルロードになる
-    /// （PR #50 レビュー #3）。
-    private var inflight: Task<ManifestTree, Error>?
-
-    init(loader: ManifestSnapshotLoader, maxAge: TimeInterval = 30) {
-        self.loader = loader
-        self.maxAge = maxAge
-    }
-
-    func tree() async throws -> ManifestTree {
-        if let cached, Date().timeIntervalSince(cached.fetchedAt) < maxAge {
-            return cached.tree
-        }
-        if let inflight {
-            return try await inflight.value
-        }
-        let loader = self.loader
-        let task = Task { ManifestTree(files: try await loader.load()) }
-        inflight = task
-        defer { inflight = nil }
-        let tree = try await task.value
-        cached = (tree, Date())
-        return tree
     }
 }

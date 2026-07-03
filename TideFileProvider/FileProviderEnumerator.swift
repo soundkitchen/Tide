@@ -1,12 +1,25 @@
 import FileProvider
 import Foundation
+import os
 import TideCore
 
-/// マニフェストツリー駆動の列挙（M5 Phase 3・読み取り専用）。
-/// `dirPath == nil` は working set 用の空列挙。
+/// マニフェストツリー駆動の列挙（M5 Phase 3〜・読み取り専用）。
+///
+/// - `dirPath == nil` は working set: **ドメイン全 item をフラットに列挙**する（FruitBasket 方式）。
+///   macOS の replicated 拡張ではリモート変更は working set の `enumerateChanges` 経由でのみ
+///   システムへ届くため、working set がドメイン全体をカバーしていないと signal しても
+///   列挙済みレプリカが恒久 stale になる（Phase 4 リサーチで確定）。
+/// - `enumerateChanges` は世代 anchor（`ManifestGenerationCache`）ベース。未知/世代落ち anchor は
+///   `.syncAnchorExpired` を返し、システムがキャッシュを破棄して全再列挙する（自己回復）。
+///   Phase 3 の静的 anchor（"tide-poc-static"）もこの経路で自然に移行される。
 final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @unchecked Sendable {
     private let dirPath: String?
     private let services: ExtensionServices
+    /// このインスタンスが最後に `enumerateItems` で提示したツリーの anchor。
+    /// `currentSyncAnchor` はこれを返す — 提示内容と anchor がずれると、その間の
+    /// 変更 diff が永遠に報告されない窓ができる。observer/completion はどのスレッドからも
+    /// 呼ばれ得る契約なのでロックで守る。
+    private let lastServedAnchor = OSAllocatedUnfairLock<String?>(initialState: nil)
 
     init(dirPath: String?, services: ExtensionServices) {
         self.dirPath = dirPath
@@ -16,25 +29,32 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @uncheck
     func invalidate() {}
 
     func enumerateItems(for observer: NSFileProviderEnumerationObserver, startingAt page: NSFileProviderPage) {
-        guard let dirPath else {
-            // working set: 追跡なし（Phase 4 で enumerateChanges と一緒に実装）
-            observer.finishEnumerating(upTo: nil)
-            return
-        }
+        let dirPath = self.dirPath
         let services = self.services
         // observer はどのスレッドから呼んでもよい契約（システム側で直列化される）なので、
         // 非 Sendable なまま Task へ箱で運ぶ。
         let boxed = UncheckedSendableBox(value: observer)
-        Task {
+        Task { [lastServedAnchor] in
             do {
-                let tree = try await services.cache.tree()
-                guard let children = tree.children(of: dirPath) else {
-                    boxed.value.finishEnumeratingWithError(NSFileProviderError(.noSuchItem))
-                    return
+                let current = try await services.cache.current()
+                let nodes: [ManifestTree.Node]
+                if let dirPath {
+                    guard let children = current.tree.children(of: dirPath) else {
+                        boxed.value.finishEnumeratingWithError(NSFileProviderError(.noSuchItem))
+                        return
+                    }
+                    nodes = children
+                } else {
+                    // working set: ルートを除く全ノード（path 昇順・決定的）
+                    nodes = current.tree.nodesByPath
+                        .filter { !$0.key.isEmpty }
+                        .sorted { $0.key < $1.key }
+                        .map(\.value)
                 }
-                if !children.isEmpty {
-                    boxed.value.didEnumerate(children.map(FileProviderItem.init(node:)))
+                if !nodes.isEmpty {
+                    boxed.value.didEnumerate(nodes.map(FileProviderItem.init(node:)))
                 }
+                lastServedAnchor.withLock { $0 = current.anchor }
                 boxed.value.finishEnumerating(upTo: nil)
             } catch {
                 AppLogger.fileProvider.error("enumerateItems failed: \(String(describing: error), privacy: .private)")
@@ -44,12 +64,61 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @uncheck
     }
 
     func enumerateChanges(for observer: NSFileProviderChangeObserver, from anchor: NSFileProviderSyncAnchor) {
-        // PoC では変更追跡をしない（増分列挙 + signalEnumerator は Phase 4）。
-        // 「変更なし」で同じ anchor を返す＝表示済み内容が維持される。
-        observer.finishEnumeratingChanges(upTo: anchor, moreComing: false)
+        let services = self.services
+        let boxed = UncheckedSendableBox(value: observer)
+        let anchorString = String(data: anchor.rawValue, encoding: .utf8)
+        Task {
+            // 起点世代の解決。未知（世代落ち・Phase 3 の静的 anchor・ログ消失後）は
+            // syncAnchorExpired でシステムに全再列挙させる。
+            guard let anchorString,
+                  let origin = await services.cache.generation(anchor: anchorString) else {
+                AppLogger.fileProvider.notice("enumerateChanges: unknown sync anchor (expired) — full re-enumeration")
+                boxed.value.finishEnumeratingWithError(NSFileProviderError(.syncAnchorExpired))
+                return
+            }
+            do {
+                // signal 応答経路なので TTL を待たずリフレッシュ（直近ロードはバースト床で吸収）
+                let current = try await services.cache.refreshedCurrent()
+                if current.anchor == anchorString {
+                    boxed.value.finishEnumeratingChanges(upTo: anchor, moreComing: false)
+                    return
+                }
+                // ドメイン全体の diff を報告する（コンテナ enumerator にも同じ diff を返す —
+                // item は parentItemIdentifier を持つのでシステム側が正しく取り込む。FruitBasket 方式）。
+                let changes = ManifestTreeDiff.changes(
+                    from: ManifestTree(files: origin.files), to: current.tree
+                )
+                if !changes.updated.isEmpty {
+                    boxed.value.didUpdate(changes.updated.map(FileProviderItem.init(node:)))
+                }
+                if !changes.deletedPaths.isEmpty {
+                    boxed.value.didDeleteItems(
+                        withIdentifiers: changes.deletedPaths.map(NSFileProviderItemIdentifier.init(tideRelativePath:))
+                    )
+                }
+                AppLogger.fileProvider.notice("enumerateChanges: \(changes.updated.count) updated / \(changes.deletedPaths.count) deleted")
+                boxed.value.finishEnumeratingChanges(
+                    upTo: NSFileProviderSyncAnchor(Data(current.anchor.utf8)), moreComing: false
+                )
+            } catch {
+                AppLogger.fileProvider.error("enumerateChanges failed: \(String(describing: error), privacy: .private)")
+                boxed.value.finishEnumeratingWithError(error)
+            }
+        }
     }
 
     func currentSyncAnchor(completionHandler: @escaping (NSFileProviderSyncAnchor?) -> Void) {
-        completionHandler(NSFileProviderSyncAnchor(Data("tide-poc-static".utf8)))
+        // enumerateItems が最後に提示したツリーの anchor を返す（提示内容との整合が最優先）。
+        // 未提示（システムが列挙前に anchor だけ要求した場合）は今の世代の anchor。
+        if let served = lastServedAnchor.withLock({ $0 }) {
+            completionHandler(NSFileProviderSyncAnchor(Data(served.utf8)))
+            return
+        }
+        let services = self.services
+        let boxed = UncheckedSendableBox(value: completionHandler)
+        Task {
+            let anchor = try? await services.cache.current().anchor
+            boxed.value(anchor.map { NSFileProviderSyncAnchor(Data($0.utf8)) })
+        }
     }
 }

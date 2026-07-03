@@ -18,7 +18,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
 
     required init(domain: NSFileProviderDomain) {
         self.domain = domain
-        self.services = ExtensionServices.fromSharedConfig()
+        self.services = ExtensionServices.fromSharedConfig(domain: domain)
         super.init()
         AppLogger.fileProvider.notice("FileProviderExtension initialized (configured: \(self.services != nil))")
     }
@@ -56,7 +56,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         let task = Task {
             defer { progress.completedUnitCount = progress.totalUnitCount }
             do {
-                let tree = try await services.cache.tree()
+                let tree = try await services.cache.current().tree
                 guard let node = tree.node(at: path) else {
                     AppLogger.fileProvider.error("item(for:): path not in manifest tree (noSuchItem): \(path, privacy: .private)")
                     completion.value(nil, NSFileProviderError(.noSuchItem))
@@ -102,7 +102,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             var cleanupURL: URL?
             defer { if let cleanupURL { try? FileManager.default.removeItem(at: cleanupURL) } }
             do {
-                let tree = try await services.cache.tree()
+                let tree = try await services.cache.current().tree
                 guard case .file(_, let entry)? = tree.node(at: path) else {
                     // noSuchItem を返すとデーモンはプレースホルダごと item を削除する（実機確認）。
                     // 本当に「無い」時以外に返さないこと。診断のため必ずログを残す。
@@ -229,7 +229,9 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             throw NSFileProviderError(.notAuthenticated)
         }
         if containerItemIdentifier == .workingSet {
-            // PoC では working set 追跡をしない（空列挙）
+            // macOS の replicated 拡張ではリモート変更がシステムに届く唯一の経路が
+            // working set の enumerateChanges（個別コンテナへの signal は無視される）。
+            // FruitBasket 同様、working set = ドメイン全 item として列挙する（Phase 4）。
             return FileProviderEnumerator(dirPath: nil, services: services)
         }
         guard let path = containerItemIdentifier.tideRelativePath else {
