@@ -243,3 +243,17 @@ symlink を辿り、リンク先（例: `~/.ssh/id_rsa`）の中身を S3 へ送
 - **含まない**: AWS 認証情報。`DeletedFilesCache.Payload` は `schemaVersion` / `bucket` / `updatedAt` / `[FileVersionHistory]`（相対パス + 版メタデータ）のみ。
 - **at-rest 場所**: `~/Library/Caches/Tide/`（本人ホーム配下）。派生データ＝S3 `listObjectVersions` からいつでも再生成可能。`factoryReset` が `Caches/Tide` ごと削除＝キャッシュも消える。
 - **bucket キー**: `load(bucket:)` は現 bucket 一致時のみ採用（別バケットの一覧を出さない）。スキーマ不一致・壊れは nil（無効）扱い。
+
+## L16. File Provider 世代ログの at-rest 内容（プライバシー境界）
+
+**Status:** ✅ Reviewed — M5 Phase 4 の増分列挙用に、マニフェストスナップショットの世代ログ（直近 8 世代）を App Group コンテナ内 Caches に追加。**認証情報を含まず、保存するのは相対パス + ファイルメタデータ（size/mtime/sha256/versionId/etag）+ bucket 名のみ**で、露出はローカル DB / S3 マニフェストが既に持つメタデータと同等であることを確認した (2026-07-04・M5 Phase 4)。
+
+**該当箇所:** `TideCore/S3/ManifestGenerationLog.swift`（`<App Group>/Library/Caches/Tide/fileprovider-manifest-log.json`）、`TideCore/S3/ManifestGenerationCache.swift`（書き手は File Provider 拡張プロセスのみ）。
+
+**重要度:** Low（攻撃者前提なし。本人の App Group コンテナ配下に派生データを置くだけ。新規の機密露出は無し）。
+
+**境界と対策:**
+- **含まない**: AWS 認証情報。`ManifestGenerationLog.Payload` は `schemaVersion` / `bucket` / `[Generation]`（anchor / fetchedAt / shardEtags / files = マニフェスト由来メタデータ）のみ。`deviceId` フィールドはマニフェスト側の書込元表示値（`ManifestFileEntry.deviceId`）の写しで、Keychain 秘匿対象の端末 ID とは別物。
+- **at-rest 場所**: App Group コンテナ内 `Library/Caches/Tide/`。派生データ＝S3 マニフェストからいつでも再生成可能。消えても anchor 未知 → `.syncAnchorExpired` → 全再列挙で自己回復。`factoryReset` が group Caches を削除・`make reset` は GROUP_CONTAINER ごと削除。
+- **bucket キー**: `load(bucket:)` は現 bucket 一致時のみ採用（別バケットの世代で diff しない）。スキーマ不一致・壊れは nil（cold 扱い）。
+- **取り込みゲート**: 世代へ入るデータは `ManifestSnapshotLoader` が `validateShardId` / `validateRelativePath` を通した後のもののみ（`ManifestReader.read` と同一のセキュリティゲート）。

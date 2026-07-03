@@ -89,6 +89,7 @@ F4 の是正内容（2026-06-11・M4 Sync Activity 対応に同梱）: `recentEr
 | L13 | 診断エクスポートの同梱範囲（プライバシー境界） | ✅ Reviewed（2026-06-19・PR #24。認証情報は含まない／ファイル名・パス・バケット名は含む旨を UI と diagnostics.txt に明示） |
 | L14 | 設定 export/import の同梱範囲（プライバシー境界） | ✅ Reviewed（2026-07-01・Issue #29。AWS 認証情報・deviceId を構造的に含めない非機密設定のみ JSON 往復。`SettingsTransferTests` がシークレット非混入を回帰固定） |
 | L15 | 削除済み一覧キャッシュの at-rest 内容（プライバシー境界） | ✅ Reviewed（2026-07-01・Issue #29 (b)。Caches に削除済みパス + 版メタ + bucket のみ・認証情報なし・派生データで factoryReset 消去・bucket キー） |
+| L16 | File Provider 世代ログの at-rest 内容（プライバシー境界） | ✅ Reviewed（2026-07-04・M5 Phase 4。group Caches にマニフェスト由来メタデータ + bucket のみ・認証情報なし・派生データで factoryReset/make reset 消去・bucket キー・PathValidator ゲート通過後のみ） |
 
 凡例: ✅ Fixed / 🟡 Partial / ⏸ Deferred / 🔴 未対応
 
@@ -99,7 +100,7 @@ F4 の是正内容（2026-06-11・M4 Sync Activity 対応に同梱）: `recentEr
 | 🔴 Critical | [critical.md](critical.md) | 3 |
 | 🟠 High | [high.md](high.md) | 3 |
 | 🟡 Medium | [medium.md](medium.md) | 7（M6 Fixed / M7 は 2026-06-02 検出・未対応） |
-| 🟢 Low / Hardening | [low.md](low.md) | 15（L13 = 診断エクスポートの同梱範囲・2026-06-19 / L14 = 設定 export/import の同梱範囲 / L15 = 削除済み一覧キャッシュの at-rest 内容・2026-07-01 Reviewed） |
+| 🟢 Low / Hardening | [low.md](low.md) | 16（L14 = 設定 export/import の同梱範囲 / L15 = 削除済み一覧キャッシュの at-rest 内容・2026-07-01 / L16 = FP 世代ログの at-rest 内容・2026-07-04 Reviewed） |
 
 ## 当初の推奨対応順（参考）
 
