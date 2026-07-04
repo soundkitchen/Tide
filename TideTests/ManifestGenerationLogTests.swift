@@ -133,4 +133,29 @@ final class ManifestGenerationLogTests: XCTestCase {
         try Data("not json".utf8).write(to: url)
         XCTAssertNil(ManifestGenerationLog.load(bucket: "b1", url: url), "壊れたファイルは nil")
     }
+
+    func testLoadRejectsUnsafePathsInPersistedSnapshot() throws {
+        // PR #51 レビュー #3: ディスク由来のログは改ざん/破損しうるので、読込時にも
+        // validateRelativePath を再適用し、1 件でも不正なら全体を破棄（cold 扱い）する。
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gen-log-unsafe-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("log.json")
+
+        let tampered = ManifestGenerationLog.Payload(
+            schemaVersion: ManifestGenerationLog.currentSchemaVersion,
+            bucket: "b1",
+            generations: [ManifestGenerationLog.Generation(
+                anchor: "g1", fetchedAt: Date(timeIntervalSince1970: 100),
+                shardEtags: ["ab": "e1"],
+                files: [
+                    "ok.txt": entry(sha: "1"),
+                    "../escape.txt": entry(sha: "2"),
+                ]
+            )]
+        )
+        try ManifestGenerationLog.save(tampered, url: url)
+        XCTAssertNil(ManifestGenerationLog.load(bucket: "b1", url: url), "不正パス混入は全破棄")
+    }
 }

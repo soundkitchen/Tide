@@ -118,6 +118,7 @@
 ### `Localizable.xcstrings` の運用
 - **新規キーには必ず `extractionState: "manual"`** を付ける（Xcode の自動 purge を防ぐため）。
 - **「キーが既に登録されていないか」を編集前に `grep` で確認**（汎用語の重複事故が起きやすい — 過去に `"Region"` 重複で JSON が壊れた）。
+- **カタログはターゲットごとに 2 つ**（M5 Phase 4〜）: アプリ向け文言は `Tide/Resources/Localizable.xcstrings`、**File Provider 拡張向け文言は `TideFileProvider/Resources/Localizable.xcstrings`**。appex 内の `String(localized:)` は `Bundle.main` = **拡張バンドル**から解決するため、拡張の user-facing 文言をアプリ側カタログへ足しても効かない（逆も同様）。なお拡張プロセスの言語は**システム言語**に従う（`make run-ja/en` の `-AppleLanguages` はアプリプロセスにしか効かない）。
 
 ### UI 起動・遷移
 - **`MenuBarExtra(.window)` のポップオーバー内ボタンから `openWindow(id:)` を呼ぶときは、`NSApp.activate(ignoringOtherApps: true)` を必ず前置**。LSUIElement = YES のアプリだとアプリがフォアグラウンドに来ておらず、新しいウィンドウが obscured になる。

@@ -12,7 +12,8 @@ import Foundation
 ///   世代を増やさない）なので、どのタスクが先に確定しても結果は同じ。
 /// - `onNewGeneration`: リフレッシュが新世代を検知（= リモート変化）した時に発火。拡張の
 ///   機会的自己 signal（`signalEnumerator(.workingSet)`）の配線先。signal → システムの
-///   `enumerateChanges` → 直近リフレッシュ済みで新世代なし → 再発火しない（収束する）。
+///   `enumerateChanges` → `refreshedCurrent` が signal 後開始のロードを保証 → 新世代なし →
+///   再発火しない（収束する）。
 public actor ManifestGenerationCache {
     /// 「今」の世代。tree は列挙・取得用、anchor は `NSFileProviderSyncAnchor` の中身。
     public struct Current: Sendable {
@@ -34,6 +35,10 @@ public actor ManifestGenerationCache {
     private var payloadLoaded = false
     private var cached: (current: Current, fetchedAt: Date)?
     private var inflight: Task<ManifestSnapshotLoader.SnapshotResult, Error>?
+    /// 最後にロード（S3 読み）を**開始**した時刻。`refreshedCurrent` が「signal 後に開始した
+    /// ロードか」を判定するために持つ（`cached.fetchedAt` は完了時刻なので代用できない —
+    /// signal 前に開始したロードへ合流しても完了は signal 後になる）。
+    private var lastLoadStartedAt: Date?
 
     public init(
         loader: ManifestSnapshotLoader,
@@ -57,9 +62,26 @@ public actor ManifestGenerationCache {
     }
 
     /// signal 応答（`enumerateChanges`）用: TTL を待たずリフレッシュする。
-    /// ただし直近 `minRefreshInterval` 以内のロード結果はそのまま返す（バースト吸収）。
-    public func refreshedCurrent() async throws -> Current {
-        try await current(maxStaleness: minRefreshInterval)
+    ///
+    /// バースト吸収の床（`minRefreshInterval`）は、直近キャッシュが**呼び出し元と異なる世代**
+    /// （`callerAnchor` 不一致 = diff を返せる）のときにだけ適用する。同じ世代のキャッシュに
+    /// 床を適用すると「signal 直前にロードした変更前ツリーで『変更なし』と答えて signal を
+    /// 消費する」取りこぼし窓になり、アプリ側 pull は取り込み済みで再 signal しないため
+    /// staleness が次のリモート変更まで残る（PR #51 レビュー #1）。
+    /// さらに「変更なし」と答えてよいのは **本呼び出し以降に開始したロード**の結果に限る
+    /// （signal 前開始の進行中ロードへ合流すると、signal の原因となった変更を含まない読みで
+    /// 「変更なし」と誤答しうる）— その場合は一度だけ再ロードする。
+    public func refreshedCurrent(callerAnchor: String?) async throws -> Current {
+        if let cached, Date().timeIntervalSince(cached.fetchedAt) < minRefreshInterval,
+           cached.current.anchor != callerAnchor {
+            return cached.current
+        }
+        let requestedAt = Date()
+        var current = try await current(maxStaleness: 0)
+        if current.anchor == callerAnchor, (lastLoadStartedAt ?? .distantPast) < requestedAt {
+            current = try await self.current(maxStaleness: 0)
+        }
+        return current
     }
 
     /// anchor の世代（diff の起点）。世代落ち・未知 anchor は nil（= `.syncAnchorExpired` 行き）。
@@ -82,6 +104,7 @@ public actor ManifestGenerationCache {
             let previous = ManifestGenerationLog.latest(of: payload).map {
                 ManifestSnapshotLoader.SnapshotResult(files: $0.files, shardEtags: $0.shardEtags)
             }
+            lastLoadStartedAt = Date()
             let task = Task { try await loader.load(previous: previous) }
             inflight = task
             defer { inflight = nil }
@@ -95,12 +118,16 @@ public actor ManifestGenerationCache {
         }
 
         let fetchedAt = Date()
+        let previousEtags = ManifestGenerationLog.latest(of: payload)?.shardEtags
         let (newPayload, appended) = ManifestGenerationLog.appending(
             snapshot: snapshot, anchor: UUID().uuidString, fetchedAt: fetchedAt,
             to: payload, bucket: bucket
         )
         payload = newPayload
-        if let logURL {
+        // 永続化は「世代が増えた or shard etag が実際に動いた」ときだけ。無変化リフレッシュの
+        // たびに最大 8 世代分の全 files map を atomic 書出しするのは無駄で、永続側 fetchedAt は
+        // 誰も読まない情報値（PR #51 レビュー #5。ログは消えても自己回復する設計なので安全側）。
+        if let logURL, appended || previousEtags != snapshot.shardEtags {
             do {
                 try ManifestGenerationLog.save(newPayload, url: logURL)
             } catch {
@@ -109,7 +136,14 @@ public actor ManifestGenerationCache {
         }
         // appending 後は必ず最新世代が存在する
         let latest = ManifestGenerationLog.latest(of: newPayload)!
-        let current = Current(tree: ManifestTree(files: latest.files), anchor: latest.anchor)
+        let current: Current
+        if !appended, let cached, cached.current.anchor == latest.anchor {
+            // 無変化なら既存ツリーを再利用（ISO8601 parse 込みの O(N) 再構築を省く —
+            // PR #51 レビュー #6）
+            current = cached.current
+        } else {
+            current = Current(tree: ManifestTree(files: latest.files), anchor: latest.anchor)
+        }
         cached = (current, fetchedAt)
         if appended {
             onNewGeneration()

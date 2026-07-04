@@ -120,4 +120,20 @@ final class ManifestTreeTests: XCTestCase {
         let tree = ManifestTree(files: ["docs/bad.txt": entry(mtime: "not-a-date")])
         XCTAssertEqual(tree.node(at: "docs"), .directory(path: "docs", mtime: nil))
     }
+
+    func testDirectoryMtimeIsDeterministicWhenFileReplacedByDirectory() {
+        // PR #51 レビュー #2: "a/b"（ファイル）と "a/b/c.txt" が両方ある壊れたマニフェスト
+        //（file→dir 置換バグ = Issue #52 が作る状態）では、directory-wins で捨てられた
+        // ファイル "a/b" の mtime を**畳み込まない**こと。挿入時畳み込みだと Dictionary の
+        // 走査順（プロセスごとに不定）で結果が変わり、世代間 diff が幻のディレクトリ更新を出す。
+        let newer = "2026-07-04T00:00:00Z"
+        let older = "2026-01-01T00:00:00Z"
+        let tree = ManifestTree(files: [
+            "a/b": entry(mtime: newer),          // directory-wins で捨てられる（newer は無効）
+            "a/b/c.txt": entry(mtime: older),    // 生き残る唯一のファイル
+        ])
+        let expected = ISO8601.parse(older)
+        XCTAssertEqual(tree.node(at: "a"), .directory(path: "a", mtime: expected))
+        XCTAssertEqual(tree.node(at: "a/b"), .directory(path: "a/b", mtime: expected))
+    }
 }

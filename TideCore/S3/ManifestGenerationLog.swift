@@ -122,11 +122,28 @@ public enum ManifestGenerationLog {
         return dir.appendingPathComponent("fileprovider-manifest-log.json")
     }
 
-    /// 読込: 欠落 / 壊れ / スキーマ不一致 / bucket 不一致はすべて nil（ログ無効 = cold 扱い）。
+    /// 読込: 欠落 / 壊れ / スキーマ不一致 / bucket 不一致 / 不正パス混入はすべて nil
+    /// （ログ無効 = cold 扱い → `.syncAnchorExpired` → 全再列挙で自己回復）。
+    ///
+    /// パス再検証について: 書込み時のデータは `ManifestSnapshotLoader` の
+    /// `validateRelativePath` ゲートを通っているが、**ディスク上のファイルはプロセス外で
+    /// 改ざん/破損しうる**ため、読込時にも同じゲートを再適用する。素通りさせると持ち越し経路
+    /// （`load(previous:)` は「検証済み」前提で無検証コピー）から不正パスが item identifier と
+    /// S3 キー組み立てに到達する（PR #51 レビュー #3・security/low.md L16）。
     public static func load(bucket: String, url: URL) -> Payload? {
         guard let data = try? Data(contentsOf: url),
               let payload = try? decode(data),
               payload.bucket == bucket else { return nil }
+        for generation in payload.generations {
+            for path in generation.files.keys {
+                do {
+                    try PathValidator.validateRelativePath(path)
+                } catch {
+                    AppLogger.fileProvider.error("Generation log rejected: unsafe path in persisted snapshot")
+                    return nil
+                }
+            }
+        }
         return payload
     }
 

@@ -9,6 +9,9 @@ final class ManifestGenerationCacheTests: XCTestCase {
         private let lock = NSLock()
         private var _files: [String: ManifestFileEntry]
         private var _version = 0
+        private var _indexFetchCount = 0
+        /// getIndex が呼ばれた回数（バースト床・短絡の検証用）。
+        var indexFetchCount: Int { lock.withLock { _indexFetchCount } }
 
         init(files: [String: ManifestFileEntry]) {
             self._files = files
@@ -23,7 +26,10 @@ final class ManifestGenerationCacheTests: XCTestCase {
         }
 
         func getIndex() async throws -> TideS3Client.ManifestFetch<ManifestIndex>? {
-            let (files, version) = lock.withLock { (_files, _version) }
+            let (files, version) = lock.withLock {
+                _indexFetchCount += 1
+                return (_files, _version)
+            }
             var shards: [String: ManifestIndex.ShardInfo] = [:]
             for path in files.keys {
                 shards[ManifestSharding.shardId(for: path)] = ManifestIndex.ShardInfo(etag: "v\(version)", count: 1)
@@ -107,7 +113,7 @@ final class ManifestGenerationCacheTests: XCTestCase {
         let first = try await cache.current()
 
         source.set(files: ["a.txt": entry(sha: "2"), "new.txt": entry(sha: "3")])
-        let second = try await cache.refreshedCurrent()
+        let second = try await cache.refreshedCurrent(callerAnchor: first.anchor)
         XCTAssertNotEqual(second.anchor, first.anchor)
         XCTAssertEqual(second.tree.node(at: "new.txt")?.isDirectory, false)
         XCTAssertEqual(signals.count, 2)
@@ -116,6 +122,48 @@ final class ManifestGenerationCacheTests: XCTestCase {
         let origin = await cache.generation(anchor: first.anchor)
         XCTAssertEqual(origin?.files["a.txt"]?.sha256, "1")
         XCTAssertNil(origin?.files["new.txt"])
+    }
+
+    func testRefreshedCurrentBypassesFloorWhenCallerAnchorMatches() async throws {
+        // PR #51 レビュー #1: 直近ロード（床内）が signal 前の変更前ツリーでも、呼び出し元と
+        // 同じ anchor なら「変更なし」と誤答せず必ず再ロードすること。
+        let source = MutableSource(files: ["a.txt": entry(sha: "1")])
+        let cache = ManifestGenerationCache(
+            loader: ManifestSnapshotLoader(source: source), bucket: "b", logURL: nil,
+            maxAge: 3600, minRefreshInterval: 3600  // 床を大きくして「握り潰し」条件を再現
+        )
+        let first = try await cache.current()
+
+        // リモート変更直後（床内）に signal 応答が来たケース
+        source.set(files: ["a.txt": entry(sha: "2")])
+        let second = try await cache.refreshedCurrent(callerAnchor: first.anchor)
+        XCTAssertNotEqual(second.anchor, first.anchor, "床を無視して再ロードし新世代を返す")
+
+        // バースト吸収は生きている: 旧 anchor（キャッシュと異なる世代）からの後続 enumerateChanges は
+        // 床内ならキャッシュから diff 材料を返し、追加の index GET をしない
+        let before = source.indexFetchCount
+        let third = try await cache.refreshedCurrent(callerAnchor: first.anchor)
+        XCTAssertEqual(third.anchor, second.anchor)
+        XCTAssertEqual(source.indexFetchCount, before, "異世代 anchor への床は追加 GET なし")
+    }
+
+    func testUnchangedRefreshDoesNotRewriteLogFile() async throws {
+        // PR #51 レビュー #5: 無変化リフレッシュで世代ログを全量再書込みしない
+        let url = try tempLogURL()
+        let source = MutableSource(files: ["a.txt": entry(sha: "1")])
+        let cache = ManifestGenerationCache(
+            loader: ManifestSnapshotLoader(source: source), bucket: "b", logURL: url,
+            maxAge: 0, minRefreshInterval: 0
+        )
+        _ = try await cache.current()
+        let bytesAfterFirst = try Data(contentsOf: url)
+
+        _ = try await cache.current()  // maxAge 0 = 再リフレッシュ（無変化）
+        XCTAssertEqual(try Data(contentsOf: url), bytesAfterFirst, "無変化なら書き直さない")
+
+        source.set(files: ["a.txt": entry(sha: "2")])
+        _ = try await cache.current()
+        XCTAssertNotEqual(try Data(contentsOf: url), bytesAfterFirst, "変化したら書く")
     }
 
     func testUnknownAnchorResolvesNil() async throws {

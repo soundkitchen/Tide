@@ -1120,24 +1120,13 @@ final class SyncEngine {
                 currentFile: items.first?.path, queueDepth: items.count
             ))
 
-            let anySucceeded = await withTaskGroup(of: Bool.self) { group in
-                let limit = 5
-                var inFlight = 0
-                var succeeded = false
-                for item in items {
-                    if inFlight >= limit {
-                        if let done = await group.next() { succeeded = succeeded || done }
-                        inFlight -= 1
-                    }
-                    let local = uploader
-                    group.addTask { [weak self] in
-                        await self?.processOne(item, uploader: local) ?? false
-                    }
-                    inFlight += 1
-                }
-                for await done in group { succeeded = succeeded || done }
-                return succeeded
-            }
+            // 有界並列の骨格は BoundedParallel に一元化（PR #50 レビュー #7 / PR #51 レビュー #7）。
+            // transform は非 throw なので try? は実際には失敗しない（throws は transform 由来のみ）。
+            let local = uploader
+            let results = (try? await BoundedParallel.compactMap(items, limit: 5) { [weak self] item in
+                await self?.processOne(item, uploader: local)
+            }) ?? []
+            let anySucceeded = results.contains(true)
             await refreshQueueDepth()
             lastSyncedAt = Date()
 

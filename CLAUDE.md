@@ -94,7 +94,7 @@
 ## 3. コード規約
 
 ### Localization
-- 文言は **`Tide/Resources/Localizable.xcstrings`** に集約（en source / ja 翻訳済み）。
+- 文言は **`Tide/Resources/Localizable.xcstrings`** に集約（en source / ja 翻訳済み）。ただし **File Provider 拡張向けの user-facing 文言は拡張側の `TideFileProvider/Resources/Localizable.xcstrings`** へ（M5 Phase 4〜。appex の `String(localized:)` は `Bundle.main` = 拡張バンドルから引くため、app 側カタログに足しても解決されない）。
 - SwiftUI の `Text("…")`, `Button("…")`, `TextField("…", …)` などの **リテラル引数は自動でローカライズ**される。
 - 関数返値の `String` を `Text(value)` / `Button(value)` に渡すケースは **`String(localized: "…")` で明示的に解決する**（さもないと verbatim 表示になる）。
 - 既存キーは `extractionState: "manual"` を付けて Xcode の自動 purge を防いでいる。

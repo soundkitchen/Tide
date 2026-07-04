@@ -65,6 +65,14 @@ public struct ManifestSnapshotLoader: Sendable {
             }
         }
 
+        // 定常（無変化）短絡: 宣言 etag マップが前回とキー・値とも完全一致なら、持ち越しの
+        // shardId 再計算（全ファイル SHA-1）と辞書再構築を省いて前回をそのまま返す。
+        // `toFetch.isEmpty` では不十分（index からシャードが消えた場合は脱落処理が要る）。
+        // 値一致まで要求するのは保守的 — 不一致なら通常経路に落ちるだけ（PR #51 レビュー #6）。
+        if let previous, previous.shardEtags == remoteShardEtags {
+            return previous
+        }
+
         // 変更検出（cold = 全取得）
         let cached = previous?.shardEtags ?? [:]
         let toFetch = remoteShardEtags.filter { cached[$0.key] != $0.value }.map(\.key)

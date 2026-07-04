@@ -41,8 +41,6 @@ public struct ManifestTree: Sendable {
     public init(files: [String: ManifestFileEntry]) {
         var children: [String: [String: Node]] = ["": [:]]  // dir → (childName → node)
         var nodes: [String: Node] = ["": .directory(path: "", mtime: nil)]
-        // ディレクトリの合成 mtime（配下ファイルの最大値）。ルートは対象外（doc コメント参照）。
-        var dirMtimes: [String: Date] = [:]
 
         for (path, entry) in files {
             let components = path.split(separator: "/").map(String.init)
@@ -71,19 +69,21 @@ public struct ManifestTree: Sendable {
                 let node = Node.file(path: path, entry: entry)
                 nodes[path] = node
                 children[dir, default: [:]][name] = node
+            }
+        }
 
-                // 挿入が成立したファイルのみ、非ルート祖先へ mtime を畳み込む
-                if let mtime = ISO8601.parse(entry.mtime) {
-                    var ancestor = ""
-                    for component in components.dropLast() {
-                        ancestor = ancestor.isEmpty ? component : "\(ancestor)/\(component)"
-                        if let current = dirMtimes[ancestor] {
-                            dirMtimes[ancestor] = max(current, mtime)
-                        } else {
-                            dirMtimes[ancestor] = mtime
-                        }
-                    }
-                }
+        // ディレクトリの合成 mtime（配下ファイルの最大値・ルートは対象外）は、構造が確定した後に
+        // **生き残ったファイルノードのみ**から畳み込む。挿入時に畳み込むと、file→directory 置換
+        // （壊れたマニフェスト）で置換済みファイルの mtime が残留し、Dictionary の走査順（プロセス
+        // ごとに不定）で結果が変わる＝世代間 diff が幻のディレクトリ更新を出す（PR #51 レビュー #2）。
+        var dirMtimes: [String: Date] = [:]
+        for node in nodes.values {
+            guard case .file(let path, let entry) = node,
+                  let mtime = ISO8601.parse(entry.mtime) else { continue }
+            var ancestor = ""
+            for component in path.split(separator: "/").dropLast() {
+                ancestor = ancestor.isEmpty ? String(component) : "\(ancestor)/\(component)"
+                dirMtimes[ancestor] = max(dirMtimes[ancestor] ?? .distantPast, mtime)
             }
         }
 

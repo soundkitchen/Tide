@@ -77,8 +77,10 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @uncheck
                 return
             }
             do {
-                // signal 応答経路なので TTL を待たずリフレッシュ（直近ロードはバースト床で吸収）
-                let current = try await services.cache.refreshedCurrent()
+                // signal 応答経路なので TTL を待たずリフレッシュ。バースト床は「呼び出し元と
+                // 異なる世代のキャッシュ = diff を返せる」場合のみ効く（同世代なら必ず再ロード
+                // — 変更前キャッシュで「変更なし」と誤答して signal を消費しないため）。
+                let current = try await services.cache.refreshedCurrent(callerAnchor: anchorString)
                 if current.anchor == anchorString {
                     boxed.value.finishEnumeratingChanges(upTo: anchor, moreComing: false)
                     return
