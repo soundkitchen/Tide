@@ -27,7 +27,8 @@ try FileManager.default.moveItem(at: tmpURL, to: fullURL)
 
 ## C2. シンボリックリンク経由のサンドボックス回避
 
-**Status:** ✅ Fixed (2026-05-24) — `performFullScan` のウォーカーで `.isSymbolicLinkKey` を取得、symlink なら `skipDescendants()` してから `continue`。`Downloader` の書き込み先がシンボリックリンクなら拒否（リンク先実体の書き換えを防ぐ）。`applyRemoteDeletion` も symlink を削除対象から除外。
+**Status:** ✅ Fixed (2026-05-24) — `performFullScan` のウォーカーで `.isSymbolicLinkKey` を取得、symlink は `continue` でスキップ。`Downloader` の書き込み先がシンボリックリンクなら拒否（リンク先実体の書き換えを防ぐ）。`applyRemoteDeletion` も symlink を削除対象から除外。
+**修正 (2026-07-05・Issue #54):** 当初対策の「symlink なら `skipDescendants()`」は**削除**した。実測で (1) deep enumeration は symlink ディレクトリへ**そもそも再帰しない**（下の「既定で辿る」という当初の記述は誤りで、この呼び出しは不要）、(2) 現在 item がファイル（symlink）のときに呼ぶと**無関係な隣接ディレクトリ**への再帰がスキップされ、実在する追跡ファイルが削除検出に乗って S3 へ誤 delete される（実害あり・実機発現）ことを確認したため。symlink 非追従の安全性は enumerator の仕様 + `continue` で維持される（回帰テスト: `FullScanSymlinkTests`）。
 
 **該当箇所（対応コード）:** `Tide/Core/SyncEngine.swift:474-492`（enumerator 構築 + `.isSymbolicLinkKey` 取得 → symlink なら `skipDescendants()` + `continue`）。Downloader の書き込み先 symlink 拒否（`Downloader.swift:66-68`）、`applyRemoteDeletion` の symlink 除外（`:292-295`）。以下は対策前の、symlink を辿っていたコード（参考）:
 

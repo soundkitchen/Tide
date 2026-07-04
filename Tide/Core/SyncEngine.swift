@@ -422,9 +422,13 @@ final class SyncEngine {
                     forKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey]
                 ) else { continue }
 
-                // セキュリティゲート: シンボリックリンクは絶対に追従しない（ディレクトリリンクなら配下もスキップ）。
+                // セキュリティゲート: シンボリックリンクは絶対に追従しない。deep enumeration は
+                // symlink（ディレクトリリンク含む）へそもそも再帰しないため continue だけで足りる。
+                // ここで skipDescendants() を呼んではならない（Issue #54）: 現在 item がファイル
+                // （symlink）のとき呼ぶと**無関係な隣接ディレクトリ**への再帰がスキップされ、配下の
+                // .syncignore が層状マッチャから欠落する（下の機密網 dir スキップのように「現在 item が
+                // ディレクトリ」の文脈でのみ正しく働く API）。
                 if values.isSymbolicLink == true {
-                    walker.skipDescendants()
                     continue
                 }
 
@@ -577,9 +581,13 @@ final class SyncEngine {
                     .isRegularFileKey, .isSymbolicLinkKey,
                     .fileSizeKey, .contentModificationDateKey
                 ])
-                // C2: シンボリックリンクは絶対に追従しない（ディレクトリリンクなら配下もスキップ）
+                // C2: シンボリックリンクは絶対に追従しない。deep enumeration は symlink
+                // （ディレクトリリンク含む）へそもそも再帰しないため continue だけで足りる。
+                // ここで skipDescendants() を呼んではならない（Issue #54）: 現在 item がファイル
+                // （symlink）のとき呼ぶと**無関係な隣接ディレクトリ**への再帰がスキップされ、
+                // 実在する追跡ファイルが foundPaths から欠落 → 削除検出に乗って S3 へ誤 delete
+                // される（同期ルート直下の symlink 1 本で実機発現・M1 からの潜在バグ）。
                 if values.isSymbolicLink == true {
-                    walker?.skipDescendants()
                     continue
                 }
                 guard values.isRegularFile == true else { continue }
