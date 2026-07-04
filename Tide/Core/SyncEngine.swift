@@ -1165,7 +1165,12 @@ final class SyncEngine {
     /// binary collation（SQLite TEXT 既定・UTF-8 は memcmp で接頭辞順序を保存）では
     /// `path >= "p/" AND path < "p0"` が「`p/` で始まる全パス」と正確に一致し、インデックスも効く
     /// （LIKE は `%`/`_` を含むファイル名でエスケープが要り、既定では index も使わない）。
-    /// - Returns: enqueue した削除件数（0 = 配下の追跡行なし＝通常のファイルイベント）。
+    /// 既に delete 行がある子孫はスキップする（親分岐の再入ガードと同型・PR #53 再レビュー）:
+    /// S3 障害中に置換後ファイルへのイベントが再着火するたび `.replace` で積み直すと、リトライ中の
+    /// 子孫 delete 行の attempts が毎回リセットされ、バックオフ / give-up が無効化される。
+    /// stale な upload 行は従来どおり `.replace` で delete へ置換する。
+    /// - Returns: 今回 enqueue（新規 or upload 行から置換）した削除件数。0 = 配下の追跡行なし、
+    ///   または全子孫が delete 変換済み（呼び元はログも `refreshQueueDepth` も抑止できる）。
     nonisolated static func enqueueDescendantDeletes(
         db: LocalDatabase, parentPath: String, now: Double
     ) async throws -> Int {
@@ -1178,8 +1183,14 @@ final class SyncEngine {
                 .map(\.path)
         }
         guard !paths.isEmpty else { return 0 }
-        try await db.pool.write { db in
+        return try await db.pool.write { db in
+            var enqueued = 0
             for p in paths {
+                if let existing = try UploadQueueRecord
+                    .filter(Column("path") == p)
+                    .fetchOne(db), existing.operation == "delete" {
+                    continue
+                }
                 var rec = UploadQueueRecord(
                     id: nil,
                     path: p,
@@ -1190,9 +1201,10 @@ final class SyncEngine {
                     lastError: nil
                 )
                 try rec.insert(db, onConflict: .replace)
+                enqueued += 1
             }
+            return enqueued
         }
-        return paths.count
     }
 
     // MARK: - Bandwidth (サブ E)
@@ -1544,7 +1556,9 @@ final class SyncEngine {
             try UploadQueueRecord
                 .filter(Column("attempts") < 5)
                 .filter(Column("next_retry_at") == nil || Column("next_retry_at") <= now)
-                .order(Column("enqueued_at"))
+                // id タイブレーク（PR #53 再レビュー nit）: フルスキャンの「削除検出 → upload」は
+                // 同一 now で enqueue するため、同時刻内は insert 順（= delete 先行）を形式化する。
+                .order(Column("enqueued_at"), Column("id"))
                 .limit(20)
                 .fetchAll(db)
         }

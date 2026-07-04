@@ -11,6 +11,21 @@ public enum FileOpenError: Error {
     case isDirectory
     /// その他の I/O エラー（errno を保持）。
     case io(errno: Int32)
+
+    /// 「path がもはや通常ファイルを指せない」失敗か＝削除（ENOENT）/ ディレクトリ化（EISDIR 相当）/
+    /// 祖先のファイル化（ENOTDIR）。Uploader はこれを upload → delete 変換の条件に使う（Issue #52
+    /// 防衛層・PR #53 レビュー #5）。symlink（ELOOP）は含めない — 置換を delete にしないのは
+    /// 文書化済みポリシー（リンク先実体を S3 から消さない）。
+    public var isPathNoLongerRegularFile: Bool {
+        switch self {
+        case .notFound, .isDirectory:
+            return true
+        case .io(let errno):
+            return errno == ENOTDIR
+        case .isSymbolicLink:
+            return false
+        }
+    }
 }
 
 /// 最終コンポーネントの symlink を追従せず（`O_NOFOLLOW`）にファイルを開き、

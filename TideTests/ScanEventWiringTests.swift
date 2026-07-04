@@ -229,6 +229,39 @@ final class ScanEventWiringTests: XCTestCase {
         XCTAssertTrue(rows.isEmpty)
     }
 
+    /// 再入ガード（PR #53 再レビュー）: 既に delete 行がある子孫は `.replace` で積み直さない
+    /// （リトライ状態 attempts を巻き戻すと give-up が無効化される）。stale な upload 行は
+    /// 従来どおり delete へ置換する。
+    func testEnqueueDescendantDeletesSkipsExistingDeleteRows() async throws {
+        let env = try makeEnv()
+        for p in ["x.dir/a.txt", "x.dir/b.txt"] {
+            try await saveFileRecord(env.db, makeRecord(path: p, sha: "s", size: 1, mtime: 1))
+        }
+        // a.txt: リトライ中の delete 行（attempts=3）/ b.txt: stale upload 行（attempts=2）を seed。
+        try await env.db.pool.write { db in
+            var del = UploadQueueRecord(
+                id: nil, path: "x.dir/a.txt", operation: "delete",
+                enqueuedAt: 1_000, attempts: 3, nextRetryAt: 9_999, lastError: "retrying"
+            )
+            try del.insert(db)
+            var up = UploadQueueRecord(
+                id: nil, path: "x.dir/b.txt", operation: "upload",
+                enqueuedAt: 1_000, attempts: 2, nextRetryAt: nil, lastError: nil
+            )
+            try up.insert(db)
+        }
+
+        let n = try await SyncEngine.enqueueDescendantDeletes(db: env.db, parentPath: "x.dir", now: 9_000)
+
+        XCTAssertEqual(n, 1, "delete 変換済みの a.txt はスキップ・upload 行の b.txt のみ置換")
+        let a = try await queueRows(env.db, path: "x.dir/a.txt")
+        XCTAssertEqual(a.first?.operation, "delete")
+        XCTAssertEqual(a.first?.attempts, 3, "リトライ中の delete 行はそのまま（attempts を巻き戻さない）")
+        let b = try await queueRows(env.db, path: "x.dir/b.txt")
+        XCTAssertEqual(b.first?.operation, "delete", "stale upload 行は delete へ置換される")
+        XCTAssertEqual(b.first?.attempts, 0)
+    }
+
     // MARK: - enqueueScanDeletions（削除検出）
 
     func testDeletionEnqueuesMissingPaths() async throws {

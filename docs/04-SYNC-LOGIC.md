@@ -431,7 +431,9 @@ pull 側がディレクトリを `(local copy …)` へ退避してファイル�
 **鏡像 = ディレクトリ → 同名ファイル置換**（PR #53 レビュー #3）も同経路で検出する:
 path が今 regular file で DB に `path/` 配下の追跡行が残っていれば、子孫の delete を
 enqueue してから通常の upload 処理へ進む（`enqueueDescendantDeletes` = PK の範囲比較
-`>= "p/" AND < "p0"` で配下を列挙）。`mv x.dir /outside && cp f x.dir` は子のイベントが
+`>= "p/" AND < "p0"` で配下を列挙。**既に delete 行がある子孫はスキップ** = 親分岐の
+再入ガードと同型で、S3 障害中のイベント再着火が `.replace` でリトライ状態を巻き戻さない。
+PR #53 再レビュー）。`mv x.dir /outside && cp f x.dir` は子のイベントが
 出ないため、放置するとマニフェストに「x.dir（ファイル）+ x.dir/…（配下）」の鏡像不整合が残り、
 ピア側は子 DL の ENOTDIR 失敗 →（削除が来ないため）再 arm の毎 pull 再試行が恒久化する。
 

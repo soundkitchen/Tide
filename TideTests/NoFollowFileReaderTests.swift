@@ -76,6 +76,16 @@ final class NoFollowFileReaderTests: XCTestCase {
         }
     }
 
+    /// Uploader の upload → delete 変換条件（`isPathNoLongerRegularFile`）の分類を固定する
+    /// （PR #53 再レビュー nit で catch を where 句 + 本プロパティへ変更）。
+    func testIsPathNoLongerRegularFileClassification() {
+        XCTAssertTrue(FileOpenError.notFound.isPathNoLongerRegularFile)
+        XCTAssertTrue(FileOpenError.isDirectory.isPathNoLongerRegularFile)
+        XCTAssertTrue(FileOpenError.io(errno: ENOTDIR).isPathNoLongerRegularFile)
+        XCTAssertFalse(FileOpenError.isSymbolicLink.isPathNoLongerRegularFile, "symlink 置換は delete にしない（文書化済みポリシー）")
+        XCTAssertFalse(FileOpenError.io(errno: EACCES).isPathNoLongerRegularFile)
+    }
+
     func testEmptyFileReadsNil() throws {
         let dir = tempDir()
         let url = dir.appendingPathComponent("empty.bin")
