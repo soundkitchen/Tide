@@ -4,16 +4,28 @@ import TideCore
 
 /// DB 非依存の全シャード読みローダ（M5 Phase 3・File Provider 拡張用）。
 final class ManifestSnapshotLoaderTests: XCTestCase {
-    private struct FakeSource: ManifestSnapshotSource {
+    private final class FakeSource: ManifestSnapshotSource, @unchecked Sendable {
         var index: ManifestIndex?
         var shards: [String: ManifestShard]
+        private let lock = NSLock()
+        private var _fetchedShardIds: [String] = []
+        /// getShard が実際に呼ばれた shardId（増分ロードのスキップ検証用）。
+        var fetchedShardIds: [String] {
+            lock.withLock { _fetchedShardIds }
+        }
+
+        init(index: ManifestIndex?, shards: [String: ManifestShard]) {
+            self.index = index
+            self.shards = shards
+        }
 
         func getIndex() async throws -> TideS3Client.ManifestFetch<ManifestIndex>? {
             index.map { TideS3Client.ManifestFetch(value: $0, etag: "idx") }
         }
 
         func getShard(_ id: String) async throws -> TideS3Client.ManifestFetch<ManifestShard>? {
-            shards[id].map { TideS3Client.ManifestFetch(value: $0, etag: "e-\(id)") }
+            lock.withLock { _fetchedShardIds.append(id) }
+            return shards[id].map { TideS3Client.ManifestFetch(value: $0, etag: "e-\(id)") }
         }
     }
 
@@ -111,5 +123,104 @@ final class ManifestSnapshotLoaderTests: XCTestCase {
         )
         let files = try await ManifestSnapshotLoader(source: source).load()
         XCTAssertEqual(Set(files.keys), ["a.txt"])
+    }
+
+    // MARK: - 増分ロード（M5 Phase 4）
+
+    /// パスの正規シャード（`ManifestSharding.shardId(for:)`）に置いた fixture を組む。
+    /// 増分ロードの持ち越しはパスからシャード ID を再計算するため、正規配置が前提。
+    private func canonicalSource(files: [String: ManifestFileEntry]) -> FakeSource {
+        var shards: [String: ManifestShard] = [:]
+        for (path, entry) in files {
+            let sid = ManifestSharding.shardId(for: path)
+            var files = shards[sid]?.files ?? [:]
+            files[path] = entry
+            shards[sid] = shard(sid, files: files)
+        }
+        return FakeSource(index: index(shardIds: Array(shards.keys)), shards: shards)
+    }
+
+    func testIncrementalColdLoadEqualsFullLoad() async throws {
+        let source = canonicalSource(files: [
+            "a.txt": entry(sha: "1"), "docs/b.txt": entry(sha: "2"),
+        ])
+        let result = try await ManifestSnapshotLoader(source: source).load(previous: nil)
+        XCTAssertEqual(Set(result.files.keys), ["a.txt", "docs/b.txt"])
+        // 取得したシャードの etag が全件記録される（次回の増分判定の材料）
+        XCTAssertEqual(
+            Set(result.shardEtags.keys),
+            Set(["a.txt", "docs/b.txt"].map { ManifestSharding.shardId(for: $0) })
+        )
+    }
+
+    func testIncrementalSkipsUnchangedShards() async throws {
+        let source = canonicalSource(files: [
+            "a.txt": entry(sha: "1"), "docs/b.txt": entry(sha: "2"),
+        ])
+        let loader = ManifestSnapshotLoader(source: source)
+        let first = try await loader.load(previous: nil)
+        let fetchedInFirst = source.fetchedShardIds.count
+
+        // 無変化の再ロード: シャード GET はゼロ・ファイルは持ち越し
+        let second = try await loader.load(previous: first)
+        XCTAssertEqual(source.fetchedShardIds.count, fetchedInFirst, "無変化シャードを再取得しない")
+        XCTAssertEqual(second, first)
+    }
+
+    func testIncrementalFetchesOnlyChangedShard() async throws {
+        let source = canonicalSource(files: [
+            "a.txt": entry(sha: "1"), "docs/b.txt": entry(sha: "2"),
+        ])
+        let loader = ManifestSnapshotLoader(source: source)
+        let first = try await loader.load(previous: nil)
+
+        // a.txt のシャードだけ内容と index 宣言 etag を進める（b 側は元の宣言値のまま）
+        let sidA = ManifestSharding.shardId(for: "a.txt")
+        let sidB = ManifestSharding.shardId(for: "docs/b.txt")
+        source.shards[sidA] = shard(sidA, files: ["a.txt": entry(sha: "1-updated")])
+        source.index = ManifestIndex(
+            updatedAt: "2026-07-04T00:00:00Z", updatedBy: "test",
+            shards: [
+                sidA: ManifestIndex.ShardInfo(etag: "e-new", count: 1),
+                sidB: ManifestIndex.ShardInfo(etag: "e-\(sidB)", count: 1),
+            ]
+        )
+
+        let before = source.fetchedShardIds.count
+        let second = try await loader.load(previous: first)
+        XCTAssertEqual(source.fetchedShardIds.suffix(from: before).sorted(), [sidA], "変化したシャードのみ取得")
+        XCTAssertEqual(second.files["a.txt"]?.sha256, "1-updated")
+        XCTAssertEqual(second.files["docs/b.txt"]?.sha256, "2", "無変化シャードの持ち越し")
+    }
+
+    func testIncrementalDropsFilesOfRemovedShard() async throws {
+        let source = canonicalSource(files: [
+            "a.txt": entry(sha: "1"), "docs/b.txt": entry(sha: "2"),
+        ])
+        let loader = ManifestSnapshotLoader(source: source)
+        let first = try await loader.load(previous: nil)
+
+        // a.txt のシャードを index から除去（= 配下全削除）
+        let sidA = ManifestSharding.shardId(for: "a.txt")
+        let sidB = ManifestSharding.shardId(for: "docs/b.txt")
+        source.shards[sidA] = nil
+        source.index = index(shardIds: [sidB])
+
+        let second = try await loader.load(previous: first)
+        XCTAssertEqual(Set(second.files.keys), ["docs/b.txt"], "消えたシャードのファイルは脱落")
+        XCTAssertEqual(Set(second.shardEtags.keys), [sidB], "消えたシャードの etag も脱落")
+    }
+
+    func testIncrementalMissingShardIsNotRecorded() async throws {
+        // index にはあるが GET が 404（削除レース）のシャードは etag を記録しない＝次回再取得
+        let source = canonicalSource(files: [
+            "a.txt": entry(sha: "1"), "docs/b.txt": entry(sha: "2"),
+        ])
+        let sidA = ManifestSharding.shardId(for: "a.txt")
+        source.shards[sidA] = nil  // index には残したまま GET だけ 404
+
+        let result = try await ManifestSnapshotLoader(source: source).load(previous: nil)
+        XCTAssertEqual(Set(result.files.keys), ["docs/b.txt"])
+        XCTAssertNil(result.shardEtags[sidA])
     }
 }

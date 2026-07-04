@@ -54,7 +54,7 @@
   - M2 ダウンロード / 復元 / ポーリング（実装済み・MVP ゴール）
   - M3 双方向同期 / 競合解決 / マルチパート（サブ A〜E 実装済み: マルチパート / `.syncignore` / 3-way merge / 中断・再開 / 帯域制御。**M3 完了**。`docs/09` の据え置き数件あり）
   - M4 運用機能と磨き込み（復元/バージョン UI・Sync Activity/エラー履歴・通知・pull コスト削減。**M4 完了**。詳細は `docs/00-OVERVIEW.md` と `docs/08-IMPLEMENTATION-NOTES.md`）
-  - M5 Files-On-Demand（File Provider）— オンラインのみ実体化: **着手中**。Phase 1（`TideCore` framework 分離）・Phase 2（App Group 移設 + App Sandbox 化 + security-scoped bookmark）・Phase 3（`TideFileProvider.appex` 読み取り materialize PoC＝dataless プレースホルダ → 開いた瞬間 S3 取得を実機実証。Phase 0 の全リスク解消）完了。次は Phase 4（増分列挙 + リモート追従）以降を継続判断。同期先は最終的に `~/Library/CloudStorage/Tide` 固定（既存 FSEvents の任意フォルダモードと opt-in 並走）。設計・進捗は `docs/09-DEFERRED.md` の M5 節
+  - M5 Files-On-Demand（File Provider）— オンラインのみ実体化: **着手中**。Phase 1（`TideCore` framework 分離）・Phase 2（App Group 移設 + App Sandbox 化 + security-scoped bookmark）・Phase 3（`TideFileProvider.appex` 読み取り materialize PoC＝dataless プレースホルダ → 開いた瞬間 S3 取得を実機実証。Phase 0 の全リスク解消）・Phase 4（増分列挙 + リモート追従: 世代 SyncAnchor + `enumerateChanges`・working set 全件列挙・アプリ pull/アップロード後の `signalEnumerator(.workingSet)` + 拡張の機会的自己 signal・ディレクトリ合成 mtime・拡張文言ローカライズ。**実機受け入れ待ち**）実装完了。次は Phase 5（双方向書込）以降を継続判断。同期先は最終的に `~/Library/CloudStorage/Tide` 固定（既存 FSEvents の任意フォルダモードと opt-in 並走）。設計・進捗は `docs/09-DEFERRED.md` の M5 節
 
 ### 主要な確定パラメータ
 - Bundle ID: `org.izukawa.Tide`
@@ -94,7 +94,7 @@
 ## 3. コード規約
 
 ### Localization
-- 文言は **`Tide/Resources/Localizable.xcstrings`** に集約（en source / ja 翻訳済み）。
+- 文言は **`Tide/Resources/Localizable.xcstrings`** に集約（en source / ja 翻訳済み）。ただし **File Provider 拡張向けの user-facing 文言は拡張側の `TideFileProvider/Resources/Localizable.xcstrings`** へ（M5 Phase 4〜。appex の `String(localized:)` は `Bundle.main` = 拡張バンドルから引くため、app 側カタログに足しても解決されない）。
 - SwiftUI の `Text("…")`, `Button("…")`, `TextField("…", …)` などの **リテラル引数は自動でローカライズ**される。
 - 関数返値の `String` を `Text(value)` / `Button(value)` に渡すケースは **`String(localized: "…")` で明示的に解決する**（さもないと verbatim 表示になる）。
 - 既存キーは `extractionState: "manual"` を付けて Xcode の自動 purge を防いでいる。

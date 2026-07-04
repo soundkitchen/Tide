@@ -841,6 +841,12 @@ final class SyncEngine {
             await reloadIgnoreMatcher()
         }
         await refreshQueueDepth()
+
+        // シャード変化を取り込んだら FP ドメインへ通知（M5 Phase 4・アプリ側が主経路）。
+        // 拡張は独立の etag キャッシュを持つので、既知の変化なら向こうで no-op になる。
+        if !affected.isEmpty {
+            FileProviderPoC.signalRemoteChanges()
+        }
     }
 
     /// `reconcileRemoteEntry` の本体（依存注入の nonisolated static）。判定 → 実 I/O の switch 配線を
@@ -1114,33 +1120,33 @@ final class SyncEngine {
                 currentFile: items.first?.path, queueDepth: items.count
             ))
 
-            await withTaskGroup(of: Void.self) { group in
-                let limit = 5
-                var inFlight = 0
-                for item in items {
-                    if inFlight >= limit {
-                        _ = await group.next()
-                        inFlight -= 1
-                    }
-                    let local = uploader
-                    group.addTask { [weak self] in
-                        await self?.processOne(item, uploader: local)
-                    }
-                    inFlight += 1
-                }
-                await group.waitForAll()
-            }
+            // 有界並列の骨格は BoundedParallel に一元化（PR #50 レビュー #7 / PR #51 レビュー #7）。
+            // transform は非 throw なので try? は実際には失敗しない（throws は transform 由来のみ）。
+            let local = uploader
+            let results = (try? await BoundedParallel.compactMap(items, limit: 5) { [weak self] item in
+                await self?.processOne(item, uploader: local)
+            }) ?? []
+            let anySucceeded = results.contains(true)
             await refreshQueueDepth()
             lastSyncedAt = Date()
+
+            // マニフェストを書いた（アップロード/削除が 1 件でも成功した）ら FP ドメインへ通知
+            //（M5 Phase 4）。自分の変更も FP ドメインの表示対象なので pull と対称に扱う。
+            if anySucceeded {
+                FileProviderPoC.signalRemoteChanges()
+            }
         }
     }
 
-    private nonisolated func processOne(_ item: UploadQueueRecord, uploader: Uploader) async {
+    /// - Returns: 処理が成功したか（マニフェストが書かれた可能性があるか）。
+    private nonisolated func processOne(_ item: UploadQueueRecord, uploader: Uploader) async -> Bool {
         do {
             try await uploader.process(item)
+            return true
         } catch {
             AppLogger.sync.error("Upload/delete failed for \(item.path, privacy: .private): \(String(describing: error), privacy: .private)")
             await self.handleProcessingFailure(item: item, error: error)
+            return false
         }
     }
 

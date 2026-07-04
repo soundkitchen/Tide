@@ -18,7 +18,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
 
     required init(domain: NSFileProviderDomain) {
         self.domain = domain
-        self.services = ExtensionServices.fromSharedConfig()
+        self.services = ExtensionServices.fromSharedConfig(domain: domain)
         super.init()
         AppLogger.fileProvider.notice("FileProviderExtension initialized (configured: \(self.services != nil))")
     }
@@ -45,9 +45,10 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         }
         // root は定数（合成ディレクトリ）なのでマニフェストロードを経由しない —
         // ドメインアタッチ時の余計な S3 往復と「一過性エラーで root が失敗アイテム化」を避ける。
+        // mtime は常に nil（ManifestTree 側も root には畳み込まない＝itemVersion が経路で揺れない）。
         if path.isEmpty {
             progress.completedUnitCount = 1
-            completionHandler(FileProviderItem(node: .directory(path: "")), nil)
+            completionHandler(FileProviderItem(node: .directory(path: "", mtime: nil)), nil)
             return progress
         }
         // completion handler はどのスレッドから呼んでもよい契約なので箱で Task へ運ぶ
@@ -55,7 +56,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         let task = Task {
             defer { progress.completedUnitCount = progress.totalUnitCount }
             do {
-                let tree = try await services.cache.tree()
+                let tree = try await services.cache.current().tree
                 guard let node = tree.node(at: path) else {
                     AppLogger.fileProvider.error("item(for:): path not in manifest tree (noSuchItem): \(path, privacy: .private)")
                     completion.value(nil, NSFileProviderError(.noSuchItem))
@@ -101,7 +102,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             var cleanupURL: URL?
             defer { if let cleanupURL { try? FileManager.default.removeItem(at: cleanupURL) } }
             do {
-                let tree = try await services.cache.tree()
+                let tree = try await services.cache.current().tree
                 guard case .file(_, let entry)? = tree.node(at: path) else {
                     // noSuchItem を返すとデーモンはプレースホルダごと item を削除する（実機確認）。
                     // 本当に「無い」時以外に返さないこと。診断のため必ずログを残す。
@@ -163,7 +164,10 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     AppLogger.fileProvider.error("fetchContents verification failed for \(path, privacy: .private) (size \(written)/\(entry.size))")
                     completion.value(nil, nil, NSError(
                         domain: NSCocoaErrorDomain, code: NSFileReadCorruptFileError,
-                        userInfo: [NSLocalizedDescriptionKey: "Downloaded content failed integrity verification."]
+                        userInfo: [
+                            NSLocalizedDescriptionKey:
+                                String(localized: "Downloaded content failed integrity verification.")
+                        ]
                     ))
                     return
                 }
@@ -228,7 +232,9 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             throw NSFileProviderError(.notAuthenticated)
         }
         if containerItemIdentifier == .workingSet {
-            // PoC では working set 追跡をしない（空列挙）
+            // macOS の replicated 拡張ではリモート変更がシステムに届く唯一の経路が
+            // working set の enumerateChanges（個別コンテナへの signal は無視される）。
+            // FruitBasket 同様、working set = ドメイン全 item として列挙する（Phase 4）。
             return FileProviderEnumerator(dirPath: nil, services: services)
         }
         guard let path = containerItemIdentifier.tideRelativePath else {
@@ -240,7 +246,10 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
     private static func readOnlyError() -> Error {
         NSError(
             domain: NSCocoaErrorDomain, code: NSFeatureUnsupportedError,
-            userInfo: [NSLocalizedDescriptionKey: "Tide (PoC) is read-only. Edit files in the sync folder instead."]
+            userInfo: [
+                NSLocalizedDescriptionKey:
+                    String(localized: "Tide (PoC) is read-only. Edit files in the sync folder instead.")
+            ]
         )
     }
 }

@@ -1,0 +1,28 @@
+{
+  "sourceLanguage" : "en",
+  "strings" : {
+    "Downloaded content failed integrity verification." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ダウンロードした内容が整合性検証に失敗しました。"
+          }
+        }
+      }
+    },
+    "Tide (PoC) is read-only. Edit files in the sync folder instead." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tide（PoC）は読み取り専用です。編集は同期フォルダ側で行ってください。"
+          }
+        }
+      }
+    }
+  },
+  "version" : "1.0"
+}
