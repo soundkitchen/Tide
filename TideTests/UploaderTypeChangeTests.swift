@@ -51,4 +51,41 @@ final class UploaderTypeChangeTests: XCTestCase {
         )
         XCTAssertEqual(rows.first?.id, item.id, "既存行の operation を書き換える（新行は作らない）")
     }
+
+    /// dir → file 置換の鏡像（PR #53 レビュー #5）: 祖先がファイル化した stale な子 upload 行は
+    /// open が ENOTDIR で失敗する。汎用 5 回リトライ → give-up（delete 未発行）に落とさず、
+    /// notFound / isDirectory と同じ delete 変換に含める。
+    func testUploadRowUnderFileAncestorConvertsToDelete() async throws {
+        let env = try makeTideTestEnv(prefix: "tide-uploader-enotdir")
+        try Data("f".utf8).write(to: env.root.appendingPathComponent("was-dir"))
+
+        let s3 = try TideS3Client(
+            credentials: AWSCredentials(accessKeyId: "AKIATESTDUMMY", secretAccessKey: "dummy"),
+            region: "us-east-1", bucket: "tide-test-bucket", deviceId: "devT"
+        )
+        let suite = "tide-tests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        addTeardownBlock { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        let uploader = Uploader(
+            s3: s3, db: env.db, syncRoot: env.root, deviceId: "devT",
+            config: ConfigStore(defaults: defaults), transferStore: env.store
+        )
+
+        let item: UploadQueueRecord = try await env.db.pool.write { db in
+            var rec = UploadQueueRecord(
+                id: nil, path: "was-dir/child.txt", operation: "upload",
+                enqueuedAt: 1_000, attempts: 2, nextRetryAt: nil, lastError: nil
+            )
+            try rec.insert(db)
+            return rec
+        }
+
+        try await uploader.process(item)
+
+        let rows = try await env.db.pool.read { db in
+            try UploadQueueRecord.filter(Column("path") == "was-dir/child.txt").fetchAll(db)
+        }
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows.first?.operation, "delete", "ENOTDIR も delete へ変換される")
+    }
 }

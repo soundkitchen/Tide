@@ -48,6 +48,19 @@ final class NoFollowFileReaderTests: XCTestCase {
         XCTAssertThrowsError(try NoFollowFileReader(path: missing))
     }
 
+    /// dir → file 置換の鏡像（PR #53 レビュー #5）: 祖先がファイルだと open は ENOTDIR(20) で失敗する。
+    /// Uploader の delete 変換（`.io(errno: ENOTDIR)` catch）が依存する errno マッピングを固定する。
+    func testAncestorFileThrowsENOTDIR() throws {
+        let dir = tempDir()
+        let f = dir.appendingPathComponent("f.txt")
+        try Data("x".utf8).write(to: f)
+        XCTAssertThrowsError(try NoFollowFileReader(path: f.appendingPathComponent("child").path)) { error in
+            guard case FileOpenError.io(let errno) = error, errno == ENOTDIR else {
+                return XCTFail("expected io(ENOTDIR), got \(error)")
+            }
+        }
+    }
+
     /// Issue #52: ディレクトリは open(O_RDONLY) が成功してしまう（EISDIR は read 時）ので、
     /// init の fstat で `.isDirectory` として先に拒否する。ファイル → 同名ディレクトリ置換を
     /// Uploader が read 前に判別（delete へ変換）できるようにするための前提。

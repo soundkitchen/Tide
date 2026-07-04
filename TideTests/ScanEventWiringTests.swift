@@ -199,6 +199,36 @@ final class ScanEventWiringTests: XCTestCase {
         XCTAssertEqual(rows.first?.operation, "delete")
     }
 
+    // MARK: - enqueueDescendantDeletes（dir → file 置換の鏡像 / PR #53 レビュー #3）
+
+    /// `parentPath/` 配下の追跡行だけが delete に乗る。PK 範囲比較（`>= "p/" AND < "p0"`）が
+    /// 接頭辞の紛らわしい隣接パス（`x.dirty` / `x.dir2/…`）を巻き込まないことも固定する。
+    func testEnqueueDescendantDeletesMatchesOnlyChildren() async throws {
+        let env = try makeEnv()
+        for p in ["x.dir/a.txt", "x.dir/sub/b.txt", "x.dirty", "x.dir2/c.txt", "y.txt"] {
+            try await saveFileRecord(env.db, makeRecord(path: p, sha: "s", size: 1, mtime: 1))
+        }
+        let n = try await SyncEngine.enqueueDescendantDeletes(db: env.db, parentPath: "x.dir", now: 9_000)
+        XCTAssertEqual(n, 2, "x.dir/ 配下の 2 行のみ")
+        for p in ["x.dir/a.txt", "x.dir/sub/b.txt"] {
+            let rows = try await queueRows(env.db, path: p)
+            XCTAssertEqual(rows.first?.operation, "delete", "\(p) は delete に乗る")
+        }
+        for p in ["x.dirty", "x.dir2/c.txt", "y.txt"] {
+            let rows = try await queueRows(env.db, path: p)
+            XCTAssertTrue(rows.isEmpty, "\(p) は巻き込まれない")
+        }
+    }
+
+    func testEnqueueDescendantDeletesNoopWithoutChildren() async throws {
+        let env = try makeEnv()
+        try await saveFileRecord(env.db, makeRecord(path: "plain.txt", sha: "s", size: 1, mtime: 1))
+        let n = try await SyncEngine.enqueueDescendantDeletes(db: env.db, parentPath: "plain.txt", now: 9_000)
+        XCTAssertEqual(n, 0, "配下の追跡行が無ければ何も積まない（通常のファイルイベント）")
+        let rows = try await allQueueRows(env.db)
+        XCTAssertTrue(rows.isEmpty)
+    }
+
     // MARK: - enqueueScanDeletions（削除検出）
 
     func testDeletionEnqueuesMissingPaths() async throws {

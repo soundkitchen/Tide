@@ -185,14 +185,10 @@ public struct Downloader: Sendable {
             // PR #9 レビュー ②: ManifestReader は fetch 時点（DL 完了前）で shard_state を「取得済み」記録
             // するため、ここで sentinel 化しないと同一セッション中の poll/wake/network-up pull が当該
             // シャードをキャッシュ済み扱いし、再開経路（reconcile → Range 再開）に到達しない。
-            // 再 arm するのはこの resumable 失敗（部分 tmp 保持）のみ。破棄系（SHA/サイズ不一致・404）は
-            // 決定的に再失敗するため再 arm せず、リモートのシャード etag 変化による自然回復に委ねる。
-            do {
-                try await db.invalidateShardCache(forPath: relativePath)
-            } catch {
-                // 失敗すると「シャード変化 or 再起動まで取り残し」が再発するので無音にしない（PR #9 レビュー ⑤）。
-                AppLogger.s3.error("Re-arm in-session download failed for \(relativePath, privacy: .private): \(String(describing: error), privacy: .private)")
-            }
+            // 再 arm するのはこの resumable 失敗（部分 tmp 保持）と、下のローカル適用ブロック失敗のみ。
+            // 破棄系（SHA/サイズ不一致・404）は決定的に再失敗するため再 arm せず、リモートのシャード
+            // etag 変化による自然回復に委ねる。
+            await rearmShardCache(forPath: relativePath, context: "in-session resume")
             throw error
         }
 
@@ -232,18 +228,32 @@ public struct Downloader: Sendable {
             )
         }
 
-        // ローカル適用（親ディレクトリ作成 → 差し替え move）。失敗したらシャードキャッシュを
-        // 再 arm して次回 pull に再試行させる（Issue #52）: ファイル → 同名ディレクトリ置換の伝播窓では
-        // 祖先名が既存ファイルで塞がれて createDirectory が決定的に失敗するが、塞いでいる旧ファイルは
-        // 後続 pull の削除反映で除かれ、その後は成功する。re-arm しないと shard_state が「取得済み」の
-        // まま残り、FileRecord の無い端末（初回取得側）では DB 再合成にも乗らず、エラーの無いまま
-        // 恒久的に取り残される。tmp は破棄する（完了サイズの tmp は resume 対象にならないため保持は無意味）。
+        // ローカル適用（親ディレクトリ作成 → 差し替え move）。「path の種別置換にブロックされた」失敗
+        //（EEXIST/ENOTDIR/516/-16 = `isBlockedByPathTypeChange`）に限りシャードキャッシュを再 arm して
+        // 次回 pull に再試行させる（Issue #52）: 伝播窓では祖先名が既存ファイルで塞がれて createDirectory
+        // が決定的に失敗するが、塞いでいる旧エントリは後続 pull の削除反映/競合退避で除かれ、その後は
+        // 成功する。re-arm しないと shard_state が「取得済み」のまま残り、FileRecord の無い端末（初回
+        // 取得側）では DB 再合成にも乗らず、エラーの無いまま恒久的に取り残される。
+        // エラークラスを絞るのは、EACCES/ENOSPC 等の非自己回復失敗まで再 arm すると「毎 pull フル再 DL →
+        // 失敗 → 破棄」が pull 周期ごとに無期限リピートするため（PR #53 レビュー #4。バックオフ機構の
+        // 無い pull 側では大ファイルの GET 課金・帯域が際限なく漏れる）。非ブロック系は従来どおり
+        // 行/tmp を保持したまま失敗を伝播する（停滞分は起動時 prune が掃除）。
         do {
             // 親ディレクトリ作成は SHA 検証後に行う＝不一致で捨てるときに空ディレクトリの litter を残さない。
             try FileManager.default.createDirectory(
                 at: fullURL.deletingLastPathComponent(),
                 withIntermediateDirectories: true
             )
+
+            // 転送中に path がディレクトリへ置換されていたら削除しない（PR #53 レビュー #8）:
+            // removeItem は再帰削除なので、置換後の新ディレクトリのツリーを競合退避なしに消してしまう。
+            // -16 で throw すればブロック系として再 arm され、次回 pull の reconcile が
+            // unreadable → conflictThenDownload でディレクトリを退避してから取得する＝データ温存で自己回復。
+            // attributesOfItem は symlink を辿らない（symlink なら .typeSymbolicLink）。
+            if let type = (try? FileManager.default.attributesOfItem(atPath: fullURL.path))?[.type] as? FileAttributeType,
+               type == .typeDirectory {
+                throw Self.downloaderError(-16, "download target became a directory; refusing to replace")
+            }
 
             // 既存ファイルを削除してから rename（同一 FS なので atomic）。
             // replaceItemAt は sandbox 中間ファイル (`.sb-*`) を作って FSEvents を汚すので使わない。
@@ -252,11 +262,15 @@ public struct Downloader: Sendable {
             }
             try FileManager.default.moveItem(at: tmpURL, to: fullURL)
         } catch {
-            await cleanupFailedDownload(tmpURL: tmpURL, path: relativePath)
-            do {
-                try await db.invalidateShardCache(forPath: relativePath)
-            } catch {
-                AppLogger.s3.error("Re-arm after local-apply failure failed for \(relativePath, privacy: .private): \(String(describing: error), privacy: .private)")
+            // 順序は [prune 順序]（CLAUDE.md §7）と同じ「invalidate → 破棄」（PR #53 レビュー #2）。
+            // 逆順だと invalidate 失敗や直後のクラッシュで「行なし + 実 etag のまま」になり、
+            // 本 PR が塞いだ沈黙恒久停止が再発する。invalidate に失敗したら行/tmp を温存する
+            // （行が残れば次回起動の prune が tmp 欠損/stale 枝で invalidate を引き受けて自己回復）。
+            // tmp は完了サイズなので resume 対象にならず、破棄してよい（成功時のみ）。
+            if Self.isBlockedByPathTypeChange(error) {
+                if await rearmShardCache(forPath: relativePath, context: "local apply") {
+                    await cleanupFailedDownload(tmpURL: tmpURL, path: relativePath)
+                }
             }
             AppLogger.s3.error("Local apply failed for \(relativePath, privacy: .private): \(String(describing: error), privacy: .private)")
             throw error
@@ -399,6 +413,51 @@ public struct Downloader: Sendable {
     private func cleanupFailedDownload(tmpURL: URL, path: String) async {
         try? FileManager.default.removeItem(at: tmpURL)
         try? await transferStore.clearDownload(path: path)
+    }
+
+    /// 当該 path のシャードキャッシュを sentinel 化（空 etag）して次回 pull に再取得させる（再 arm）。
+    /// 失敗は無音にしない（PR #9 レビュー ⑤）。呼び出し側は返値で [prune 順序]（invalidate 成功後に
+    /// のみ行/tmp を破棄）を守る。`cleanupFailedDownload` へは統合しない — 他の破棄系呼び出し元
+    /// （SHA/サイズ不一致・404）は決定的に再失敗するため再 arm してはならない。
+    @discardableResult
+    private func rearmShardCache(forPath path: String, context: StaticString) async -> Bool {
+        do {
+            try await db.invalidateShardCache(forPath: path)
+            return true
+        } catch {
+            AppLogger.s3.error("Re-arm (\(context, privacy: .public)) failed for \(path, privacy: .private): \(String(describing: error), privacy: .private)")
+            return false
+        }
+    }
+
+    /// ローカル適用失敗のうち「path（または祖先）の種別置換にブロックされた」ものか判定する
+    /// （Issue #52 の伝播窓・PR #53 レビュー #4）。真になるのは:
+    /// - POSIX `EEXIST`(17) / `ENOTDIR`(20)（祖先がファイルで塞がれた createDirectory/move）
+    /// - Cocoa `NSFileWriteFileExistsError`(516)（同上の Cocoa 包装）
+    /// - 自ドメイン -16（転送中に DL 先がディレクトリ化・上記 throw）
+    /// これらは後続 pull の削除反映/競合退避でブロッカーが除かれ再試行が成功する見込みがある。
+    /// それ以外（EACCES/ENOSPC 等）を再 arm すると毎 pull のフル再 DL が無期限化するため除外する。
+    /// `SyncError.ioError` は underlying を取り出し、NSError の underlying 連鎖を辿って判定する。
+    public static func isBlockedByPathTypeChange(_ error: Error) -> Bool {
+        var cursor: NSError?
+        if case SyncError.ioError(let underlying) = error {
+            cursor = underlying as NSError
+        } else {
+            cursor = error as NSError
+        }
+        while let cur = cursor {
+            if cur.domain == NSPOSIXErrorDomain, cur.code == Int(EEXIST) || cur.code == Int(ENOTDIR) {
+                return true
+            }
+            if cur.domain == NSCocoaErrorDomain, cur.code == NSFileWriteFileExistsError {
+                return true
+            }
+            if cur.domain == "Tide.Downloader", cur.code == -16 {
+                return true
+            }
+            cursor = cur.userInfo[NSUnderlyingErrorKey] as? NSError
+        }
+        return false
     }
 
     /// 相対パスから決定的な tmp ファイル名を導く（再開で同じ tmp を再発見できるように）。

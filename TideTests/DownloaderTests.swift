@@ -133,6 +133,98 @@ final class DownloaderTests: XCTestCase {
         XCTAssertNil(rec)
     }
 
+    /// PR #53 レビュー #4: 再 arm は種別置換ブロック（EEXIST/ENOTDIR/516/-16）に限定する。
+    /// EACCES 等の非自己回復失敗で再 arm すると毎 pull フル再 DL が無期限化するため、
+    /// 従来どおり行/tmp を保持したまま失敗を伝播する（起動時 prune に委ねる）。
+    func testLocalApplyNonBlockedFailureDoesNotRearm() async throws {
+        let env = try makeEnv()
+        // 書込不可の親ディレクトリで createDirectory を EACCES で失敗させる。
+        let ro = env.root.appendingPathComponent("ro", isDirectory: true)
+        try FileManager.default.createDirectory(at: ro, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: ro.path)
+        addTeardownBlock {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: ro.path)
+        }
+
+        let rp = "ro/sub/file.bin"
+        let data = deterministicBytes(2000)
+        try await seedShardState(db: env.db, path: rp, etag: "e-keep")
+        let fake = FakeRangedDownloadClient(fullData: data)
+        let dl = makeDownloader(client: fake, db: env.db, store: env.store, root: env.root, tmp: env.tmp)
+
+        do {
+            _ = try await dl.download(relativePath: rp, entry: entry(for: data))
+            XCTFail("EACCES で失敗するはず")
+        } catch {
+            XCTAssertFalse(Downloader.isBlockedByPathTypeChange(error), "EACCES はブロック系に分類しない")
+        }
+
+        let etag = try await shardEtag(db: env.db, path: rp)
+        XCTAssertEqual(etag, "e-keep", "非ブロック系失敗では再 arm しない")
+        // 行と tmp は保持（従来挙動 = 起動時 prune が停滞を掃除）。
+        let row = try await env.store.loadDownload(path: rp)
+        XCTAssertNotNil(row)
+        let tmpURL = Downloader.resumeTmpURL(in: env.tmp, relativePath: rp)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: tmpURL.path))
+    }
+
+    /// PR #53 レビュー #8: 転送中に DL 先がディレクトリへ置換された場合、type-blind な removeItem で
+    /// 新ディレクトリのツリーを再帰削除せず、-16 で中断する（ブロック系 = 再 arm）。次回 pull の
+    /// reconcile が unreadable → conflictThenDownload でディレクトリを退避してから取得する（データ温存）。
+    func testLocalApplyRefusesToReplaceDirectoryCreatedDuringTransfer() async throws {
+        let env = try makeEnv()
+        let rp = "swap.txt"
+        let data = deterministicBytes(1500)
+        try await seedShardState(db: env.db, path: rp, etag: "e-swap")
+
+        let target = env.root.appendingPathComponent(rp)
+        let client = DirCreatingClient(fullData: data, dirToCreate: target)
+        let dl = makeDownloader(client: client, db: env.db, store: env.store, root: env.root, tmp: env.tmp)
+
+        do {
+            _ = try await dl.download(relativePath: rp, entry: entry(for: data))
+            XCTFail("転送中にディレクトリ化した path は置換しないはず")
+        } catch {
+            XCTAssertTrue(Downloader.isBlockedByPathTypeChange(error), "-16 はブロック系")
+        }
+
+        // 新ディレクトリのツリーが無傷（再帰削除されていない）。
+        var isDir: ObjCBool = false
+        XCTAssertTrue(FileManager.default.fileExists(atPath: target.path, isDirectory: &isDir))
+        XCTAssertTrue(isDir.boolValue)
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: target.appendingPathComponent("keep.txt").path),
+            "ディレクトリ内の既存ファイルが温存される"
+        )
+        // ブロック系なので再 arm + 行/tmp 破棄。
+        let etag = try await shardEtag(db: env.db, path: rp)
+        XCTAssertEqual(etag, "")
+        let row = try await env.store.loadDownload(path: rp)
+        XCTAssertNil(row)
+    }
+
+    /// `isBlockedByPathTypeChange` の分類を固定する（PR #53 レビュー #4）。
+    func testBlockedByPathTypeChangeClassifier() {
+        XCTAssertTrue(Downloader.isBlockedByPathTypeChange(
+            NSError(domain: NSPOSIXErrorDomain, code: Int(EEXIST))))
+        XCTAssertTrue(Downloader.isBlockedByPathTypeChange(
+            NSError(domain: NSPOSIXErrorDomain, code: Int(ENOTDIR))))
+        XCTAssertTrue(Downloader.isBlockedByPathTypeChange(
+            NSError(domain: NSCocoaErrorDomain, code: NSFileWriteFileExistsError)))
+        // Cocoa が POSIX を包む実際の形（underlying 連鎖を辿る）。
+        XCTAssertTrue(Downloader.isBlockedByPathTypeChange(
+            NSError(domain: NSCocoaErrorDomain, code: 513, userInfo: [
+                NSUnderlyingErrorKey: NSError(domain: NSPOSIXErrorDomain, code: Int(ENOTDIR))
+            ])))
+        // 自ドメイン -16（SyncError.ioError 包装ごと判定できる）。
+        XCTAssertTrue(Downloader.isBlockedByPathTypeChange(
+            SyncError.ioError(underlying: NSError(domain: "Tide.Downloader", code: -16))))
+        XCTAssertFalse(Downloader.isBlockedByPathTypeChange(
+            NSError(domain: NSPOSIXErrorDomain, code: Int(EACCES))))
+        XCTAssertFalse(Downloader.isBlockedByPathTypeChange(
+            NSError(domain: NSCocoaErrorDomain, code: NSFileWriteNoPermissionError)))
+    }
+
     func testResumeFromPartial() async throws {
         let env = try makeEnv()
         let data = deterministicBytes(5000)
@@ -390,5 +482,31 @@ final class FakeRangedDownloadClient: RangedDownloadClient, @unchecked Sendable 
             try? h.close()
         }
         return TideS3Client.StreamObjectResult(etag: etag, contentLength: Int64(slice.count))
+    }
+}
+
+/// 転送中の「DL 先のディレクトリ化」を模擬するクライアント（PR #53 レビュー #8 のテスト用）:
+/// streamObject の中（= download() の入口検査後・ローカル適用前）で対象 path にディレクトリと
+/// 中身を作ってから本文を流す。
+final class DirCreatingClient: RangedDownloadClient, @unchecked Sendable {
+    let fullData: Data
+    let dirToCreate: URL
+
+    init(fullData: Data, dirToCreate: URL) {
+        self.fullData = fullData
+        self.dirToCreate = dirToCreate
+    }
+
+    func streamObject(
+        key: String,
+        versionId: String?,
+        rangeStart: Int64?,
+        limiter: RateLimiter?,
+        sink: (Data) throws -> Void
+    ) async throws -> TideS3Client.StreamObjectResult? {
+        try FileManager.default.createDirectory(at: dirToCreate, withIntermediateDirectories: true)
+        try Data("keep".utf8).write(to: dirToCreate.appendingPathComponent("keep.txt"))
+        try sink(fullData)
+        return TideS3Client.StreamObjectResult(etag: "etag-x", contentLength: Int64(fullData.count))
     }
 }
