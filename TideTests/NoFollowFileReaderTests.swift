@@ -48,6 +48,21 @@ final class NoFollowFileReaderTests: XCTestCase {
         XCTAssertThrowsError(try NoFollowFileReader(path: missing))
     }
 
+    /// Issue #52: ディレクトリは open(O_RDONLY) が成功してしまう（EISDIR は read 時）ので、
+    /// init の fstat で `.isDirectory` として先に拒否する。ファイル → 同名ディレクトリ置換を
+    /// Uploader が read 前に判別（delete へ変換）できるようにするための前提。
+    func testRejectsDirectory() throws {
+        let dir = tempDir()
+        let sub = dir.appendingPathComponent("was-a-file.txt", isDirectory: true)
+        try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+
+        XCTAssertThrowsError(try NoFollowFileReader(path: sub.path)) { error in
+            guard case FileOpenError.isDirectory = error else {
+                return XCTFail("expected isDirectory, got \(error)")
+            }
+        }
+    }
+
     func testEmptyFileReadsNil() throws {
         let dir = tempDir()
         let url = dir.appendingPathComponent("empty.bin")

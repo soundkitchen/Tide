@@ -96,6 +96,43 @@ final class DownloaderTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: tmpURL.path))
     }
 
+    /// Issue #52（修正 C）: ローカル適用（親ディレクトリ作成 → move）の失敗はシャードキャッシュを
+    /// re-arm し、tmp と再開行を破棄する。ファイル → 同名ディレクトリ置換の伝播窓では「祖先名が
+    /// 既存ファイルで塞がれる」ため createDirectory が決定的に失敗するが、塞ぐ旧ファイルは後続 pull の
+    /// 削除反映で除かれ、その後の再試行は成功する。re-arm を欠くと shard_state が「取得済み」のまま残り、
+    /// FileRecord の無い端末（初回取得側）では DB 再合成にも乗らず、エラーの無いまま恒久的に取り残される。
+    func testLocalApplyFailureRearmsShardCacheAndDiscardsTmp() async throws {
+        let env = try makeEnv()
+        // 親名 "x.txt" を既存ファイルで塞ぐ（種別変化の伝播窓を模擬）。
+        try deterministicBytes(100, salt: 9).write(to: env.root.appendingPathComponent("x.txt"))
+
+        let rp = "x.txt/inner.txt"
+        let data = deterministicBytes(3000)
+        // ManifestReader が fetch 時点で記録する shard_state を seed（re-arm の観測点）。
+        try await seedShardState(db: env.db, path: rp, etag: "shard-etag-1")
+
+        let fake = FakeRangedDownloadClient(fullData: data)
+        let dl = makeDownloader(client: fake, db: env.db, store: env.store, root: env.root, tmp: env.tmp)
+
+        do {
+            _ = try await dl.download(relativePath: rp, entry: entry(for: data))
+            XCTFail("親がファイルで塞がれているので失敗するはず")
+        } catch {
+            // expected（POSIX 17 / Cocoa 516 系のローカル I/O 失敗）
+        }
+
+        let etag = try await shardEtag(db: env.db, path: rp)
+        XCTAssertEqual(etag, "", "ローカル適用失敗はシャードキャッシュを re-arm（sentinel 化）する")
+        // tmp と再開行は破棄（完了サイズの tmp は resume 対象にならないため保持は無意味）。
+        let tmpURL = Downloader.resumeTmpURL(in: env.tmp, relativePath: rp)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: tmpURL.path))
+        let row = try await env.store.loadDownload(path: rp)
+        XCTAssertNil(row)
+        // DB 反映は move 成功後のみ（FileRecord は作られない）。
+        let rec = try await env.db.pool.read { db in try FileRecord.fetchOne(db, key: rp) }
+        XCTAssertNil(rec)
+    }
+
     func testResumeFromPartial() async throws {
         let env = try makeEnv()
         let data = deterministicBytes(5000)

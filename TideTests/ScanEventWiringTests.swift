@@ -174,6 +174,31 @@ final class ScanEventWiringTests: XCTestCase {
         XCTAssertEqual(rows.first?.attempts, 0, ".replace は行を置換＝attempts リセット（処理中の同 path を上書き）")
     }
 
+    // MARK: - enqueueDelete（event 経路 / 種別変化 Issue #52）
+
+    /// 追跡中ファイルがディレクトリへ置換されたとき（Issue #52）、event 経路は delete を
+    /// `.replace` で enqueue する＝誤分類済みの同 path upload 行（EISDIR でリトライ中）を置換して潰す。
+    func testEnqueueDeleteReplacesExistingUploadRow() async throws {
+        let env = try makeEnv()
+        let path = "x.txt"
+        try await seedUploadRow(env.db, path: path, attempts: 3)
+
+        try await SyncEngine.enqueueDelete(db: env.db, path: path, now: 8_000)
+
+        let rows = try await queueRows(env.db, path: path)
+        XCTAssertEqual(rows.count, 1, "同 path は 1 行に置換される")
+        XCTAssertEqual(rows.first?.operation, "delete", "upload 行は delete 行へ置き換わる")
+        XCTAssertEqual(rows.first?.attempts, 0, "置換行は古いリトライ状態を引き継がない")
+    }
+
+    func testEnqueueDeleteInsertsWhenAbsent() async throws {
+        let env = try makeEnv()
+        try await SyncEngine.enqueueDelete(db: env.db, path: "gone.txt", now: 8_000)
+        let rows = try await queueRows(env.db, path: "gone.txt")
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows.first?.operation, "delete")
+    }
+
     // MARK: - enqueueScanDeletions（削除検出）
 
     func testDeletionEnqueuesMissingPaths() async throws {

@@ -89,6 +89,15 @@ public struct Uploader: Sendable {
             // 読み込みタイミングで削除された → delete として再処理
             try await convertQueueItemToDelete(item)
             return
+        } catch FileOpenError.isDirectory {
+            // Issue #52: 追跡中ファイルがディレクトリへ置換された（rm x.txt && mkdir x.txt）。
+            // upload のままにすると EISDIR で 5 回 give-up → 旧ファイルの S3 delete が発行されず、
+            // マニフェストに「x.txt（ファイル）と x.txt/…（配下）」が両立する不整合が残る。
+            // 旧ファイルはもう存在しないので notFound と同様に delete へ変換する（イベント分類側の
+            // 種別変化検出が主経路で、ここはスキャン enqueue 済み行や既存の stale 行への防衛）。
+            AppLogger.sync.info("Path is now a directory; converting upload to delete: \(path, privacy: .private)")
+            try await convertQueueItemToDelete(item)
+            return
         }
         defer { reader.close() }
 

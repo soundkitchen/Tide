@@ -232,18 +232,35 @@ public struct Downloader: Sendable {
             )
         }
 
-        // 親ディレクトリ作成（SHA 検証後に行う＝不一致で捨てるときに空ディレクトリの litter を残さない）
-        try FileManager.default.createDirectory(
-            at: fullURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
+        // ローカル適用（親ディレクトリ作成 → 差し替え move）。失敗したらシャードキャッシュを
+        // 再 arm して次回 pull に再試行させる（Issue #52）: ファイル → 同名ディレクトリ置換の伝播窓では
+        // 祖先名が既存ファイルで塞がれて createDirectory が決定的に失敗するが、塞いでいる旧ファイルは
+        // 後続 pull の削除反映で除かれ、その後は成功する。re-arm しないと shard_state が「取得済み」の
+        // まま残り、FileRecord の無い端末（初回取得側）では DB 再合成にも乗らず、エラーの無いまま
+        // 恒久的に取り残される。tmp は破棄する（完了サイズの tmp は resume 対象にならないため保持は無意味）。
+        do {
+            // 親ディレクトリ作成は SHA 検証後に行う＝不一致で捨てるときに空ディレクトリの litter を残さない。
+            try FileManager.default.createDirectory(
+                at: fullURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
 
-        // 既存ファイルを削除してから rename（同一 FS なので atomic）。
-        // replaceItemAt は sandbox 中間ファイル (`.sb-*`) を作って FSEvents を汚すので使わない。
-        if FileManager.default.fileExists(atPath: fullURL.path) {
-            try FileManager.default.removeItem(at: fullURL)
+            // 既存ファイルを削除してから rename（同一 FS なので atomic）。
+            // replaceItemAt は sandbox 中間ファイル (`.sb-*`) を作って FSEvents を汚すので使わない。
+            if FileManager.default.fileExists(atPath: fullURL.path) {
+                try FileManager.default.removeItem(at: fullURL)
+            }
+            try FileManager.default.moveItem(at: tmpURL, to: fullURL)
+        } catch {
+            await cleanupFailedDownload(tmpURL: tmpURL, path: relativePath)
+            do {
+                try await db.invalidateShardCache(forPath: relativePath)
+            } catch {
+                AppLogger.s3.error("Re-arm after local-apply failure failed for \(relativePath, privacy: .private): \(String(describing: error), privacy: .private)")
+            }
+            AppLogger.s3.error("Local apply failed for \(relativePath, privacy: .private): \(String(describing: error), privacy: .private)")
+            throw error
         }
-        try FileManager.default.moveItem(at: tmpURL, to: fullURL)
 
         // 再開状態をクリア（完了したので不要）+ DB 反映
         try await transferStore.clearDownload(path: relativePath)

@@ -72,6 +72,11 @@ M1 では **ローカル → S3 の一方向** のみを実装する。
    │
    ├─ ファイルが存在する（create / modify）
    │     │
+   │     ├─ path が今ディレクトリ（種別変化の検出 / Issue #52）
+   │     │     ├─ DB エントリなし → 何もしない（通常のディレクトリイベント）
+   │     │     └─ DB エントリあり → 追跡中ファイルがディレクトリへ置換された
+   │     │        → 旧ファイルの delete キューへ（.replace ＝誤分類済み upload 行を潰す）
+   │     │        → フルスキャン発火（`mv 既存dir path` の置換は子のイベントが出ないため配下はスキャンで拾う）
    │     ▼
    │   [DB の files テーブル参照]
    │     │
@@ -398,6 +403,32 @@ do {
 }
 ```
 
+### ファイルが同名ディレクトリへ置換された（種別変化 / Issue #52）
+
+`rm x.txt && mkdir x.txt && echo hi > x.txt/inner.txt` のような置換は、放置すると
+「イベントが置換後のディレクトリを upload に誤分類 → read が EISDIR で 5 回 give-up →
+旧ファイルの S3 delete 未発行 → マニフェストに `x.txt`（ファイル）と `x.txt/inner.txt` が両立 →
+pull 側がディレクトリを `(local copy …)` へ退避してファイルを復元 → 配下の DL が
+『親名がファイルで塞がっている』（POSIX 17）で毎 pull 失敗」という復元不能ループになる。
+三層で防ぐ（2026-07-04）:
+
+1. **FileWatcher はディレクトリイベントを落とさない**。rm + mkdir が latency 窓内で合流すると
+   FSEvents はフラグを OR 合成する（ItemIsFile|ItemIsDir が両立し得る）ため、watcher で IsDir を
+   弾くと検出が timing 依存になる。種別判定は `processEventToQueue` の実 stat に委ねる
+   （symlink イベントの skip は従来どおり）。
+2. **イベント分類で種別変化を検出**（`processEventToQueue`）: path が今ディレクトリなら通常の
+   ファイル処理に進ませない。追跡中（`FileRecord` あり）なら旧ファイルの delete を
+   `.replace` で enqueue（誤分類済みの upload 行も潰す）→ フルスキャンを発火して配下を拾う。
+   未追跡なら no-op（通常のディレクトリイベント）。
+3. **Uploader の防衛**: `NoFollowFileReader` は init の fstat で `.isDirectory` を投げ
+   （ディレクトリは open 成功 / read で EISDIR のため read 前に判別）、`processUpload` は
+   notFound と同様に **delete へ変換**する（スキャン enqueue 済み行・既存の stale 行の救済）。
+
+pull 側もローカル適用失敗（親ディレクトリ作成 / move）でシャードキャッシュを再 arm し、
+置換の伝播窓で 2 台目が取り残されないようにする（下記 Downloader 節）。
+配線テストは `ScanEventWiringTests` / `UploaderTypeChangeTests` / `NoFollowFileReaderTests` /
+`DownloaderTests`。
+
 ### アトミック書き込み（テキストエディタ等）
 
 多くのエディタは「一時ファイル作成 → リネーム」でアトミック書き込みする。これは FSEvents 的には:
@@ -504,10 +535,12 @@ struct ReadResult {
 8. 親ディレクトリ作成（SHA 検証後＝不一致で捨てるとき空ディレクトリの litter を残さない）
 9. 既存ファイルがあれば removeItem → moveItem で atomic に置換
    （replaceItemAt は .sb-* 中間ファイルを作って FSEvents を汚すので使わない）
+   ※ 8–9 の**ローカル適用失敗**は tmp と行を破棄し、当該シャードの shard_state を再 arm して
+   次回 pull に再試行させる（Issue #52。下記注記）
 10. transfer_state の行をクリア + DB を更新 + sync_log 記録
 ```
 
-> ストリーミング途中のネットワーク失敗は **部分 tmp と transfer_state 行を保持**し、次回 pull で同じ tmp を `Range: bytes=N-` で再開する（N は実際の tmp サイズ＝プロセス kill 後も確実）。さらに **当該シャードの `shard_state` を sentinel 化（空 etag・`LocalDatabase.invalidateShardCache`）** する。`ManifestReader` は fetch 時点（DL 完了前）でシャードを「取得済み」記録するため、これを欠くと同一セッション中の poll/wake/network-up pull が当該シャードをキャッシュ済み扱いし、再開経路に到達しない（PR #9 レビュー ②）。再 arm はこの resumable 失敗のみで、**破棄系（SHA 不一致 / 実サイズ不一致 / サイズ超過 / 404）は再 arm しない**（決定的に再失敗するためリトライストームを避け、リモートのシャード etag 変化による自然回復に委ねる）。実 DB + フェイク `RangedDownloadClient` での結合的ユニットテストは `DownloaderTests`。
+> ストリーミング途中のネットワーク失敗は **部分 tmp と transfer_state 行を保持**し、次回 pull で同じ tmp を `Range: bytes=N-` で再開する（N は実際の tmp サイズ＝プロセス kill 後も確実）。さらに **当該シャードの `shard_state` を sentinel 化（空 etag・`LocalDatabase.invalidateShardCache`）** する。`ManifestReader` は fetch 時点（DL 完了前）でシャードを「取得済み」記録するため、これを欠くと同一セッション中の poll/wake/network-up pull が当該シャードをキャッシュ済み扱いし、再開経路に到達しない（PR #9 レビュー ②）。**破棄系のうち SHA 不一致 / 実サイズ不一致 / サイズ超過 / 404 は再 arm しない**（決定的に再失敗するためリトライストームを避け、リモートのシャード etag 変化による自然回復に委ねる）。例外は**ローカル適用（親ディレクトリ作成 → move）の失敗**（Issue #52・2026-07-04）: ファイル → 同名ディレクトリ置換の伝播窓では「祖先名が既存ファイルで塞がれる」ため決定的に失敗するが、塞ぐ旧ファイルは後続 pull の削除反映で除かれて**その後の再試行は成功する**ので、tmp と行を破棄した上で再 arm する（再 arm を欠くと、`FileRecord` の無い端末＝初回取得側では DB 再合成にも乗らず、エラーの無いまま恒久的に取り残される）。実 DB + フェイク `RangedDownloadClient` での結合的ユニットテストは `DownloaderTests`。
 >
 > 起動時の掃除（`SyncEngine.pruneOrphanTransfers`）も同じ sentinel 化を行う: resumable な download 行（tmp あり・新しい）は行と tmp を温存して invalidate のみ（再 arm）、clear する行（tmp 消失 / 7 日超 stale）も**行を落とす前に**必ず invalidate する（これを欠くと FileRecord 無し + 実 etag のままで当該ファイルが永久に再 DL されない。受け入れテスト §6-2 で発見・2026-06-07 修正）。invalidate に失敗したら行を消さず次回起動の prune に委ねる（自己回復）。prune の「分岐 → 実 I/O」配線は `TransferPruneTests`（実 DB）で回帰固定。
 

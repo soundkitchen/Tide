@@ -1020,12 +1020,33 @@ final class SyncEngine {
                 try await enqueueDelete(path: path, now: now)
                 return
             }
-            let size = (attrs[.size] as? NSNumber)?.int64Value ?? 0
-            let mtime = ((attrs[.modificationDate] as? Date) ?? Date()).timeIntervalSince1970
 
             let existing = try await db.pool.read { db in
                 try FileRecord.fetchOne(db, key: path)
             }
+
+            // 種別変化の検出（Issue #52）: path が今ディレクトリなら、通常のファイル処理
+            // （classify → upload enqueue）には進ませない。upload に分類すると EISDIR で give-up し、
+            // 旧ファイルの S3 delete が発行されないままマニフェストに「ファイルと同名配下」が両立する
+            // 不整合が残り、pull 側が復元不能な reconcile エラーループに入る。
+            // attributesOfItem は symlink を辿らない（lstat 相当）ので symlink dir を誤検出しない。
+            if (attrs[.type] as? FileAttributeType) == .typeDirectory {
+                // 未追跡パスの通常 dir イベント（配下書込での mtime 更新等。watcher が IsDir を
+                // 通すようになったぶん頻繁に来る）は no-op。
+                guard existing != nil else { return }
+                // 追跡中ファイルがディレクトリへ置換された → 旧ファイルの delete を enqueue
+                // （.replace で誤分類済みの upload 行も潰す）。
+                try await enqueueDelete(path: path, now: now)
+                AppLogger.sync.info("File replaced by a directory; enqueued delete: \(path, privacy: .private)")
+                // ディレクトリ配下の子はフルスキャンで拾う（echo で作った子は自身のイベントでも来るが、
+                // `mv 既存dir path` の置換は子のイベントが出ない）。delete を先に enqueue しているので
+                // キュー順序上も delete → 子孫 upload になる。
+                Task { [weak self] in await self?.triggerFullScan() }
+                return
+            }
+
+            let size = (attrs[.size] as? NSNumber)?.int64Value ?? 0
+            let mtime = ((attrs[.modificationDate] as? Date) ?? Date()).timeIntervalSince1970
             // 変更判定（preDecision → verifyHash → postHash → mtime CAS）はフルスキャンと同じ
             // classifyLocalChange に集約（hash は off-main・#30 / D1 で配線テスト）。
             switch try await Self.classifyLocalChange(
@@ -1059,6 +1080,14 @@ final class SyncEngine {
     }
 
     private func enqueueDelete(path: String, now: Double) async throws {
+        try await Self.enqueueDelete(db: db, path: path, now: now)
+        await refreshQueueDepth()
+    }
+
+    /// delete キューへ 1 行投入する（常に onConflict: .replace ＝処理中の同 path 行を置換する。
+    /// 種別変化（Issue #52）では誤分類済みの upload 行をこれで潰す）。event 経路と
+    /// 配線テスト（`ScanEventWiringTests`）が共用する nonisolated static（`enqueueUpload` と同型）。
+    nonisolated static func enqueueDelete(db: LocalDatabase, path: String, now: Double) async throws {
         try await db.pool.write { db in
             var rec = UploadQueueRecord(
                 id: nil,
@@ -1071,7 +1100,6 @@ final class SyncEngine {
             )
             try rec.insert(db, onConflict: .replace)
         }
-        await refreshQueueDepth()
     }
 
     // MARK: - Bandwidth (サブ E)

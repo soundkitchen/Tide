@@ -6,6 +6,9 @@ public enum FileOpenError: Error {
     case isSymbolicLink
     /// パスが存在しない（ENOENT）。
     case notFound
+    /// パスがディレクトリだった（Issue #52）。macOS ではディレクトリの `open(O_RDONLY)` 自体は
+    /// 成功し、最初の `read(2)` が EISDIR で失敗するため、init の fstat で先に拒否する。
+    case isDirectory
     /// その他の I/O エラー（errno を保持）。
     case io(errno: Int32)
 }
@@ -33,6 +36,18 @@ public final class NoFollowFileReader {
             default:
                 throw FileOpenError.io(errno: err)
             }
+        }
+        // ディレクトリは open が成功してしまう（EISDIR は read 時）ので、同一 FD の fstat で
+        // ここで拒否する（Issue #52: ファイル → 同名ディレクトリ置換を read 前に判別できるようにする）。
+        var st = stat()
+        if fstat(opened, &st) != 0 {
+            let err = errno
+            Darwin.close(opened)
+            throw FileOpenError.io(errno: err)
+        }
+        if (st.st_mode & S_IFMT) == S_IFDIR {
+            Darwin.close(opened)
+            throw FileOpenError.isDirectory
         }
         self.fd = opened
     }
