@@ -22,6 +22,21 @@ extension XCTestCase {
         let db = try LocalDatabase(at: base.appendingPathComponent("db.sqlite"))
         return (db, TransferStateStore(db: db), root, tmp, base)
     }
+
+    /// ダミー資格情報の実 `TideS3Client` と一時 suite の `ConfigStore`。構築はオフラインで完結し
+    /// ネットワークへ出ないため、「S3 呼び出し前に return する経路」（Uploader の delete 変換 seam・
+    /// SyncEngine のスキャン駆動等）のテストで使う（PR #55 レビュー ⑥: 3 箇所の重複を単一構築点へ集約）。
+    /// suite は teardown で削除する。
+    func makeOfflineS3AndConfig() throws -> (s3: TideS3Client, config: ConfigStore) {
+        let s3 = try TideS3Client(
+            credentials: AWSCredentials(accessKeyId: "AKIATESTDUMMY", secretAccessKey: "dummy"),
+            region: "us-east-1", bucket: "tide-test-bucket", deviceId: "devT"
+        )
+        let suite = "tide-tests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        addTeardownBlock { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        return (s3, ConfigStore(defaults: defaults))
+    }
 }
 
 // 以下は self を捕捉しない非同期ヘルパ。@MainActor テスト（SyncActivityModelTests）から

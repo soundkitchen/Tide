@@ -30,7 +30,7 @@ try FileManager.default.moveItem(at: tmpURL, to: fullURL)
 **Status:** ✅ Fixed (2026-05-24) — `performFullScan` のウォーカーで `.isSymbolicLinkKey` を取得、symlink は `continue` でスキップ。`Downloader` の書き込み先がシンボリックリンクなら拒否（リンク先実体の書き換えを防ぐ）。`applyRemoteDeletion` も symlink を削除対象から除外。
 **修正 (2026-07-05・Issue #54):** 当初対策の「symlink なら `skipDescendants()`」は**削除**した。実測で (1) deep enumeration は symlink ディレクトリへ**そもそも再帰しない**（下の「既定で辿る」という当初の記述は誤りで、この呼び出しは不要）、(2) 現在 item がファイル（symlink）のときに呼ぶと**無関係な隣接ディレクトリ**への再帰がスキップされ、実在する追跡ファイルが削除検出に乗って S3 へ誤 delete される（実害あり・実機発現）ことを確認したため。symlink 非追従の安全性は enumerator の仕様 + `continue` で維持される（回帰テスト: `FullScanSymlinkTests`）。
 
-**該当箇所（対応コード）:** `Tide/Core/SyncEngine.swift:474-492`（enumerator 構築 + `.isSymbolicLinkKey` 取得 → symlink なら `skipDescendants()` + `continue`）。Downloader の書き込み先 symlink 拒否（`Downloader.swift:66-68`）、`applyRemoteDeletion` の symlink 除外（`:292-295`）。以下は対策前の、symlink を辿っていたコード（参考）:
+**該当箇所（対応コード）:** `Tide/Core/SyncEngine.swift` の `performFullScan` / `loadLayeredIgnore`（enumerator 構築 + `.isSymbolicLinkKey` 取得 → symlink は **`continue` のみ**。`skipDescendants()` は「現在 item がディレクトリ」の機密網 dir スキップ＝`loadLayeredIgnore` の `HardcodedIgnoreRules` 分岐でのみ使用 — Issue #54）。Downloader の書き込み先 symlink 拒否（`Downloader.download` 入口）、`applyRemoteDeletion` の symlink 除外。以下は対策前の、symlink を辿っていたコード（参考）:
 
 ```swift
 let walker = fm.enumerator(
@@ -40,11 +40,14 @@ let walker = fm.enumerator(
 )
 ```
 
-`FileManager.enumerator(at:)` は**ディレクトリへのシンボリックリンクを既定で辿る**。`syncRoot` 配下に `~/.ssh` を指すシンボリックリンクが置かれれば、その中身が S3 にアップロードされる。FileWatcher 側は `kFSEventStreamEventFlagItemIsSymlink` でスキップしている（`FileWatcher.swift:104`）が、全件スキャン経路では抜ける。
+`FileManager.enumerator(at:)` は**ディレクトリへのシンボリックリンクを既定で辿る**（← **当初 2026-05-24 の想定で、2026-07-05 の実測により誤りと判明**: deep enumeration は symlink へそもそも再帰しない。上の修正注記と Issue #54 参照。仮に辿った場合の懸念として記録を残す）。`syncRoot` 配下に `~/.ssh` を指すシンボリックリンクが置かれれば、その中身が S3 にアップロードされる。FileWatcher 側は `kFSEventStreamEventFlagItemIsSymlink` でスキップしている（`FileWatcher.swift:104`）が、全件スキャン経路では抜ける。
 
 **対策:**
-- enumerator の各 URL について `.isSymbolicLinkKey` を取り、シンボリックリンクは無視
-- ディレクトリの場合は同様にチェックし、シンボリックリンクなら `walker.skipDescendants()`
+- enumerator の各 URL について `.isSymbolicLinkKey` を取り、シンボリックリンクは無視（`continue` のみ）
+- ~~ディレクトリの場合は同様にチェックし、シンボリックリンクなら `walker.skipDescendants()`~~
+  （**撤回・Issue #54**: symlink item で `skipDescendants()` を呼ぶと無関係な隣接ディレクトリが
+  走査から脱落し、追跡ファイルが S3 へ誤 delete される。enumerator は symlink へ再帰しないため
+  `continue` のみが正しい。dir-symlink 非追従の挙動は `FullScanSymlinkTests` でピン留め）
 - Downloader 側の `removeItem` / `moveItem` も、`fullURL` が既存のシンボリックリンクならエラーで弾く（リンク先実体の置換を防ぐ）
 
 ---

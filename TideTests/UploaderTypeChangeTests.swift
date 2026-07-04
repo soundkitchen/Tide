@@ -18,16 +18,10 @@ final class UploaderTypeChangeTests: XCTestCase {
         )
 
         // ダミー資格情報の実 TideS3Client（構築はオフラインで完結し、ネットワークへは出ない）。
-        let s3 = try TideS3Client(
-            credentials: AWSCredentials(accessKeyId: "AKIATESTDUMMY", secretAccessKey: "dummy"),
-            region: "us-east-1", bucket: "tide-test-bucket", deviceId: "devT"
-        )
-        let suite = "tide-tests-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        addTeardownBlock { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        let (s3, config) = try makeOfflineS3AndConfig()
         let uploader = Uploader(
             s3: s3, db: env.db, syncRoot: env.root, deviceId: "devT",
-            config: ConfigStore(defaults: defaults), transferStore: env.store
+            config: config, transferStore: env.store
         )
 
         let item: UploadQueueRecord = try await env.db.pool.write { db in
@@ -59,16 +53,10 @@ final class UploaderTypeChangeTests: XCTestCase {
         let env = try makeTideTestEnv(prefix: "tide-uploader-enotdir")
         try Data("f".utf8).write(to: env.root.appendingPathComponent("was-dir"))
 
-        let s3 = try TideS3Client(
-            credentials: AWSCredentials(accessKeyId: "AKIATESTDUMMY", secretAccessKey: "dummy"),
-            region: "us-east-1", bucket: "tide-test-bucket", deviceId: "devT"
-        )
-        let suite = "tide-tests-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        addTeardownBlock { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        let (s3, config) = try makeOfflineS3AndConfig()
         let uploader = Uploader(
             s3: s3, db: env.db, syncRoot: env.root, deviceId: "devT",
-            config: ConfigStore(defaults: defaults), transferStore: env.store
+            config: config, transferStore: env.store
         )
 
         let item: UploadQueueRecord = try await env.db.pool.write { db in
