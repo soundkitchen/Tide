@@ -471,14 +471,31 @@ final class SyncEngine {
 
     // MARK: - Full scan
 
+    /// フルスキャン実行中フラグ + 実行中に届いた再要求の pending（PR #53 レビュー #7）。
+    /// @MainActor なので check-and-set は割り込まれない。
+    private var isFullScanning = false
+    private var pendingFullScan = false
+
     func triggerFullScan() async {
-        AppLogger.sync.info("Starting full scan: \(self.syncRoot.path, privacy: .private)")
-        do {
-            try await performFullScan()
-        } catch {
-            AppLogger.sync.error("Full scan failed: \(String(describing: error), privacy: .private)")
-            await recordIssue(SyncIssueClassifier.classify(error: error), logAs: "Full scan failed")
+        // 多重フルスキャンの抑止（PR #53 レビュー #7）: 実行中の再要求は pending に coalesce し、
+        // 現行スキャンの完了後に 1 周だけ追加で走らせる（要求時点の新しい状態を取りこぼさない。
+        // 種別変化イベントの連続着火や .syncignore 連続編集で detached ツリー走査が並走しない）。
+        if isFullScanning {
+            pendingFullScan = true
+            return
         }
+        isFullScanning = true
+        defer { isFullScanning = false }
+        repeat {
+            pendingFullScan = false
+            AppLogger.sync.info("Starting full scan: \(self.syncRoot.path, privacy: .private)")
+            do {
+                try await performFullScan()
+            } catch {
+                AppLogger.sync.error("Full scan failed: \(String(describing: error), privacy: .private)")
+                await recordIssue(SyncIssueClassifier.classify(error: error), logAs: "Full scan failed")
+            }
+        } while pendingFullScan
     }
 
     // MARK: - Restore（M4: 過去バージョン / 削除済みの復元）
@@ -534,7 +551,13 @@ final class SyncEngine {
 
         let result: (newEnqueued: Int, deletedEnqueued: Int, mtimesRepaired: Int) = try await Task.detached(priority: .utility) { () -> (Int, Int, Int) in
             var foundPaths: Set<String> = []
-            var newEnqueued = 0
+            // 走査中は upload 候補をバッファし、削除検出（enqueueScanDeletions）を先に enqueue して
+            // から一括投入する（PR #53 レビュー #6）: 走査中に逐次 enqueue すると、キューループが
+            // 並行稼働しているため「アプリ停止中に起きた file→dir 置換」を起動時スキャンが検出する
+            // ケースで子 upload が旧ファイルの delete より先に処理され、#52 型の両立状態を一時的に
+            // S3 へ押し出し得る。削除先行でも同一バッチ内の並列処理までは順序保証しない
+            // （残る伝播窓は pull 側の再 arm＝修正 C が受ける）。
+            var uploadCandidates: [String] = []
             var deletedEnqueued = 0
             var mtimesRepaired = 0
 
@@ -600,16 +623,20 @@ final class SyncEngine {
                     // CAS no-op を数えない。PR #12 レビュー Low-1）。
                     mtimesRepaired += 1
                 case .enqueue:
-                    // scan は onConflict: .ignore（リトライ中の attempts を巻き戻さない）。
-                    try await Self.enqueueUpload(db: db, path: relative, now: now, onConflict: .ignore)
-                    newEnqueued += 1
+                    uploadCandidates.append(relative)
                 }
             }
 
             // DB にあって実体走査で見つからなかった path を delete キューへ（集合差分 → enqueue の配線）。
+            // upload より先に enqueue する（レビュー #6・上記コメント参照）。
             deletedEnqueued = try await Self.enqueueScanDeletions(db: db, foundPaths: foundPaths, now: now)
 
-            return (newEnqueued, deletedEnqueued, mtimesRepaired)
+            // scan は onConflict: .ignore（リトライ中の attempts を巻き戻さない）。
+            for relative in uploadCandidates {
+                try await Self.enqueueUpload(db: db, path: relative, now: now, onConflict: .ignore)
+            }
+
+            return (uploadCandidates.count, deletedEnqueued, mtimesRepaired)
         }.value
 
         AppLogger.sync.info("Full scan: enqueued \(result.newEnqueued) uploads, \(result.deletedEnqueued) deletes, repaired \(result.mtimesRepaired) mtimes")
@@ -1012,20 +1039,71 @@ final class SyncEngine {
         switch event.kind {
         case .createdOrModified:
             let fullURL = syncRoot.appendingPathComponent(path)
+            let existing = try await db.pool.read { db in
+                try FileRecord.fetchOne(db, key: path)
+            }
+
             let attrs: [FileAttributeKey: Any]
             do {
                 attrs = try FileManager.default.attributesOfItem(atPath: fullURL.path)
             } catch {
-                // file gone between event and now → treat as delete
+                // イベントと処理の間に消えた → 追跡中のみ delete として扱う（`.deleted` 分岐と対称・
+                // PR #53 レビュー #1）。debounce 窓内に生成・消滅する一過性パス（ビルドツールの
+                // 一時ディレクトリ等。watcher が IsDir を通すようになったぶん dir でも到達する）へ
+                // 無条件 delete を発行すると、processDelete が存在ガード無しに delete marker +
+                // シャード RMW を行い、未 pull のリモート追跡ファイルまで消し得る。
+                guard existing != nil else { return }
                 try await enqueueDelete(path: path, now: now)
                 return
             }
+
+            // 種別変化の検出（Issue #52）: path が今ディレクトリなら、通常のファイル処理
+            // （classify → upload enqueue）には進ませない。upload に分類すると EISDIR で give-up し、
+            // 旧ファイルの S3 delete が発行されないままマニフェストに「ファイルと同名配下」が両立する
+            // 不整合が残り、pull 側が復元不能な reconcile エラーループに入る。
+            // attributesOfItem は symlink を辿らない（lstat 相当）ので symlink dir を誤検出しない。
+            if (attrs[.type] as? FileAttributeType) == .typeDirectory {
+                // 未追跡パスの通常 dir イベント（配下書込での mtime 更新等。watcher が IsDir を
+                // 通すようになったぶん頻繁に来る）は no-op。
+                guard existing != nil else { return }
+                // 再入ガード（PR #53 レビュー #7）: 既に同 path の delete 行があれば何もしない。
+                // FileRecord は S3 delete + シャード更新の成功まで残るため、S3 障害中に dir イベントが
+                // 再着火するたび .replace で積み直すと attempts が毎回リセットされ、バックオフと
+                // 5 回 give-up が無効化される（多重フルスキャンの抑止も兼ねる）。
+                let alreadyConverted = try await db.pool.read { db in
+                    try UploadQueueRecord
+                        .filter(Column("path") == path)
+                        .filter(Column("operation") == "delete")
+                        .fetchOne(db) != nil
+                }
+                if alreadyConverted { return }
+                // 追跡中ファイルがディレクトリへ置換された → 旧ファイルの delete を enqueue
+                // （.replace で誤分類済みの upload 行も潰す）。
+                try await enqueueDelete(path: path, now: now)
+                AppLogger.sync.info("File replaced by a directory; enqueued delete: \(path, privacy: .private)")
+                // ディレクトリ配下の子はフルスキャンで拾う（echo で作った子は自身のイベントでも来るが、
+                // `mv 既存dir path` の置換は子のイベントが出ない）。delete → 子孫 upload の順は
+                // 「delete を先に enqueue + スキャン側も削除 → upload の順で enqueue（レビュー #6）」で
+                // 通常成立するが、同一バッチ内の並列処理があるため厳密な順序保証ではない
+                // （両立が漏れ出る伝播窓は pull 側の再 arm＝修正 C が受けて自己回復する）。
+                Task { [weak self] in await self?.triggerFullScan() }
+                return
+            }
+
+            // 種別変化の鏡像 = ディレクトリ → 同名ファイル置換（PR #53 レビュー #3）:
+            // `mv x.dir /outside && cp f x.dir` は子のイベントが出ないため、path が今 regular file で
+            // DB に `path/` 配下の追跡行が残っていたら子孫の delete をここで enqueue する。放置すると
+            // マニフェストに「x.dir（ファイル）+ x.dir/…（配下）」の鏡像不整合が残り、ピア側は子 DL の
+            // ENOTDIR 失敗 → 再 arm の毎 pull 再試行が（削除が来ないため）恒久化する。
+            // path 自身の upload はこの後の通常経路が担う。
+            let descendants = try await Self.enqueueDescendantDeletes(db: db, parentPath: path, now: now)
+            if descendants > 0 {
+                AppLogger.sync.info("Directory replaced by a file; enqueued \(descendants) descendant delete(s): \(path, privacy: .private)")
+                await refreshQueueDepth()
+            }
+
             let size = (attrs[.size] as? NSNumber)?.int64Value ?? 0
             let mtime = ((attrs[.modificationDate] as? Date) ?? Date()).timeIntervalSince1970
-
-            let existing = try await db.pool.read { db in
-                try FileRecord.fetchOne(db, key: path)
-            }
             // 変更判定（preDecision → verifyHash → postHash → mtime CAS）はフルスキャンと同じ
             // classifyLocalChange に集約（hash は off-main・#30 / D1 で配線テスト）。
             switch try await Self.classifyLocalChange(
@@ -1059,6 +1137,14 @@ final class SyncEngine {
     }
 
     private func enqueueDelete(path: String, now: Double) async throws {
+        try await Self.enqueueDelete(db: db, path: path, now: now)
+        await refreshQueueDepth()
+    }
+
+    /// delete キューへ 1 行投入する（常に onConflict: .replace ＝処理中の同 path 行を置換する。
+    /// 種別変化（Issue #52）では誤分類済みの upload 行をこれで潰す）。event 経路と
+    /// 配線テスト（`ScanEventWiringTests`）が共用する nonisolated static（`enqueueUpload` と同型）。
+    nonisolated static func enqueueDelete(db: LocalDatabase, path: String, now: Double) async throws {
         try await db.pool.write { db in
             var rec = UploadQueueRecord(
                 id: nil,
@@ -1071,7 +1157,54 @@ final class SyncEngine {
             )
             try rec.insert(db, onConflict: .replace)
         }
-        await refreshQueueDepth()
+    }
+
+    /// ディレクトリ → 同名ファイル置換（種別変化の鏡像・PR #53 レビュー #3）で、`parentPath/` 配下に
+    /// 残っている追跡行すべてを delete キューへ投入する。
+    /// 前方一致は LIKE ではなく **PK の範囲比較**で拾う: `"/"` の次のバイトは `"0"` なので、
+    /// binary collation（SQLite TEXT 既定・UTF-8 は memcmp で接頭辞順序を保存）では
+    /// `path >= "p/" AND path < "p0"` が「`p/` で始まる全パス」と正確に一致し、インデックスも効く
+    /// （LIKE は `%`/`_` を含むファイル名でエスケープが要り、既定では index も使わない）。
+    /// 既に delete 行がある子孫はスキップする（親分岐の再入ガードと同型・PR #53 再レビュー）:
+    /// S3 障害中に置換後ファイルへのイベントが再着火するたび `.replace` で積み直すと、リトライ中の
+    /// 子孫 delete 行の attempts が毎回リセットされ、バックオフ / give-up が無効化される。
+    /// stale な upload 行は従来どおり `.replace` で delete へ置換する。
+    /// - Returns: 今回 enqueue（新規 or upload 行から置換）した削除件数。0 = 配下の追跡行なし、
+    ///   または全子孫が delete 変換済み（呼び元はログも `refreshQueueDepth` も抑止できる）。
+    nonisolated static func enqueueDescendantDeletes(
+        db: LocalDatabase, parentPath: String, now: Double
+    ) async throws -> Int {
+        let lower = parentPath + "/"
+        let upper = parentPath + "0"
+        let paths: [String] = try await db.pool.read { db in
+            try FileRecord
+                .filter(Column("path") >= lower && Column("path") < upper)
+                .fetchAll(db)
+                .map(\.path)
+        }
+        guard !paths.isEmpty else { return 0 }
+        return try await db.pool.write { db in
+            var enqueued = 0
+            for p in paths {
+                if let existing = try UploadQueueRecord
+                    .filter(Column("path") == p)
+                    .fetchOne(db), existing.operation == "delete" {
+                    continue
+                }
+                var rec = UploadQueueRecord(
+                    id: nil,
+                    path: p,
+                    operation: "delete",
+                    enqueuedAt: now,
+                    attempts: 0,
+                    nextRetryAt: nil,
+                    lastError: nil
+                )
+                try rec.insert(db, onConflict: .replace)
+                enqueued += 1
+            }
+            return enqueued
+        }
     }
 
     // MARK: - Bandwidth (サブ E)
@@ -1423,7 +1556,9 @@ final class SyncEngine {
             try UploadQueueRecord
                 .filter(Column("attempts") < 5)
                 .filter(Column("next_retry_at") == nil || Column("next_retry_at") <= now)
-                .order(Column("enqueued_at"))
+                // id タイブレーク（PR #53 再レビュー nit）: フルスキャンの「削除検出 → upload」は
+                // 同一 now で enqueue するため、同時刻内は insert 順（= delete 先行）を形式化する。
+                .order(Column("enqueued_at"), Column("id"))
                 .limit(20)
                 .fetchAll(db)
         }

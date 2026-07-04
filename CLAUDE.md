@@ -54,7 +54,7 @@
   - M2 ダウンロード / 復元 / ポーリング（実装済み・MVP ゴール）
   - M3 双方向同期 / 競合解決 / マルチパート（サブ A〜E 実装済み: マルチパート / `.syncignore` / 3-way merge / 中断・再開 / 帯域制御。**M3 完了**。`docs/09` の据え置き数件あり）
   - M4 運用機能と磨き込み（復元/バージョン UI・Sync Activity/エラー履歴・通知・pull コスト削減。**M4 完了**。詳細は `docs/00-OVERVIEW.md` と `docs/08-IMPLEMENTATION-NOTES.md`）
-  - M5 Files-On-Demand（File Provider）— オンラインのみ実体化: **着手中**。Phase 1（`TideCore` framework 分離）・Phase 2（App Group 移設 + App Sandbox 化 + security-scoped bookmark）・Phase 3（`TideFileProvider.appex` 読み取り materialize PoC＝dataless プレースホルダ → 開いた瞬間 S3 取得を実機実証。Phase 0 の全リスク解消）・Phase 4（増分列挙 + リモート追従: 世代 SyncAnchor + `enumerateChanges`・working set 全件列挙・アプリ pull/アップロード後の `signalEnumerator(.workingSet)` + 拡張の機会的自己 signal・ディレクトリ合成 mtime・拡張文言ローカライズ。実機受け入れ済み・PR #51 マージ済み）完了。次は Phase 5（双方向書込）以降を継続判断。関連: 受け入れで発見したコア既存バグ = Issue #52（ファイル→同名ディレクトリ置換）同期先は最終的に `~/Library/CloudStorage/Tide` 固定（既存 FSEvents の任意フォルダモードと opt-in 並走）。設計・進捗は `docs/09-DEFERRED.md` の M5 節
+  - M5 Files-On-Demand（File Provider）— オンラインのみ実体化: **着手中**。Phase 1（`TideCore` framework 分離）・Phase 2（App Group 移設 + App Sandbox 化 + security-scoped bookmark）・Phase 3（`TideFileProvider.appex` 読み取り materialize PoC＝dataless プレースホルダ → 開いた瞬間 S3 取得を実機実証。Phase 0 の全リスク解消）・Phase 4（増分列挙 + リモート追従: 世代 SyncAnchor + `enumerateChanges`・working set 全件列挙・アプリ pull/アップロード後の `signalEnumerator(.workingSet)` + 拡張の機会的自己 signal・ディレクトリ合成 mtime・拡張文言ローカライズ。実機受け入れ済み・PR #51 マージ済み）完了。次は Phase 5（双方向書込）以降を継続判断。関連: 受け入れで発見したコア既存バグ = Issue #52（ファイル→同名ディレクトリ置換。コア側 3 層修正 + pull 再 arm を実装済み — `docs/09` 該当節参照。FP の種別変化受理の再テストは未）。同期先は最終的に `~/Library/CloudStorage/Tide` 固定（既存 FSEvents の任意フォルダモードと opt-in 並走）。設計・進捗は `docs/09-DEFERRED.md` の M5 節
 
 ### 主要な確定パラメータ
 - Bundle ID: `org.izukawa.Tide`
@@ -197,7 +197,7 @@
 - **[DL サイズ検証]** `Downloader.download` は commit（tmp→本体 move）前に「実 tmp サイズ == `entry.size`」を検証する。
 - **[reconcile ゲート]** pull 取り込みは入口で純粋関数 `ChangeDetector.reconcileIsNoop` を通し、no-op（ローカル==DB==リモート）を skip（hash も DB write もしない）。→ `docs/04`
 - **[リモート削除反映]** `Downloader.applyRemoteDeletion` は `ThreeWayMerge.decide(remote:nil)` で削除可否を決める＝`.deleteLocal`（base==local＝未編集）のみ実削除、編集済み/未追跡/unreadable は `.keepLocalRemoteDeleted` で**温存**（無条件削除はリモート削除でローカル編集を消す＝他端末由来のデータ損失）。symlink は削除せず、ローカル不在は孤児 `FileRecord` のみ掃除。判定→I/O の配線は `RemoteDeletionTests` で固定（#30 / D1）。→ `docs/08` / `docs/09`
-- **[prune 順序]** 中断転送の prune は download 行を落とす**前に**必ず `invalidateShardCache(forPath:)` を実行する（逆順だと中断 DL がシャード変化まで永久に再 DL されず＝クリーンインストール復旧で一部ファイル欠落）。→ `docs/09`
+- **[prune 順序]** 中断転送の prune は download 行を落とす**前に**必ず `invalidateShardCache(forPath:)` を実行する（逆順だと中断 DL がシャード変化まで永久に再 DL されず＝クリーンインストール復旧で一部ファイル欠落）。`Downloader.download` のローカル適用ブロック失敗（Issue #52 の再 arm）も同順＝invalidate 成功時のみ行/tmp を破棄（PR #53 レビュー #2）。→ `docs/09`
 - **[mtime 不変条件]** `FileRecord.mtime` = 最後に同期した時点の**ローカル stat 実値**。マニフェスト ISO8601 秒精度値で上書きしない（毎起動再アップロードの自己持続サイクルになる）。`Downloader.markSynced` も stat 実値を記録。**マニフェスト mtime に fractional seconds を足さない**（`parseISO8601` が nil → now フォールバックでパース全滅）。
 - **[キュー行 id 基準]** アップロードキュー行の完了/失敗処理は **`item.id` 基準**で消す（`path` 基準にしない）。処理中に置換された新 id 行を巻き込むと無エラー乖離になる。
 - **[torn 安定化ゲート]** アップロードは読了後に同 FD を再 `fstat` し、size 変化 or mtime 前進があれば torn とみなして commit しない（`StabilityCheck` / `SyncError.fileChangedDuringUpload`）。不安定ファイルは give-up させず延期＋1 回可視化。

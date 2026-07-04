@@ -85,8 +85,15 @@ public struct Uploader: Sendable {
             }
             AppLogger.sync.error("Refusing to upload a symbolic link: \(path, privacy: .private)")
             return
-        } catch FileOpenError.notFound {
-            // 読み込みタイミングで削除された → delete として再処理
+        } catch let openError as FileOpenError where openError.isPathNoLongerRegularFile {
+            // path がもはや通常ファイルを指せない = 削除（ENOENT）/ ディレクトリ化（Issue #52・
+            // rm x.txt && mkdir x.txt）/ 祖先のファイル化（ENOTDIR・dir → file 置換の鏡像で
+            // stale な子 upload 行が残るケース）→ delete として再処理する。
+            // upload のまま 5 回 give-up すると旧エントリの S3 delete が発行されず、マニフェストに
+            // 「ファイルと同名配下」が両立する不整合が残る（イベント分類側の種別変化検出が主経路で、
+            // ここはスキャン enqueue 済み行・既存 stale 行への防衛層。PR #53 レビュー #5 / nit-1 で
+            // ENOTDIR を追加し catch を統合。理由の切り分け用に openError を添える＝再レビュー nit）。
+            AppLogger.sync.info("Path no longer names a regular file (\(String(describing: openError), privacy: .private)); converting upload to delete: \(path, privacy: .private)")
             try await convertQueueItemToDelete(item)
             return
         }

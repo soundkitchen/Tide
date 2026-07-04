@@ -55,14 +55,20 @@
 - **新しい App Extension ターゲットが要り、拡張は別プロセスでサンドボックス必須＝L1（App Sandbox）と密結合**。同期コア（`S3Client` / `Manifest` / `LocalDatabase`）を拡張プロセスから呼べる形に再編が必要。**L1 の security-scoped bookmark 対応もこの版で一度に行う**（arbitrary-folder モデルのまま 0.2.0 で先行サンドボックス化すると、ドメインへ移る本版で作り直しになるため＝二度手間回避。L1 / H3 を 0.2.0 から外した理由）。
 - **最小プロトタイプ**＝ドメイン登録 + `enumerator` + `fetchContents` で実現性を確認してから本実装に入る段取り。
 
-## ファイル → 同名ディレクトリ置換で FSEvents 同期が壊れる（2026-07-04 発見・Issue 化判断待ち）
+## ファイル → 同名ディレクトリ置換で FSEvents 同期が壊れる（2026-07-04 発見 = Issue #52・同日修正）
 
 M5 Phase 4 実機受け入れの種別変化エッジテストで発覚した**本体コア（FSEvents モード）の既存バグ**（M1〜M4 から存在。Phase 4 のコードは無関係）。
 
 - **再現**: 同期フォルダで `rm x.txt && mkdir x.txt && echo hi > x.txt/inner.txt`
-- **メカニズム**: ① FSEvents イベント処理が置換後のパス（ディレクトリ）を「変更 = アップロード」と分類し、`NoFollowFileReader` の open が **EISDIR（errno 21）で 5 回失敗 → give-up**。**旧ファイルの S3 delete が発行されない** → ② マニフェストに `x.txt`（ファイル）と `x.txt/inner.txt` が両立する不整合が残る → ③ 次の pull が「リモート = ファイル / ローカル = ディレクトリ」を競合と判定し、ローカルのディレクトリを `(local copy …)` にリネームしてファイルを復元 → ④ 以降、`x.txt/inner.txt` のダウンロードが「親名がファイルで塞がっている」（NSCocoaError 516 / POSIX 17）で**毎 pull 失敗し続ける無限エラーループ**（自己回復しない）。
-- **データ損失は無い**（③ の競合コピーが中身を保全 = 温存原則は機能）。復旧は手動: ファイル版を削除 → pull が inner を復元 → ディレクトリごと削除、で整合に戻せる（実機で確認済み）。
-- **修正の当たり**: イベント分類（`SyncEngine.classifyLocalChange` / `processEventToQueue`）で「追跡中パスの種別がファイル→ディレクトリへ変わった」を検出したら、**旧ファイルの delete を enqueue** してからディレクトリ配下を通常スキャンに乗せる（delete → 子孫 upload の順序保証も要検討）。EISDIR での give-up 経路にも「パスがディレクトリなら upload 行を delete へ変換」の防衛を足す。
+- **メカニズム**: ① FSEvents イベント処理が置換後のパス（ディレクトリ）を「変更 = アップロード」と分類し、`NoFollowFileReader` の read が **EISDIR（errno 21）で 5 回失敗 → give-up**（ディレクトリは open 自体は成功し、最初の read で EISDIR になることを実測確認）。**旧ファイルの S3 delete が発行されない** → ② マニフェストに `x.txt`（ファイル）と `x.txt/inner.txt` が両立する不整合が残る → ③ 次の pull が「リモート = ファイル / ローカル = ディレクトリ」を競合と判定し、ローカルのディレクトリを `(local copy …)` にリネームしてファイルを復元 → ④ 以降、`x.txt/inner.txt` のダウンロードが「親名がファイルで塞がっている」（NSCocoaError 516 / POSIX 17）で**毎 pull 失敗し続ける無限エラーループ**（自己回復しない。`inner.txt` の `FileRecord` が残存するため未変化シャードでも DB 再合成で毎 pull reconcile に乗る）。
+- **データ損失は無い**（③ の競合コピーが中身を保全 = 温存原則は機能）。
+- **解消（2026-07-04・Issue #52）**: 三層で修正。詳細は `docs/04-SYNC-LOGIC.md`「ファイルが同名ディレクトリへ置換された」節。
+  1. **FileWatcher がディレクトリイベントを通す**ようにした（rm+mkdir の合流イベントは FSEvents がフラグを OR 合成するため、IsDir を弾くと検出が timing 依存になる。symlink skip は維持）。
+  2. **イベント分類で種別変化を検出**: path が今ディレクトリ ∧ 追跡中なら旧ファイルの delete を `.replace` で enqueue（誤分類 upload 行も潰す）→ フルスキャン発火で配下を拾う（`mv 既存dir path` は子のイベントが出ない）。delete を先に enqueue するのでキュー順序上も delete → 子孫 upload。
+  3. **Uploader の防衛**: `NoFollowFileReader` が init の fstat で `FileOpenError.isDirectory` を投げ、`processUpload` が notFound と同様に delete へ変換（スキャン enqueue 済み行・stale 行の救済）。
+  - 追加で調査中に発見した **2 台目取り残し**も修正: 不整合（または修正後の正常な伝播窓）で別端末が pull すると、配下 DL の 516 失敗が `createDirectory`（再 arm 付き streaming catch の外）で起きるためシャードキャッシュが「取得済み」のまま残り、`FileRecord` の無い端末では DB 再合成にも乗らず**エラーの無いまま恒久停止**していた。→ `Downloader.download` のローカル適用（親 dir 作成 → move）失敗で tmp/行を破棄 + `invalidateShardCache` で再 arm し、delete 伝播後の次 pull で自己回復するようにした。
+  - テスト: `ScanEventWiringTests`（enqueueDelete の .replace 配線）/ `UploaderTypeChangeTests`（upload → delete 変換）/ `NoFollowFileReaderTests`・`HashCalculatorTests`（isDirectory）/ `DownloaderTests`（ローカル適用失敗の再 arm）。
+  - **PR #53 レビュー対応（2026-07-05・8 指摘 + nits 2 すべて確認・対応）**: ① 消失フォールバックの delete を追跡中パスに限定（一過性 dir の無条件 delete 防止） ② 再 arm を [prune 順序] と同順化（invalidate 成功 → 行/tmp 破棄） ③ **鏡像 = dir → file 置換も検出**（`enqueueDescendantDeletes`＝PK 範囲比較で配下の追跡行を delete へ） ④ 再 arm をブロック系エラー（EEXIST/ENOTDIR/516/-16 = `isBlockedByPathTypeChange`）に限定（非自己回復失敗の毎 pull フル再 DL 化防止） ⑤ Uploader の delete 変換に ENOTDIR を追加（catch 統合） ⑥ フルスキャンを「削除検出 → upload」の 2 段 enqueue 化 ⑦ 種別変化分岐に再入ガード（delete 行既存なら no-op）+ `triggerFullScan` の coalescing ⑧ DL 適用の removeItem 前にディレクトリ化を再確認（-16 で中断 → 再 arm・新 dir ツリーを再帰削除しない）。詳細は `docs/04`。再レビュー（全 10 件 FIXED 確認）の残課題 1 + 任意 nit 2 も対応: 鏡像分岐の子孫 delete にも行単位の再入ガード（delete 行既存ならスキップ＝attempts 巻き戻し防止）/ `fetchReadyItems` に id タイブレーク（同時刻 enqueue の delete 先行を形式化）/ 統合 catch のログに理由（`FileOpenError` の記述）を付記（判定は `isPathNoLongerRegularFile` プロパティへ集約）。
 - **FP 側の残課題**: この不整合でマニフェストが壊れたため、File Provider の「同一 identifier の種別変化 update をシステムが受理するか」は**未検証のまま**（コア修正後に Phase 4 チェックリストのエッジ項目を再テスト）。
 
 ## ストレージバックエンド移植性（Cloudflare R2 / Google Cloud Storage）— 将来の任意検討（Issue 化せず本メモで追跡）

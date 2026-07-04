@@ -48,6 +48,44 @@ final class NoFollowFileReaderTests: XCTestCase {
         XCTAssertThrowsError(try NoFollowFileReader(path: missing))
     }
 
+    /// dir → file 置換の鏡像（PR #53 レビュー #5）: 祖先がファイルだと open は ENOTDIR(20) で失敗する。
+    /// Uploader の delete 変換（`.io(errno: ENOTDIR)` catch）が依存する errno マッピングを固定する。
+    func testAncestorFileThrowsENOTDIR() throws {
+        let dir = tempDir()
+        let f = dir.appendingPathComponent("f.txt")
+        try Data("x".utf8).write(to: f)
+        XCTAssertThrowsError(try NoFollowFileReader(path: f.appendingPathComponent("child").path)) { error in
+            guard case FileOpenError.io(let errno) = error, errno == ENOTDIR else {
+                return XCTFail("expected io(ENOTDIR), got \(error)")
+            }
+        }
+    }
+
+    /// Issue #52: ディレクトリは open(O_RDONLY) が成功してしまう（EISDIR は read 時）ので、
+    /// init の fstat で `.isDirectory` として先に拒否する。ファイル → 同名ディレクトリ置換を
+    /// Uploader が read 前に判別（delete へ変換）できるようにするための前提。
+    func testRejectsDirectory() throws {
+        let dir = tempDir()
+        let sub = dir.appendingPathComponent("was-a-file.txt", isDirectory: true)
+        try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+
+        XCTAssertThrowsError(try NoFollowFileReader(path: sub.path)) { error in
+            guard case FileOpenError.isDirectory = error else {
+                return XCTFail("expected isDirectory, got \(error)")
+            }
+        }
+    }
+
+    /// Uploader の upload → delete 変換条件（`isPathNoLongerRegularFile`）の分類を固定する
+    /// （PR #53 再レビュー nit で catch を where 句 + 本プロパティへ変更）。
+    func testIsPathNoLongerRegularFileClassification() {
+        XCTAssertTrue(FileOpenError.notFound.isPathNoLongerRegularFile)
+        XCTAssertTrue(FileOpenError.isDirectory.isPathNoLongerRegularFile)
+        XCTAssertTrue(FileOpenError.io(errno: ENOTDIR).isPathNoLongerRegularFile)
+        XCTAssertFalse(FileOpenError.isSymbolicLink.isPathNoLongerRegularFile, "symlink 置換は delete にしない（文書化済みポリシー）")
+        XCTAssertFalse(FileOpenError.io(errno: EACCES).isPathNoLongerRegularFile)
+    }
+
     func testEmptyFileReadsNil() throws {
         let dir = tempDir()
         let url = dir.appendingPathComponent("empty.bin")

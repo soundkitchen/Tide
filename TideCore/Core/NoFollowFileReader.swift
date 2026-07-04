@@ -6,8 +6,26 @@ public enum FileOpenError: Error {
     case isSymbolicLink
     /// パスが存在しない（ENOENT）。
     case notFound
+    /// パスがディレクトリだった（Issue #52）。macOS ではディレクトリの `open(O_RDONLY)` 自体は
+    /// 成功し、最初の `read(2)` が EISDIR で失敗するため、init の fstat で先に拒否する。
+    case isDirectory
     /// その他の I/O エラー（errno を保持）。
     case io(errno: Int32)
+
+    /// 「path がもはや通常ファイルを指せない」失敗か＝削除（ENOENT）/ ディレクトリ化（EISDIR 相当）/
+    /// 祖先のファイル化（ENOTDIR）。Uploader はこれを upload → delete 変換の条件に使う（Issue #52
+    /// 防衛層・PR #53 レビュー #5）。symlink（ELOOP）は含めない — 置換を delete にしないのは
+    /// 文書化済みポリシー（リンク先実体を S3 から消さない）。
+    public var isPathNoLongerRegularFile: Bool {
+        switch self {
+        case .notFound, .isDirectory:
+            return true
+        case .io(let errno):
+            return errno == ENOTDIR
+        case .isSymbolicLink:
+            return false
+        }
+    }
 }
 
 /// 最終コンポーネントの symlink を追従せず（`O_NOFOLLOW`）にファイルを開き、
@@ -33,6 +51,18 @@ public final class NoFollowFileReader {
             default:
                 throw FileOpenError.io(errno: err)
             }
+        }
+        // ディレクトリは open が成功してしまう（EISDIR は read 時）ので、同一 FD の fstat で
+        // ここで拒否する（Issue #52: ファイル → 同名ディレクトリ置換を read 前に判別できるようにする）。
+        var st = stat()
+        if fstat(opened, &st) != 0 {
+            let err = errno
+            Darwin.close(opened)
+            throw FileOpenError.io(errno: err)
+        }
+        if (st.st_mode & S_IFMT) == S_IFDIR {
+            Darwin.close(opened)
+            throw FileOpenError.isDirectory
         }
         self.fd = opened
     }

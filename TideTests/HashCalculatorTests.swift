@@ -63,6 +63,20 @@ final class HashCalculatorTests: XCTestCase {
         }
     }
 
+    /// Issue #52: ディレクトリの hash は `.isDirectory` で失敗する（reconcile では nil → unreadable の
+    /// 安全側へ倒れる従来挙動のまま。旧実装は read 時の EISDIR ＝ io(errno:21) だった）。
+    func testNoFollowDirectoryThrowsIsDirectory() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tide-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        XCTAssertThrowsError(try HashCalculator.sha256NoFollow(of: dir)) { error in
+            guard case FileOpenError.isDirectory = error else {
+                return XCTFail("expected isDirectory, got \(error)")
+            }
+        }
+    }
+
     func testNoFollowMissingFileThrowsNotFound() throws {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("tide-missing-\(UUID().uuidString).bin")

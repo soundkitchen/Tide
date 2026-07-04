@@ -100,8 +100,11 @@ final class FileWatcher: @unchecked Sendable {
 
             let flag = Int(flags[i])
 
-            // ディレクトリイベントはスキップ（FileEvents 有効でもディレクトリは飛んでくる）
-            if (flag & kFSEventStreamEventFlagItemIsDir) != 0 { continue }
+            // ディレクトリイベントは落とさず SyncEngine へ通す（Issue #52）:
+            // rm x.txt && mkdir x.txt が latency 窓内で 1 イベントに合流すると FSEvents はフラグを
+            // OR 合成する（ItemIsFile|ItemIsDir が両立し得る）ため、ここで IsDir を弾くと「追跡中
+            // ファイルのディレクトリ置換」の検出が timing 依存になる。種別の判定は
+            // processEventToQueue の実 stat に委ね、未追跡パスの通常 dir イベントは向こうで no-op。
             if (flag & kFSEventStreamEventFlagItemIsSymlink) != 0 { continue }
 
             // 実際にファイルが存在するかで create/modify か delete を判別する
