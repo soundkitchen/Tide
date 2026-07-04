@@ -55,6 +55,16 @@
 - **新しい App Extension ターゲットが要り、拡張は別プロセスでサンドボックス必須＝L1（App Sandbox）と密結合**。同期コア（`S3Client` / `Manifest` / `LocalDatabase`）を拡張プロセスから呼べる形に再編が必要。**L1 の security-scoped bookmark 対応もこの版で一度に行う**（arbitrary-folder モデルのまま 0.2.0 で先行サンドボックス化すると、ドメインへ移る本版で作り直しになるため＝二度手間回避。L1 / H3 を 0.2.0 から外した理由）。
 - **最小プロトタイプ**＝ドメイン登録 + `enumerator` + `fetchContents` で実現性を確認してから本実装に入る段取り。
 
+## ファイル → 同名ディレクトリ置換で FSEvents 同期が壊れる（2026-07-04 発見・Issue 化判断待ち）
+
+M5 Phase 4 実機受け入れの種別変化エッジテストで発覚した**本体コア（FSEvents モード）の既存バグ**（M1〜M4 から存在。Phase 4 のコードは無関係）。
+
+- **再現**: 同期フォルダで `rm x.txt && mkdir x.txt && echo hi > x.txt/inner.txt`
+- **メカニズム**: ① FSEvents イベント処理が置換後のパス（ディレクトリ）を「変更 = アップロード」と分類し、`NoFollowFileReader` の open が **EISDIR（errno 21）で 5 回失敗 → give-up**。**旧ファイルの S3 delete が発行されない** → ② マニフェストに `x.txt`（ファイル）と `x.txt/inner.txt` が両立する不整合が残る → ③ 次の pull が「リモート = ファイル / ローカル = ディレクトリ」を競合と判定し、ローカルのディレクトリを `(local copy …)` にリネームしてファイルを復元 → ④ 以降、`x.txt/inner.txt` のダウンロードが「親名がファイルで塞がっている」（NSCocoaError 516 / POSIX 17）で**毎 pull 失敗し続ける無限エラーループ**（自己回復しない）。
+- **データ損失は無い**（③ の競合コピーが中身を保全 = 温存原則は機能）。復旧は手動: ファイル版を削除 → pull が inner を復元 → ディレクトリごと削除、で整合に戻せる（実機で確認済み）。
+- **修正の当たり**: イベント分類（`SyncEngine.classifyLocalChange` / `processEventToQueue`）で「追跡中パスの種別がファイル→ディレクトリへ変わった」を検出したら、**旧ファイルの delete を enqueue** してからディレクトリ配下を通常スキャンに乗せる（delete → 子孫 upload の順序保証も要検討）。EISDIR での give-up 経路にも「パスがディレクトリなら upload 行を delete へ変換」の防衛を足す。
+- **FP 側の残課題**: この不整合でマニフェストが壊れたため、File Provider の「同一 identifier の種別変化 update をシステムが受理するか」は**未検証のまま**（コア修正後に Phase 4 チェックリストのエッジ項目を再テスト）。
+
 ## ストレージバックエンド移植性（Cloudflare R2 / Google Cloud Storage）— 将来の任意検討（Issue 化せず本メモで追跡）
 
 現状 `Tide/S3/`（`S3Client`/`Uploader`/`Downloader`/`ManifestReader`）は aws-sdk-swift と AWS S3 の機能に密結合。将来 R2 / GCS へ広げる場合に「すでに塞がっている機能」を 2026-06 時点の公式ドキュメント調査で評価した結論を記録する（**0.2.0 では実装しない**）。
