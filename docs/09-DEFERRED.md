@@ -71,6 +71,14 @@ M5 Phase 4 実機受け入れの種別変化エッジテストで発覚した**�
   - **PR #53 レビュー対応（2026-07-05・8 指摘 + nits 2 すべて確認・対応）**: ① 消失フォールバックの delete を追跡中パスに限定（一過性 dir の無条件 delete 防止） ② 再 arm を [prune 順序] と同順化（invalidate 成功 → 行/tmp 破棄） ③ **鏡像 = dir → file 置換も検出**（`enqueueDescendantDeletes`＝PK 範囲比較で配下の追跡行を delete へ） ④ 再 arm をブロック系エラー（EEXIST/ENOTDIR/516/-16 = `isBlockedByPathTypeChange`）に限定（非自己回復失敗の毎 pull フル再 DL 化防止） ⑤ Uploader の delete 変換に ENOTDIR を追加（catch 統合） ⑥ フルスキャンを「削除検出 → upload」の 2 段 enqueue 化 ⑦ 種別変化分岐に再入ガード（delete 行既存なら no-op）+ `triggerFullScan` の coalescing ⑧ DL 適用の removeItem 前にディレクトリ化を再確認（-16 で中断 → 再 arm・新 dir ツリーを再帰削除しない）。詳細は `docs/04`。再レビュー（全 10 件 FIXED 確認）の残課題 1 + 任意 nit 2 も対応: 鏡像分岐の子孫 delete にも行単位の再入ガード（delete 行既存ならスキップ＝attempts 巻き戻し防止）/ `fetchReadyItems` に id タイブレーク（同時刻 enqueue の delete 先行を形式化）/ 統合 catch のログに理由（`FileOpenError` の記述）を付記（判定は `isPathNoLongerRegularFile` プロパティへ集約）。
 - **FP 側の残課題**: この不整合でマニフェストが壊れたため、File Provider の「同一 identifier の種別変化 update をシステムが受理するか」は**未検証のまま**（コア修正後に Phase 4 チェックリストのエッジ項目を再テスト）。
 
+## スキャン走査の symlink `skipDescendants()` 誤用で隣接ディレクトリが走査から脱落（2026-07-05 発見 = Issue #54・同日修正）
+
+Issue #52 の実機受け入れ中に発見した **M1 からの潜在バグ**。同期ルート内に symlink が 1 本あるだけで、走査順（APFS のハッシュ順）次第で無関係な隣のディレクトリのサブツリーが走査から脱落していた。
+
+- **実機発現**: 同期ルート直下の file-symlink 存在下でフルスキャンが走り、ローカルに実在する追跡ファイル `x.txt/inner.txt` が「見つからない」と判定され **S3 へ誤 delete**（他端末には削除として伝播し得る静かなデータ損失系。版履歴からは回復可・ローカルは無傷）。
+- **根因（実験 3 本で確定）**: ① deep enumeration は symlink（ディレクトリリンク含む）へ**そもそも再帰しない**＝symlink での `skipDescendants()` は不要 ② 現在 item がファイル（symlink）のときに呼ぶと**無関係な隣接ディレクトリ**への再帰がスキップされる（決定的に再現） ③ ディレクトリ item での正規使用（機密網 dir スキップ）は正常。C2 対策（2026-05-24）当時の「enumerator はディレクトリへの symlink を既定で辿る」という前提が誤りだった（`security/critical.md` C2 の修正注記参照）。
+- **解消（2026-07-05・Issue #54）**: `performFullScan` / `loadLayeredIgnore` の symlink 分岐から `skipDescendants()` を除去（`continue` のみ。symlink 非追従の安全性は enumerator の仕様で維持）。回帰テスト `FullScanSymlinkTests` は実 SyncEngine + 実ツリー（file-symlink 12 本 × 子ファイル入り dir 12 個 + **root 外の機密ディレクトリを指す dir-symlink 1 本**）で「全ファイル走査 + 誤 delete ゼロ + 全 `.syncignore` ロード + **dir-symlink 配下が同期対象/層状マッチャに一切乗らない（C2 の非追従挙動のピン留め）**」を固定し、**旧実装では両テストとも赤になることを確認済み**。列挙順（APFS ハッシュ順）依存の事象のため、「symlink の後に未走査ディレクトリが並ぶ＝旧実装が失敗する条件」を前提条件アサーションで検証し、環境変化による回帰ガードの静かな失効も検出できるようにした（PR #55 レビュー ③④）。
+
 ## ストレージバックエンド移植性（Cloudflare R2 / Google Cloud Storage）— 将来の任意検討（Issue 化せず本メモで追跡）
 
 現状 `Tide/S3/`（`S3Client`/`Uploader`/`Downloader`/`ManifestReader`）は aws-sdk-swift と AWS S3 の機能に密結合。将来 R2 / GCS へ広げる場合に「すでに塞がっている機能」を 2026-06 時点の公式ドキュメント調査で評価した結論を記録する（**0.2.0 では実装しない**）。
