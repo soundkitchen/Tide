@@ -28,7 +28,9 @@ public struct Uploader: Sendable {
         transferStore: any TransferStateStoring,
         progressReporter: TransferProgressReporter? = nil,
         uploadLimiter: RateLimiter? = nil,
-        onManifestWrite: (@Sendable () -> Void)? = nil
+        // 既定値なし（PR #56 再レビュー (2)）: ManifestUpdater 層と同じく、hook の渡し忘れを
+        // コンパイルエラーにする。「通知しない」は nil の明示渡しで宣言させる。
+        onManifestWrite: (@Sendable () -> Void)?
     ) {
         self.s3 = s3
         self.db = db
@@ -363,17 +365,22 @@ public struct ManifestUpdater: Sendable {
                 // この書込が恒久不可視になる。シャード実 etag と index 宣言がずれていれば
                 // index のみ修復し、可視化された確定点として発火する。
                 if let fetchedEtag = fetched?.etag {
-                    let declared = try await store.getIndex()?.value.shards[shardId]?.etag
-                    if declared != fetchedEtag {
-                        try await updateIndex { idx in
-                            idx.shards[shardId] = .init(etag: fetchedEtag, count: shard.files.count)
-                        }
-                        onManifestDidWrite?()
-                    }
+                    try await repairIndexDeclarationIfStale(
+                        shardId: shardId, fetchedEtag: fetchedEtag, count: shard.files.count
+                    )
                 }
                 return .alreadyUpToDate(existing)
             }
             if decision == .conflict, let existing {
+                // 競合でも突合修復だけは通す（PR #56 再レビュー (3)）: updateIndex 未完の分断からの
+                // 再試行で backoff 中のローカル再編集が「自分の前回書込」と幻影競合するケースは
+                // `.alreadyUpToDate` に到達しない。throw の前に書込済み entry の可視化を確定させる
+                // （競合解決自体は呼び出し元の退避 + versionId 取得が担う）。
+                if let fetchedEtag = fetched?.etag {
+                    try await repairIndexDeclarationIfStale(
+                        shardId: shardId, fetchedEtag: fetchedEtag, count: shard.files.count
+                    )
+                }
                 throw SyncError.uploadConflict(path: path, remoteEntry: existing)
             }
             // ここに来るのは .proceed のみ（理論上不到達: .alreadyUpToDate/.conflict は existing 非 nil で
@@ -385,8 +392,9 @@ public struct ManifestUpdater: Sendable {
             shard.files[path] = newEntry
             shard.updatedAt = ISO8601.now()
             let newEtag = try await store.putShard(shard, ifMatch: etag)
-            try await updateIndex { idx in
+            _ = try await updateIndex { idx in
                 idx.shards[shardId] = .init(etag: newEtag, count: shard.files.count)
+                return true
             }
             // シャード + index の両方が確定した時のみ発火。putShard 成功 → updateIndex が
             // リトライ尽きで throw した場合は非発火のまま失敗として呼び出し元へ伝播し
@@ -416,20 +424,25 @@ public struct ManifestUpdater: Sendable {
             // 前回試行が updateIndex 手前で失敗した再入では、内容不変でも index 修復が必要）。
             if shard.files == filesBefore {
                 if let etag {
-                    let declared = try await store.getIndex()?.value.shards[shardId]?.etag
-                    if declared != etag {
-                        try await updateIndex { idx in
-                            idx.shards[shardId] = .init(etag: etag, count: shard.files.count)
-                        }
-                        onManifestDidWrite?()
-                    }
-                } else if try await store.getIndex()?.value.shards[shardId] != nil {
+                    try await repairIndexDeclarationIfStale(
+                        shardId: shardId, fetchedEtag: etag, count: shard.files.count
+                    )
+                } else {
                     // シャード不在なのに index が宣言を残している（deleteShard 成功 → updateIndex
-                    // 失敗の再入）→ 宣言を除去して確定させる。
-                    try await updateIndex { idx in
-                        idx.shards.removeValue(forKey: shardId)
+                    // 失敗の再入）→ 宣言を除去して確定させる。CAS（PR #56 再レビュー (1)）:
+                    // 観測した宣言から index が動いていたら中止する。観測とコミットの間に別書き手が
+                    // 同シャードを新規作成 + 宣言していた場合、無条件 removeValue はその正当な宣言を
+                    // 消し「実在シャードが未宣言」= 次回 pull の removedShards 誤検出（削除伝播）に
+                    // 化けるため、宣言除去は「観測した stale 宣言がまだ居るとき」のみ行う。
+                    let declared = try await store.getIndex()?.value.shards[shardId]?.etag
+                    if declared != nil {
+                        let repaired = try await updateIndex { idx in
+                            guard idx.shards[shardId]?.etag == declared else { return false }
+                            idx.shards.removeValue(forKey: shardId)
+                            return true
+                        }
+                        if repaired { onManifestDidWrite?() }
                     }
-                    onManifestDidWrite?()
                 }
                 return
             }
@@ -440,30 +453,59 @@ public struct ManifestUpdater: Sendable {
                 if etag != nil {
                     try await store.deleteShard(shardId)
                 }
-                try await updateIndex { idx in
+                _ = try await updateIndex { idx in
                     idx.shards.removeValue(forKey: shardId)
+                    return true
                 }
                 onManifestDidWrite?()
                 return
             }
 
             let newEtag = try await store.putShard(shard, ifMatch: etag)
-            try await updateIndex { idx in
+            _ = try await updateIndex { idx in
                 idx.shards[shardId] = .init(etag: newEtag, count: shard.files.count)
+                return true
             }
             onManifestDidWrite?()
         }
     }
 
-    private func updateIndex(_ transform: (inout ManifestIndex) -> Void) async throws {
+    /// シャード実 etag と index 宣言を突合し、ずれていれば **CAS 付き**で index のみ修復する
+    /// （PR #56 レビュー ① / 再レビュー (1)）。「putShard 成功 → updateIndex 未完」の分断からの
+    /// 再入（`.alreadyUpToDate` / `.conflict` / no-op 書換）が呼ぶ。
+    /// CAS: 観測した宣言から index が動いていたら修復を中止する（並行書き手の新しい宣言を
+    /// stale 観測で巻き戻さない）。中止しても正しさは保たれる — 宣言を動かした書き手が
+    /// 自分の書込パスで宣言を確定させている。修復として書いたときのみ発火する。
+    /// - Returns: 修復として index を書いたか。
+    @discardableResult
+    private func repairIndexDeclarationIfStale(
+        shardId: String, fetchedEtag: String, count: Int
+    ) async throws -> Bool {
+        let declared = try await store.getIndex()?.value.shards[shardId]?.etag
+        guard declared != fetchedEtag else { return false }
+        let repaired = try await updateIndex { idx in
+            guard idx.shards[shardId]?.etag == declared else { return false }
+            idx.shards[shardId] = .init(etag: fetchedEtag, count: count)
+            return true
+        }
+        if repaired { onManifestDidWrite?() }
+        return repaired
+    }
+
+    /// index の RMW。`transform` が false を返したら**書かずに** false（CAS 中止用）。
+    /// 412/409 リトライは index を再取得してから transform を再評価するので、CAS は毎試行
+    /// 新鮮な index に対して判定される。
+    /// - Returns: 実際に index を書いたか。
+    private func updateIndex(_ transform: (inout ManifestIndex) -> Bool) async throws -> Bool {
         try await withConditionalRetry("index.json") {
             let fetched = try await store.getIndex()
             var index = fetched?.value ?? ManifestIndex.empty(updatedBy: deviceId)
             let etag = fetched?.etag
-            transform(&index)
+            guard transform(&index) else { return false }
             index.updatedAt = ISO8601.now()
             index.updatedBy = deviceId
             _ = try await store.putIndex(index, ifMatch: etag)
+            return true
         }
     }
 

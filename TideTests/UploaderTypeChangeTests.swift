@@ -21,7 +21,7 @@ final class UploaderTypeChangeTests: XCTestCase {
         let (s3, config) = try makeOfflineS3AndConfig()
         let uploader = Uploader(
             s3: s3, db: env.db, syncRoot: env.root, deviceId: "devT",
-            config: config, transferStore: env.store
+            config: config, transferStore: env.store, onManifestWrite: nil
         )
 
         let item: UploadQueueRecord = try await env.db.pool.write { db in
@@ -56,7 +56,7 @@ final class UploaderTypeChangeTests: XCTestCase {
         let (s3, config) = try makeOfflineS3AndConfig()
         let uploader = Uploader(
             s3: s3, db: env.db, syncRoot: env.root, deviceId: "devT",
-            config: config, transferStore: env.store
+            config: config, transferStore: env.store, onManifestWrite: nil
         )
 
         let item: UploadQueueRecord = try await env.db.pool.write { db in

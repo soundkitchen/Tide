@@ -31,6 +31,17 @@ actor InMemoryManifestStore: ManifestStore {
         putIndexFailuresRemaining = times
     }
 
+    private var postGetIndexMutation: (shardId: String, info: ManifestIndex.ShardInfo?)?
+
+    /// 次の getIndex が返った**直後**に「並行書き手 B の index 書換」を適用する
+    /// （突合修復 CAS の検証用。PR #56 再レビュー (1)/(4)）。呼び出し元が受け取るスナップショットは
+    /// 適用**前**の値なので、「観測後に index が動いた」状況を決定的に作れる。`info` nil は宣言削除。
+    func simulateConcurrentIndexWriteAfterNextGetIndex(
+        shardId: String, info: ManifestIndex.ShardInfo?
+    ) {
+        postGetIndexMutation = (shardId, info)
+    }
+
     /// テスト前提の直接投入（etag 検証を通さない）。index の shard 情報も同期する。
     func seed(shard: ManifestShard, deviceId: String = "seed-device") {
         let etag = mintEtag()
@@ -59,8 +70,24 @@ actor InMemoryManifestStore: ManifestStore {
     // MARK: - ManifestStore
 
     func getIndex() throws -> TideS3Client.ManifestFetch<ManifestIndex>? {
-        guard let index, let indexEtag else { return nil }
-        return .init(value: index, etag: indexEtag)
+        let result: TideS3Client.ManifestFetch<ManifestIndex>?
+        if let index, let indexEtag {
+            result = .init(value: index, etag: indexEtag)
+        } else {
+            result = nil
+        }
+        if let mutation = postGetIndexMutation {
+            postGetIndexMutation = nil
+            var idx = index ?? ManifestIndex.empty(updatedBy: "race-writer")
+            if let info = mutation.info {
+                idx.shards[mutation.shardId] = info
+            } else {
+                idx.shards.removeValue(forKey: mutation.shardId)
+            }
+            index = idx
+            indexEtag = mintEtag()
+        }
+        return result
     }
 
     func putIndex(_ newIndex: ManifestIndex, ifMatch: String?) throws -> String {

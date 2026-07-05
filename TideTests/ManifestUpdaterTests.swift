@@ -287,6 +287,117 @@ final class ManifestUpdaterTests: XCTestCase {
         XCTAssertNil(declared)
     }
 
+    /// 【PR #56 再レビュー (4)】既存シャード + no-op 書換 + 宣言乖離 → 宣言のみ突合修復 + 発火
+    /// （`updateShard` no-op の `if let etag` 側 = redeclare 分岐の直接テスト）。
+    func testNoopUpdateShardRedeclaresStaleDeclarationAndFires() async throws {
+        let store = InMemoryManifestStore()
+        let counter = SignalCounter()
+        let path = "docs/a.txt"
+        let shardId = ManifestSharding.shardId(for: path)
+        var shard = ManifestShard.empty(id: shardId)
+        shard.files[path] = makeManifestEntry(sha: "aaa")
+        await store.seed(shard: shard)
+        // index を触らずシャードだけ再 PUT → 宣言 stale を作る
+        let cur = await store.shardEtags[shardId]
+        _ = try await store.putShard(shard, ifMatch: cur)
+
+        // 不在キーへの no-op delete → 内容は書かないが宣言のずれだけ修復 + 発火
+        try await makeUpdater(store: store, counter: counter).updateShard(for: path) {
+            $0.files.removeValue(forKey: "docs/absent.txt")
+        }
+
+        XCTAssertEqual(counter.count, 1)
+        let declared = await store.index?.shards[shardId]?.etag
+        let actual = await store.shardEtags[shardId]
+        XCTAssertEqual(declared, actual)
+    }
+
+    /// 【PR #56 再レビュー (3)】`.conflict` でも throw 前に宣言を突合修復する:
+    /// updateIndex 未完の分断 → backoff 中のローカル再編集 → 幻影競合、の連鎖では
+    /// `.alreadyUpToDate` に到達しないため、競合 throw 直前の修復が index stale を閉じる。
+    func testConflictPathRepairsStaleIndexBeforeThrow() async throws {
+        let store = InMemoryManifestStore()
+        let counter = SignalCounter()
+        let path = "docs/a.txt"
+        let shardId = ManifestSharding.shardId(for: path)
+        var shard = ManifestShard.empty(id: shardId)
+        shard.files[path] = makeManifestEntry(sha: "theirs")
+        await store.seed(shard: shard)
+        // 宣言 stale を作る（シャードだけ再 PUT）
+        let cur = await store.shardEtags[shardId]
+        _ = try await store.putShard(shard, ifMatch: cur)
+
+        do {
+            _ = try await makeUpdater(store: store, counter: counter)
+                .updateFileEntry(for: path, base: "base", newEntry: makeManifestEntry(sha: "mine"))
+            XCTFail("expected uploadConflict")
+        } catch SyncError.uploadConflict {}
+
+        XCTAssertEqual(counter.count, 1)  // 修復分のみ（競合自体は非発火）
+        let declared = await store.index?.shards[shardId]?.etag
+        let actual = await store.shardEtags[shardId]
+        XCTAssertEqual(declared, actual)
+    }
+
+    /// 【PR #56 再レビュー (1)】dangling 宣言の除去は CAS: 観測後に並行書き手 B が同シャードを
+    /// 再宣言していたら中止し、B の正当な宣言を消さない（消すと「実在シャードが未宣言」=
+    /// removedShards 誤検出 → 削除伝播に化ける最悪ケース）。
+    func testDanglingRemovalCASAbortsOnConcurrentRedeclare() async throws {
+        let store = InMemoryManifestStore()
+        let counter = SignalCounter()
+        let path = "docs/a.txt"
+        let shardId = ManifestSharding.shardId(for: path)
+        var shard = ManifestShard.empty(id: shardId)
+        shard.files[path] = makeManifestEntry(sha: "aaa")
+        await store.seed(shard: shard)
+        await store.failNextPutIndex(times: 5)
+        do {
+            try await makeUpdater(store: store, counter: counter).updateShard(for: path) {
+                $0.files.removeValue(forKey: path)
+            }
+            XCTFail("expected manifestUpdateFailed")
+        } catch SyncError.manifestUpdateFailed {}
+        // dangling 状態: シャード消滅・宣言残存。ここで B が観測直後に再宣言する状況を注入
+        let bInfo = ManifestIndex.ShardInfo(etag: "etag-B", count: 7)
+        await store.simulateConcurrentIndexWriteAfterNextGetIndex(shardId: shardId, info: bInfo)
+
+        // 再試行（no-op）: 観測は stale 宣言 → コミット時には B の宣言 → CAS 中止・非発火
+        try await makeUpdater(store: store, counter: counter).updateShard(for: path) {
+            $0.files.removeValue(forKey: path)
+        }
+
+        XCTAssertEqual(counter.count, 0)
+        let declared = await store.index?.shards[shardId]?.etag
+        XCTAssertEqual(declared, "etag-B")  // B の宣言が温存される
+    }
+
+    /// 【PR #56 再レビュー (1)】redeclare 修復（`.alreadyUpToDate` 再入）も CAS: 観測後に
+    /// 並行書き手が宣言を動かしていたら stale 観測で巻き戻さない。
+    func testRedeclareRepairCASAbortsOnConcurrentWriter() async throws {
+        let store = InMemoryManifestStore()
+        let counter = SignalCounter()
+        let path = "docs/a.txt"
+        let entry = makeManifestEntry(sha: "aaa")
+        let shardId = ManifestSharding.shardId(for: path)
+        await store.failNextPutIndex(times: 5)
+        do {
+            _ = try await makeUpdater(store: store, counter: counter)
+                .updateFileEntry(for: path, base: nil, newEntry: entry)
+            XCTFail("expected manifestUpdateFailed")
+        } catch SyncError.manifestUpdateFailed {}
+        // 分断状態（シャードあり・宣言なし）。観測直後に B が宣言を書く状況を注入
+        let bInfo = ManifestIndex.ShardInfo(etag: "etag-B", count: 1)
+        await store.simulateConcurrentIndexWriteAfterNextGetIndex(shardId: shardId, info: bInfo)
+
+        let outcome = try await makeUpdater(store: store, counter: counter)
+            .updateFileEntry(for: path, base: nil, newEntry: entry)
+
+        XCTAssertEqual(outcome, .alreadyUpToDate(entry))
+        XCTAssertEqual(counter.count, 0)  // CAS 中止・非発火
+        let declared = await store.index?.shards[shardId]?.etag
+        XCTAssertEqual(declared, "etag-B")
+    }
+
     /// hook を明示 nil にしても全経路が従来どおり成功する（通知なしの明示宣言）。
     func testNilHookStillWrites() async throws {
         let store = InMemoryManifestStore()
