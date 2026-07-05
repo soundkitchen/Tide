@@ -31,7 +31,8 @@ actor InMemoryManifestStore: ManifestStore {
         putIndexFailuresRemaining = times
     }
 
-    private var postGetIndexMutation: (shardId: String, info: ManifestIndex.ShardInfo?)?
+    private var postGetIndexMutation:
+        (shardId: String, info: ManifestIndex.ShardInfo?, shard: ManifestShard?)?
     private var postGetShardRecreation: ManifestShard?
 
     /// 次の getShard が返った**直後**に「並行書き手 B のシャード再作成 + 宣言」を適用する
@@ -44,10 +45,12 @@ actor InMemoryManifestStore: ManifestStore {
     /// 次の getIndex が返った**直後**に「並行書き手 B の index 書換」を適用する
     /// （突合修復 CAS の検証用。PR #56 再レビュー (1)/(4)）。呼び出し元が受け取るスナップショットは
     /// 適用**前**の値なので、「観測後に index が動いた」状況を決定的に作れる。`info` nil は宣言削除。
+    /// `shard` を渡すとシャードオブジェクトも同時に再作成する（実在の書き手 B のモデル =
+    /// 宣言の前に putShard が完了している。dangling フォールスルーの実在再確認に掛けるため）。
     func simulateConcurrentIndexWriteAfterNextGetIndex(
-        shardId: String, info: ManifestIndex.ShardInfo?
+        shardId: String, info: ManifestIndex.ShardInfo?, shard: ManifestShard? = nil
     ) {
-        postGetIndexMutation = (shardId, info)
+        postGetIndexMutation = (shardId, info, shard)
     }
 
     /// テスト前提の直接投入（etag 検証を通さない）。index の shard 情報も同期する。
@@ -86,6 +89,11 @@ actor InMemoryManifestStore: ManifestStore {
         }
         if let mutation = postGetIndexMutation {
             postGetIndexMutation = nil
+            if let shard = mutation.shard {
+                shards[mutation.shardId] = shard
+                // 宣言とオブジェクトの etag を一致させる（実 S3 の整合状態を模倣）
+                shardEtags[mutation.shardId] = mutation.info?.etag ?? mintEtag()
+            }
             var idx = index ?? ManifestIndex.empty(updatedBy: "race-writer")
             if let info = mutation.info {
                 idx.shards[mutation.shardId] = info

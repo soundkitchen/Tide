@@ -433,27 +433,8 @@ public struct ManifestUpdater: Sendable {
                     )
                 } else {
                     // シャード不在なのに index が宣言を残している（deleteShard 成功 → updateIndex
-                    // 失敗の再入）→ 宣言を除去して確定させる。CAS（PR #56 再レビュー (1)）:
-                    // 観測した宣言から index が動いていたら中止する。観測とコミットの間に別書き手が
-                    // 同シャードを新規作成 + 宣言していた場合、無条件 removeValue はその正当な宣言を
-                    // 消し「実在シャードが未宣言」= 次回 pull の removedShards 誤検出（削除伝播）に
-                    // 化けるため、宣言除去は「観測した stale 宣言がまだ居るとき」のみ行う。
-                    let declared = try await store.getIndex()?.value.shards[shardId]?.etag
-                    if declared != nil {
-                        // 観測前の窓も閉じる（PR #56 再々レビュー (a)）: 外側 getShard(404) と上の
-                        // 宣言観測の間隙に並行書き手の再作成（putShard + 宣言）が両方完了していると、
-                        // その新鮮な宣言を「stale な dangling」と誤認したまま CAS が成立してしまう。
-                        // 除去をコミットする前にシャード実在を再確認し、実在したら除去を中止する
-                        // （B の putShard が再確認前 → ここで中止 / B の宣言が観測後 → CAS 不成立で
-                        // 中止、の両翼で削除伝播クラスの窓を閉じる）。
-                        if try await store.getShard(shardId) != nil { return }
-                        let repaired = try await updateIndex { idx in
-                            guard idx.shards[shardId]?.etag == declared else { return false }
-                            idx.shards.removeValue(forKey: shardId)
-                            return true
-                        }
-                        if repaired { onManifestDidWrite?() }
-                    }
+                    // 失敗の再入）→ dangling 宣言を除去して確定させる。
+                    try await removeDanglingDeclarationIfShardAbsent(shardId: shardId)
                 }
                 return
             }
@@ -468,14 +449,22 @@ public struct ManifestUpdater: Sendable {
                 // 観測した値）を宣言しているとき」のみ。deleteShard 〜 このコミットの間に並行書き手が
                 // 同シャードを再作成 + 宣言していたら、その正当な宣言を消さない（実在シャードの
                 // 未宣言化 = removedShards 誤検出 → 削除伝播の遮断）。主経路は修復系と違い自分の
-                // 観測 etag を知っているので、観測前窓のない完全な CAS になる。ずれていた場合の
-                // 後始末（本当に dangling なら）は no-op 再入の dangling 修復（実在再確認付き）が担う。
+                // 観測 etag を知っているので、観測前窓のない完全な CAS になる。
                 let removed = try await updateIndex { idx in
                     guard idx.shards[shardId]?.etag == etag else { return false }
                     idx.shards.removeValue(forKey: shardId)
                     return true
                 }
-                if removed { onManifestDidWrite?() }
+                if removed {
+                    onManifestDidWrite?()
+                } else {
+                    // ガード失敗の後始末（PR #56 第 4 ラウンド (g)）: 宣言が観測 etag と違う理由が
+                    // 「並行再作成」なら温存が正しいが、「先行分断の stale 宣言 + 自分が今オブジェクトを
+                    // 消した」形だと dangling が残り、しかも主系は成功でキュー行を消すため再入は
+                    // 機会的にしか起きない（= 削除が伝播しない ghost 化）。実在再確認付きの dangling
+                    // 除去へフォールスルーして両取りする（シャードが実在すれば何もしない）。
+                    try await removeDanglingDeclarationIfShardAbsent(shardId: shardId)
+                }
                 return
             }
 
@@ -486,6 +475,32 @@ public struct ManifestUpdater: Sendable {
             }
             onManifestDidWrite?()
         }
+    }
+
+    /// シャード不在時の dangling 宣言除去（実在再確認 + CAS 付き。PR #56 再レビュー (1) /
+    /// 再々レビュー (a) / 第 4 ラウンド (g) で共用ヘルパ化）。
+    /// 「オブジェクトは無いのに index が宣言を残している」状態を、観測し直した宣言への CAS で
+    /// 除去して確定させる（除去したら発火）。放置すると他デバイスは「宣言 == 記録済み etag」で
+    /// スキャンをスキップし続け、削除が伝播しない（ghost 残存）。
+    /// - CAS: 観測した宣言から index が動いていたら中止（並行書き手の新しい宣言を消さない =
+    ///   実在シャードの未宣言化 → removedShards 誤検出 → 削除伝播の遮断）。
+    /// - 実在再確認: 宣言観測より前に並行書き手の再作成（putShard + 宣言）が両方完了していると、
+    ///   新鮮な宣言を「stale な dangling」と誤認したまま CAS が成立してしまうため、コミット前に
+    ///   シャード実在を再確認して実在なら中止（B の putShard が再確認前 → ここで中止 /
+    ///   B の宣言が観測後 → CAS 不成立で中止、の両翼）。
+    /// - Returns: 宣言を除去したか。
+    @discardableResult
+    private func removeDanglingDeclarationIfShardAbsent(shardId: String) async throws -> Bool {
+        let declared = try await store.getIndex()?.value.shards[shardId]?.etag
+        guard declared != nil else { return false }
+        if try await store.getShard(shardId) != nil { return false }
+        let removed = try await updateIndex { idx in
+            guard idx.shards[shardId]?.etag == declared else { return false }
+            idx.shards.removeValue(forKey: shardId)
+            return true
+        }
+        if removed { onManifestDidWrite?() }
+        return removed
     }
 
     /// シャード実 etag と index 宣言を突合し、ずれていれば **CAS 付き**で index のみ修復する

@@ -437,7 +437,9 @@ final class ManifestUpdaterTests: XCTestCase {
     }
 
     /// 【PR #56 再々レビュー (b)】空シャード削除の主経路の宣言除去も CAS: deleteShard 〜 index
-    /// コミットの間に並行書き手が再作成 + 宣言していたら、その宣言を消さない・発火しない。
+    /// コミットの間に並行書き手が再作成（putShard + 宣言）していたら、その宣言を消さない・発火しない。
+    /// B はシャードオブジェクト込みで注入する（実在の書き手 = 宣言の前に putShard 完了。
+    /// 第 4 ラウンド (g) のフォールスルーは実在再確認で中止し、B を温存する）。
     /// （注入は updateIndex 内の fetch 直後に効くため、stale ifMatch の putIndex → 412 →
     /// リトライ再取得 → CAS 中止、という「リトライごとの CAS 再評価」経路も同時に踏む。）
     func testEmptyShardDeletionCASKeepsConcurrentRedeclaration() async throws {
@@ -448,9 +450,13 @@ final class ManifestUpdaterTests: XCTestCase {
         var shard = ManifestShard.empty(id: shardId)
         shard.files[path] = makeManifestEntry(sha: "aaa")
         await store.seed(shard: shard)
-        // updateIndex の fetch 直後に B が同シャードを再宣言する状況を注入
-        let bInfo = ManifestIndex.ShardInfo(etag: "etag-B", count: 7)
-        await store.simulateConcurrentIndexWriteAfterNextGetIndex(shardId: shardId, info: bInfo)
+        // updateIndex の fetch 直後に B が同シャードを再作成 + 再宣言する状況を注入
+        var recreated = ManifestShard.empty(id: shardId)
+        recreated.files["docs/other.txt"] = makeManifestEntry(sha: "bbb")
+        let bInfo = ManifestIndex.ShardInfo(etag: "etag-B", count: 1)
+        await store.simulateConcurrentIndexWriteAfterNextGetIndex(
+            shardId: shardId, info: bInfo, shard: recreated
+        )
 
         // 最後の 1 件を消す = 空シャード削除の主経路
         try await makeUpdater(store: store, counter: counter).updateShard(for: path) {
@@ -460,6 +466,37 @@ final class ManifestUpdaterTests: XCTestCase {
         XCTAssertEqual(counter.count, 0)  // 宣言は除去していない = 非発火
         let declared = await store.index?.shards[shardId]?.etag
         XCTAssertEqual(declared, "etag-B")  // B の宣言が温存される
+        let survivingShard = await store.shards[shardId]
+        XCTAssertNotNil(survivingShard?.files["docs/other.txt"])  // B のシャードも温存
+    }
+
+    /// 【PR #56 第 4 ラウンド (g)】主経路 CAS のガード失敗 + オブジェクト不在（= 先行分断の
+    /// stale 宣言だった場合）は dangling 除去へフォールスルーし、宣言を除去 + 発火する。
+    /// 放置すると主系は成功でキュー行を消すため再入が来ず、他デバイスが「宣言 == 記録済み etag」で
+    /// スキャンをスキップし続けて削除が伝播しない（ghost 残存）。
+    func testEmptyShardDeletionFallsThroughToRemoveStaleDanglingDeclaration() async throws {
+        let store = InMemoryManifestStore()
+        let counter = SignalCounter()
+        let path = "docs/a.txt"
+        let shardId = ManifestSharding.shardId(for: path)
+        var shard = ManifestShard.empty(id: shardId)
+        shard.files[path] = makeManifestEntry(sha: "aaa")
+        await store.seed(shard: shard)
+        // 先行分断を模擬: シャードだけ再 PUT して宣言を stale（E_old）にする
+        let cur = await store.shardEtags[shardId]
+        _ = try await store.putShard(shard, ifMatch: cur)
+
+        // 最後の 1 件の削除（主経路）: CAS は E_old ≠ 観測 etag で失敗するが、フォールスルーが
+        // オブジェクト不在を確認して dangling 宣言を除去 + 発火する
+        try await makeUpdater(store: store, counter: counter).updateShard(for: path) {
+            $0.files.removeValue(forKey: path)
+        }
+
+        XCTAssertEqual(counter.count, 1)
+        let declared = await store.index?.shards[shardId]
+        XCTAssertNil(declared)
+        let shards = await store.shards
+        XCTAssertNil(shards[shardId])
     }
 
     /// hook を明示 nil にしても全経路が従来どおり成功する（通知なしの明示宣言）。
