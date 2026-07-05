@@ -32,6 +32,14 @@ actor InMemoryManifestStore: ManifestStore {
     }
 
     private var postGetIndexMutation: (shardId: String, info: ManifestIndex.ShardInfo?)?
+    private var postGetShardRecreation: ManifestShard?
+
+    /// 次の getShard が返った**直後**に「並行書き手 B のシャード再作成 + 宣言」を適用する
+    /// （dangling 除去の観測前窓 = PR #56 再々レビュー (a) の検証用）。呼び出し元が受け取る
+    /// スナップショットは適用前の値（404 なら nil のまま）。宣言 etag は再作成シャードの実 etag。
+    func simulateConcurrentShardCreateAfterNextGetShard(_ shard: ManifestShard) {
+        postGetShardRecreation = shard
+    }
 
     /// 次の getIndex が返った**直後**に「並行書き手 B の index 書換」を適用する
     /// （突合修復 CAS の検証用。PR #56 再レビュー (1)/(4)）。呼び出し元が受け取るスナップショットは
@@ -103,8 +111,23 @@ actor InMemoryManifestStore: ManifestStore {
     }
 
     func getShard(_ id: String) throws -> TideS3Client.ManifestFetch<ManifestShard>? {
-        guard let shard = shards[id], let etag = shardEtags[id] else { return nil }
-        return .init(value: shard, etag: etag)
+        let result: TideS3Client.ManifestFetch<ManifestShard>?
+        if let shard = shards[id], let etag = shardEtags[id] {
+            result = .init(value: shard, etag: etag)
+        } else {
+            result = nil
+        }
+        if let recreation = postGetShardRecreation {
+            postGetShardRecreation = nil
+            let etag = mintEtag()
+            shards[recreation.shardId] = recreation
+            shardEtags[recreation.shardId] = etag
+            var idx = index ?? ManifestIndex.empty(updatedBy: "race-writer")
+            idx.shards[recreation.shardId] = .init(etag: etag, count: recreation.files.count)
+            index = idx
+            indexEtag = mintEtag()
+        }
+        return result
     }
 
     func putShard(_ shard: ManifestShard, ifMatch: String?) throws -> String {

@@ -398,6 +398,70 @@ final class ManifestUpdaterTests: XCTestCase {
         XCTAssertEqual(declared, "etag-B")
     }
 
+    /// 【PR #56 再々レビュー (a)】dangling 除去の「観測前の窓」: 外側 getShard(404) と宣言観測の
+    /// 間隙に並行書き手の再作成（putShard + 宣言）が**両方**完了していた場合、その新鮮な宣言を
+    /// stale と誤認せず、コミット前のシャード実在再確認で除去を中止する。
+    func testDanglingRemovalAbortsWhenShardRecreatedBeforeObservation() async throws {
+        let store = InMemoryManifestStore()
+        let counter = SignalCounter()
+        let path = "docs/a.txt"
+        let shardId = ManifestSharding.shardId(for: path)
+        var shard = ManifestShard.empty(id: shardId)
+        shard.files[path] = makeManifestEntry(sha: "aaa")
+        await store.seed(shard: shard)
+        await store.failNextPutIndex(times: 5)
+        do {
+            try await makeUpdater(store: store, counter: counter).updateShard(for: path) {
+                $0.files.removeValue(forKey: path)
+            }
+            XCTFail("expected manifestUpdateFailed")
+        } catch SyncError.manifestUpdateFailed {}
+        // dangling 状態。ここで「外側 getShard(404) の直後」に B の再作成（putShard + 宣言）が
+        // 両方完了する状況を注入 → A は B の新鮮な宣言を dangling として観測してしまう
+        var recreated = ManifestShard.empty(id: shardId)
+        recreated.files["docs/other.txt"] = makeManifestEntry(sha: "bbb")
+        await store.simulateConcurrentShardCreateAfterNextGetShard(recreated)
+
+        try await makeUpdater(store: store, counter: counter).updateShard(for: path) {
+            $0.files.removeValue(forKey: path)
+        }
+
+        XCTAssertEqual(counter.count, 0)
+        // B のシャードと宣言がそのまま生きている（実在シャードの未宣言化 = 削除伝播の遮断）
+        let declared = await store.index?.shards[shardId]?.etag
+        let actual = await store.shardEtags[shardId]
+        XCTAssertNotNil(declared)
+        XCTAssertEqual(declared, actual)
+        let survivingShard = await store.shards[shardId]
+        XCTAssertNotNil(survivingShard?.files["docs/other.txt"])
+    }
+
+    /// 【PR #56 再々レビュー (b)】空シャード削除の主経路の宣言除去も CAS: deleteShard 〜 index
+    /// コミットの間に並行書き手が再作成 + 宣言していたら、その宣言を消さない・発火しない。
+    /// （注入は updateIndex 内の fetch 直後に効くため、stale ifMatch の putIndex → 412 →
+    /// リトライ再取得 → CAS 中止、という「リトライごとの CAS 再評価」経路も同時に踏む。）
+    func testEmptyShardDeletionCASKeepsConcurrentRedeclaration() async throws {
+        let store = InMemoryManifestStore()
+        let counter = SignalCounter()
+        let path = "docs/a.txt"
+        let shardId = ManifestSharding.shardId(for: path)
+        var shard = ManifestShard.empty(id: shardId)
+        shard.files[path] = makeManifestEntry(sha: "aaa")
+        await store.seed(shard: shard)
+        // updateIndex の fetch 直後に B が同シャードを再宣言する状況を注入
+        let bInfo = ManifestIndex.ShardInfo(etag: "etag-B", count: 7)
+        await store.simulateConcurrentIndexWriteAfterNextGetIndex(shardId: shardId, info: bInfo)
+
+        // 最後の 1 件を消す = 空シャード削除の主経路
+        try await makeUpdater(store: store, counter: counter).updateShard(for: path) {
+            $0.files.removeValue(forKey: path)
+        }
+
+        XCTAssertEqual(counter.count, 0)  // 宣言は除去していない = 非発火
+        let declared = await store.index?.shards[shardId]?.etag
+        XCTAssertEqual(declared, "etag-B")  // B の宣言が温存される
+    }
+
     /// hook を明示 nil にしても全経路が従来どおり成功する（通知なしの明示宣言）。
     func testNilHookStillWrites() async throws {
         let store = InMemoryManifestStore()

@@ -376,6 +376,10 @@ public struct ManifestUpdater: Sendable {
                 // 再試行で backoff 中のローカル再編集が「自分の前回書込」と幻影競合するケースは
                 // `.alreadyUpToDate` に到達しない。throw の前に書込済み entry の可視化を確定させる
                 // （競合解決自体は呼び出し元の退避 + versionId 取得が担う）。
+                // 修復失敗（manifestUpdateFailed）が uploadConflict を置換して競合解決が 1 backoff
+                // 遅れるのは**意図的な優先順**（PR #56 再々レビュー (e)）: try? で握り潰すと
+                // resolveUploadConflict がキュー行を消し、修復未完 = index 恒久 stale が再来する。
+                // 遅延側は次試行 + pull 側 .conflictThenDownload が受け止め、データ損失はない。
                 if let fetchedEtag = fetched?.etag {
                     try await repairIndexDeclarationIfStale(
                         shardId: shardId, fetchedEtag: fetchedEtag, count: shard.files.count
@@ -436,6 +440,13 @@ public struct ManifestUpdater: Sendable {
                     // 化けるため、宣言除去は「観測した stale 宣言がまだ居るとき」のみ行う。
                     let declared = try await store.getIndex()?.value.shards[shardId]?.etag
                     if declared != nil {
+                        // 観測前の窓も閉じる（PR #56 再々レビュー (a)）: 外側 getShard(404) と上の
+                        // 宣言観測の間隙に並行書き手の再作成（putShard + 宣言）が両方完了していると、
+                        // その新鮮な宣言を「stale な dangling」と誤認したまま CAS が成立してしまう。
+                        // 除去をコミットする前にシャード実在を再確認し、実在したら除去を中止する
+                        // （B の putShard が再確認前 → ここで中止 / B の宣言が観測後 → CAS 不成立で
+                        // 中止、の両翼で削除伝播クラスの窓を閉じる）。
+                        if try await store.getShard(shardId) != nil { return }
                         let repaired = try await updateIndex { idx in
                             guard idx.shards[shardId]?.etag == declared else { return false }
                             idx.shards.removeValue(forKey: shardId)
@@ -453,11 +464,18 @@ public struct ManifestUpdater: Sendable {
                 if etag != nil {
                     try await store.deleteShard(shardId)
                 }
-                _ = try await updateIndex { idx in
+                // CAS（PR #56 再々レビュー (b)）: 宣言除去は「自分が消したシャードの etag（外側で
+                // 観測した値）を宣言しているとき」のみ。deleteShard 〜 このコミットの間に並行書き手が
+                // 同シャードを再作成 + 宣言していたら、その正当な宣言を消さない（実在シャードの
+                // 未宣言化 = removedShards 誤検出 → 削除伝播の遮断）。主経路は修復系と違い自分の
+                // 観測 etag を知っているので、観測前窓のない完全な CAS になる。ずれていた場合の
+                // 後始末（本当に dangling なら）は no-op 再入の dangling 修復（実在再確認付き）が担う。
+                let removed = try await updateIndex { idx in
+                    guard idx.shards[shardId]?.etag == etag else { return false }
                     idx.shards.removeValue(forKey: shardId)
                     return true
                 }
-                onManifestDidWrite?()
+                if removed { onManifestDidWrite?() }
                 return
             }
 
