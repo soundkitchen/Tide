@@ -51,12 +51,7 @@ final class ManifestGenerationCacheTests: XCTestCase {
         }
     }
 
-    private final class SignalCounter: @unchecked Sendable {
-        private let lock = NSLock()
-        private var _count = 0
-        var count: Int { lock.withLock { _count } }
-        func fire() { lock.withLock { _count += 1 } }
-    }
+    // SignalCounter は TestSupport の共有版を使う（PR #56 レビュー ⑦で吊り上げ）。
 
     private func entry(sha: String, mtime: String = "2026-07-01T00:00:00Z") -> ManifestFileEntry {
         ManifestFileEntry(

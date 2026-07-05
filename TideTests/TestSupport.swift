@@ -134,3 +134,31 @@ enum TestData {
     /// Data の SHA-256 hex（小文字）。
     static func shaHex(_ data: Data) -> String { HashCalculator.hex(SHA256.hash(data: data)) }
 }
+
+/// @Sendable クロージャからの発火回数を数えるスレッドセーフなカウンタ
+/// （ManifestGenerationCacheTests / ManifestUpdaterTests で共用。PR #56 レビュー ⑦）。
+final class SignalCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _count = 0
+    var count: Int { lock.withLock { _count } }
+    func fire() { lock.withLock { _count += 1 } }
+}
+
+/// デフォルト引数付きの ManifestFileEntry ビルダー（PR #56 レビュー ⑦。
+/// 新規テストはこれを使う。既存ファイルの private ビルダーの移行は任意）。
+func makeManifestEntry(
+    sha: String,
+    size: Int64 = 10,
+    mtime: String = "2026-07-05T00:00:00Z",
+    deviceId: String = "test-device"
+) -> ManifestFileEntry {
+    ManifestFileEntry(
+        size: size,
+        mtime: mtime,
+        sha256: sha,
+        s3VersionId: "v-\(sha)",
+        etag: "obj-etag-\(sha)",
+        deviceId: deviceId,
+        uploadedAt: mtime
+    )
+}

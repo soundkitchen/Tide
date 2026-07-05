@@ -15,6 +15,9 @@ public struct Uploader: Sendable {
     public var progressReporter: TransferProgressReporter? = nil
     /// アップロード帯域制御（サブ E）。複数ファイル並行 UL で共有する。nil = 無制限。
     public var uploadLimiter: RateLimiter? = nil
+    /// マニフェスト書込の唯一のチョークポイント。init で 1 個だけ構築して upload/delete が共用する
+    /// （PR #56 レビュー ④: 構築の重複をなくし、hook＝FP signal の配線点をアプリ側 1 箇所に固定）。
+    public let manifestUpdater: ManifestUpdater
 
     public init(
         s3: TideS3Client,
@@ -24,7 +27,10 @@ public struct Uploader: Sendable {
         config: ConfigStore,
         transferStore: any TransferStateStoring,
         progressReporter: TransferProgressReporter? = nil,
-        uploadLimiter: RateLimiter? = nil
+        uploadLimiter: RateLimiter? = nil,
+        // 既定値なし（PR #56 再レビュー (2)）: ManifestUpdater 層と同じく、hook の渡し忘れを
+        // コンパイルエラーにする。「通知しない」は nil の明示渡しで宣言させる。
+        onManifestWrite: (@Sendable () -> Void)?
     ) {
         self.s3 = s3
         self.db = db
@@ -34,6 +40,9 @@ public struct Uploader: Sendable {
         self.transferStore = transferStore
         self.progressReporter = progressReporter
         self.uploadLimiter = uploadLimiter
+        self.manifestUpdater = ManifestUpdater(
+            store: s3, deviceId: deviceId, onManifestDidWrite: onManifestWrite
+        )
     }
 
     /// upload_queue の 1 件を処理する。
@@ -192,7 +201,7 @@ public struct Uploader: Sendable {
             deviceId: deviceId,
             uploadedAt: ISO8601.now()
         )
-        let outcome = try await ManifestUpdater(s3: s3, deviceId: deviceId).updateFileEntry(
+        let outcome = try await manifestUpdater.updateFileEntry(
             for: path, base: base, newEntry: newEntry
         )
 
@@ -249,7 +258,7 @@ public struct Uploader: Sendable {
         try await s3.deleteObject(key: s3Key)
         AppLogger.s3.info("Deleted (delete marker): \(path, privacy: .private)")
 
-        try await ManifestUpdater(s3: s3, deviceId: deviceId).updateShard(for: path) { shard in
+        try await manifestUpdater.updateShard(for: path) { shard in
             shard.files.removeValue(forKey: path)
         }
 
@@ -299,13 +308,29 @@ public enum ShardUpdateOutcome: Equatable, Sendable {
 }
 
 /// シャードと index.json を楽観的ロックで更新する。
-public struct ManifestUpdater {
-    public let s3: TideS3Client
+/// アプリ（Uploader 経由）と File Provider 拡張（M5 Phase 5〜）が共有する
+/// **マニフェスト書込の唯一のチョークポイント**。
+public struct ManifestUpdater: Sendable {
+    public let store: any ManifestStore
     public let deviceId: String
+    /// マニフェスト（シャード + index）が**実際に書かれた**直後に 1 回発火する。
+    /// FP ドメインへの signal はここに配線する（M5 Phase 5-0 / PR #51 レビュー #4）:
+    /// バッチ集約（anySucceeded）だと「マニフェスト PUT 成功 → 後続の DB write throw」で
+    /// 1 バッチ分 signal が漏れる窓があったが、確定点発火なら構造的に漏れない。
+    /// `.alreadyUpToDate`（書いていない）/ `.conflict` / リトライ尽き失敗では発火しない。
+    public var onManifestDidWrite: (@Sendable () -> Void)?
 
-    public init(s3: TideS3Client, deviceId: String) {
-        self.s3 = s3
+    /// `onManifestDidWrite` に既定値を置かない（PR #56 レビュー ④）: 将来の構築箇所
+    /// （FP 拡張の書込経路等）が hook の配線を忘れると signal 漏れ窓が静かに再発するため、
+    /// 「通知しない」は `nil` の明示渡しで宣言させる。
+    public init(
+        store: any ManifestStore,
+        deviceId: String,
+        onManifestDidWrite: (@Sendable () -> Void)?
+    ) {
+        self.store = store
         self.deviceId = deviceId
+        self.onManifestDidWrite = onManifestDidWrite
     }
 
     /// アップロードの per-file entry を、並行更新を検出しながら書き込む（Issue #25 / A）。
@@ -324,7 +349,7 @@ public struct ManifestUpdater {
     ) async throws -> ShardUpdateOutcome {
         let shardId = ManifestSharding.shardId(for: path)
         return try await withConditionalRetry("shard \(shardId)") {
-            let fetched = try await s3.getShard(shardId)
+            let fetched = try await store.getShard(shardId)
             var shard = fetched?.value ?? ManifestShard.empty(id: shardId)
             let etag = fetched?.etag
             let existing = shard.files[path]
@@ -334,9 +359,32 @@ public struct ManifestUpdater {
             // existing は decideUpload が .alreadyUpToDate / .conflict を返すとき必ず非 nil
             // （remote == nil なら必ず .proceed）。理論上不到達の existing == nil は安全側で書込へ倒す。
             if decision == .alreadyUpToDate, let existing {
+                // index 突合修復（PR #56 レビュー ①）: 「putShard 成功 → updateIndex 未完」で
+                // 失敗した書込の再試行はここに入る（remote == uploading）。そのまま返すと
+                // index が旧シャード etag を宣言し続け、全読者（他デバイス pull / FP 増分ロード）から
+                // この書込が恒久不可視になる。シャード実 etag と index 宣言がずれていれば
+                // index のみ修復し、可視化された確定点として発火する。
+                if let fetchedEtag = fetched?.etag {
+                    try await repairIndexDeclarationIfStale(
+                        shardId: shardId, fetchedEtag: fetchedEtag, count: shard.files.count
+                    )
+                }
                 return .alreadyUpToDate(existing)
             }
             if decision == .conflict, let existing {
+                // 競合でも突合修復だけは通す（PR #56 再レビュー (3)）: updateIndex 未完の分断からの
+                // 再試行で backoff 中のローカル再編集が「自分の前回書込」と幻影競合するケースは
+                // `.alreadyUpToDate` に到達しない。throw の前に書込済み entry の可視化を確定させる
+                // （競合解決自体は呼び出し元の退避 + versionId 取得が担う）。
+                // 修復失敗（manifestUpdateFailed）が uploadConflict を置換して競合解決が 1 backoff
+                // 遅れるのは**意図的な優先順**（PR #56 再々レビュー (e)）: try? で握り潰すと
+                // resolveUploadConflict がキュー行を消し、修復未完 = index 恒久 stale が再来する。
+                // 遅延側は次試行 + pull 側 .conflictThenDownload が受け止め、データ損失はない。
+                if let fetchedEtag = fetched?.etag {
+                    try await repairIndexDeclarationIfStale(
+                        shardId: shardId, fetchedEtag: fetchedEtag, count: shard.files.count
+                    )
+                }
                 throw SyncError.uploadConflict(path: path, remoteEntry: existing)
             }
             // ここに来るのは .proceed のみ（理論上不到達: .alreadyUpToDate/.conflict は existing 非 nil で
@@ -347,10 +395,16 @@ public struct ManifestUpdater {
 
             shard.files[path] = newEntry
             shard.updatedAt = ISO8601.now()
-            let newEtag = try await s3.putShard(shard, ifMatch: etag)
-            try await updateIndex { idx in
+            let newEtag = try await store.putShard(shard, ifMatch: etag)
+            _ = try await updateIndex { idx in
                 idx.shards[shardId] = .init(etag: newEtag, count: shard.files.count)
+                return true
             }
+            // シャード + index の両方が確定した時のみ発火。putShard 成功 → updateIndex が
+            // リトライ尽きで throw した場合は非発火のまま失敗として呼び出し元へ伝播し
+            // （SyncError は外側リトライに再マッチしない）、再試行（キューのバックオフ再試行）が
+            // 上の `.alreadyUpToDate` 分岐の index 突合修復で可視化 + 発火する（PR #56 レビュー ①）。
+            onManifestDidWrite?()
             return .wrote
         }
     }
@@ -361,38 +415,130 @@ public struct ManifestUpdater {
     ) async throws {
         let shardId = ManifestSharding.shardId(for: path)
         try await withConditionalRetry("shard \(shardId)") {
-            let fetched = try await s3.getShard(shardId)
+            let fetched = try await store.getShard(shardId)
             var shard = fetched?.value ?? ManifestShard.empty(id: shardId)
             let etag = fetched?.etag
+            let filesBefore = shard.files
             transform(&shard)
-            shard.updatedAt = ISO8601.now()
 
-            if shard.files.isEmpty {
-                if etag != nil {
-                    try await s3.deleteShard(shardId)
-                }
-                try await updateIndex { idx in
-                    idx.shards.removeValue(forKey: shardId)
+            // no-op 検出（PR #56 レビュー ②）: transform が内容を変えなかったら書かない・発火しない
+            // （`updateFileEntry` の `.alreadyUpToDate` と対称の規約）。到達例: マニフェスト不在パスへの
+            // delete（consumed 済みの再試行 / 他デバイスが先に削除 / ENOENT からの delete 変換）。
+            // ただし「シャード実体と index 宣言のずれ」だけは修復する（PR #56 レビュー ①:
+            // 前回試行が updateIndex 手前で失敗した再入では、内容不変でも index 修復が必要）。
+            if shard.files == filesBefore {
+                if let etag {
+                    try await repairIndexDeclarationIfStale(
+                        shardId: shardId, fetchedEtag: etag, count: shard.files.count
+                    )
+                } else {
+                    // シャード不在なのに index が宣言を残している（deleteShard 成功 → updateIndex
+                    // 失敗の再入）→ dangling 宣言を除去して確定させる。
+                    try await removeDanglingDeclarationIfShardAbsent(shardId: shardId)
                 }
                 return
             }
 
-            let newEtag = try await s3.putShard(shard, ifMatch: etag)
-            try await updateIndex { idx in
-                idx.shards[shardId] = .init(etag: newEtag, count: shard.files.count)
+            shard.updatedAt = ISO8601.now()
+
+            if shard.files.isEmpty {
+                if etag != nil {
+                    try await store.deleteShard(shardId)
+                }
+                // CAS（PR #56 再々レビュー (b)）: 宣言除去は「自分が消したシャードの etag（外側で
+                // 観測した値）を宣言しているとき」のみ。deleteShard 〜 このコミットの間に並行書き手が
+                // 同シャードを再作成 + 宣言していたら、その正当な宣言を消さない（実在シャードの
+                // 未宣言化 = removedShards 誤検出 → 削除伝播の遮断）。主経路は修復系と違い自分の
+                // 観測 etag を知っているので、観測前窓のない完全な CAS になる。
+                let removed = try await updateIndex { idx in
+                    guard idx.shards[shardId]?.etag == etag else { return false }
+                    idx.shards.removeValue(forKey: shardId)
+                    return true
+                }
+                if removed {
+                    onManifestDidWrite?()
+                } else {
+                    // ガード失敗の後始末（PR #56 第 4 ラウンド (g)）: 宣言が観測 etag と違う理由が
+                    // 「並行再作成」なら温存が正しいが、「先行分断の stale 宣言 + 自分が今オブジェクトを
+                    // 消した」形だと dangling が残り、しかも主系は成功でキュー行を消すため再入は
+                    // 機会的にしか起きない（= 削除が伝播しない ghost 化）。実在再確認付きの dangling
+                    // 除去へフォールスルーして両取りする（シャードが実在すれば何もしない）。
+                    try await removeDanglingDeclarationIfShardAbsent(shardId: shardId)
+                }
+                return
             }
+
+            let newEtag = try await store.putShard(shard, ifMatch: etag)
+            _ = try await updateIndex { idx in
+                idx.shards[shardId] = .init(etag: newEtag, count: shard.files.count)
+                return true
+            }
+            onManifestDidWrite?()
         }
     }
 
-    private func updateIndex(_ transform: (inout ManifestIndex) -> Void) async throws {
+    /// シャード不在時の dangling 宣言除去（実在再確認 + CAS 付き。PR #56 再レビュー (1) /
+    /// 再々レビュー (a) / 第 4 ラウンド (g) で共用ヘルパ化）。
+    /// 「オブジェクトは無いのに index が宣言を残している」状態を、観測し直した宣言への CAS で
+    /// 除去して確定させる（除去したら発火）。放置すると他デバイスは「宣言 == 記録済み etag」で
+    /// スキャンをスキップし続け、削除が伝播しない（ghost 残存）。
+    /// - CAS: 観測した宣言から index が動いていたら中止（並行書き手の新しい宣言を消さない =
+    ///   実在シャードの未宣言化 → removedShards 誤検出 → 削除伝播の遮断）。
+    /// - 実在再確認: 宣言観測より前に並行書き手の再作成（putShard + 宣言）が両方完了していると、
+    ///   新鮮な宣言を「stale な dangling」と誤認したまま CAS が成立してしまうため、コミット前に
+    ///   シャード実在を再確認して実在なら中止（B の putShard が再確認前 → ここで中止 /
+    ///   B の宣言が観測後 → CAS 不成立で中止、の両翼）。
+    /// - Returns: 宣言を除去したか。
+    @discardableResult
+    private func removeDanglingDeclarationIfShardAbsent(shardId: String) async throws -> Bool {
+        let declared = try await store.getIndex()?.value.shards[shardId]?.etag
+        guard declared != nil else { return false }
+        if try await store.getShard(shardId) != nil { return false }
+        let removed = try await updateIndex { idx in
+            guard idx.shards[shardId]?.etag == declared else { return false }
+            idx.shards.removeValue(forKey: shardId)
+            return true
+        }
+        if removed { onManifestDidWrite?() }
+        return removed
+    }
+
+    /// シャード実 etag と index 宣言を突合し、ずれていれば **CAS 付き**で index のみ修復する
+    /// （PR #56 レビュー ① / 再レビュー (1)）。「putShard 成功 → updateIndex 未完」の分断からの
+    /// 再入（`.alreadyUpToDate` / `.conflict` / no-op 書換）が呼ぶ。
+    /// CAS: 観測した宣言から index が動いていたら修復を中止する（並行書き手の新しい宣言を
+    /// stale 観測で巻き戻さない）。中止しても正しさは保たれる — 宣言を動かした書き手が
+    /// 自分の書込パスで宣言を確定させている。修復として書いたときのみ発火する。
+    /// - Returns: 修復として index を書いたか。
+    @discardableResult
+    private func repairIndexDeclarationIfStale(
+        shardId: String, fetchedEtag: String, count: Int
+    ) async throws -> Bool {
+        let declared = try await store.getIndex()?.value.shards[shardId]?.etag
+        guard declared != fetchedEtag else { return false }
+        let repaired = try await updateIndex { idx in
+            guard idx.shards[shardId]?.etag == declared else { return false }
+            idx.shards[shardId] = .init(etag: fetchedEtag, count: count)
+            return true
+        }
+        if repaired { onManifestDidWrite?() }
+        return repaired
+    }
+
+    /// index の RMW。`transform` が false を返したら**書かずに** false（CAS 中止用）。
+    /// 412/409 リトライは index を再取得してから transform を再評価するので、CAS は毎試行
+    /// 新鮮な index に対して判定される。
+    /// - Returns: 実際に index を書いたか。
+    private func updateIndex(_ transform: (inout ManifestIndex) -> Bool) async throws -> Bool {
         try await withConditionalRetry("index.json") {
-            let fetched = try await s3.getIndex()
+            let fetched = try await store.getIndex()
             var index = fetched?.value ?? ManifestIndex.empty(updatedBy: deviceId)
             let etag = fetched?.etag
-            transform(&index)
+            guard transform(&index) else { return false }
             index.updatedAt = ISO8601.now()
             index.updatedBy = deviceId
-            _ = try await s3.putIndex(index, ifMatch: etag)
+            _ = try await store.putIndex(index, ifMatch: etag)
+            return true
         }
     }
 
@@ -409,6 +555,13 @@ public struct ManifestUpdater {
             do {
                 return try await operation()
             } catch {
+                // 自前の SyncError は素通しする（PR #56 レビュー ①）。クラシファイアは
+                // String(describing:) の部分文字列マッチなので、下位エラー文字列を埋め込む
+                // manifestUpdateFailed（内側 updateIndex のリトライ尽き）や path を含む
+                // uploadConflict（"file-412.txt" 等）が「リトライ可能な 412」に誤分類されると、
+                // 外側再実行が getShard → 自分の書いた entry → .alreadyUpToDate 短絡で
+                // 「index 未更新のまま静かな成功」に化ける（恒久 stale の温床）。
+                if error is SyncError { throw error }
                 if S3ErrorClassifier.isPreconditionFailed(error)
                     || S3ErrorClassifier.isConditionalConflict(error) {
                     lastError = error

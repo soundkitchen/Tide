@@ -42,6 +42,29 @@ enum FileProviderPoC {
     /// 拡張側は enumerateChanges 応答で TTL を待たず増分ロードするため、この signal が
     /// 実質のリモート追従トリガになる。
     static func signalRemoteChanges() {
+        // コアレス（PR #56 レビュー ③）: 確定点発火（M5 Phase 5-0）はアップロード 1 件ごとに
+        // 呼ばれるため、大量アップロード時に signal（XPC 2 回/呼）が件数分に増幅する。
+        // 「即時 1 発 + クールダウン中の後着はトレーリング 1 発」に集約する — 先頭は遅延ゼロで
+        // 従来の反映速度を保ち、トレーリング再発火が「窓中の最後の書込」の取りこぼしを防ぐ。
+        if signalCooldownTask != nil {
+            signalPendingDuringCooldown = true
+            return
+        }
+        performSignal()
+        signalCooldownTask = Task {
+            try? await Task.sleep(for: .seconds(1))
+            signalCooldownTask = nil
+            if signalPendingDuringCooldown {
+                signalPendingDuringCooldown = false
+                signalRemoteChanges()
+            }
+        }
+    }
+
+    private static var signalCooldownTask: Task<Void, Never>?
+    private static var signalPendingDuringCooldown = false
+
+    private static func performSignal() {
         Task {
             guard await isEnabled(), let manager = NSFileProviderManager(for: domain) else { return }
             do {
