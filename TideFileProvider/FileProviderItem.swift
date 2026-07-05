@@ -4,7 +4,8 @@ import TideCore
 import UniformTypeIdentifiers
 
 /// `ManifestTree.Node` を `NSFileProviderItem` に写像する読み取り専用アイテム（M5 Phase 3）。
-/// identifier = 相対 POSIX パス（ルートは `.rootContainer`）。バージョンは sha256 をそのまま使う。
+/// identifier = kind プレフィックス + 相対 POSIX パス（`f:`/`d:`・ルートは `.rootContainer`。
+/// M5 Phase 5-1 で kind 織り込み形式へ変更）。バージョンは sha256 をそのまま使う。
 final class FileProviderItem: NSObject, NSFileProviderItem, @unchecked Sendable {
     private let node: ManifestTree.Node
 
@@ -13,14 +14,15 @@ final class FileProviderItem: NSObject, NSFileProviderItem, @unchecked Sendable 
     }
 
     var itemIdentifier: NSFileProviderItemIdentifier {
-        NSFileProviderItemIdentifier(tideRelativePath: node.path)
+        NSFileProviderItemIdentifier(tideNode: node)
     }
 
     var parentItemIdentifier: NSFileProviderItemIdentifier {
         let components = node.path.split(separator: "/")
         guard components.count > 1 else { return .rootContainer }
+        // 親は常に合成ディレクトリ
         return NSFileProviderItemIdentifier(
-            tideRelativePath: components.dropLast().joined(separator: "/"))
+            tideRelativePath: components.dropLast().joined(separator: "/"), isDirectory: true)
     }
 
     var filename: String {
