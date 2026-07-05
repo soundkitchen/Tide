@@ -77,7 +77,7 @@ Issue #52 の実機受け入れ中に発見した **M1 からの潜在バグ**�
 
 - **実機発現**: 同期ルート直下の file-symlink 存在下でフルスキャンが走り、ローカルに実在する追跡ファイル `x.txt/inner.txt` が「見つからない」と判定され **S3 へ誤 delete**（他端末には削除として伝播し得る静かなデータ損失系。版履歴からは回復可・ローカルは無傷）。
 - **根因（実験 3 本で確定）**: ① deep enumeration は symlink（ディレクトリリンク含む）へ**そもそも再帰しない**＝symlink での `skipDescendants()` は不要 ② 現在 item がファイル（symlink）のときに呼ぶと**無関係な隣接ディレクトリ**への再帰がスキップされる（決定的に再現） ③ ディレクトリ item での正規使用（機密網 dir スキップ）は正常。C2 対策（2026-05-24）当時の「enumerator はディレクトリへの symlink を既定で辿る」という前提が誤りだった（`security/critical.md` C2 の修正注記参照）。
-- **解消（2026-07-05・Issue #54）**: `performFullScan` / `loadLayeredIgnore` の symlink 分岐から `skipDescendants()` を除去（`continue` のみ。symlink 非追従の安全性は enumerator の仕様で維持）。回帰テスト `FullScanSymlinkTests` は実 SyncEngine + 実ツリー（file-symlink 12 本 × 子ファイル入り dir 12 個）で「全ファイル走査 + 誤 delete ゼロ + 全 `.syncignore` ロード」を固定し、**旧実装では両テストとも赤になることを確認済み**。
+- **解消（2026-07-05・Issue #54）**: `performFullScan` / `loadLayeredIgnore` の symlink 分岐から `skipDescendants()` を除去（`continue` のみ。symlink 非追従の安全性は enumerator の仕様で維持）。回帰テスト `FullScanSymlinkTests` は実 SyncEngine + 実ツリー（file-symlink 12 本 × 子ファイル入り dir 12 個 + **root 外の機密ディレクトリを指す dir-symlink 1 本**）で「全ファイル走査 + 誤 delete ゼロ + 全 `.syncignore` ロード + **dir-symlink 配下が同期対象/層状マッチャに一切乗らない（C2 の非追従挙動のピン留め）**」を固定し、**旧実装では両テストとも赤になることを確認済み**。列挙順（APFS ハッシュ順）依存の事象のため、「symlink の後に未走査ディレクトリが並ぶ＝旧実装が失敗する条件」を前提条件アサーションで検証し、環境変化による回帰ガードの静かな失効も検出できるようにした（PR #55 レビュー ③④）。
 
 ## ストレージバックエンド移植性（Cloudflare R2 / Google Cloud Storage）— 将来の任意検討（Issue 化せず本メモで追跡）
 
