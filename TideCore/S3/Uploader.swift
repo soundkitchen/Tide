@@ -15,9 +15,9 @@ public struct Uploader: Sendable {
     public var progressReporter: TransferProgressReporter? = nil
     /// アップロード帯域制御（サブ E）。複数ファイル並行 UL で共有する。nil = 無制限。
     public var uploadLimiter: RateLimiter? = nil
-    /// マニフェストが実際に書かれた確定点で発火（`ManifestUpdater.onManifestDidWrite` へ配線）。
-    /// FP ドメインへの signal 用（M5 Phase 5-0）。nil = 通知なし。
-    public var onManifestWrite: (@Sendable () -> Void)? = nil
+    /// マニフェスト書込の唯一のチョークポイント。init で 1 個だけ構築して upload/delete が共用する
+    /// （PR #56 レビュー ④: 構築の重複をなくし、hook＝FP signal の配線点をアプリ側 1 箇所に固定）。
+    public let manifestUpdater: ManifestUpdater
 
     public init(
         s3: TideS3Client,
@@ -38,7 +38,9 @@ public struct Uploader: Sendable {
         self.transferStore = transferStore
         self.progressReporter = progressReporter
         self.uploadLimiter = uploadLimiter
-        self.onManifestWrite = onManifestWrite
+        self.manifestUpdater = ManifestUpdater(
+            store: s3, deviceId: deviceId, onManifestDidWrite: onManifestWrite
+        )
     }
 
     /// upload_queue の 1 件を処理する。
@@ -197,9 +199,7 @@ public struct Uploader: Sendable {
             deviceId: deviceId,
             uploadedAt: ISO8601.now()
         )
-        let outcome = try await ManifestUpdater(
-            store: s3, deviceId: deviceId, onManifestDidWrite: onManifestWrite
-        ).updateFileEntry(
+        let outcome = try await manifestUpdater.updateFileEntry(
             for: path, base: base, newEntry: newEntry
         )
 
@@ -256,9 +256,7 @@ public struct Uploader: Sendable {
         try await s3.deleteObject(key: s3Key)
         AppLogger.s3.info("Deleted (delete marker): \(path, privacy: .private)")
 
-        try await ManifestUpdater(
-            store: s3, deviceId: deviceId, onManifestDidWrite: onManifestWrite
-        ).updateShard(for: path) { shard in
+        try await manifestUpdater.updateShard(for: path) { shard in
             shard.files.removeValue(forKey: path)
         }
 
@@ -320,10 +318,13 @@ public struct ManifestUpdater: Sendable {
     /// `.alreadyUpToDate`（書いていない）/ `.conflict` / リトライ尽き失敗では発火しない。
     public var onManifestDidWrite: (@Sendable () -> Void)?
 
+    /// `onManifestDidWrite` に既定値を置かない（PR #56 レビュー ④）: 将来の構築箇所
+    /// （FP 拡張の書込経路等）が hook の配線を忘れると signal 漏れ窓が静かに再発するため、
+    /// 「通知しない」は `nil` の明示渡しで宣言させる。
     public init(
         store: any ManifestStore,
         deviceId: String,
-        onManifestDidWrite: (@Sendable () -> Void)? = nil
+        onManifestDidWrite: (@Sendable () -> Void)?
     ) {
         self.store = store
         self.deviceId = deviceId
@@ -356,6 +357,20 @@ public struct ManifestUpdater: Sendable {
             // existing は decideUpload が .alreadyUpToDate / .conflict を返すとき必ず非 nil
             // （remote == nil なら必ず .proceed）。理論上不到達の existing == nil は安全側で書込へ倒す。
             if decision == .alreadyUpToDate, let existing {
+                // index 突合修復（PR #56 レビュー ①）: 「putShard 成功 → updateIndex 未完」で
+                // 失敗した書込の再試行はここに入る（remote == uploading）。そのまま返すと
+                // index が旧シャード etag を宣言し続け、全読者（他デバイス pull / FP 増分ロード）から
+                // この書込が恒久不可視になる。シャード実 etag と index 宣言がずれていれば
+                // index のみ修復し、可視化された確定点として発火する。
+                if let fetchedEtag = fetched?.etag {
+                    let declared = try await store.getIndex()?.value.shards[shardId]?.etag
+                    if declared != fetchedEtag {
+                        try await updateIndex { idx in
+                            idx.shards[shardId] = .init(etag: fetchedEtag, count: shard.files.count)
+                        }
+                        onManifestDidWrite?()
+                    }
+                }
                 return .alreadyUpToDate(existing)
             }
             if decision == .conflict, let existing {
@@ -373,9 +388,10 @@ public struct ManifestUpdater: Sendable {
             try await updateIndex { idx in
                 idx.shards[shardId] = .init(etag: newEtag, count: shard.files.count)
             }
-            // シャード + index の両方が確定した時のみ発火。putShard 成功 → updateIndex 失敗は
-            // 非発火が正しい: 増分ロード（ManifestSnapshotLoader）は index 宣言 etag 起点なので、
-            // index 未更新の変化は signal しても見えない（次の index 更新時に自然に拾われる）。
+            // シャード + index の両方が確定した時のみ発火。putShard 成功 → updateIndex が
+            // リトライ尽きで throw した場合は非発火のまま失敗として呼び出し元へ伝播し
+            // （SyncError は外側リトライに再マッチしない）、再試行（キューのバックオフ再試行）が
+            // 上の `.alreadyUpToDate` 分岐の index 突合修復で可視化 + 発火する（PR #56 レビュー ①）。
             onManifestDidWrite?()
             return .wrote
         }
@@ -390,7 +406,34 @@ public struct ManifestUpdater: Sendable {
             let fetched = try await store.getShard(shardId)
             var shard = fetched?.value ?? ManifestShard.empty(id: shardId)
             let etag = fetched?.etag
+            let filesBefore = shard.files
             transform(&shard)
+
+            // no-op 検出（PR #56 レビュー ②）: transform が内容を変えなかったら書かない・発火しない
+            // （`updateFileEntry` の `.alreadyUpToDate` と対称の規約）。到達例: マニフェスト不在パスへの
+            // delete（consumed 済みの再試行 / 他デバイスが先に削除 / ENOENT からの delete 変換）。
+            // ただし「シャード実体と index 宣言のずれ」だけは修復する（PR #56 レビュー ①:
+            // 前回試行が updateIndex 手前で失敗した再入では、内容不変でも index 修復が必要）。
+            if shard.files == filesBefore {
+                if let etag {
+                    let declared = try await store.getIndex()?.value.shards[shardId]?.etag
+                    if declared != etag {
+                        try await updateIndex { idx in
+                            idx.shards[shardId] = .init(etag: etag, count: shard.files.count)
+                        }
+                        onManifestDidWrite?()
+                    }
+                } else if try await store.getIndex()?.value.shards[shardId] != nil {
+                    // シャード不在なのに index が宣言を残している（deleteShard 成功 → updateIndex
+                    // 失敗の再入）→ 宣言を除去して確定させる。
+                    try await updateIndex { idx in
+                        idx.shards.removeValue(forKey: shardId)
+                    }
+                    onManifestDidWrite?()
+                }
+                return
+            }
+
             shard.updatedAt = ISO8601.now()
 
             if shard.files.isEmpty {
@@ -437,6 +480,13 @@ public struct ManifestUpdater: Sendable {
             do {
                 return try await operation()
             } catch {
+                // 自前の SyncError は素通しする（PR #56 レビュー ①）。クラシファイアは
+                // String(describing:) の部分文字列マッチなので、下位エラー文字列を埋め込む
+                // manifestUpdateFailed（内側 updateIndex のリトライ尽き）や path を含む
+                // uploadConflict（"file-412.txt" 等）が「リトライ可能な 412」に誤分類されると、
+                // 外側再実行が getShard → 自分の書いた entry → .alreadyUpToDate 短絡で
+                // 「index 未更新のまま静かな成功」に化ける（恒久 stale の温床）。
+                if error is SyncError { throw error }
                 if S3ErrorClassifier.isPreconditionFailed(error)
                     || S3ErrorClassifier.isConditionalConflict(error) {
                     lastError = error

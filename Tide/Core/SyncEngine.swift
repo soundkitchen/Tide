@@ -1278,15 +1278,15 @@ final class SyncEngine {
         }
     }
 
-    /// - Returns: 処理が成功したか（マニフェストが書かれた可能性があるか）。
-    private nonisolated func processOne(_ item: UploadQueueRecord, uploader: Uploader) async -> Bool {
+    /// キュー 1 件を処理し、失敗はリトライ/バックオフ/give-up へ配線する。
+    /// 成否の戻り値は持たない（FP への通知は uploader の onManifestWrite＝マニフェスト書込の
+    /// 確定点が担うため、呼び出し側はバッチの成否を集約しない。M5 Phase 5-0）。
+    private nonisolated func processOne(_ item: UploadQueueRecord, uploader: Uploader) async {
         do {
             try await uploader.process(item)
-            return true
         } catch {
             AppLogger.sync.error("Upload/delete failed for \(item.path, privacy: .private): \(String(describing: error), privacy: .private)")
             await self.handleProcessingFailure(item: item, error: error)
-            return false
         }
     }
 

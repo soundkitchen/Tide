@@ -4,43 +4,18 @@ import TideCore
 /// `ManifestUpdater` の分岐 →「マニフェストを実際に書いたか」→ `onManifestDidWrite` 発火の
 /// 配線を回帰固定する（M5 Phase 5-0）。発火は FP ドメインへの signal に直結するため、
 /// 「書いていないのに発火（無駄 signal）」「書いたのに非発火（staleness 窓 = PR #51 レビュー #4）」の
-/// 両方向を全分岐で固定する。
+/// 両方向を全分岐で固定する。PR #56 レビューで追加:
+/// - ①: updateIndex リトライ尽きが「静かな成功」に化けず失敗として伝播し、
+///   再試行の `.alreadyUpToDate` / no-op 再入が index を突合修復して発火する
+/// - ②: no-op 削除（マニフェスト不在パスの delete）は書かない・発火しない
 final class ManifestUpdaterTests: XCTestCase {
-    /// @Sendable クロージャから加算できる発火カウンタ。
-    private final class FireCounter: @unchecked Sendable {
-        private let lock = NSLock()
-        private var value = 0
-        func increment() {
-            lock.lock()
-            defer { lock.unlock() }
-            value += 1
-        }
-        var count: Int {
-            lock.lock()
-            defer { lock.unlock() }
-            return value
-        }
-    }
-
-    private func makeEntry(sha: String, size: Int64 = 10) -> ManifestFileEntry {
-        ManifestFileEntry(
-            size: size,
-            mtime: "2026-07-05T00:00:00Z",
-            sha256: sha,
-            s3VersionId: "v-\(sha)",
-            etag: "obj-etag-\(sha)",
-            deviceId: "test-device",
-            uploadedAt: "2026-07-05T00:00:00Z"
-        )
-    }
-
     private func makeUpdater(
-        store: InMemoryManifestStore, counter: FireCounter
+        store: InMemoryManifestStore, counter: SignalCounter
     ) -> ManifestUpdater {
         ManifestUpdater(
             store: store,
             deviceId: "test-device",
-            onManifestDidWrite: { counter.increment() }
+            onManifestDidWrite: { counter.fire() }
         )
     }
 
@@ -49,9 +24,9 @@ final class ManifestUpdaterTests: XCTestCase {
     /// .wrote（新規作成）→ 発火 1 回・シャードと index が更新される。
     func testWroteFiresHookOnce() async throws {
         let store = InMemoryManifestStore()
-        let counter = FireCounter()
+        let counter = SignalCounter()
         let path = "docs/a.txt"
-        let entry = makeEntry(sha: "aaa")
+        let entry = makeManifestEntry(sha: "aaa")
 
         let outcome = try await makeUpdater(store: store, counter: counter)
             .updateFileEntry(for: path, base: nil, newEntry: entry)
@@ -65,19 +40,19 @@ final class ManifestUpdaterTests: XCTestCase {
         XCTAssertEqual(index?.shards[shardId]?.count, 1)
     }
 
-    /// .alreadyUpToDate（別書き手が同一内容を確定済み）→ 書かない・発火 0 回。
+    /// .alreadyUpToDate（別書き手が同一内容を確定済み・index も整合）→ 書かない・発火 0 回。
     func testAlreadyUpToDateDoesNotFire() async throws {
         let store = InMemoryManifestStore()
-        let counter = FireCounter()
+        let counter = SignalCounter()
         let path = "docs/a.txt"
-        let remote = makeEntry(sha: "same")
+        let remote = makeManifestEntry(sha: "same")
         let shardId = ManifestSharding.shardId(for: path)
         var shard = ManifestShard.empty(id: shardId)
         shard.files[path] = remote
         await store.seed(shard: shard)
 
         let outcome = try await makeUpdater(store: store, counter: counter)
-            .updateFileEntry(for: path, base: "old-base", newEntry: makeEntry(sha: "same"))
+            .updateFileEntry(for: path, base: "old-base", newEntry: makeManifestEntry(sha: "same"))
 
         XCTAssertEqual(outcome, .alreadyUpToDate(remote))
         XCTAssertEqual(counter.count, 0)
@@ -89,9 +64,9 @@ final class ManifestUpdaterTests: XCTestCase {
     /// .conflict（base とも uploading とも違う sha が権威に居る）→ uploadConflict throw・発火 0 回。
     func testConflictDoesNotFireAndLeavesShardUntouched() async throws {
         let store = InMemoryManifestStore()
-        let counter = FireCounter()
+        let counter = SignalCounter()
         let path = "docs/a.txt"
-        let remote = makeEntry(sha: "theirs")
+        let remote = makeManifestEntry(sha: "theirs")
         let shardId = ManifestSharding.shardId(for: path)
         var shard = ManifestShard.empty(id: shardId)
         shard.files[path] = remote
@@ -99,7 +74,7 @@ final class ManifestUpdaterTests: XCTestCase {
 
         do {
             _ = try await makeUpdater(store: store, counter: counter)
-                .updateFileEntry(for: path, base: "base", newEntry: makeEntry(sha: "mine"))
+                .updateFileEntry(for: path, base: "base", newEntry: makeManifestEntry(sha: "mine"))
             XCTFail("expected uploadConflict")
         } catch let SyncError.uploadConflict(conflictPath, remoteEntry) {
             XCTAssertEqual(conflictPath, path)
@@ -110,29 +85,52 @@ final class ManifestUpdaterTests: XCTestCase {
         XCTAssertEqual(stored?.files[path], remote)
     }
 
+    /// パスに "412" を含む uploadConflict が外側リトライに「リトライ可能な 412」と誤分類されて
+    /// 飲み込まれない（PR #56 レビュー ①: SyncError はクラシファイアに再マッチさせず素通し。
+    /// String(describing:) ベースの分類は description に埋まる path/下位エラー文字列を拾ってしまう）。
+    func testUploadConflictWith412LookalikePathPropagates() async throws {
+        let store = InMemoryManifestStore()
+        let counter = SignalCounter()
+        let path = "docs/file-412.txt"
+        let remote = makeManifestEntry(sha: "theirs")
+        let shardId = ManifestSharding.shardId(for: path)
+        var shard = ManifestShard.empty(id: shardId)
+        shard.files[path] = remote
+        await store.seed(shard: shard)
+
+        do {
+            _ = try await makeUpdater(store: store, counter: counter)
+                .updateFileEntry(for: path, base: "base", newEntry: makeManifestEntry(sha: "mine"))
+            XCTFail("expected uploadConflict")
+        } catch SyncError.uploadConflict {
+            // ok: manifestUpdateFailed（5 回消費）へ化けないこと
+        }
+        XCTAssertEqual(counter.count, 0)
+    }
+
     /// 412 → 再取得 → 成功のリトライ経路でも発火はちょうど 1 回。
     func test412RetryThenSuccessFiresOnce() async throws {
         let store = InMemoryManifestStore()
-        let counter = FireCounter()
+        let counter = SignalCounter()
         let path = "docs/a.txt"
         await store.failNextPutShard(times: 1)
 
         let outcome = try await makeUpdater(store: store, counter: counter)
-            .updateFileEntry(for: path, base: nil, newEntry: makeEntry(sha: "aaa"))
+            .updateFileEntry(for: path, base: nil, newEntry: makeManifestEntry(sha: "aaa"))
 
         XCTAssertEqual(outcome, .wrote)
         XCTAssertEqual(counter.count, 1)
     }
 
-    /// 412 がリトライ上限（5 回）まで続く → manifestUpdateFailed・発火 0 回。
+    /// putShard の 412 がリトライ上限（5 回）まで続く → manifestUpdateFailed・発火 0 回。
     func test412ExhaustedDoesNotFire() async throws {
         let store = InMemoryManifestStore()
-        let counter = FireCounter()
+        let counter = SignalCounter()
         await store.failNextPutShard(times: 5)
 
         do {
             _ = try await makeUpdater(store: store, counter: counter)
-                .updateFileEntry(for: "docs/a.txt", base: nil, newEntry: makeEntry(sha: "aaa"))
+                .updateFileEntry(for: "docs/a.txt", base: nil, newEntry: makeManifestEntry(sha: "aaa"))
             XCTFail("expected manifestUpdateFailed")
         } catch let SyncError.manifestUpdateFailed(message) {
             XCTAssertTrue(message.contains("conditional update failed"))
@@ -140,17 +138,70 @@ final class ManifestUpdaterTests: XCTestCase {
         XCTAssertEqual(counter.count, 0)
     }
 
+    /// 【PR #56 レビュー ①】putShard 成功 → updateIndex リトライ尽き:
+    /// 「静かな成功」（外側リトライが manifestUpdateFailed を 412 と誤分類 → 再実行が
+    /// .alreadyUpToDate 短絡で index 未更新のまま成功 return）に化けず、失敗として伝播する。
+    func testIndexUpdateExhaustionThrowsInsteadOfSilentSuccess() async throws {
+        let store = InMemoryManifestStore()
+        let counter = SignalCounter()
+        let path = "docs/a.txt"
+        await store.failNextPutIndex(times: 5)
+
+        do {
+            _ = try await makeUpdater(store: store, counter: counter)
+                .updateFileEntry(for: path, base: nil, newEntry: makeManifestEntry(sha: "aaa"))
+            XCTFail("expected manifestUpdateFailed")
+        } catch let SyncError.manifestUpdateFailed(message) {
+            XCTAssertTrue(message.contains("index.json"))
+        }
+        XCTAssertEqual(counter.count, 0)
+        // 分断状態の確認: シャードは書けたが index は未宣言
+        let shardId = ManifestSharding.shardId(for: path)
+        let shard = await store.shards[shardId]
+        XCTAssertNotNil(shard?.files[path])
+        let index = await store.index
+        XCTAssertNil(index?.shards[shardId])
+    }
+
+    /// 【PR #56 レビュー ①】上の分断状態からの再試行（キューのバックオフ再試行に相当）は
+    /// `.alreadyUpToDate` 再入で index を突合修復し、可視化の確定点として発火する。
+    func testRetryAfterIndexFailureRepairsIndexAndFires() async throws {
+        let store = InMemoryManifestStore()
+        let counter = SignalCounter()
+        let path = "docs/a.txt"
+        let entry = makeManifestEntry(sha: "aaa")
+        let shardId = ManifestSharding.shardId(for: path)
+        await store.failNextPutIndex(times: 5)
+        do {
+            _ = try await makeUpdater(store: store, counter: counter)
+                .updateFileEntry(for: path, base: nil, newEntry: entry)
+            XCTFail("expected manifestUpdateFailed")
+        } catch SyncError.manifestUpdateFailed {}
+        XCTAssertEqual(counter.count, 0)
+
+        // 再試行: remote == uploading → .alreadyUpToDate だが index がずれている → 修復 + 発火
+        let outcome = try await makeUpdater(store: store, counter: counter)
+            .updateFileEntry(for: path, base: nil, newEntry: entry)
+
+        XCTAssertEqual(outcome, .alreadyUpToDate(entry))
+        XCTAssertEqual(counter.count, 1)
+        let declared = await store.index?.shards[shardId]?.etag
+        let actual = await store.shardEtags[shardId]
+        XCTAssertNotNil(declared)
+        XCTAssertEqual(declared, actual)
+    }
+
     // MARK: - updateShard（削除経路）
 
     /// 削除で残エントリありのシャード書換 → 発火 1 回。
     func testUpdateShardRemovalFiresOnce() async throws {
         let store = InMemoryManifestStore()
-        let counter = FireCounter()
+        let counter = SignalCounter()
         let path = "docs/a.txt"
         let shardId = ManifestSharding.shardId(for: path)
         var shard = ManifestShard.empty(id: shardId)
-        shard.files[path] = makeEntry(sha: "aaa")
-        shard.files[path + ".keep"] = makeEntry(sha: "bbb")
+        shard.files[path] = makeManifestEntry(sha: "aaa")
+        shard.files[path + ".keep"] = makeManifestEntry(sha: "bbb")
         await store.seed(shard: shard)
 
         try await makeUpdater(store: store, counter: counter).updateShard(for: path) {
@@ -166,11 +217,11 @@ final class ManifestUpdaterTests: XCTestCase {
     /// 最後の 1 件を消して空シャード削除になる経路でも発火 1 回・index から shard が消える。
     func testUpdateShardEmptyDeletionFiresOnce() async throws {
         let store = InMemoryManifestStore()
-        let counter = FireCounter()
+        let counter = SignalCounter()
         let path = "docs/a.txt"
         let shardId = ManifestSharding.shardId(for: path)
         var shard = ManifestShard.empty(id: shardId)
-        shard.files[path] = makeEntry(sha: "aaa")
+        shard.files[path] = makeManifestEntry(sha: "aaa")
         await store.seed(shard: shard)
 
         try await makeUpdater(store: store, counter: counter).updateShard(for: path) {
@@ -184,13 +235,65 @@ final class ManifestUpdaterTests: XCTestCase {
         XCTAssertNil(index?.shards[shardId])
     }
 
-    /// hook 未設定（nil）でも全経路が従来どおり成功する（後方互換）。
+    /// 【PR #56 レビュー ②】マニフェスト不在パスへの no-op 削除は書かない・発火しない
+    /// （consumed 済み delete の再試行 / 他デバイスが先に削除 / ENOENT からの delete 変換で到達）。
+    func testNoopDeleteOnAbsentPathDoesNotWriteOrFire() async throws {
+        let store = InMemoryManifestStore()
+        let counter = SignalCounter()
+
+        try await makeUpdater(store: store, counter: counter).updateShard(for: "docs/none.txt") {
+            $0.files.removeValue(forKey: "docs/none.txt")
+        }
+
+        XCTAssertEqual(counter.count, 0)
+        let index = await store.index
+        XCTAssertNil(index)
+        let shards = await store.shards
+        XCTAssertTrue(shards.isEmpty)
+    }
+
+    /// 【PR #56 レビュー ①②】deleteShard 成功 → updateIndex 失敗の再試行は、no-op でも
+    /// index に残った宣言（dangling）を除去して発火する（削除側の突合修復）。
+    func testNoopDeleteRepairsDanglingIndexDeclaration() async throws {
+        let store = InMemoryManifestStore()
+        let counter = SignalCounter()
+        let path = "docs/a.txt"
+        let shardId = ManifestSharding.shardId(for: path)
+        var shard = ManifestShard.empty(id: shardId)
+        shard.files[path] = makeManifestEntry(sha: "aaa")
+        await store.seed(shard: shard)
+        await store.failNextPutIndex(times: 5)
+
+        do {
+            try await makeUpdater(store: store, counter: counter).updateShard(for: path) {
+                $0.files.removeValue(forKey: path)
+            }
+            XCTFail("expected manifestUpdateFailed")
+        } catch SyncError.manifestUpdateFailed {}
+        XCTAssertEqual(counter.count, 0)
+        // 分断状態: シャードは削除済みだが index は宣言を残す
+        let shardsAfterFail = await store.shards
+        XCTAssertNil(shardsAfterFail[shardId])
+        let danglingDeclared = await store.index?.shards[shardId]
+        XCTAssertNotNil(danglingDeclared)
+
+        // 再試行（同じ削除・今度は no-op）→ dangling 宣言を除去 + 発火
+        try await makeUpdater(store: store, counter: counter).updateShard(for: path) {
+            $0.files.removeValue(forKey: path)
+        }
+
+        XCTAssertEqual(counter.count, 1)
+        let declared = await store.index?.shards[shardId]
+        XCTAssertNil(declared)
+    }
+
+    /// hook を明示 nil にしても全経路が従来どおり成功する（通知なしの明示宣言）。
     func testNilHookStillWrites() async throws {
         let store = InMemoryManifestStore()
-        let updater = ManifestUpdater(store: store, deviceId: "test-device")
+        let updater = ManifestUpdater(store: store, deviceId: "test-device", onManifestDidWrite: nil)
 
         let outcome = try await updater.updateFileEntry(
-            for: "docs/a.txt", base: nil, newEntry: makeEntry(sha: "aaa")
+            for: "docs/a.txt", base: nil, newEntry: makeManifestEntry(sha: "aaa")
         )
         XCTAssertEqual(outcome, .wrote)
     }

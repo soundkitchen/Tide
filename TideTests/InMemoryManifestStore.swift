@@ -18,10 +18,17 @@ actor InMemoryManifestStore: ManifestStore {
     private(set) var shardEtags: [String: String] = [:]
     private var etagCounter = 0
     private var putShardFailuresRemaining = 0
+    private var putIndexFailuresRemaining = 0
 
     /// 次の putShard を `times` 回だけ 412 で失敗させる。
     func failNextPutShard(times: Int) {
         putShardFailuresRemaining = times
+    }
+
+    /// 次の putIndex を `times` 回だけ 412 で失敗させる
+    /// （putShard 成功 → updateIndex 失敗の分断を作る。PR #56 レビュー ① の再現用）。
+    func failNextPutIndex(times: Int) {
+        putIndexFailuresRemaining = times
     }
 
     /// テスト前提の直接投入（etag 検証を通さない）。index の shard 情報も同期する。
@@ -57,6 +64,10 @@ actor InMemoryManifestStore: ManifestStore {
     }
 
     func putIndex(_ newIndex: ManifestIndex, ifMatch: String?) throws -> String {
+        if putIndexFailuresRemaining > 0 {
+            putIndexFailuresRemaining -= 1
+            throw SimulatedPreconditionFailure()
+        }
         try checkPrecondition(ifMatch: ifMatch, current: indexEtag)
         index = newIndex
         let etag = mintEtag()
