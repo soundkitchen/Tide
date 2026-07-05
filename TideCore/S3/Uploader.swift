@@ -15,6 +15,9 @@ public struct Uploader: Sendable {
     public var progressReporter: TransferProgressReporter? = nil
     /// アップロード帯域制御（サブ E）。複数ファイル並行 UL で共有する。nil = 無制限。
     public var uploadLimiter: RateLimiter? = nil
+    /// マニフェストが実際に書かれた確定点で発火（`ManifestUpdater.onManifestDidWrite` へ配線）。
+    /// FP ドメインへの signal 用（M5 Phase 5-0）。nil = 通知なし。
+    public var onManifestWrite: (@Sendable () -> Void)? = nil
 
     public init(
         s3: TideS3Client,
@@ -24,7 +27,8 @@ public struct Uploader: Sendable {
         config: ConfigStore,
         transferStore: any TransferStateStoring,
         progressReporter: TransferProgressReporter? = nil,
-        uploadLimiter: RateLimiter? = nil
+        uploadLimiter: RateLimiter? = nil,
+        onManifestWrite: (@Sendable () -> Void)? = nil
     ) {
         self.s3 = s3
         self.db = db
@@ -34,6 +38,7 @@ public struct Uploader: Sendable {
         self.transferStore = transferStore
         self.progressReporter = progressReporter
         self.uploadLimiter = uploadLimiter
+        self.onManifestWrite = onManifestWrite
     }
 
     /// upload_queue の 1 件を処理する。
@@ -192,7 +197,9 @@ public struct Uploader: Sendable {
             deviceId: deviceId,
             uploadedAt: ISO8601.now()
         )
-        let outcome = try await ManifestUpdater(s3: s3, deviceId: deviceId).updateFileEntry(
+        let outcome = try await ManifestUpdater(
+            store: s3, deviceId: deviceId, onManifestDidWrite: onManifestWrite
+        ).updateFileEntry(
             for: path, base: base, newEntry: newEntry
         )
 
@@ -249,7 +256,9 @@ public struct Uploader: Sendable {
         try await s3.deleteObject(key: s3Key)
         AppLogger.s3.info("Deleted (delete marker): \(path, privacy: .private)")
 
-        try await ManifestUpdater(s3: s3, deviceId: deviceId).updateShard(for: path) { shard in
+        try await ManifestUpdater(
+            store: s3, deviceId: deviceId, onManifestDidWrite: onManifestWrite
+        ).updateShard(for: path) { shard in
             shard.files.removeValue(forKey: path)
         }
 
@@ -299,13 +308,26 @@ public enum ShardUpdateOutcome: Equatable, Sendable {
 }
 
 /// シャードと index.json を楽観的ロックで更新する。
-public struct ManifestUpdater {
-    public let s3: TideS3Client
+/// アプリ（Uploader 経由）と File Provider 拡張（M5 Phase 5〜）が共有する
+/// **マニフェスト書込の唯一のチョークポイント**。
+public struct ManifestUpdater: Sendable {
+    public let store: any ManifestStore
     public let deviceId: String
+    /// マニフェスト（シャード + index）が**実際に書かれた**直後に 1 回発火する。
+    /// FP ドメインへの signal はここに配線する（M5 Phase 5-0 / PR #51 レビュー #4）:
+    /// バッチ集約（anySucceeded）だと「マニフェスト PUT 成功 → 後続の DB write throw」で
+    /// 1 バッチ分 signal が漏れる窓があったが、確定点発火なら構造的に漏れない。
+    /// `.alreadyUpToDate`（書いていない）/ `.conflict` / リトライ尽き失敗では発火しない。
+    public var onManifestDidWrite: (@Sendable () -> Void)?
 
-    public init(s3: TideS3Client, deviceId: String) {
-        self.s3 = s3
+    public init(
+        store: any ManifestStore,
+        deviceId: String,
+        onManifestDidWrite: (@Sendable () -> Void)? = nil
+    ) {
+        self.store = store
         self.deviceId = deviceId
+        self.onManifestDidWrite = onManifestDidWrite
     }
 
     /// アップロードの per-file entry を、並行更新を検出しながら書き込む（Issue #25 / A）。
@@ -324,7 +346,7 @@ public struct ManifestUpdater {
     ) async throws -> ShardUpdateOutcome {
         let shardId = ManifestSharding.shardId(for: path)
         return try await withConditionalRetry("shard \(shardId)") {
-            let fetched = try await s3.getShard(shardId)
+            let fetched = try await store.getShard(shardId)
             var shard = fetched?.value ?? ManifestShard.empty(id: shardId)
             let etag = fetched?.etag
             let existing = shard.files[path]
@@ -347,10 +369,14 @@ public struct ManifestUpdater {
 
             shard.files[path] = newEntry
             shard.updatedAt = ISO8601.now()
-            let newEtag = try await s3.putShard(shard, ifMatch: etag)
+            let newEtag = try await store.putShard(shard, ifMatch: etag)
             try await updateIndex { idx in
                 idx.shards[shardId] = .init(etag: newEtag, count: shard.files.count)
             }
+            // シャード + index の両方が確定した時のみ発火。putShard 成功 → updateIndex 失敗は
+            // 非発火が正しい: 増分ロード（ManifestSnapshotLoader）は index 宣言 etag 起点なので、
+            // index 未更新の変化は signal しても見えない（次の index 更新時に自然に拾われる）。
+            onManifestDidWrite?()
             return .wrote
         }
     }
@@ -361,7 +387,7 @@ public struct ManifestUpdater {
     ) async throws {
         let shardId = ManifestSharding.shardId(for: path)
         try await withConditionalRetry("shard \(shardId)") {
-            let fetched = try await s3.getShard(shardId)
+            let fetched = try await store.getShard(shardId)
             var shard = fetched?.value ?? ManifestShard.empty(id: shardId)
             let etag = fetched?.etag
             transform(&shard)
@@ -369,30 +395,32 @@ public struct ManifestUpdater {
 
             if shard.files.isEmpty {
                 if etag != nil {
-                    try await s3.deleteShard(shardId)
+                    try await store.deleteShard(shardId)
                 }
                 try await updateIndex { idx in
                     idx.shards.removeValue(forKey: shardId)
                 }
+                onManifestDidWrite?()
                 return
             }
 
-            let newEtag = try await s3.putShard(shard, ifMatch: etag)
+            let newEtag = try await store.putShard(shard, ifMatch: etag)
             try await updateIndex { idx in
                 idx.shards[shardId] = .init(etag: newEtag, count: shard.files.count)
             }
+            onManifestDidWrite?()
         }
     }
 
     private func updateIndex(_ transform: (inout ManifestIndex) -> Void) async throws {
         try await withConditionalRetry("index.json") {
-            let fetched = try await s3.getIndex()
+            let fetched = try await store.getIndex()
             var index = fetched?.value ?? ManifestIndex.empty(updatedBy: deviceId)
             let etag = fetched?.etag
             transform(&index)
             index.updatedAt = ISO8601.now()
             index.updatedBy = deviceId
-            _ = try await s3.putIndex(index, ifMatch: etag)
+            _ = try await store.putIndex(index, ifMatch: etag)
         }
     }
 

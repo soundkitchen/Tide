@@ -714,3 +714,8 @@ public enum S3ErrorClassifier {
         return desc.contains("BucketAlreadyExists") && !desc.contains("BucketAlreadyOwnedByYou")
     }
 }
+
+// ManifestStore / ManifestSnapshotSource を actor で実装（テストのフェイク等）しても
+// isolation 境界を越えて返せるように、中身が Sendable なら Sendable（M5 Phase 5-0）。
+// 実運用の T は ManifestIndex / ManifestShard（ともに Sendable）のみ。
+extension TideS3Client.ManifestFetch: Sendable where T: Sendable {}
