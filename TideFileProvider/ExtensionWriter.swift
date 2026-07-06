@@ -48,6 +48,9 @@ struct ExtensionWriter: Sendable {
             let outcome = try await updater.updateFileEntry(for: path, base: baseSha, newEntry: entry)
             // .wrote / .alreadyUpToDate いずれも S3 は確定済み。キャッシュを無効化して次の列挙が
             // S3 から読み直す（局所世代構築は撤去。PR #58 レビュー #2/#3）。
+            // .alreadyUpToDate（別書き手が同一 sha を先に確定）でも invalidate する: 自分は書いて
+            // いないが**リモートが分岐している**帰結なので、読み直しでその版を反映する（sha 同一なので
+            // itemVersion は不変 = 実質 no-op に収束・無害。PR #58 再レビュー参考 1 への意図的据え置き）。
             await cache.invalidateAfterLocalWrite()
             switch outcome {
             case .wrote:
@@ -95,6 +98,9 @@ struct ExtensionWriter: Sendable {
             await cache.invalidateAfterLocalWrite()
             return .removed
         case .alreadyGone:
+            // 別デバイスが先に削除済み等でエントリが既に無い帰結。invalidate は無駄ではない —
+            // キャッシュがまだそのファントムを持っていれば読み直しで消える（有益。PR #58 再レビュー
+            // 参考 1: この帰結で発火を絞ると、絞った側がファントム除去の機会を失う）。
             await cache.invalidateAfterLocalWrite()
             return .alreadyGone
         case .rejectedRemoteChanged(let remote):
