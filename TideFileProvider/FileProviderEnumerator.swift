@@ -68,13 +68,11 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @uncheck
         let boxed = UncheckedSendableBox(value: observer)
         let anchorString = String(data: anchor.rawValue, encoding: .utf8)
         Task {
-            guard let anchorString else {
-                boxed.value.finishEnumeratingWithError(NSFileProviderError(.syncAnchorExpired))
-                return
-            }
-            // 起点世代の解決。未知（世代落ち・Phase 3 の静的 anchor・ログ消失後）は
-            // syncAnchorExpired でシステムに全再列挙させる。
-            guard let origin = await services.cache.generation(anchor: anchorString) else {
+            // 起点世代の解決。未知（非 UTF-8・世代落ち・Phase 3 の静的 anchor・ログ消失後）は
+            // syncAnchorExpired でシステムに全再列挙させる（単一 guard = どの経路でも必ず
+            // notice ログを通す。PR #57 レビュー #4）。
+            guard let anchorString,
+                  let origin = await services.cache.generation(anchor: anchorString) else {
                 AppLogger.fileProvider.notice("enumerateChanges: unknown sync anchor (expired) — full re-enumeration")
                 boxed.value.finishEnumeratingWithError(NSFileProviderError(.syncAnchorExpired))
                 return

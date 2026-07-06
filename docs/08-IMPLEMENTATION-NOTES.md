@@ -59,7 +59,7 @@
 - **拡張は DB に一切触らない**: 列挙はマニフェスト直読みの `ManifestSnapshotLoader`（index + 全シャード・shard_state キャッシュ無し・書込ゼロ）→ `ManifestTree` で path→ツリー合成。2 プロセス DB 書込競合を構造で回避する（単一書き手＝拡張への移行は Phase 6）。
 - **`fetchContents` はマニフェストの `s3VersionId` に固定して取得**し、commit 前にサイズ + SHA-256 を検証（Downloader と同じ不変条件）。列挙と取得の間に最新版が変わっても提示済み itemVersion と中身が食い違わない。
 - **書込系（create/modify/delete）は全拒否**（read-only PoC）。item capabilities も read のみ。
-- **item identifier は `p:` + 相対 POSIX パス**（ルートは `.rootContainer`）。プレフィックス無しの生パスだと、予約 identifier（`NSFileProviderRootContainerItemIdentifier` 等の rawValue）と同名のファイルパスが衝突して階層破綻・永久 noSuchItem を起こしうる（PR #50 レビュー #4）。
+- **item identifier は `p:` + 相対 POSIX パス**（ルートは `.rootContainer`。**M5 Phase 5-1 で `f:`/`d:` の kind 織り込み形式へ変更** — 下記 Phase 4 節の「item identifier の kind 織り込み」項参照）。プレフィックス無しの生パスだと、予約 identifier（`NSFileProviderRootContainerItemIdentifier` 等の rawValue）と同名のファイルパスが衝突して階層破綻・永久 noSuchItem を起こしうる（PR #50 レビュー #4）。
 - **並列取得の骨格は `BoundedParallel.compactMap`**（TideCore 共有ヘルパ）に一元化。`group.next()` 結果の取りこぼし罠（下記）を構造的に封じる。
 - **並列 TaskGroup の結果回収**: 同時実行上限に達した時に消費する `group.next()` の結果を `_ =` で捨てない（シャード数 > 上限で完了分が黙って失われ「無エラーでファイル欠落」になる。Phase 3 実機で 15 中 6 件欠落として顕在化。`ManifestReader` にも同型の潜在バグがあり両方修正 — 本体側は「未変更シャードの DB 補完」が欠落をマスクしつつ shard_state 未更新の再取得を毎周回発生させていた）。
 - **拡張のログは既定レベル以上（notice/error）で出す**: `.info` は永続化されず `log show` で追えない。拡張プロセスは対話デバッグしづらいため、設定チェック等の診断は notice 以上に（`log stream` はリダイレクトでバッファされるので `script -q` 経由の pty で取る）。

@@ -14,9 +14,11 @@ struct UncheckedSendableBox<T>: @unchecked Sendable {
 struct ExtensionServices: Sendable {
     let s3: TideS3Client
     let cache: ManifestGenerationCache
-    /// workingSet への自己 signal。機会的自己 signal（`onNewGeneration`）と、kind 変化
-    /// 2 相配信のセッション跨ぎ（M5 Phase 5-1: フェーズ 1 の delete 確定後にこれを発火して、
-    /// システムに**新しい変更列挙セッション**でフェーズ 2 を取りに来させる）で共用する。
+    /// workingSet への自己 signal。現状の呼び手は機会的自己 signal（`onNewGeneration`）のみ。
+    /// Phase 5-2 以降の書込通知（拡張自身の書込後にシステムへ変化を取りに来させる）の土台として
+    /// 公開している。※「delete 確定 → signal → 新セッションで update」の 2 相配信パターンは
+    /// **再導入しないこと** — 22ms 差の別セッションでも ingest 合成で delete が update を打ち消す
+    /// ことを実機確定済み（Phase 5-1。kind 変化は id 分離で解決済み・docs/08 参照）。
     let signalWorkingSet: @Sendable () -> Void
 
     /// 共有設定から構築する。未セットアップ / 認証情報なしなら nil
