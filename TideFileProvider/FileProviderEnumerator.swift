@@ -68,8 +68,9 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @uncheck
         let boxed = UncheckedSendableBox(value: observer)
         let anchorString = String(data: anchor.rawValue, encoding: .utf8)
         Task {
-            // 起点世代の解決。未知（世代落ち・Phase 3 の静的 anchor・ログ消失後）は
-            // syncAnchorExpired でシステムに全再列挙させる。
+            // 起点世代の解決。未知（非 UTF-8・世代落ち・Phase 3 の静的 anchor・ログ消失後）は
+            // syncAnchorExpired でシステムに全再列挙させる（単一 guard = どの経路でも必ず
+            // notice ログを通す。PR #57 レビュー #4）。
             guard let anchorString,
                   let origin = await services.cache.generation(anchor: anchorString) else {
                 AppLogger.fileProvider.notice("enumerateChanges: unknown sync anchor (expired) — full re-enumeration")
@@ -90,15 +91,21 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @uncheck
                 let changes = ManifestTreeDiff.changes(
                     from: ManifestTree(files: origin.files), to: current.tree
                 )
+                // 種別変化（file⇄dir）も単一セッションで安全に配れる（M5 Phase 5-1）:
+                // item identifier が kind 織り込み形式（`f:`/`d:` + path）なので、kind 変化は
+                // 「旧 kind ノード（旧 id）の delete + 新 kind ノード（新 id）の update」= 別 id の
+                // 独立した 2 変化になる。同一 id の delete+update を fileproviderd が ingest 合成で
+                // 打ち消す問題（単一レスポンス / moreComing ページ / 近接別セッションのすべてで
+                // 実機確認）は id 分離で構造的に消える。
+                if !changes.deleted.isEmpty {
+                    boxed.value.didDeleteItems(
+                        withIdentifiers: changes.deleted.map(NSFileProviderItemIdentifier.init(tideNode:))
+                    )
+                }
                 if !changes.updated.isEmpty {
                     boxed.value.didUpdate(changes.updated.map(FileProviderItem.init(node:)))
                 }
-                if !changes.deletedPaths.isEmpty {
-                    boxed.value.didDeleteItems(
-                        withIdentifiers: changes.deletedPaths.map(NSFileProviderItemIdentifier.init(tideRelativePath:))
-                    )
-                }
-                AppLogger.fileProvider.notice("enumerateChanges: \(changes.updated.count) updated / \(changes.deletedPaths.count) deleted")
+                AppLogger.fileProvider.notice("enumerateChanges: \(changes.updated.count) updated / \(changes.deleted.count) deleted")
                 boxed.value.finishEnumeratingChanges(
                     upTo: NSFileProviderSyncAnchor(Data(current.anchor.utf8)), moreComing: false
                 )

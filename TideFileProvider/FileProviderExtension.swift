@@ -6,12 +6,15 @@ import TideCore
 /// Tide の File Provider 拡張（M5 Phase 3・読み取り materialize の最小 PoC）。
 ///
 /// - 列挙はマニフェスト（`ManifestSnapshotLoader` → `ManifestTree`）駆動。**DB には一切触らない**
-///   （2 プロセス書込競合の構造的回避。単一書き手＝拡張への移行は Phase 6）。
+///   （2 プロセス書込競合の構造的回避。Phase 5 は「拡張 = 第 3 のデバイス」方式＝DB 非接触のまま
+///   S3 へ直接書く。旧「単一書き手＝拡張」構想は撤回）。
 /// - `fetchContents` は `streamObject`（マニフェストの `s3VersionId` に固定）+ サイズ/SHA-256 検証。
 /// - 書込系コールバック（create / modify / delete）は**すべて拒否**（read-only PoC）。
-/// - item identifier は `p:` + 相対 POSIX パス（マニフェスト・オブジェクトキーと 1:1。ルートは
-///   `.rootContainer`）。プレフィックスは予約 identifier（`.rootContainer` 等の rawValue）と
-///   同名のファイルパスが衝突して階層が破綻するのを構造的に防ぐ（PR #50 レビュー #4）。
+/// - item identifier は **kind 織り込み形式**: `f:`（ファイル）/ `d:`（ディレクトリ）+ 相対 POSIX
+///   パス（マニフェスト・オブジェクトキーと 1:1。ルートは `.rootContainer`。M5 Phase 5-1 で
+///   `p:` から変更 — 詳細はファイル末尾の extension 参照）。プレフィックスは予約 identifier
+///   （`.rootContainer` 等の rawValue）と同名のファイルパスが衝突して階層が破綻するのを
+///   構造的に防ぐ役割も引き続き担う（PR #50 レビュー #4）。
 final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, @unchecked Sendable {
     private let domain: NSFileProviderDomain
     private let services: ExtensionServices?
@@ -38,11 +41,12 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             completionHandler(nil, NSFileProviderError(.notAuthenticated))
             return progress
         }
-        guard let path = identifier.tideRelativePath else {
+        guard let ref = identifier.tidePathAndKind else {
             progress.completedUnitCount = 1
             completionHandler(nil, NSFileProviderError(.noSuchItem))
             return progress
         }
+        let path = ref.path
         // root は定数（合成ディレクトリ）なのでマニフェストロードを経由しない —
         // ドメインアタッチ時の余計な S3 往復と「一過性エラーで root が失敗アイテム化」を避ける。
         // mtime は常に nil（ManifestTree 側も root には畳み込まない＝itemVersion が経路で揺れない）。
@@ -59,6 +63,15 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 let tree = try await services.cache.current().tree
                 guard let node = tree.node(at: path) else {
                     AppLogger.fileProvider.error("item(for:): path not in manifest tree (noSuchItem): \(path, privacy: .private)")
+                    completion.value(nil, NSFileProviderError(.noSuchItem))
+                    return
+                }
+                // kind 不一致（id は f: なのに tree ではディレクトリ等）は「その kind の item は
+                // もう無い」= noSuchItem（kind 変化後の stale 旧 id が必ず通る正常系なので notice。
+                // path 自体はツリーに実在するため「not in manifest tree」ログとは分ける —
+                // 共用すると shard に entry が在るのに無いと出る誤診誘導になる。PR #57 レビュー #3）。
+                guard node.isDirectory == ref.isDirectory else {
+                    AppLogger.fileProvider.notice("item(for:): kind mismatch (stale id, noSuchItem): \(path, privacy: .private)")
                     completion.value(nil, NSFileProviderError(.noSuchItem))
                     return
                 }
@@ -86,11 +99,12 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             completionHandler(nil, nil, NSFileProviderError(.notAuthenticated))
             return progress
         }
-        guard let path = itemIdentifier.tideRelativePath, !path.isEmpty else {
+        guard let ref = itemIdentifier.tidePathAndKind, !ref.path.isEmpty, !ref.isDirectory else {
             progress.completedUnitCount = 1
             completionHandler(nil, nil, NSFileProviderError(.noSuchItem))
             return progress
         }
+        let path = ref.path
         let domain = self.domain
         // completion handler はどのスレッドから呼んでもよい契約なので箱で Task へ運ぶ
         let completion = UncheckedSendableBox(value: completionHandler)
@@ -237,10 +251,10 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             // FruitBasket 同様、working set = ドメイン全 item として列挙する（Phase 4）。
             return FileProviderEnumerator(dirPath: nil, services: services)
         }
-        guard let path = containerItemIdentifier.tideRelativePath else {
+        guard let ref = containerItemIdentifier.tidePathAndKind, ref.isDirectory else {
             throw NSFileProviderError(.noSuchItem)
         }
-        return FileProviderEnumerator(dirPath: path, services: services)
+        return FileProviderEnumerator(dirPath: ref.path, services: services)
     }
 
     private static func readOnlyError() -> Error {
@@ -255,23 +269,52 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
 }
 
 extension NSFileProviderItemIdentifier {
-    /// Tide の item identifier のパスプレフィックス。予約 identifier
-    /// （`NSFileProviderRootContainerItemIdentifier` 等の rawValue）と同名のファイルが
-    /// マニフェストに居ても衝突しないよう、パス由来の identifier は必ずこれを付ける。
-    static let tidePathPrefix = "p:"
+    /// Tide の item identifier のプレフィックス（M5 Phase 5-1 で kind 織り込み形式へ変更）:
+    /// ファイル = `f:<相対 POSIX パス>` / ディレクトリ = `d:<相対 POSIX パス>`。ルートは
+    /// `.rootContainer`。予約 identifier（rootContainer 等の rawValue）と同名ファイルとの
+    /// 衝突回避（旧 `p:` の目的）も引き続きプレフィックスが担う。
+    ///
+    /// kind を id に織り込む理由: fileproviderd は同一 id の kind（file⇄dir）変化を受理しない —
+    /// 単一レスポンス内の delete+update も、moreComing ページ分割も、自己 signal による
+    /// 別セッション（22ms 差）でも「item changed」の ingest バッチに合成され delete が update を
+    /// 打ち消す（item 消失。2026-07-05〜06 実機確定）。kind ごとに別 id なら kind 変化 =
+    /// 「旧 id の削除 + 新 id の出現」となり、同一 id 合成の余地が構造的に消える。
+    /// **旧 `p:` 形式の有効化済みドメインは Disable → Enable で作り直す**（docs/09 の
+    /// 「identifier スキーマを変えたら作り直し」どおり。実験的 opt-in 機能のため移行コードは
+    /// 持たない — 旧 id は `tidePathAndKind == nil` → noSuchItem に落ちる）。
+    static let tideFilePrefix = "f:"
+    static let tideDirectoryPrefix = "d:"
 
-    /// Tide の item identifier → 相対 POSIX パス。ルートは `""`。
-    /// working set / trash / 未知の identifier（プレフィックス無し）は nil。
-    var tideRelativePath: String? {
-        if self == .rootContainer { return "" }
-        guard rawValue.hasPrefix(Self.tidePathPrefix) else { return nil }
-        return String(rawValue.dropFirst(Self.tidePathPrefix.count))
+    /// Tide の item identifier → (相対 POSIX パス, ディレクトリか)。ルートは `("", true)`。
+    /// working set / trash / 旧 `p:` / 未知の identifier は nil。
+    /// 裸の `"f:"` / `"d:"`（空パス）も nil = 不正 id（root の正規表現は `.rootContainer` のみ。
+    /// 受理すると root 高速パス等が「要求 id と食い違う item」を成功応答しうる。自前の mint 経路は
+    /// この形を作らないが、書込対応でデーモン供給 id を受ける面が増える前の防御。PR #57 レビュー #5）。
+    var tidePathAndKind: (path: String, isDirectory: Bool)? {
+        if self == .rootContainer { return ("", true) }
+        if rawValue.hasPrefix(Self.tideFilePrefix) {
+            let path = String(rawValue.dropFirst(Self.tideFilePrefix.count))
+            return path.isEmpty ? nil : (path, false)
+        }
+        if rawValue.hasPrefix(Self.tideDirectoryPrefix) {
+            let path = String(rawValue.dropFirst(Self.tideDirectoryPrefix.count))
+            return path.isEmpty ? nil : (path, true)
+        }
+        return nil
     }
 
-    /// 相対 POSIX パス → Tide の item identifier。ルート（`""`）は `.rootContainer`。
-    init(tideRelativePath path: String) {
-        self = path.isEmpty
-            ? .rootContainer
-            : NSFileProviderItemIdentifier(Self.tidePathPrefix + path)
+    /// 相対 POSIX パス + kind → Tide の item identifier。ルート（`""`）は `.rootContainer`。
+    init(tideRelativePath path: String, isDirectory: Bool) {
+        if path.isEmpty {
+            self = .rootContainer
+        } else {
+            let prefix = isDirectory ? Self.tideDirectoryPrefix : Self.tideFilePrefix
+            self = NSFileProviderItemIdentifier(prefix + path)
+        }
+    }
+
+    /// ノード → item identifier（kind はノードから取る）。
+    init(tideNode node: ManifestTree.Node) {
+        self.init(tideRelativePath: node.path, isDirectory: node.isDirectory)
     }
 }

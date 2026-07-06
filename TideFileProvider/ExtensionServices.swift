@@ -14,6 +14,12 @@ struct UncheckedSendableBox<T>: @unchecked Sendable {
 struct ExtensionServices: Sendable {
     let s3: TideS3Client
     let cache: ManifestGenerationCache
+    /// workingSet への自己 signal。現状の呼び手は機会的自己 signal（`onNewGeneration`）のみ。
+    /// Phase 5-2 以降の書込通知（拡張自身の書込後にシステムへ変化を取りに来させる）の土台として
+    /// 公開している。※「delete 確定 → signal → 新セッションで update」の 2 相配信パターンは
+    /// **再導入しないこと** — 22ms 差の別セッションでも ingest 合成で delete が update を打ち消す
+    /// ことを実機確定済み（Phase 5-1。kind 変化は id 分離で解決済み・docs/08 参照）。
+    let signalWorkingSet: @Sendable () -> Void
 
     /// 共有設定から構築する。未セットアップ / 認証情報なしなら nil
     /// （呼び出し側が `NSFileProviderError(.notAuthenticated)` に落とす）。
@@ -54,22 +60,25 @@ struct ExtensionServices: Sendable {
             // NSFileProviderDomain は Sendable 注釈が無いが、signalEnumerator は
             // どのスレッド/プロセスから呼んでもよい契約なので箱で closure へ運ぶ。
             let boxedDomain = UncheckedSendableBox(value: domain)
+            let signalWorkingSet: @Sendable () -> Void = {
+                // replicated 拡張への signal は .workingSet のみ有効（他は無視される）。
+                NSFileProviderManager(for: boxedDomain.value)?.signalEnumerator(for: .workingSet) { error in
+                    if let error {
+                        AppLogger.fileProvider.error("Self-signal failed: \(String(describing: error), privacy: .private)")
+                    }
+                }
+            }
             let cache = ManifestGenerationCache(
                 loader: ManifestSnapshotLoader(source: s3),
                 bucket: bucket,
                 logURL: logURL,
                 onNewGeneration: {
                     // ブラウズ契機のリフレッシュがリモート変化に気づいた時の自己 signal。
-                    // replicated 拡張への signal は .workingSet のみ有効（他は無視される）。
                     // アプリ側の pull 後 signal が主経路で、これはアプリ非起動時の補完。
-                    NSFileProviderManager(for: boxedDomain.value)?.signalEnumerator(for: .workingSet) { error in
-                        if let error {
-                            AppLogger.fileProvider.error("Self-signal failed: \(String(describing: error), privacy: .private)")
-                        }
-                    }
+                    signalWorkingSet()
                 }
             )
-            return ExtensionServices(s3: s3, cache: cache)
+            return ExtensionServices(s3: s3, cache: cache, signalWorkingSet: signalWorkingSet)
         } catch {
             AppLogger.fileProvider.error("Extension: failed to construct S3 client: \(String(describing: error), privacy: .private)")
             return nil
