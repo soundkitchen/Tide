@@ -56,7 +56,7 @@
 - **Caches の移設は暗黙**: `TideTmpDirectory` / `DeletedFilesCache` は `.cachesDirectory` 相対のままサンドボックスのコンテナ内へ自然に移る（中断転送の `.part` は失われるが Range 再開が頭からやり直すだけ・削除一覧キャッシュは再列挙で再生成）。
 
 ### File Provider 読み取り PoC（M5 Phase 3）
-- **拡張は DB に一切触らない**: 列挙はマニフェスト直読みの `ManifestSnapshotLoader`（index + 全シャード・shard_state キャッシュ無し・書込ゼロ）→ `ManifestTree` で path→ツリー合成。2 プロセス DB 書込競合を構造で回避する（単一書き手＝拡張への移行は Phase 6）。
+- **拡張は DB に一切触らない**: 列挙はマニフェスト直読みの `ManifestSnapshotLoader`（index + 全シャード・shard_state キャッシュ無し・書込ゼロ）→ `ManifestTree` で path→ツリー合成。2 プロセス DB 書込競合を構造で回避する（Phase 5 は「拡張 = 第 3 のデバイス」方式＝DB 非接触のまま S3 へ直接書く。旧「単一書き手＝拡張への移行」構想は撤回）。
 - **`fetchContents` はマニフェストの `s3VersionId` に固定して取得**し、commit 前にサイズ + SHA-256 を検証（Downloader と同じ不変条件）。列挙と取得の間に最新版が変わっても提示済み itemVersion と中身が食い違わない。
 - **書込系（create/modify/delete）は全拒否**（read-only PoC）。item capabilities も read のみ。
 - **item identifier は `p:` + 相対 POSIX パス**（ルートは `.rootContainer`。**M5 Phase 5-1 で `f:`/`d:` の kind 織り込み形式へ変更** — 下記 Phase 4 節の「item identifier の kind 織り込み」項参照）。プレフィックス無しの生パスだと、予約 identifier（`NSFileProviderRootContainerItemIdentifier` 等の rawValue）と同名のファイルパスが衝突して階層破綻・永久 noSuchItem を起こしうる（PR #50 レビュー #4）。

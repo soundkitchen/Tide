@@ -14,7 +14,8 @@ extension TideS3Client: ManifestSnapshotSource {}
 /// `ManifestReader` と違い **DB に一切依存しない**（shard_state キャッシュの読み書きも
 /// files テーブルからの補完もしない）。拡張プロセスから共有 DB へ書くと app 側と
 /// 2 プロセス書込競合になるため、読み取り経路では書込ゼロを構造で保証する
-/// （単一書き手＝拡張への移行は Phase 6）。
+/// （Phase 5 は「拡張 = 第 3 のデバイス」方式＝DB 非接触のまま S3 へ直接書く。
+/// 旧「単一書き手＝拡張への移行」構想は撤回）。
 ///
 /// Phase 4 の増分読み: 前回スナップショット（`SnapshotResult`）を渡すと、index の shard etag
 /// 差分で**変化したシャードだけ**を取得し、無変化シャードのファイルは前回分を持ち越す
