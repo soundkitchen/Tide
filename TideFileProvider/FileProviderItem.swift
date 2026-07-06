@@ -42,23 +42,28 @@ final class FileProviderItem: NSObject, NSFileProviderItem, @unchecked Sendable 
     var capabilities: NSFileProviderItemCapabilities {
         switch node {
         case .directory:
+            // dir の削除・配下追加は Phase 5-3、改名/移動は Phase 5-4 で解放する。
             return [.allowsReading, .allowsContentEnumerating]
         case .file:
-            return [.allowsReading]
+            // M5 Phase 5-2: 内容編集と削除を解放（改名/移動 = .allowsRenaming/.allowsReparenting
+            // は Phase 5-4。未許可なので Finder 上はグレーアウトされる）。
+            return [.allowsReading, .allowsWriting, .allowsDeleting]
         }
     }
 
     var itemVersion: NSFileProviderItemVersion {
+        // contentVersion の符号化は TideCore の `FileProviderWritePolicy` に集約（`baseSha` の対・
+        // 書込経路の 3-way ベース抽出と往復整合を保証。PR #58 レビュー #8）。
+        let content = FileProviderWritePolicy.contentVersion(for: node)
         switch node {
         case .directory(_, let mtime):
             // ディレクトリは合成物（コンテンツは持たない）。配下の最大 mtime（合成値）を
             // metadataVersion に載せ、配下更新でメタデータ（表示日付）が追従するようにする。
             let meta = mtime.map { "dir-\(ISO8601.format($0))" } ?? "dir"
-            return NSFileProviderItemVersion(
-                contentVersion: Data("dir".utf8), metadataVersion: Data(meta.utf8))
-        case .file(_, let entry):
-            let v = Data(entry.sha256.utf8)
-            return NSFileProviderItemVersion(contentVersion: v, metadataVersion: v)
+            return NSFileProviderItemVersion(contentVersion: content, metadataVersion: Data(meta.utf8))
+        case .file:
+            // file は content == metadata（sha256）— 内容変化がメタ変化でもある。
+            return NSFileProviderItemVersion(contentVersion: content, metadataVersion: content)
         }
     }
 

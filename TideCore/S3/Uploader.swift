@@ -307,6 +307,18 @@ public enum ShardUpdateOutcome: Equatable, Sendable {
     case alreadyUpToDate(ManifestFileEntry)
 }
 
+/// `removeFileEntry` の結果（FP 拡張の deleteItem 用・M5 Phase 5-2）。
+public enum ShardRemoveOutcome: Equatable, Sendable {
+    /// entry を除去した。
+    case removed
+    /// entry が既に無い（冪等成功。consumed 済み削除の再試行 / 他デバイスが先に削除）。
+    case alreadyGone
+    /// 権威 entry がベースから進んでいた = 削除拒否（「データ損失 < 重複」）。
+    /// 呼び出し側は最新 item を添えて `fileProviderErrorForRejectedDeletion` を返し、
+    /// システムに最新版を復元させる。
+    case rejectedRemoteChanged(ManifestFileEntry)
+}
+
 /// シャードと index.json を楽観的ロックで更新する。
 /// アプリ（Uploader 経由）と File Provider 拡張（M5 Phase 5〜）が共有する
 /// **マニフェスト書込の唯一のチョークポイント**。
@@ -394,18 +406,47 @@ public struct ManifestUpdater: Sendable {
             assert(decision == .proceed, "decideUpload returned \(decision) with a nil existing entry")
 
             shard.files[path] = newEntry
-            shard.updatedAt = ISO8601.now()
-            let newEtag = try await store.putShard(shard, ifMatch: etag)
-            _ = try await updateIndex { idx in
-                idx.shards[shardId] = .init(etag: newEtag, count: shard.files.count)
-                return true
-            }
-            // シャード + index の両方が確定した時のみ発火。putShard 成功 → updateIndex が
-            // リトライ尽きで throw した場合は非発火のまま失敗として呼び出し元へ伝播し
-            // （SyncError は外側リトライに再マッチしない）、再試行（キューのバックオフ再試行）が
-            // 上の `.alreadyUpToDate` 分岐の index 突合修復で可視化 + 発火する（PR #56 レビュー ①）。
-            onManifestDidWrite?()
+            // シャード + index の両方が確定した時のみ発火（commitShardWrite）。putShard 成功 →
+            // updateIndex がリトライ尽きで throw した場合は非発火のまま失敗として呼び出し元へ
+            // 伝播し（SyncError は外側リトライに再マッチしない）、再試行（キューのバックオフ
+            // 再試行）が上の `.alreadyUpToDate` 分岐の index 突合修復で可視化 + 発火する
+            // （PR #56 レビュー ①）。
+            try await commitShardWrite(shardId: shardId, shard: shard, etag: etag)
             return .wrote
+        }
+    }
+
+    /// FP 拡張の deleteItem（M5 Phase 5-2）用: per-file entry を「権威 entry がベースと一致する
+    /// ときのみ」除去する。ガードは RMW 内（`removeFileEntry` を新設した理由）: チェック → 削除の
+    /// 間に別書き手が entry を進める窓を、412 リトライごとの再評価で塞ぐ。ベース不明（nil）も
+    /// 拒否側へ倒す（「データ損失 < 重複」— 根拠なしに消さない）。
+    /// 呼び出し側の順序は **マニフェスト除去 → deleteObject**（アプリの processDelete と逆）:
+    /// 権威判定点がこの RMW 内にあるため。中間クラッシュは「マニフェストから消えた不可視 live
+    /// オブジェクト」が残るだけ（他デバイスは削除に収束・版履歴で回復可・データ損失なし）。
+    public func removeFileEntry(for path: String, base: String?) async throws -> ShardRemoveOutcome {
+        let shardId = ManifestSharding.shardId(for: path)
+        return try await withConditionalRetry("shard \(shardId)") {
+            let fetched = try await store.getShard(shardId)
+            var shard = fetched?.value ?? ManifestShard.empty(id: shardId)
+            let etag = fetched?.etag
+            guard let existing = shard.files[path] else {
+                // 不在 = 冪等成功。分断の後始末（index 宣言ずれ / dangling 宣言）だけ突合しておく
+                // （updateShard の no-op 経路と同じ規約）。
+                if let fetchedEtag = fetched?.etag {
+                    try await repairIndexDeclarationIfStale(
+                        shardId: shardId, fetchedEtag: fetchedEtag, count: shard.files.count
+                    )
+                } else {
+                    try await removeDanglingDeclarationIfShardAbsent(shardId: shardId)
+                }
+                return .alreadyGone
+            }
+            guard let base, existing.sha256 == base else {
+                return .rejectedRemoteChanged(existing)
+            }
+            shard.files.removeValue(forKey: path)
+            try await commitShardWrite(shardId: shardId, shard: shard, etag: etag)
+            return .removed
         }
     }
 
@@ -439,42 +480,49 @@ public struct ManifestUpdater: Sendable {
                 return
             }
 
-            shard.updatedAt = ISO8601.now()
+            _ = try await commitShardWrite(shardId: shardId, shard: shard, etag: etag)
+        }
+    }
 
-            if shard.files.isEmpty {
-                if etag != nil {
-                    try await store.deleteShard(shardId)
-                }
-                // CAS（PR #56 再々レビュー (b)）: 宣言除去は「自分が消したシャードの etag（外側で
-                // 観測した値）を宣言しているとき」のみ。deleteShard 〜 このコミットの間に並行書き手が
-                // 同シャードを再作成 + 宣言していたら、その正当な宣言を消さない（実在シャードの
-                // 未宣言化 = removedShards 誤検出 → 削除伝播の遮断）。主経路は修復系と違い自分の
-                // 観測 etag を知っているので、観測前窓のない完全な CAS になる。
-                let removed = try await updateIndex { idx in
-                    guard idx.shards[shardId]?.etag == etag else { return false }
-                    idx.shards.removeValue(forKey: shardId)
-                    return true
-                }
-                if removed {
-                    onManifestDidWrite?()
-                } else {
-                    // ガード失敗の後始末（PR #56 第 4 ラウンド (g)）: 宣言が観測 etag と違う理由が
-                    // 「並行再作成」なら温存が正しいが、「先行分断の stale 宣言 + 自分が今オブジェクトを
-                    // 消した」形だと dangling が残り、しかも主系は成功でキュー行を消すため再入は
-                    // 機会的にしか起きない（= 削除が伝播しない ghost 化）。実在再確認付きの dangling
-                    // 除去へフォールスルーして両取りする（シャードが実在すれば何もしない）。
-                    try await removeDanglingDeclarationIfShardAbsent(shardId: shardId)
-                }
-                return
+    /// シャード書込の共通テール（updateFileEntry / updateShard / removeFileEntry が共用）:
+    /// updatedAt を刻み、空なら deleteShard + 宣言除去、残があれば putShard + 宣言更新。
+    /// マニフェストが確定した時のみ発火する。
+    /// - 空シャード削除の宣言除去は CAS（PR #56 再々レビュー (b)）: 「自分が消したシャードの
+    ///   etag（外側で観測した値）を宣言しているとき」のみ removeValue。deleteShard 〜 コミットの
+    ///   間に並行書き手が再作成 + 宣言していたら、その正当な宣言を消さない（実在シャードの
+    ///   未宣言化 = removedShards 誤検出 → 削除伝播の遮断）。
+    /// - CAS 失敗時は実在再確認付き dangling 除去へフォールスルー（第 4 ラウンド (g)）:
+    ///   「先行分断の stale 宣言 + 自分が今オブジェクトを消した」形の ghost 化（削除が伝播しない）
+    ///   を防ぎつつ、並行再作成は温存する。
+    private func commitShardWrite(
+        shardId: String, shard: ManifestShard, etag: String?
+    ) async throws {
+        var shard = shard
+        shard.updatedAt = ISO8601.now()
+
+        if shard.files.isEmpty {
+            if etag != nil {
+                try await store.deleteShard(shardId)
             }
-
-            let newEtag = try await store.putShard(shard, ifMatch: etag)
-            _ = try await updateIndex { idx in
-                idx.shards[shardId] = .init(etag: newEtag, count: shard.files.count)
+            let removed = try await updateIndex { idx in
+                guard idx.shards[shardId]?.etag == etag else { return false }
+                idx.shards.removeValue(forKey: shardId)
                 return true
             }
-            onManifestDidWrite?()
+            if removed {
+                onManifestDidWrite?()
+            } else {
+                try await removeDanglingDeclarationIfShardAbsent(shardId: shardId)
+            }
+            return
         }
+
+        let newEtag = try await store.putShard(shard, ifMatch: etag)
+        _ = try await updateIndex { idx in
+            idx.shards[shardId] = .init(etag: newEtag, count: shard.files.count)
+            return true
+        }
+        onManifestDidWrite?()
     }
 
     /// シャード不在時の dangling 宣言除去（実在再確認 + CAS 付き。PR #56 再レビュー (1) /

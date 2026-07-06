@@ -118,7 +118,7 @@ final class ManifestUpdaterTests: XCTestCase {
         let outcome = try await makeUpdater(store: store, counter: counter)
             .updateFileEntry(for: path, base: nil, newEntry: makeManifestEntry(sha: "aaa"))
 
-        XCTAssertEqual(outcome, .wrote)
+        guard case .wrote = outcome else { return XCTFail("expected .wrote, got \(outcome)") }
         XCTAssertEqual(counter.count, 1)
     }
 
@@ -499,6 +499,109 @@ final class ManifestUpdaterTests: XCTestCase {
         XCTAssertNil(shards[shardId])
     }
 
+    // MARK: - removeFileEntry（FP 拡張の deleteItem 用・M5 Phase 5-2）
+
+    /// ベース一致の削除 → 除去 + 発火。返り etag は実シャード etag（自世代 append 用）。
+    func testRemoveFileEntryRemovesAndFires() async throws {
+        let store = InMemoryManifestStore()
+        let counter = SignalCounter()
+        let path = "docs/a.txt"
+        let shardId = ManifestSharding.shardId(for: path)
+        var shard = ManifestShard.empty(id: shardId)
+        shard.files[path] = makeManifestEntry(sha: "aaa")
+        shard.files[path + ".keep"] = makeManifestEntry(sha: "bbb")
+        await store.seed(shard: shard)
+
+        let outcome = try await makeUpdater(store: store, counter: counter)
+            .removeFileEntry(for: path, base: "aaa")
+
+        XCTAssertEqual(outcome, .removed)
+        XCTAssertEqual(counter.count, 1)
+        let stored = await store.shards[shardId]
+        XCTAssertNil(stored?.files[path])
+        XCTAssertNotNil(stored?.files[path + ".keep"])
+        let declared = await store.index?.shards[shardId]
+        XCTAssertEqual(declared?.count, 1)
+    }
+
+    /// 最後の 1 件の削除 → 空シャード削除 + 宣言除去 + 発火。
+    func testRemoveFileEntryLastEntryDeletesShard() async throws {
+        let store = InMemoryManifestStore()
+        let counter = SignalCounter()
+        let path = "docs/a.txt"
+        let shardId = ManifestSharding.shardId(for: path)
+        var shard = ManifestShard.empty(id: shardId)
+        shard.files[path] = makeManifestEntry(sha: "aaa")
+        await store.seed(shard: shard)
+
+        let outcome = try await makeUpdater(store: store, counter: counter)
+            .removeFileEntry(for: path, base: "aaa")
+
+        XCTAssertEqual(outcome, .removed)
+        XCTAssertEqual(counter.count, 1)
+        let stored = await store.shards[shardId]
+        XCTAssertNil(stored)
+        let declared = await store.index?.shards[shardId]
+        XCTAssertNil(declared)
+    }
+
+    /// 不在 entry の削除 = 冪等成功（.alreadyGone）。書かない・発火しない。
+    func testRemoveFileEntryAlreadyGoneDoesNotFire() async throws {
+        let store = InMemoryManifestStore()
+        let counter = SignalCounter()
+        let path = "docs/a.txt"
+        let shardId = ManifestSharding.shardId(for: path)
+        var shard = ManifestShard.empty(id: shardId)
+        shard.files[path + ".keep"] = makeManifestEntry(sha: "bbb")
+        await store.seed(shard: shard)
+
+        let outcome = try await makeUpdater(store: store, counter: counter)
+            .removeFileEntry(for: path, base: "aaa")
+
+        guard case .alreadyGone = outcome else { return XCTFail("expected .alreadyGone, got \(outcome)") }
+        XCTAssertEqual(counter.count, 0)
+        let stored = await store.shards[shardId]
+        XCTAssertNotNil(stored?.files[path + ".keep"])
+    }
+
+    /// 権威 entry がベースより進んでいる → 拒否（現 entry 添付）。除去しない・発火しない。
+    func testRemoveFileEntryRejectsWhenRemoteChanged() async throws {
+        let store = InMemoryManifestStore()
+        let counter = SignalCounter()
+        let path = "docs/a.txt"
+        let remote = makeManifestEntry(sha: "theirs")
+        let shardId = ManifestSharding.shardId(for: path)
+        var shard = ManifestShard.empty(id: shardId)
+        shard.files[path] = remote
+        await store.seed(shard: shard)
+
+        let outcome = try await makeUpdater(store: store, counter: counter)
+            .removeFileEntry(for: path, base: "mine")
+
+        XCTAssertEqual(outcome, .rejectedRemoteChanged(remote))
+        XCTAssertEqual(counter.count, 0)
+        let stored = await store.shards[shardId]
+        XCTAssertEqual(stored?.files[path], remote)
+    }
+
+    /// ベース不明（nil）も拒否側へ倒す（根拠なしに消さない =「データ損失 < 重複」）。
+    func testRemoveFileEntryRejectsNilBase() async throws {
+        let store = InMemoryManifestStore()
+        let counter = SignalCounter()
+        let path = "docs/a.txt"
+        let remote = makeManifestEntry(sha: "aaa")
+        let shardId = ManifestSharding.shardId(for: path)
+        var shard = ManifestShard.empty(id: shardId)
+        shard.files[path] = remote
+        await store.seed(shard: shard)
+
+        let outcome = try await makeUpdater(store: store, counter: counter)
+            .removeFileEntry(for: path, base: nil)
+
+        XCTAssertEqual(outcome, .rejectedRemoteChanged(remote))
+        XCTAssertEqual(counter.count, 0)
+    }
+
     /// hook を明示 nil にしても全経路が従来どおり成功する（通知なしの明示宣言）。
     func testNilHookStillWrites() async throws {
         let store = InMemoryManifestStore()
@@ -507,6 +610,6 @@ final class ManifestUpdaterTests: XCTestCase {
         let outcome = try await updater.updateFileEntry(
             for: "docs/a.txt", base: nil, newEntry: makeManifestEntry(sha: "aaa")
         )
-        XCTAssertEqual(outcome, .wrote)
+        guard case .wrote = outcome else { return XCTFail("expected .wrote, got \(outcome)") }
     }
 }

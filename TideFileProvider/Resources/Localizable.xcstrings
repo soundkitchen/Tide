@@ -1,6 +1,17 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "Creating new items in Tide is not supported yet. Add files in the sync folder instead." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tide での新規作成にはまだ対応していません。追加は同期フォルダ側で行ってください。"
+          }
+        }
+      }
+    },
     "Downloaded content failed integrity verification." : {
       "extractionState" : "manual",
       "localizations" : {
@@ -12,13 +23,24 @@
         }
       }
     },
-    "Tide (PoC) is read-only. Edit files in the sync folder instead." : {
+    "Folder changes in Tide are not supported yet." : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Tide（PoC）は読み取り専用です。編集は同期フォルダ側で行ってください。"
+            "value" : "Tide でのフォルダ変更にはまだ対応していません。"
+          }
+        }
+      }
+    },
+    "Renaming or moving items in Tide is not supported yet." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tide での名称変更・移動にはまだ対応していません。"
           }
         }
       }

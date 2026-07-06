@@ -14,6 +14,8 @@ struct UncheckedSendableBox<T>: @unchecked Sendable {
 struct ExtensionServices: Sendable {
     let s3: TideS3Client
     let cache: ManifestGenerationCache
+    /// FP 書込経路（M5 Phase 5-2・deleteItem + modifyItem）。S3 とマニフェストのみを書く。
+    let writer: ExtensionWriter
     /// workingSet への自己 signal。現状の呼び手は機会的自己 signal（`onNewGeneration`）のみ。
     /// Phase 5-2 以降の書込通知（拡張自身の書込後にシステムへ変化を取りに来させる）の土台として
     /// 公開している。※「delete 確定 → signal → 新セッションで update」の 2 相配信パターンは
@@ -75,10 +77,27 @@ struct ExtensionServices: Sendable {
                 onNewGeneration: {
                     // ブラウズ契機のリフレッシュがリモート変化に気づいた時の自己 signal。
                     // アプリ側の pull 後 signal が主経路で、これはアプリ非起動時の補完。
+                    // Phase 5-2 の自世代 append（recordLocalChange）もここを通る =
+                    // 拡張自身の書込の anchor 前進もこの 1 本に集約。
                     signalWorkingSet()
                 }
             )
-            return ExtensionServices(s3: s3, cache: cache, signalWorkingSet: signalWorkingSet)
+            // 拡張の ManifestUpdater は onManifestDidWrite を**明示 nil**にする: 拡張の signal は
+            // 書込後の `invalidateAfterLocalWrite` → onNewGeneration が担う。ここでも発火させると
+            // 「無効化前の signal → enumerateChanges → 旧世代ロード」の無駄往復になる
+            // （アプリ側は世代ログを持たないため書込確定点の hook が signal の正位置、という
+            // 役割分担。docs/08 Phase 5-2 節参照）。
+            let writer = ExtensionWriter(
+                s3: s3,
+                cache: cache,
+                updater: ManifestUpdater(store: s3, deviceId: config.deviceId, onManifestDidWrite: nil),
+                deviceId: config.deviceId,
+                uploadSizeLimitBytes: config.uploadSizeLimitBytes,
+                uploadLimiter: RateLimiter(ratePerSec: Double(config.uploadBandwidthBytesPerSec))
+            )
+            return ExtensionServices(
+                s3: s3, cache: cache, writer: writer, signalWorkingSet: signalWorkingSet
+            )
         } catch {
             AppLogger.fileProvider.error("Extension: failed to construct S3 client: \(String(describing: error), privacy: .private)")
             return nil
