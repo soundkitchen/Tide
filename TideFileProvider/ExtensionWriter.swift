@@ -13,6 +13,10 @@ struct ExtensionWriter: Sendable {
     let deviceId: String
     /// 1 ファイルあたりのアップロード上限（`ConfigStore.uploadSizeLimitBytes`）。<=0 は無制限。
     let uploadSizeLimitBytes: Int64
+    /// アップロード帯域制御（`ConfigStore.uploadBandwidthBytesPerSec`・PR #58 レビュー #7）。
+    /// アプリと同じく設定上限を尊重する。拡張はループを持たず短命なので、レートは
+    /// `ExtensionServices` 構築時（= 設定読込時）の値で固定する。<=0 は無制限。
+    let uploadLimiter: RateLimiter
 
     enum ModifyOutcome {
         /// 書込成功（または別書き手が同一内容を確定済み）。entry は正規パスの確定 identity。
@@ -42,18 +46,13 @@ struct ExtensionWriter: Sendable {
         )
         do {
             let outcome = try await updater.updateFileEntry(for: path, base: baseSha, newEntry: entry)
+            // .wrote / .alreadyUpToDate いずれも S3 は確定済み。キャッシュを無効化して次の列挙が
+            // S3 から読み直す（局所世代構築は撤去。PR #58 レビュー #2/#3）。
+            await cache.invalidateAfterLocalWrite()
             switch outcome {
-            case .wrote(let newShardEtag):
-                await cache.recordLocalChange(
-                    updatingShardEtags: [ManifestSharding.shardId(for: path): newShardEtag]
-                ) { $0[path] = entry }
+            case .wrote:
                 return .written(entry)
             case .alreadyUpToDate(let remote):
-                // 別書き手が同一内容を確定済み。リモート identity を正として世代へ反映
-                // （シャードは書いていないので etag は落として次回突合に委ねる）。
-                await cache.recordLocalChange(
-                    updatingShardEtags: [ManifestSharding.shardId(for: path): nil]
-                ) { $0[path] = remote }
                 return .written(remote)
             }
         } catch let SyncError.uploadConflict(_, remoteEntry) {
@@ -69,21 +68,13 @@ struct ExtensionWriter: Sendable {
             let copyOutcome = try await updater.updateFileEntry(
                 for: copyPath, base: nil, newEntry: copyEntry
             )
-            guard case .wrote(let copyShardEtag) = copyOutcome else {
+            guard case .wrote = copyOutcome else {
                 // conflict copy 名は秒精度タイムスタンプ付きで衝突は実質ない。万一衝突したら
                 // 退避を諦めて競合を伝播（リトライは fileproviderd が担う。ローカル編集内容は
                 // 正規キーの orphan version として S3 に残っており消失はしない）。
                 throw SyncError.uploadConflict(path: path, remoteEntry: remoteEntry)
             }
-            await cache.recordLocalChange(
-                updatingShardEtags: [
-                    ManifestSharding.shardId(for: path): nil,
-                    ManifestSharding.shardId(for: copyPath): copyShardEtag,
-                ]
-            ) { files in
-                files[path] = remoteEntry
-                files[copyPath] = copyEntry
-            }
+            await cache.invalidateAfterLocalWrite()
             return .conflict(remote: remoteEntry, copyPath: copyPath, copyEntry: copyEntry)
         }
     }
@@ -95,20 +86,19 @@ struct ExtensionWriter: Sendable {
         try PathValidator.validateRelativePath(path)
         let outcome = try await updater.removeFileEntry(for: path, base: baseSha)
         switch outcome {
-        case .removed(let newShardEtag):
+        case .removed:
             do {
                 try await s3.deleteObject(key: "files/\(path)")
             } catch {
                 AppLogger.fileProvider.error("deleteObject after manifest removal failed (invisible live object remains): \(String(describing: error), privacy: .private)")
             }
-            await cache.recordLocalChange(
-                updatingShardEtags: [ManifestSharding.shardId(for: path): newShardEtag]
-            ) { $0.removeValue(forKey: path) }
+            await cache.invalidateAfterLocalWrite()
             return .removed
         case .alreadyGone:
-            await cache.recordLocalChange(updatingShardEtags: [:]) { $0.removeValue(forKey: path) }
+            await cache.invalidateAfterLocalWrite()
             return .alreadyGone
         case .rejectedRemoteChanged(let remote):
+            // 除去していない = 世代を触らない（キャッシュはそのまま = 最新版の item を保持）。
             return .rejected(remote)
         }
     }
@@ -131,12 +121,15 @@ struct ExtensionWriter: Sendable {
         if PartPlan.shouldUseMultipart(fileSize: info.size) {
             let plan = PartPlan.plan(forFileSize: info.size)
             let result = try await MultipartUploader(s3: s3).upload(
-                key: key, reader: reader, partSize: plan.partSize
+                key: key, reader: reader, partSize: plan.partSize, limiter: uploadLimiter
             )
             put = result.put
             sha256 = result.sha256
         } else {
             let (data, hash) = try HashCalculator.readAllAndHash(reader)
+            // 単発 PUT は Data 一括なので、送出前に本体サイズぶんを取得して平均レートを律速する
+            // （アプリ側 Uploader と同じ規約）。無制限（rate<=0）なら即返る。
+            await uploadLimiter.acquire(data.count)
             put = try await s3.putObject(key: key, data: data)
             sha256 = hash
         }

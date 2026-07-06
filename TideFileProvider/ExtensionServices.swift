@@ -83,8 +83,8 @@ struct ExtensionServices: Sendable {
                 }
             )
             // 拡張の ManifestUpdater は onManifestDidWrite を**明示 nil**にする: 拡張の signal は
-            // 自世代 append（recordLocalChange → onNewGeneration）が担う。ここでも発火させると
-            // 「世代 append 前の signal → enumerateChanges → 旧世代ロード」の無駄往復になる
+            // 書込後の `invalidateAfterLocalWrite` → onNewGeneration が担う。ここでも発火させると
+            // 「無効化前の signal → enumerateChanges → 旧世代ロード」の無駄往復になる
             // （アプリ側は世代ログを持たないため書込確定点の hook が signal の正位置、という
             // 役割分担。docs/08 Phase 5-2 節参照）。
             let writer = ExtensionWriter(
@@ -92,7 +92,8 @@ struct ExtensionServices: Sendable {
                 cache: cache,
                 updater: ManifestUpdater(store: s3, deviceId: config.deviceId, onManifestDidWrite: nil),
                 deviceId: config.deviceId,
-                uploadSizeLimitBytes: config.uploadSizeLimitBytes
+                uploadSizeLimitBytes: config.uploadSizeLimitBytes,
+                uploadLimiter: RateLimiter(ratePerSec: Double(config.uploadBandwidthBytesPerSec))
             )
             return ExtensionServices(
                 s3: s3, cache: cache, writer: writer, signalWorkingSet: signalWorkingSet

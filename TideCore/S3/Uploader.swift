@@ -300,9 +300,8 @@ public struct Uploader: Sendable {
 
 /// `updateFileEntry` の結果。アップロード書込シームでの並行更新検出（Issue #25 / A）の結末を表す。
 public enum ShardUpdateOutcome: Equatable, Sendable {
-    /// 自分の entry でマニフェストを更新した。`newShardEtag` は putShard の返り値
-    /// （FP 拡張の自世代 append が shardEtags を更新して次回増分ロードの再取得を避ける。5-2）。
-    case wrote(newShardEtag: String)
+    /// 自分の entry でマニフェストを更新した。
+    case wrote
     /// 別の書き手が同一内容を既に確定済みだった（マニフェスト書込せず）。
     /// 付随する `ManifestFileEntry` は権威シャードの現リモート版＝ローカル DB をこの identity に合わせる。
     case alreadyUpToDate(ManifestFileEntry)
@@ -310,9 +309,8 @@ public enum ShardUpdateOutcome: Equatable, Sendable {
 
 /// `removeFileEntry` の結果（FP 拡張の deleteItem 用・M5 Phase 5-2）。
 public enum ShardRemoveOutcome: Equatable, Sendable {
-    /// entry を除去した。`newShardEtag` は残エントリありなら putShard の返り値、
-    /// 空シャード削除なら nil（自世代 append は該当シャードを shardEtags から落とす）。
-    case removed(newShardEtag: String?)
+    /// entry を除去した。
+    case removed
     /// entry が既に無い（冪等成功。consumed 済み削除の再試行 / 他デバイスが先に削除）。
     case alreadyGone
     /// 権威 entry がベースから進んでいた = 削除拒否（「データ損失 < 重複」）。
@@ -413,11 +411,8 @@ public struct ManifestUpdater: Sendable {
             // 伝播し（SyncError は外側リトライに再マッチしない）、再試行（キューのバックオフ
             // 再試行）が上の `.alreadyUpToDate` 分岐の index 突合修復で可視化 + 発火する
             // （PR #56 レビュー ①）。
-            guard let newEtag = try await commitShardWrite(shardId: shardId, shard: shard, etag: etag) else {
-                // 直前に entry を入れたので空シャード削除には到達しない（防御）
-                throw SyncError.manifestUpdateFailed("shard \(shardId): unexpected empty-shard commit")
-            }
-            return .wrote(newShardEtag: newEtag)
+            try await commitShardWrite(shardId: shardId, shard: shard, etag: etag)
+            return .wrote
         }
     }
 
@@ -450,8 +445,8 @@ public struct ManifestUpdater: Sendable {
                 return .rejectedRemoteChanged(existing)
             }
             shard.files.removeValue(forKey: path)
-            let newEtag = try await commitShardWrite(shardId: shardId, shard: shard, etag: etag)
-            return .removed(newShardEtag: newEtag)
+            try await commitShardWrite(shardId: shardId, shard: shard, etag: etag)
+            return .removed
         }
     }
 
@@ -499,10 +494,9 @@ public struct ManifestUpdater: Sendable {
     /// - CAS 失敗時は実在再確認付き dangling 除去へフォールスルー（第 4 ラウンド (g)）:
     ///   「先行分断の stale 宣言 + 自分が今オブジェクトを消した」形の ghost 化（削除が伝播しない）
     ///   を防ぎつつ、並行再作成は温存する。
-    /// - Returns: putShard した場合はその新 etag。空シャード削除なら nil。
     private func commitShardWrite(
         shardId: String, shard: ManifestShard, etag: String?
-    ) async throws -> String? {
+    ) async throws {
         var shard = shard
         shard.updatedAt = ISO8601.now()
 
@@ -520,7 +514,7 @@ public struct ManifestUpdater: Sendable {
             } else {
                 try await removeDanglingDeclarationIfShardAbsent(shardId: shardId)
             }
-            return nil
+            return
         }
 
         let newEtag = try await store.putShard(shard, ifMatch: etag)
@@ -529,7 +523,6 @@ public struct ManifestUpdater: Sendable {
             return true
         }
         onManifestDidWrite?()
-        return newEtag
     }
 
     /// シャード不在時の dangling 宣言除去（実在再確認 + CAS 付き。PR #56 再レビュー (1) /

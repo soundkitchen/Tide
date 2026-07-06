@@ -14,6 +14,25 @@ final class FileProviderWritePolicyTests: XCTestCase {
         XCTAssertNil(FileProviderWritePolicy.baseSha(fromContentVersion: Data("dir".utf8)))
     }
 
+    // MARK: - contentVersion 往復（PR #58 レビュー #8）
+
+    /// file ノードは contentVersion(for:) → baseSha で往復する（符号化と復号の整合）。
+    func testContentVersionRoundtripsForFile() {
+        let sha = String(repeating: "0123456789abcdef", count: 4)
+        let entry = ManifestFileEntry(
+            size: 1, mtime: "2026-07-06T00:00:00Z", sha256: sha,
+            s3VersionId: nil, etag: "e", deviceId: "d", uploadedAt: "2026-07-06T00:00:00Z"
+        )
+        let cv = FileProviderWritePolicy.contentVersion(for: .file(path: "a.txt", entry: entry))
+        XCTAssertEqual(FileProviderWritePolicy.baseSha(fromContentVersion: cv), sha)
+    }
+
+    /// directory ノードの contentVersion は base sha を持たない（"dir" → nil）。
+    func testContentVersionForDirectoryHasNoBaseSha() {
+        let cv = FileProviderWritePolicy.contentVersion(for: .directory(path: "d", mtime: nil))
+        XCTAssertNil(FileProviderWritePolicy.baseSha(fromContentVersion: cv))
+    }
+
     func testBaseShaRejectsNonShaShapes() {
         XCTAssertNil(FileProviderWritePolicy.baseSha(fromContentVersion: nil))
         XCTAssertNil(FileProviderWritePolicy.baseSha(fromContentVersion: Data()))

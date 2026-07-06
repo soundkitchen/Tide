@@ -31,13 +31,9 @@ final class ManifestUpdaterTests: XCTestCase {
         let outcome = try await makeUpdater(store: store, counter: counter)
             .updateFileEntry(for: path, base: nil, newEntry: entry)
 
-        guard case .wrote(let newShardEtag) = outcome else {
-            return XCTFail("expected .wrote, got \(outcome)")
-        }
+        XCTAssertEqual(outcome, .wrote)
         XCTAssertEqual(counter.count, 1)
         let shardId = ManifestSharding.shardId(for: path)
-        let actualEtag = await store.shardEtags[shardId]
-        XCTAssertEqual(newShardEtag, actualEtag)  // 返り etag = 実シャード etag(自世代 append 用)
         let shard = await store.shards[shardId]
         XCTAssertEqual(shard?.files[path], entry)
         let index = await store.index
@@ -519,12 +515,8 @@ final class ManifestUpdaterTests: XCTestCase {
         let outcome = try await makeUpdater(store: store, counter: counter)
             .removeFileEntry(for: path, base: "aaa")
 
-        guard case .removed(let newShardEtag) = outcome else {
-            return XCTFail("expected .removed, got \(outcome)")
-        }
+        XCTAssertEqual(outcome, .removed)
         XCTAssertEqual(counter.count, 1)
-        let actualEtag = await store.shardEtags[shardId]
-        XCTAssertEqual(newShardEtag, actualEtag)
         let stored = await store.shards[shardId]
         XCTAssertNil(stored?.files[path])
         XCTAssertNotNil(stored?.files[path + ".keep"])
@@ -532,7 +524,7 @@ final class ManifestUpdaterTests: XCTestCase {
         XCTAssertEqual(declared?.count, 1)
     }
 
-    /// 最後の 1 件の削除 → 空シャード削除（etag nil）+ 宣言除去 + 発火。
+    /// 最後の 1 件の削除 → 空シャード削除 + 宣言除去 + 発火。
     func testRemoveFileEntryLastEntryDeletesShard() async throws {
         let store = InMemoryManifestStore()
         let counter = SignalCounter()
@@ -545,10 +537,7 @@ final class ManifestUpdaterTests: XCTestCase {
         let outcome = try await makeUpdater(store: store, counter: counter)
             .removeFileEntry(for: path, base: "aaa")
 
-        guard case .removed(let newShardEtag) = outcome else {
-            return XCTFail("expected .removed, got \(outcome)")
-        }
-        XCTAssertNil(newShardEtag)
+        XCTAssertEqual(outcome, .removed)
         XCTAssertEqual(counter.count, 1)
         let stored = await store.shards[shardId]
         XCTAssertNil(stored)

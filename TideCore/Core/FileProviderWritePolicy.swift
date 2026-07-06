@@ -4,9 +4,21 @@ import Foundation
 /// （Data / String のみ受ける）— `TideFileProvider` ターゲットは TideTests から import
 /// できないため、テスト可能なロジックは TideCore に置く。
 public enum FileProviderWritePolicy {
+    /// `NSFileProviderItemVersion.contentVersion` に載せるバイト列をノードから作る。
+    /// file = sha256 hex（小文字）の UTF-8 / directory = `"dir"` の UTF-8。
+    /// **符号化（これ）と復号（`baseSha`）を対で同居させる**（PR #58 レビュー #8）: 別モジュールに
+    /// 分かれていると Phase 5-3/5-4 で片方だけ変えたとき、コンパイルもテストも通らないまま
+    /// 「全 delete が拒否 / 全 modify が base:nil 劣化」の無言故障になる。往復は
+    /// `FileProviderWritePolicyTests` が固定する。
+    public static func contentVersion(for node: ManifestTree.Node) -> Data {
+        switch node {
+        case .file(_, let entry): return Data(entry.sha256.utf8)
+        case .directory: return Data("dir".utf8)
+        }
+    }
+
     /// FP の `NSFileProviderItemVersion.contentVersion` の中身から 3-way ベースの sha256 を
-    /// 取り出す。itemVersion の発行元は `FileProviderItem.itemVersion`（file = sha256 hex の
-    /// UTF-8 / directory = "dir"）なので、その逆写像 + 防御的検証。
+    /// 取り出す（`contentVersion(for:)` の逆写像 + 防御的検証）。
     /// - "dir" / 非 UTF-8 / 空 / sha256 hex（64 桁小文字）以外 → nil = 内容ベース不明。
     ///   nil の扱いは呼び出し側の意味論に委ねる（削除ガードは「根拠なしに消さない」= 拒否側、
     ///   アップロード競合判定は `decideUpload(base: nil)` = remote 有りなら競合側、へ倒れる）。

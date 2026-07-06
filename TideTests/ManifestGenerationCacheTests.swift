@@ -42,15 +42,18 @@ final class ManifestGenerationCacheTests: XCTestCase {
         }
 
         func getIndex() async throws -> TideS3Client.ManifestFetch<ManifestIndex>? {
-            let shouldWait = lock.withLock { _gateArmed && _gateWaiter == nil }
+            // version を**待ちに入る前**（= 書込前）に捕捉する。ゲートで止められたロードは
+            // pre-write の index（旧 etag）を返す → 増分ローダは「変化なし」で shard を再取得せず
+            // 旧世代の files を持ち越す = 決定的に stale なロードになる（stale 破棄の検証用）。
+            let (files, version, shouldWait) = lock.withLock {
+                () -> ([String: ManifestFileEntry], Int, Bool) in
+                _indexFetchCount += 1
+                return (_files, _version, _gateArmed && _gateWaiter == nil)
+            }
             if shouldWait {
                 await withCheckedContinuation { cont in
                     lock.withLock { _gateWaiter = cont }
                 }
-            }
-            let (files, version) = lock.withLock {
-                _indexFetchCount += 1
-                return (_files, _version)
             }
             var shards: [String: ManifestIndex.ShardInfo] = [:]
             for path in files.keys {
@@ -231,10 +234,11 @@ final class ManifestGenerationCacheTests: XCTestCase {
         XCTAssertNil(gen)
     }
 
-    // MARK: - 自世代 append（recordLocalChange・M5 Phase 5-2）
+    // MARK: - ローカル書込の無効化（invalidateAfterLocalWrite・M5 Phase 5-2）
 
-    /// 拡張自身の書込の即時反映: anchor 前進・ツリー反映・onNewGeneration 発火・永続化。
-    func testRecordLocalChangeAdvancesAnchorAndFires() async throws {
+    /// 書込確定（S3 反映）後に invalidate → 自己 signal 発火 + 次の current() が S3 から読み直して
+    /// 書込を反映（新 anchor）+ 両世代 anchor 解決可 + 永続化（別インスタンスから引ける）。
+    func testInvalidateAfterLocalWriteReloadsFromS3AndFires() async throws {
         let source = MutableSource(files: ["a.txt": entry(sha: "1")])
         let signals = SignalCounter()
         let logURL = try tempLogURL()
@@ -245,22 +249,22 @@ final class ManifestGenerationCacheTests: XCTestCase {
         let gen1 = try await cache.current()
         let n0 = signals.count
 
+        // 実運用では書込が S3 に確定済み。source に反映してから invalidate。
         let w = entry(sha: "w1")
-        await cache.recordLocalChange(
-            updatingShardEtags: [ManifestSharding.shardId(for: "w.txt"): "w-etag"]
-        ) { $0["w.txt"] = w }
+        source.set(files: ["a.txt": entry(sha: "1"), "w.txt": w])
+        await cache.invalidateAfterLocalWrite()
+        XCTAssertEqual(signals.count, n0 + 1)  // invalidate 自体が自己 signal を発火
 
-        // TTL 内の current() はロードせずキャッシュ = 書込済みツリーが即時に見える
+        // 次の current() は S3 から読み直す = 書込済みツリー・新 anchor
         let after = try await cache.current()
         XCTAssertNotEqual(after.anchor, gen1.anchor)
         XCTAssertNotNil(after.tree.node(at: "w.txt"))
-        XCTAssertEqual(signals.count, n0 + 1)
         // 両世代とも anchor 解決できる（enumerateChanges の diff 起点に使える）
         let g1 = await cache.generation(anchor: gen1.anchor)
         XCTAssertNotNil(g1)
         let g2 = await cache.generation(anchor: after.anchor)
         XCTAssertNotNil(g2)
-        // 永続化: 別インスタンス（プロセス再起動相当）からも自世代が引ける
+        // 永続化: 別インスタンス（プロセス再起動相当）からも新世代が引ける
         let cache2 = ManifestGenerationCache(
             loader: ManifestSnapshotLoader(source: source), bucket: "b", logURL: logURL
         )
@@ -268,8 +272,9 @@ final class ManifestGenerationCacheTests: XCTestCase {
         XCTAssertNotNil(g2b)
     }
 
-    /// stale ロード破棄: 書込（recordLocalChange）より前に開始した S3 ロードの結果を世代化しない
-    /// （巻き戻り世代 = 旧 entry の didUpdate = 実 bounce の防止）。破棄後に一度だけ読み直す。
+    /// stale ロード破棄: ローカル書込より**前に開始**した S3 ロードを世代化せず読み直す
+    /// （巻き戻り世代 = 旧 entry の didUpdate = 実 bounce の防止・PR #58 レビュー #4/#5）。
+    /// ゲートで pre-write の index を返すロードを inflight にしておき、書込 invalidate 後に解放。
     func testStaleLoadStartedBeforeLocalWriteIsDiscarded() async throws {
         let source = MutableSource(files: ["a.txt": entry(sha: "1")])
         let cache = ManifestGenerationCache(
@@ -278,24 +283,57 @@ final class ManifestGenerationCacheTests: XCTestCase {
         )
         let gen1 = try await cache.current()
 
-        // ロードを getIndex で停止させてから、書込を挟む
+        // L1: refreshedCurrent の最初のロードを getIndex で止める（= 書込前に開始・pre-write index）
         source.armGate()
         let task = Task { try await cache.refreshedCurrent(callerAnchor: gen1.anchor) }
         while !source.gateWaiting {
             try await Task.sleep(nanoseconds: 5_000_000)
         }
+
+        // 書込確定: S3(source) に反映してから invalidate（lastLocalWriteAt 前進）
         let w = entry(sha: "w1")
-        await cache.recordLocalChange(
-            updatingShardEtags: [ManifestSharding.shardId(for: "w.txt"): "v1"]
-        ) { $0["w.txt"] = w }
-        let localAnchor = try await cache.current().anchor
-        // 書込は S3（source）にも実在する（実運用では putShard/updateIndex 済みの状態）
         source.set(files: ["a.txt": entry(sha: "1"), "w.txt": w])
+        await cache.invalidateAfterLocalWrite()
+
+        // L1 を解放。L1 は書込前開始 + pre-write index（w.txt 無し）→ discard → 読み直し
+        // （ゲートは消費済みなので読み直しの getIndex は即 live = w.txt 有り）。
+        source.openGate()
+        let result = try await task.value
+
+        // 読み直しが書込を含む世代を返す（巻き戻りしていない = bounce 防止）
+        XCTAssertNotNil(result.tree.node(at: "w.txt"))
+        XCTAssertNotEqual(result.anchor, gen1.anchor)
+    }
+
+    /// stale ロード破棄の while ループ（レビュー #5）: 読み直し中にさらに書込が着地しても
+    /// 取りこぼさない（最終スナップショットは最後の書込以降に開始したロード）。
+    func testSecondWriteDuringReloadIsNotMissed() async throws {
+        let source = MutableSource(files: ["a.txt": entry(sha: "1")])
+        let cache = ManifestGenerationCache(
+            loader: ManifestSnapshotLoader(source: source), bucket: "b", logURL: nil,
+            maxAge: 3600, minRefreshInterval: 0
+        )
+        let gen1 = try await cache.current()
+
+        source.armGate()
+        let task = Task { try await cache.refreshedCurrent(callerAnchor: gen1.anchor) }
+        while !source.gateWaiting { try await Task.sleep(nanoseconds: 5_000_000) }
+
+        // 1 つ目の書込 + invalidate（L1 は pre-write index で stale）
+        source.set(files: ["a.txt": entry(sha: "1"), "w1.txt": entry(sha: "w1")])
+        await cache.invalidateAfterLocalWrite()
+        // 解放前に 2 つ目の書込 + invalidate（lastLocalWriteAt をさらに前進）
+        source.set(files: [
+            "a.txt": entry(sha: "1"),
+            "w1.txt": entry(sha: "w1"),
+            "w2.txt": entry(sha: "w2"),
+        ])
+        await cache.invalidateAfterLocalWrite()
         source.openGate()
 
         let result = try await task.value
-        // 書込前開始のロード（w.txt を含まない）が世代化されず、読み直しで w.txt が残る
-        XCTAssertNotNil(result.tree.node(at: "w.txt"))
-        XCTAssertEqual(result.anchor, localAnchor)  // 巻き戻り世代を作っていない
+        // while ループが最後の書込まで読み直す → 両方の書込が見える
+        XCTAssertNotNil(result.tree.node(at: "w1.txt"))
+        XCTAssertNotNil(result.tree.node(at: "w2.txt"))
     }
 }
