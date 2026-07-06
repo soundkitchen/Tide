@@ -74,6 +74,19 @@
 - **item identifier の kind 織り込みと種別変化の配信（M5 Phase 5-1・2026-07-06）**: item identifier を `p:<path>` から **`f:<path>`（ファイル）/ `d:<path>`（ディレクトリ）** へ変更した。動機 = fileproviderd は**同一 id の kind（file⇄dir）変化を受理しない**: update 単発は `itemKindMismatch` 拒否（ゾンビ化・2026-07-05 実機）、delete+update の分解配信も ① 単一レスポンス内 ② moreComing ページ分割 ③ 中間 anchor 確定 + 自己 signal の別セッション（22ms 差）の **3 形態すべてで「item changed」の ingest 合成により delete が update を打ち消す**（item 消失。2026-07-06 実機。①②は即時合成、③はタイミング依存 — file→dir が 9ms 差で通った例もあるが本番不適）。kind ごとに id を分ければ kind 変化 =「旧 id の delete + 新 id の出現」= 独立した 2 変化となり、合成の余地が構造的に消える。`ManifestTreeDiff.Changes` は `deleted` を**旧ツリーのノード**（kind 情報付き）で返し、enumerator が旧 id を正しく組む。種別変化は didDeleteItems（旧 id）→ didUpdate（新 id）を**単一セッション**で配信して収束する（強制単一世代 = 拡張 STOP/CONT で file→dir / dir→file / materialize 済みの 3 方向を実機受け入れ）。**移行**: 旧 `p:` ドメインは Disable → Enable で作り直し（`.syncAnchorExpired` 全再列挙による無再作成移行は不可 — 旧 id item が名前衝突で「名前 2」リネームされ恒久残存する。`docs/09` 既知の癖参照）。
 - **CloudStorage フォルダ名は変更不可（調査結論・2026-07-04）**: `~/Library/CloudStorage/<ホストアプリ表示名>-<domain.displayName>` はシステム（fileproviderd）が合成し、制御する API は無い（Tide は "Tide-Tide"）。ただし **Finder 上の表示名は既に「Tide」に解決済み**（実測）で、ハイフン名が露出するのは POSIX パスのみ。Dropbox も実フォルダは "Dropbox - Personal" 形式。→ 現状維持で確定（据え置きにしない）。なお同一 identifier のドメインは再 add でプロパティ更新可（remove 不要・SDK ヘッダ明記）。
 
+### FP 双方向書込（M5 Phase 5-2・「拡張 = 第 3 のデバイス」方式・2026-07-06）
+
+FP ドメイン内のファイル編集（`modifyItem` の .contents）と削除（`deleteItem`）を実装した（新規作成 = 5-3、改名/移動 = 5-4）。設計と不変条件:
+
+- **書込境界**: 拡張は **S3 とマニフェスト（+ 自世代ログ）だけを書く**（`ExtensionWriter`）。アプリの DB / syncRoot / tmp には一切触れない ＝ [pull/restore 直列化] と [mtime 不変条件] に影響しない。アプリは既存 pull で拡張の書込に追従する（**アプリ側コード変更ゼロ**・2 台目 Mac と同型）。
+- **共有チョークポイント**: マニフェスト書込はアプリと同一の `ManifestUpdater` を通す。3-way ベースは FP の `baseVersion`（itemVersion = sha256）から `FileProviderWritePolicy.baseSha` で取得（**DB 非接触のまま競合検出できる**理由）。並行更新は If-Match RMW + `decideUpload` / ベースガードが裁く。
+- **deleteItem**: `ManifestUpdater.removeFileEntry(for:base:)` 新設 — **ガードを RMW 内**に置き（チェック → 削除の間の並行更新窓を 412 リトライごとの再評価で閉じる）、ベース一致のみ除去。ベース不明（nil）も拒否側（「データ損失 < 重複」）。**順序 = マニフェスト除去 → deleteObject（marker）**＝アプリの processDelete と逆（権威判定点が RMW 内にあるため）。marker 発行失敗は削除成功扱い（真実 = マニフェストは除去済み・不可視 live は版履歴で回復可）。リモートがベースより進んでいたら `fileProviderErrorForRejectedDeletion(of: 最新item)` — **fileproviderd が受理し最新版を復元することを実機確認**（拡張プロセスの respawn を跨いでも機能）。
+- **modifyItem 競合**: `.conflict` は FSEvents 側 `resolveUploadConflict` と対称 — ローカル編集を `ConflictNamer` の別 path へ上げ直し（tmp はコールバック中生存 = 再アップロード可）、completion は**リモート現行 entry の item + `shouldFetchContent=true`**（正規パスはリモート勝ち）。**受理・収束を実機確認**（正規 = リモート版 / copy = ローカル編集・データ損失ゼロ）。メタデータのみの modifyItem は黙って受理（remainingFields に残すと永久再試行）。
+- **自世代 append + stale ロード破棄（bounce 防止の要）**: 書込成功直後に `ManifestGenerationCache.recordLocalChange` が「最新世代 + 自分の書込」を新世代として append（putShard の返り etag で shardEtags も更新 = 次回増分ロードが自シャードを再取得しない）。completion で返す item は**必ずシャードへ書いた entry から生成** → 直後の enumerateChanges と同一 itemVersion = 適用 no-op。さらに actor が `lastLocalWriteAt` を持ち、**書込前に開始した S3 ロードの結果は世代化せず一度だけ読み直す**（巻き戻り世代 = 旧 entry の didUpdate = 実 bounce の防止）。
+- **signal の役割分担**: 拡張の `ManifestUpdater` は `onManifestDidWrite` を**明示 nil** — 拡張の anchor 前進は自世代 append（`recordLocalChange` → `onNewGeneration` → 自己 signal）が一元的に担う（アプリ側は世代ログを持たないため書込確定点 hook が signal の正位置、という対比）。
+- **セキュリティゲート**: identifier→path 変換直後の `validateRelativePath`・サイズ上限（`uploadSizeLimitBytes`）・SSE-S3（putObject/MPU 内で明示）・`NoFollowFileReader`（fileproviderd 提供 tmp は静止が契約だが多層防御）・conflict copy 名も `validateRelativePath` を通す。
+- **実機受け入れ**（2026-07-06）: FP 編集 → pull で syncRoot 反映 / FP 削除 → 全デバイス削除 / 削除拒否 + 復元 / 編集競合の両方保持 / bounce ゼロ / sync_log エラー 0。既知の残余レース（redeclare 観測前窓・無条件 DELETE）は 5-2 設計時に再評価 — 拡張書込は同一チョークポイント経由のため**新しい窓は増えない**（従来どおり記録のまま）。
+
 ### ダウンロード一時ディレクトリ
 - **`TideTmpDirectory.resolve(for:)` で同一ボリュームの tmp を返す**。第一選択は `~/Library/Caches/Tide/tmp/`。同期ルートと別ボリュームになる時のみ `<syncRoot>/.tide/tmp/` にフォールバック。`moveItem` の atomic 性を保つため。
 

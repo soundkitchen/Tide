@@ -39,6 +39,10 @@ public actor ManifestGenerationCache {
     /// ロードか」を判定するために持つ（`cached.fetchedAt` は完了時刻なので代用できない —
     /// signal 前に開始したロードへ合流しても完了は signal 後になる）。
     private var lastLoadStartedAt: Date?
+    /// 最後に `recordLocalChange`（拡張自身の書込の自世代 append・M5 Phase 5-2）が走った時刻。
+    /// これより**前に開始**した S3 ロードの結果は「自分の書込を含まない巻き戻り snapshot」で、
+    /// そのまま世代化すると旧 entry の didUpdate（実 bounce）になるため破棄して再ロードする。
+    private var lastLocalWriteAt: Date?
 
     public init(
         loader: ManifestSnapshotLoader,
@@ -96,19 +100,13 @@ public actor ManifestGenerationCache {
         }
         loadPayloadIfNeeded()
 
-        let snapshot: ManifestSnapshotLoader.SnapshotResult
-        if let inflight {
-            snapshot = try await inflight.value
-        } else {
-            let loader = self.loader
-            let previous = ManifestGenerationLog.latest(of: payload).map {
-                ManifestSnapshotLoader.SnapshotResult(files: $0.files, shardEtags: $0.shardEtags)
-            }
-            lastLoadStartedAt = Date()
-            let task = Task { try await loader.load(previous: previous) }
-            inflight = task
-            defer { inflight = nil }
-            snapshot = try await task.value
+        var (snapshot, startedAt) = try await loadSnapshot(joinInflight: true)
+        // stale ロード破棄（M5 Phase 5-2）: 自世代 append（recordLocalChange）より前に開始した
+        // ロードは自分の書込を含まない可能性がある。世代化すると「巻き戻り世代」→ 旧 entry の
+        // didUpdate = 実 bounce になるため、一度だけフレッシュに読み直す（増分ロードの previous
+        /// は自世代込みの最新世代なので、無変化なら appended=false で anchor は動かない）。
+        if let writeAt = lastLocalWriteAt, startedAt < writeAt {
+            (snapshot, startedAt) = try await loadSnapshot(joinInflight: false)
         }
 
         // ここからは actor 直列文脈。合流タスクの間に先行タスクが確定済みなら、それをそのまま返す
@@ -149,6 +147,73 @@ public actor ManifestGenerationCache {
             onNewGeneration()
         }
         return current
+    }
+
+    /// S3 からの snapshot ロード 1 回分。`joinInflight` = 進行中ロードへの合流を許すか
+    /// （stale ロード破棄後の読み直しは合流しない = 必ず新規開始）。
+    /// - Returns: snapshot と、そのロードの**開始**時刻。
+    private func loadSnapshot(
+        joinInflight: Bool
+    ) async throws -> (ManifestSnapshotLoader.SnapshotResult, Date) {
+        if joinInflight, let inflight {
+            return (try await inflight.value, lastLoadStartedAt ?? .distantPast)
+        }
+        let loader = self.loader
+        let previous = ManifestGenerationLog.latest(of: payload).map {
+            ManifestSnapshotLoader.SnapshotResult(files: $0.files, shardEtags: $0.shardEtags)
+        }
+        let startedAt = Date()
+        lastLoadStartedAt = startedAt
+        let task = Task { try await loader.load(previous: previous) }
+        inflight = task
+        defer { inflight = nil }
+        return (try await task.value, startedAt)
+    }
+
+    /// 拡張自身の書込（M5 Phase 5-2・「拡張 = 第 3 のデバイス」）を世代ログへ即時反映する
+    /// （自世代 append・bounce 防止の要）。書込成功直後に「最新世代 + 自分の書込」を新世代として
+    /// append し、キャッシュも差し替える:
+    /// - コールバックの completion で返した item と、次の enumerateChanges が配る item が
+    ///   **同一 itemVersion**（どちらもシャードへ書いた entry から生成）になり、適用は no-op。
+    /// - `updatingShardEtags`: putShard の返り etag（次回増分ロードが自シャードを再取得しない）。
+    ///   値 nil はシャード消滅（空シャード削除）= マップから落とす（次回は index 宣言と突合）。
+    /// - 新世代 append 後に `onNewGeneration`（= 自己 signal）を発火して anchor を前進させる。
+    public func recordLocalChange(
+        updatingShardEtags: [String: String?],
+        mutate: (inout [String: ManifestFileEntry]) -> Void
+    ) {
+        loadPayloadIfNeeded()
+        let base = ManifestGenerationLog.latest(of: payload)
+        var files = base?.files ?? [:]
+        mutate(&files)
+        var shardEtags = base?.shardEtags ?? [:]
+        for (shardId, etag) in updatingShardEtags {
+            if let etag {
+                shardEtags[shardId] = etag
+            } else {
+                shardEtags.removeValue(forKey: shardId)
+            }
+        }
+        let fetchedAt = Date()
+        let (newPayload, appended) = ManifestGenerationLog.appending(
+            snapshot: .init(files: files, shardEtags: shardEtags),
+            anchor: UUID().uuidString, fetchedAt: fetchedAt,
+            to: payload, bucket: bucket
+        )
+        payload = newPayload
+        if let logURL {
+            do {
+                try ManifestGenerationLog.save(newPayload, url: logURL)
+            } catch {
+                AppLogger.fileProvider.error("Generation log save failed: \(String(describing: error), privacy: .private)")
+            }
+        }
+        let latest = ManifestGenerationLog.latest(of: newPayload)!
+        cached = (Current(tree: ManifestTree(files: latest.files), anchor: latest.anchor), fetchedAt)
+        lastLocalWriteAt = Date()
+        if appended {
+            onNewGeneration()
+        }
     }
 
     private func loadPayloadIfNeeded() {

@@ -42,9 +42,12 @@ final class FileProviderItem: NSObject, NSFileProviderItem, @unchecked Sendable 
     var capabilities: NSFileProviderItemCapabilities {
         switch node {
         case .directory:
+            // dir の削除・配下追加は Phase 5-3、改名/移動は Phase 5-4 で解放する。
             return [.allowsReading, .allowsContentEnumerating]
         case .file:
-            return [.allowsReading]
+            // M5 Phase 5-2: 内容編集と削除を解放（改名/移動 = .allowsRenaming/.allowsReparenting
+            // は Phase 5-4。未許可なので Finder 上はグレーアウトされる）。
+            return [.allowsReading, .allowsWriting, .allowsDeleting]
         }
     }
 

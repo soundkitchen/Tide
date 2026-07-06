@@ -208,7 +208,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         request: NSFileProviderRequest,
         completionHandler: @escaping (NSFileProviderItem?, NSFileProviderItemFields, Bool, Error?) -> Void
     ) -> Progress {
-        completionHandler(nil, [], false, Self.readOnlyError())
+        // 新規作成は Phase 5-3 で対応（root 孤児 UX の解消もそこで）。
+        completionHandler(nil, [], false, Self.createUnsupportedError())
         return Progress(totalUnitCount: 1)
     }
 
@@ -221,8 +222,89 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         request: NSFileProviderRequest,
         completionHandler: @escaping (NSFileProviderItem?, NSFileProviderItemFields, Bool, Error?) -> Void
     ) -> Progress {
-        completionHandler(nil, [], false, Self.readOnlyError())
-        return Progress(totalUnitCount: 1)
+        let progress = Progress(totalUnitCount: 1)
+        guard let services else {
+            progress.completedUnitCount = 1
+            completionHandler(nil, [], false, NSFileProviderError(.notAuthenticated))
+            return progress
+        }
+        guard let ref = item.itemIdentifier.tidePathAndKind, !ref.path.isEmpty else {
+            progress.completedUnitCount = 1
+            completionHandler(nil, [], false, NSFileProviderError(.noSuchItem))
+            return progress
+        }
+        guard !ref.isDirectory else {
+            // ディレクトリのメタデータ変更・削除は Phase 5-3 で対応。
+            progress.completedUnitCount = 1
+            completionHandler(nil, [], false, Self.folderChangesUnsupportedError())
+            return progress
+        }
+        guard !changedFields.contains(.filename), !changedFields.contains(.parentItemIdentifier) else {
+            // 改名 / 移動は Phase 5-4（capability 未許可なので通常は来ない防御）。
+            progress.completedUnitCount = 1
+            completionHandler(nil, [], false, Self.renameUnsupportedError())
+            return progress
+        }
+        let path = ref.path
+        let completion = UncheckedSendableBox(value: completionHandler)
+
+        guard changedFields.contains(.contents) else {
+            // メタデータのみ（mtime / タグ等）: マニフェストに保存先が無いので**黙って受理**する
+            // （remainingFields に残すと fileproviderd が永久再試行する）。権威 = 現ツリーの
+            // entry から item を返す。
+            let task = Task {
+                defer { progress.completedUnitCount = progress.totalUnitCount }
+                do {
+                    let tree = try await services.cache.current().tree
+                    guard let node = tree.node(at: path), !node.isDirectory else {
+                        completion.value(nil, [], false, NSFileProviderError(.noSuchItem))
+                        return
+                    }
+                    completion.value(FileProviderItem(node: node), [], false, nil)
+                } catch {
+                    completion.value(nil, [], false, error)
+                }
+            }
+            progress.cancellationHandler = { task.cancel() }
+            return progress
+        }
+
+        guard let newContents else {
+            progress.completedUnitCount = 1
+            completionHandler(nil, [], false, NSFileProviderError(.noSuchItem))
+            return progress
+        }
+        // 3-way ベース = システムが最後に見た itemVersion（= 旧 sha256）。DB 非接触のまま
+        // 競合検出できる（「拡張 = 第 3 のデバイス」の要・docs/08）。
+        let baseSha = FileProviderWritePolicy.baseSha(fromContentVersion: version.contentVersion)
+        let contentModified = item.contentModificationDate ?? nil
+        let boxedURL = UncheckedSendableBox(value: newContents)
+        let task = Task {
+            defer { progress.completedUnitCount = progress.totalUnitCount }
+            do {
+                let outcome = try await services.writer.modifyFileContents(
+                    path: path, contentsURL: boxedURL.value,
+                    baseSha: baseSha, contentModified: contentModified
+                )
+                switch outcome {
+                case .written(let entry):
+                    // 返却 item は必ずシャードへ書いた entry から生成（自世代 append と同一
+                    // itemVersion = 直後の enumerateChanges が no-op・bounce しない）。
+                    completion.value(FileProviderItem(node: .file(path: path, entry: entry)), [], false, nil)
+                case .conflict(let remote, let copyPath, _):
+                    // 正規パスはリモート版が勝つ（FSEvents 側と対称）。shouldFetchContent=true で
+                    // システムにリモート内容を取り直させる。ローカル編集は conflict copy として
+                    // 自世代に反映済み → 直後の enumerateChanges で新 item として出現する。
+                    AppLogger.fileProvider.notice("modifyItem: upload conflict — local edit preserved as copy: \(copyPath, privacy: .private)")
+                    completion.value(FileProviderItem(node: .file(path: path, entry: remote)), [], true, nil)
+                }
+            } catch {
+                AppLogger.fileProvider.error("modifyItem failed: \(String(describing: error), privacy: .private)")
+                completion.value(nil, [], false, error)
+            }
+        }
+        progress.cancellationHandler = { task.cancel() }
+        return progress
     }
 
     func deleteItem(
@@ -232,8 +314,47 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         request: NSFileProviderRequest,
         completionHandler: @escaping (Error?) -> Void
     ) -> Progress {
-        completionHandler(Self.readOnlyError())
-        return Progress(totalUnitCount: 1)
+        let progress = Progress(totalUnitCount: 1)
+        guard let services else {
+            progress.completedUnitCount = 1
+            completionHandler(NSFileProviderError(.notAuthenticated))
+            return progress
+        }
+        guard let ref = identifier.tidePathAndKind, !ref.path.isEmpty else {
+            // 未知 id の削除要求 = 対象はもう無い（noSuchItem でシステム側の掃除に任せる）。
+            progress.completedUnitCount = 1
+            completionHandler(NSFileProviderError(.noSuchItem))
+            return progress
+        }
+        guard !ref.isDirectory else {
+            // ディレクトリ削除（再帰）は Phase 5-3 で対応。
+            progress.completedUnitCount = 1
+            completionHandler(Self.folderChangesUnsupportedError())
+            return progress
+        }
+        let baseSha = FileProviderWritePolicy.baseSha(fromContentVersion: version.contentVersion)
+        let completion = UncheckedSendableBox(value: completionHandler)
+        let task = Task {
+            defer { progress.completedUnitCount = progress.totalUnitCount }
+            do {
+                switch try await services.writer.deleteFile(path: ref.path, baseSha: baseSha) {
+                case .removed, .alreadyGone:
+                    completion.value(nil)
+                case .rejected(let remote):
+                    // リモートがベースより進んでいた → 削除拒否 + 最新 item を添える
+                    // （システムが最新版を復元する。「データ損失 < 重複」）。
+                    AppLogger.fileProvider.notice("deleteItem: rejected (remote changed since base): \(ref.path, privacy: .private)")
+                    completion.value(NSError.fileProviderErrorForRejectedDeletion(
+                        of: FileProviderItem(node: .file(path: ref.path, entry: remote))
+                    ))
+                }
+            } catch {
+                AppLogger.fileProvider.error("deleteItem failed: \(String(describing: error), privacy: .private)")
+                completion.value(error)
+            }
+        }
+        progress.cancellationHandler = { task.cancel() }
+        return progress
     }
 
     // MARK: - Enumeration
@@ -257,12 +378,32 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         return FileProviderEnumerator(dirPath: ref.path, services: services)
     }
 
-    private static func readOnlyError() -> Error {
+    private static func createUnsupportedError() -> Error {
         NSError(
             domain: NSCocoaErrorDomain, code: NSFeatureUnsupportedError,
             userInfo: [
                 NSLocalizedDescriptionKey:
-                    String(localized: "Tide (PoC) is read-only. Edit files in the sync folder instead.")
+                    String(localized: "Creating new items in Tide is not supported yet. Add files in the sync folder instead.")
+            ]
+        )
+    }
+
+    private static func folderChangesUnsupportedError() -> Error {
+        NSError(
+            domain: NSCocoaErrorDomain, code: NSFeatureUnsupportedError,
+            userInfo: [
+                NSLocalizedDescriptionKey:
+                    String(localized: "Folder changes in Tide are not supported yet.")
+            ]
+        )
+    }
+
+    private static func renameUnsupportedError() -> Error {
+        NSError(
+            domain: NSCocoaErrorDomain, code: NSFeatureUnsupportedError,
+            userInfo: [
+                NSLocalizedDescriptionKey:
+                    String(localized: "Renaming or moving items in Tide is not supported yet.")
             ]
         )
     }
