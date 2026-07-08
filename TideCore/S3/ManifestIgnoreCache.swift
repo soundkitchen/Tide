@@ -74,6 +74,10 @@ public actor ManifestIgnoreCache {
         // 異世代の並行ビルドで新世代 B が先に完了した後、遅着した旧世代 A が無条件に
         // 確定すると cachedAnchor が B → A へ巻き戻り、次の B 要求が 1 回無駄に再構築される
         // （sha メモ化で fetch は走らず正しさにも影響しないが、構造的に閉じておく）。
+        // 既知の残余（PR #59 再レビュー・対応不要）: 「最後に要求された anchor が勝つ」方針の
+        // ため、B の in-flight 中にさらに旧世代 A' が inflight を上書きすると B のコミットが
+        // スキップされ B が非キャッシュのまま終わる発生順はある。実害は次の B 要求の
+        // 再構築 1 回（fetch ゼロ）だけで、どの発生順でも正しさは保たれる。
         if inflight?.anchor == anchor {
             cachedAnchor = anchor
             cachedLayered = layered
