@@ -258,13 +258,23 @@ symlink を辿り、リンク先（例: `~/.ssh/id_rsa`）の中身を S3 へ送
 - **bucket キー**: `load(bucket:)` は現 bucket 一致時のみ採用（別バケットの世代で diff しない）。スキーマ不一致・壊れは nil（cold 扱い）。
 - **取り込みゲート**: 世代へ入るデータは `ManifestSnapshotLoader` が `validateShardId` / `validateRelativePath` を通した後のもののみ（`ManifestReader.read` と同一のセキュリティゲート）。さらに**読込時（`ManifestGenerationLog.load`）にも全世代の path を `validateRelativePath` で再検証**し、1 件でも不正なら全体を破棄（cold 扱い）— ディスク上のファイルはプロセス外で改ざん/破損しうるため、書込み時ゲートだけでは持ち越し経路（`load(previous:)` は検証済み前提の無検証コピー）を保証できない（PR #51 レビュー #3・2026-07-04）。
 
-## L17. File Provider 書込経路のゲート（M5 Phase 5-2）
+## L17. File Provider 書込経路のゲート（M5 Phase 5-2〜5-3）
 
-**Status: Mitigated (2026-07-06, M5 Phase 5-2)** — FP 拡張の書込（deleteItem / modifyItem）は
-`ExtensionWriter` に集約し、以下のゲートを全経路で通す:
-- item identifier → path 変換直後の `PathValidator.validateRelativePath`（conflict copy 名も同様）
+**Status: Mitigated (2026-07-06, M5 Phase 5-2 / 2026-07-09, Phase 5-3 で createItem・dir 再帰削除へ拡大)** —
+FP 拡張の書込（deleteItem / modifyItem / createItem）は `ExtensionWriter` に集約し、以下のゲートを全経路で通す:
+- item identifier → path 変換直後の `PathValidator.validateRelativePath`（conflict copy 名も同様）。
+  createItem は加えて filename 起因の構造破壊を `FileProviderWritePolicy.childPath` で構造的に拒否
+  （空 / `.` / `..` / `/` 含み / NUL）し、検証不能な名前は `ExcludedFromSync` = ローカル温存・S3 非汚染
 - サイズ上限 `uploadSizeLimitBytes`（`PartPlan.isWithinUploadLimit`）
 - SSE-S3 は `putObject` / `createMultipartUpload` 内で明示（既存規約のまま）
 - 本体読込は `NoFollowFileReader`（fileproviderd 提供 tmp は静止が契約だが多層防御）
 - 削除はベース一致ガードを RMW 内に置く（`ManifestUpdater.removeFileEntry`・ベース不明は拒否 =
   「データ損失 < 重複」）。拡張はアプリの DB / syncRoot / tmp に一切書かない（書込面の最小化）。
+  dir 再帰削除（Phase 5-3）も同ガードのシャード単位バッチ版 `removeFileEntries`（拒否で即中断・
+  tree 由来 path は S3 キー組み立て前に全件 `validateRelativePath`）
+- **機密網（`HardcodedIgnoreRules`）は FP createItem でも最優先で強制**（M5 Phase 5-3・2026-07-09）:
+  該当パス（`.env` / `.aws` 等）とその配下は `NSFileProviderError(.excludedFromSync)` で拒否 =
+  ローカルに残るが S3 へは決して上がらない。symlink も同様に除外（同期しない不変条件の FP 側適用）。
+  ユーザ `.syncignore` も FSEvents モードと同一の `IgnoreDecision.shouldSkip`（未追跡のみ・
+  `.syncignore` 自身は除外しない）で適用 — `.syncignore` 本体はマニフェスト宣言の versionId 固定 +
+  全バイト SHA-256 検証で取得する（`ManifestIgnoreCache`・改ざんされた層構成で除外判定しない）

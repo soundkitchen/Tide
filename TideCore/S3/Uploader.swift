@@ -319,6 +319,17 @@ public enum ShardRemoveOutcome: Equatable, Sendable {
     case rejectedRemoteChanged(ManifestFileEntry)
 }
 
+/// `removeFileEntries` の結果（FP 拡張のディレクトリ再帰削除用・M5 Phase 5-3）。
+public enum ShardBatchRemoveOutcome: Equatable, Sendable {
+    /// 全対象を除去した（不在分は冪等スキップ）。`paths` は実際にマニフェストから除去した
+    /// パス（呼び出し側が delete marker を発行する対象）。
+    case removed(paths: [String])
+    /// `path` の権威 entry がベースから進んでいた = 中断（「拒否で即中断」方針）。
+    /// `removedPaths` は中断より**前のシャードで既に除去済み**のパス（未変更ファイルのみなので
+    /// 安全・呼び出し側は marker を発行してよい）。中断したシャードからは 1 件も除去していない。
+    case rejected(path: String, remote: ManifestFileEntry, removedPaths: [String])
+}
+
 /// シャードと index.json を楽観的ロックで更新する。
 /// アプリ（Uploader 経由）と File Provider 拡張（M5 Phase 5〜）が共有する
 /// **マニフェスト書込の唯一のチョークポイント**。
@@ -448,6 +459,71 @@ public struct ManifestUpdater: Sendable {
             try await commitShardWrite(shardId: shardId, shard: shard, etag: etag)
             return .removed
         }
+    }
+
+    /// FP 拡張のディレクトリ再帰削除（M5 Phase 5-3）用: 複数 entry を**シャード単位のバッチ RMW**で
+    /// 「権威 entry がベースと一致するときのみ」まとめて除去する。deleteItem は「数秒以内」が
+    /// システム契約のため、往復回数をファイル数ではなくシャード数（最大 256）で有界化する。
+    /// ガードは `removeFileEntry` と同じく RMW 内（412 リトライごとにシャード内全対象を再評価）。
+    ///
+    /// 方針は「拒否で即中断」（2026-07-09 ユーザ確定）: あるシャードで 1 件でもベース不一致
+    /// （リモート先行）を見つけたら**そのシャードからは何も除去せず**、以降のシャードにも進まない。
+    /// 呼び出し側は `DirectoryNotEmpty` を返してシステムに残存分を復元させる。処理済みシャードの
+    /// 除去分はそのまま（ベース一致 = 未変更ファイルのみなので安全・再試行で収束）。
+    /// - Parameter expectedByPath: 除去対象の相対パス → 期待 sha256（呼び出し側がキャッシュ済み
+    ///   ツリーから取る）。ベース不明のパスはそもそも渡さないこと（「根拠なしに消さない」）。
+    public func removeFileEntries(
+        expecting expectedByPath: [String: String]
+    ) async throws -> ShardBatchRemoveOutcome {
+        var removedAll: [String] = []
+        let groups = Dictionary(grouping: expectedByPath.keys, by: ManifestSharding.shardId(for:))
+        // シャード順は決定的に（テスト再現性と、再試行時に同じ順で進んで途中中断点が安定するため）
+        for shardId in groups.keys.sorted() {
+            let paths = groups[shardId]!.sorted()
+            let outcome = try await withConditionalRetry("shard \(shardId)") {
+                () -> BatchShardOutcome in
+                let fetched = try await store.getShard(shardId)
+                var shard = fetched?.value ?? ManifestShard.empty(id: shardId)
+                let etag = fetched?.etag
+                var toRemove: [String] = []
+                for path in paths {
+                    guard let existing = shard.files[path] else { continue }  // 既に無い = 冪等
+                    guard existing.sha256 == expectedByPath[path] else {
+                        // 除去前に発見 → このシャードは 1 件も書かずに中断（部分シャードを作らない）
+                        return .rejected(path: path, remote: existing)
+                    }
+                    toRemove.append(path)
+                }
+                guard !toRemove.isEmpty else {
+                    // 全対象が不在 = no-op。分断の後始末だけ突合しておく
+                    // （`removeFileEntry` の alreadyGone 経路と同じ規約）。
+                    if let fetchedEtag = etag {
+                        try await repairIndexDeclarationIfStale(
+                            shardId: shardId, fetchedEtag: fetchedEtag, count: shard.files.count
+                        )
+                    } else {
+                        try await removeDanglingDeclarationIfShardAbsent(shardId: shardId)
+                    }
+                    return .committed([])
+                }
+                for path in toRemove { shard.files.removeValue(forKey: path) }
+                try await commitShardWrite(shardId: shardId, shard: shard, etag: etag)
+                return .committed(toRemove)
+            }
+            switch outcome {
+            case .committed(let removed):
+                removedAll.append(contentsOf: removed)
+            case .rejected(let path, let remote):
+                return .rejected(path: path, remote: remote, removedPaths: removedAll)
+            }
+        }
+        return .removed(paths: removedAll)
+    }
+
+    /// `removeFileEntries` の 1 シャードぶんの RMW 結果（内部専用）。
+    private enum BatchShardOutcome {
+        case committed([String])
+        case rejected(path: String, remote: ManifestFileEntry)
     }
 
     public func updateShard(

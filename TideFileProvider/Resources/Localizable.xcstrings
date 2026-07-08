@@ -1,17 +1,6 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
-    "Creating new items in Tide is not supported yet. Add files in the sync folder instead." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Tide での新規作成にはまだ対応していません。追加は同期フォルダ側で行ってください。"
-          }
-        }
-      }
-    },
     "Downloaded content failed integrity verification." : {
       "extractionState" : "manual",
       "localizations" : {
@@ -19,17 +8,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "ダウンロードした内容が整合性検証に失敗しました。"
-          }
-        }
-      }
-    },
-    "Folder changes in Tide are not supported yet." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Tide でのフォルダ変更にはまだ対応していません。"
           }
         }
       }

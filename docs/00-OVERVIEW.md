@@ -32,7 +32,7 @@ macOS のクリーンインストール後の復旧を主目的とした、Dropb
 
 - macOS 専用、Swift + SwiftUI、メニューバー常駐アプリ
 - 単一同期フォルダ → 単一 S3 バケットの双方向同期
-- 全ファイルをローカル保持（ファイルオンデマンドなし）
+- 全ファイルをローカル保持（FSEvents モード。**M5 でファイルオンデマンド = File Provider モードを追加中** — dataless プレースホルダをオンラインのみ実体化する `~/Library/CloudStorage/Tide` ドメイン。既存 FSEvents モードと opt-in 並走。進捗は `09-DEFERRED.md` M5 節）
 - 暗号化なし（クライアント側暗号化なし、S3 側暗号化は AWS デフォルトに従う）
 - ローカル変更は FSEvents + デバウンスで即時アップロード
 - リモート変更は起動時・スリープ復帰時・ネットワーク復帰時・定期ポーリング（デフォルト3分）で検知
@@ -46,7 +46,7 @@ macOS のクリーンインストール後の復旧を主目的とした、Dropb
 
 ### 対象外（やらない）
 
-- ファイルオンデマンド（File Provider Extension）
+- ~~ファイルオンデマンド（File Provider Extension）~~（**M5 で対象に昇格・2026-07-02 決定**。`NSFileProviderReplicatedExtension` による dataless オンラインのみ実体化。下記マイルストーン M5 参照）
 - クライアント側暗号化
 - 複数ユーザー間のコラボレーション機能
 - 共有リンク生成
@@ -104,6 +104,24 @@ macOS のクリーンインストール後の復旧を主目的とした、Dropb
   - macOS 通知（UserNotifications）。発火は「ユーザの介入が要る／取りこぼしが起きうる確定的な事象」だけに絞る: ① 競合コピー作成、② サイズ上限超過、③ リトライ give-up、④ 不安定ファイル（変化し続けて未バックアップ）。一過性のネットワークエラー等は出さない。許可は**初回発火時**にリクエスト。Settings の「Notifications」トグル（既定 on）で抑止可。通知クリックで Sync Activity を開く。判定は純粋関数 `NotificationPolicy`。詳細は `docs/08-IMPLEMENTATION-NOTES.md`。
 - ✅ パフォーマンス最適化（pull コスト削減）
   - リモート pull の取り込み（`reconcileRemoteEntry`）に **stat ゲート**を追加。未変化シャードは entry が DB から再合成されるため、ローカルが DB と一致し DB がリモートをそのまま反映していれば hash も DB write もせずスキップする（証明可能な no-op）。内容一致時の DB 最新化は `download()` から専用 `markSynced` に分離し、残る hash も off-main 化（pull 中のメインスレッドブロックを解消）。判定は純粋関数 `ChangeDetector.reconcileIsNoop`。詳細は `docs/08-IMPLEMENTATION-NOTES.md`「reconcile 入口の stat ゲート」と `docs/04-SYNC-LOGIC.md`。
+
+### M5: Files-On-Demand（File Provider・着手中 2026-07-02〜）
+
+当初「対象外」としていたファイルオンデマンドを対象に昇格した（v0.2.0 出荷後・2026-07-02 ユーザ決定）。
+`NSFileProviderReplicatedExtension` により `~/Library/CloudStorage/Tide` ドメインへ dataless
+プレースホルダを列挙し、開いた瞬間に S3 から実体化する。**既存 FSEvents モードは残して opt-in 並走**
+（未ソークの新モードが既存バックアップ経路を汚さない）。3 ターゲット構成（`TideCore` framework +
+`Tide` app + `TideFileProvider.appex`）。設計・進捗・フェーズ分割の詳細は `09-DEFERRED.md` の M5 節、
+確定した実装判断は `08-IMPLEMENTATION-NOTES.md` を参照。
+
+- ✅ Phase 1: `TideCore` framework 分離（app と拡張の共有コア・PR #48）
+- ✅ Phase 2: App Group 移設 + App Sandbox 化 + security-scoped bookmark（PR #49）
+- ✅ Phase 3: 読み取り materialize PoC（dataless → 開いた瞬間 S3 取得・PR #50）
+- ✅ Phase 4: 増分列挙 + リモート追従（世代 SyncAnchor + `enumerateChanges`・PR #51）
+- ⏳ Phase 5: 双方向書込（「拡張 = 第 3 のデバイス」方式）— 5-0 signal チョークポイント（PR #56）/
+  5-1 kind 変化対応（PR #57）/ 5-2 書込 PoC = deleteItem + modifyItem（PR #58）マージ済み、
+  5-3 createItem + dir 再帰削除 実装済み（実機受け入れ待ち）、残 = 5-4 rename/reparent
+- ⏸ 以降: FSEvents モードとの並走 UI / soak（#40）後の既定化判断
 
 ## 技術スタック
 
