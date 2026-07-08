@@ -273,6 +273,18 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             // 同期される。空のままなら他デバイスへ伝播しない（FSEvents モードの「空ディレクトリは
             // 同期しない」と同じ）。id は path 決定的（`d:<path>`）なので、実体化後の合成 dir と
             // 同一 item に収束する。
+            //
+            // 同 path にマニフェスト **file** が実在する kind 衝突は意図的にチェックしない
+            // （PR #59 レビュー #2）: ツリー参照（cache.current()）を挟むと cold 時に S3 往復が
+            // 要り「フォルダ作成 = S3 非接触・オフラインでも成功」の利点を失う。並存した場合は
+            // 別 id（`d:` と `f:`）の同名 item となり、システムの名前衝突バウンスが解消する。
+            //
+            // 仮想 dir の mtime 規約（PR #59 レビュー #3・三経路で共通）: **作成時のみテンプレート
+            // 値を載せ、再照会（item(for:) / dir メタデータ modifyItem）は nil** — mtime は
+            // マニフェストに保存されず再照会時には知り得ないため。metadataVersion が
+            // "dir-<日時>" → "dir" へ一度揺れ得るが、contentVersion（"dir"）は不変なので
+            // 再取得等の副作用はない（実機 bounce ゼロ確認済み）。実体化後は配下最大 mtime の
+            // 合成値に収束する。
             progress.completedUnitCount = 1
             completionHandler(
                 FileProviderItem(

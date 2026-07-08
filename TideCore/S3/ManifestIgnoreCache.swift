@@ -70,8 +70,14 @@ public actor ManifestIgnoreCache {
             if inflight?.anchor == anchor { inflight = nil }
         }
         let layered = try await task.value
-        cachedAnchor = anchor
-        cachedLayered = layered
+        // キャッシュ確定も「自分が最後に張った build」のときだけ（PR #59 レビュー #1）:
+        // 異世代の並行ビルドで新世代 B が先に完了した後、遅着した旧世代 A が無条件に
+        // 確定すると cachedAnchor が B → A へ巻き戻り、次の B 要求が 1 回無駄に再構築される
+        // （sha メモ化で fetch は走らず正しさにも影響しないが、構造的に閉じておく）。
+        if inflight?.anchor == anchor {
+            cachedAnchor = anchor
+            cachedLayered = layered
+        }
         return layered
     }
 

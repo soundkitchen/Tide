@@ -189,6 +189,57 @@ final class ManifestIgnoreCacheTests: XCTestCase {
         XCTAssertTrue(layered.isIgnored("a.log"))
     }
 
+    /// 手動開閉のゲート（異世代並行ビルドの完了順を決定的に制御する）。
+    private actor AsyncGate {
+        private var opened = false
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+
+        var waiterCount: Int { waiters.count }
+
+        func wait() async {
+            if opened { return }
+            await withCheckedContinuation { waiters.append($0) }
+        }
+
+        func open() {
+            opened = true
+            waiters.forEach { $0.resume() }
+            waiters.removeAll()
+        }
+    }
+
+    /// 異世代の並行ビルドで、遅れて完了した旧世代が新世代のキャッシュを巻き戻さない
+    /// （PR #59 レビュー #1: 巻き戻ると次の新世代要求が 1 回無駄に再構築される）。
+    func testLateFinishingOlderBuildDoesNotClobberNewerCache() async throws {
+        let recorder = FetchRecorder()
+        recorder.respond(path: ".syncignore", versionId: "v-a", sha: "a", text: "*.log\n")
+        recorder.respond(path: ".syncignore", versionId: "v-b", sha: "b", text: "*.tmp\n")
+        let gate = AsyncGate()
+        let cache = ManifestIgnoreCache { path, versionId, maxPrefixBytes in
+            if versionId == "v-a" { await gate.wait() }  // 旧世代のビルドだけ遅延させる
+            return try recorder.record(
+                .init(path: path, versionId: versionId, maxPrefixBytes: maxPrefixBytes))
+        }
+        let treeA = makeTree([".syncignore": makeManifestEntry(sha: "a")])
+        let treeB = makeTree([".syncignore": makeManifestEntry(sha: "b")])
+
+        async let older = cache.layeredIgnore(tree: treeA, anchor: "gen-a")
+        // 旧世代ビルドがゲートに到達（= in-flight 登録済み）してから新世代を要求する
+        while await gate.waiterCount == 0 { await Task.yield() }
+        let newer = try await cache.layeredIgnore(tree: treeB, anchor: "gen-b")
+        XCTAssertTrue(newer.isIgnored("x.tmp"))
+
+        await gate.open()
+        let olderResult = try await older
+        XCTAssertTrue(olderResult.isIgnored("x.log"))  // 遅着側も自分の世代の正しい結果を得る
+
+        // 新世代キャッシュが巻き戻っていない = 再要求が fetch ゼロで返る
+        let countBefore = recorder.calls.count
+        let again = try await cache.layeredIgnore(tree: treeB, anchor: "gen-b")
+        XCTAssertTrue(again.isIgnored("x.tmp"))
+        XCTAssertEqual(recorder.calls.count, countBefore)
+    }
+
     /// 並行要求は single-flight で合流する（フォルダドラッグ = 並行 createItem の多重構築防止）。
     func testConcurrentRequestsCoalesce() async throws {
         let recorder = FetchRecorder()
