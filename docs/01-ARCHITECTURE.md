@@ -4,6 +4,14 @@
 > 本書の API シグネチャの一部は M1 当時のスケッチが残っている箇所がある（その旨を各所に注記）。
 > M3 で追加されたコンポーネントの設計詳細は [`07-M3-IMPLEMENTATION-GUIDE.md`](07-M3-IMPLEMENTATION-GUIDE.md)、
 > 確定した実装判断は [`08-IMPLEMENTATION-NOTES.md`](08-IMPLEMENTATION-NOTES.md) を参照。
+>
+> **M5（Files-On-Demand・着手中）による読み替え**: M5 Phase 1 で 3 ターゲット構成へ移行した —
+> `TideCore/`（framework。下記ツリーの `Tide/{S3,Storage,Models}/` 全部と `Tide/Core/` の純粋型を収容・
+> `APPLICATION_EXTENSION_API_ONLY=YES`）+ `Tide/`（app。`SyncEngine` 等の駆動層/殻と UI が残る）+
+> `TideFileProvider/`（File Provider 拡張 `.appex`。`FileProviderExtension` / `FileProviderEnumerator` /
+> `FileProviderItem` / `ExtensionServices` / `ExtensionWriter`。TideCore に依存・DB 非接触）。
+> **ファイル名・型名は不変**なので下記ツリーの個別書き換えはしていない（読み替え規則は
+> `CLAUDE.md` §6、拡張側の設計は `08`「FP 双方向書込」ほか M5 各節と `09-DEFERRED.md` M5 節を参照）。
 
 ## モジュール構成
 
