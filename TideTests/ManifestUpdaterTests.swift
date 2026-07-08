@@ -612,4 +612,184 @@ final class ManifestUpdaterTests: XCTestCase {
         )
         guard case .wrote = outcome else { return XCTFail("expected .wrote, got \(outcome)") }
     }
+
+    // MARK: - removeFileEntries（バッチ削除・M5 Phase 5-3）
+
+    /// 同一シャードに載る 2 パスを実際の `ManifestSharding` で探す（sha 分布依存を排除）。
+    private func findSameShardPair() -> (String, String) {
+        var byShard: [String: String] = [:]
+        for i in 0..<100_000 {
+            let p = "batch/f\(i).txt"
+            let s = ManifestSharding.shardId(for: p)
+            if let existing = byShard[s] { return (existing, p) }
+            byShard[s] = p
+        }
+        fatalError("no same-shard pair found")
+    }
+
+    /// 別シャードに載る 2 パスを「シャード id 昇順」で返す（処理順 = sorted の検証用）。
+    private func findOrderedDifferentShardPair() -> (first: String, second: String) {
+        let a = "batch/f0.txt"
+        let sa = ManifestSharding.shardId(for: a)
+        for i in 1..<100_000 {
+            let p = "batch/f\(i).txt"
+            let sp = ManifestSharding.shardId(for: p)
+            if sp != sa {
+                return sa < sp ? (a, p) : (p, a)
+            }
+        }
+        fatalError("no different-shard pair found")
+    }
+
+    /// 全対象ベース一致 → 複数シャードをまたいで全除去。発火はシャード書込ごとに 1 回。
+    func testBatchRemoveRemovesAcrossShards() async throws {
+        let store = InMemoryManifestStore()
+        let counter = SignalCounter()
+        let (p1, p2) = findOrderedDifferentShardPair()
+        for path in [p1, p2] {
+            var shard = ManifestShard.empty(id: ManifestSharding.shardId(for: path))
+            shard.files[path] = makeManifestEntry(sha: "sha-\(path)")
+            shard.files[path + ".keep"] = makeManifestEntry(sha: "keep")
+            await store.seed(shard: shard)
+        }
+
+        let outcome = try await makeUpdater(store: store, counter: counter)
+            .removeFileEntries(expecting: [p1: "sha-\(p1)", p2: "sha-\(p2)"])
+
+        guard case .removed(let paths) = outcome else {
+            return XCTFail("expected .removed, got \(outcome)")
+        }
+        XCTAssertEqual(Set(paths), [p1, p2])
+        XCTAssertEqual(counter.count, 2)
+        for path in [p1, p2] {
+            let stored = await store.shards[ManifestSharding.shardId(for: path)]
+            XCTAssertNil(stored?.files[path])
+            XCTAssertNotNil(stored?.files[path + ".keep"])
+        }
+    }
+
+    /// 同一シャード内の 1 件がベース不一致 → **そのシャードからは 1 件も除去しない**
+    /// （部分シャードを作らない）・発火 0。
+    func testBatchRemoveRejectionLeavesWholeShardUntouched() async throws {
+        let store = InMemoryManifestStore()
+        let counter = SignalCounter()
+        let (pa, pb) = findSameShardPair()
+        let shardId = ManifestSharding.shardId(for: pa)
+        let theirs = makeManifestEntry(sha: "theirs")
+        var shard = ManifestShard.empty(id: shardId)
+        shard.files[pa] = makeManifestEntry(sha: "sha-a")
+        shard.files[pb] = theirs
+        await store.seed(shard: shard)
+
+        let outcome = try await makeUpdater(store: store, counter: counter)
+            .removeFileEntries(expecting: [pa: "sha-a", pb: "mine"])
+
+        guard case .rejected(let path, let remote, let removedPaths) = outcome else {
+            return XCTFail("expected .rejected, got \(outcome)")
+        }
+        XCTAssertEqual(path, pb)
+        XCTAssertEqual(remote, theirs)
+        XCTAssertEqual(removedPaths, [])
+        XCTAssertEqual(counter.count, 0)
+        let stored = await store.shards[shardId]
+        XCTAssertNotNil(stored?.files[pa])
+        XCTAssertNotNil(stored?.files[pb])
+    }
+
+    /// 後段シャードで拒否 → 前段シャードの除去分は確定済みとして報告し、後段は無傷・以降中断。
+    func testBatchRemoveRejectionReportsEarlierRemovals() async throws {
+        let store = InMemoryManifestStore()
+        let counter = SignalCounter()
+        let (first, second) = findOrderedDifferentShardPair()
+        let theirs = makeManifestEntry(sha: "theirs")
+        var shard1 = ManifestShard.empty(id: ManifestSharding.shardId(for: first))
+        shard1.files[first] = makeManifestEntry(sha: "sha-first")
+        await store.seed(shard: shard1)
+        var shard2 = ManifestShard.empty(id: ManifestSharding.shardId(for: second))
+        shard2.files[second] = theirs
+        await store.seed(shard: shard2)
+
+        let outcome = try await makeUpdater(store: store, counter: counter)
+            .removeFileEntries(expecting: [first: "sha-first", second: "mine"])
+
+        guard case .rejected(let path, let remote, let removedPaths) = outcome else {
+            return XCTFail("expected .rejected, got \(outcome)")
+        }
+        XCTAssertEqual(path, second)
+        XCTAssertEqual(remote, theirs)
+        XCTAssertEqual(removedPaths, [first])
+        XCTAssertEqual(counter.count, 1)  // 前段シャードの書込のみ
+        let stored1 = await store.shards[ManifestSharding.shardId(for: first)]
+        XCTAssertNil(stored1)  // 唯一の entry を除去 → 空シャード削除
+        let stored2 = await store.shards[ManifestSharding.shardId(for: second)]
+        XCTAssertEqual(stored2?.files[second], theirs)
+    }
+
+    /// 不在パスは冪等スキップ。全対象不在なら書かない・発火しない・removed は空。
+    func testBatchRemoveAbsentPathsAreIdempotent() async throws {
+        let store = InMemoryManifestStore()
+        let counter = SignalCounter()
+        let path = "docs/a.txt"
+        var shard = ManifestShard.empty(id: ManifestSharding.shardId(for: path))
+        shard.files[path + ".keep"] = makeManifestEntry(sha: "keep")
+        await store.seed(shard: shard)
+
+        let outcome = try await makeUpdater(store: store, counter: counter)
+            .removeFileEntries(expecting: [path: "gone", "docs/other.txt": "gone2"])
+
+        guard case .removed(let paths) = outcome else {
+            return XCTFail("expected .removed, got \(outcome)")
+        }
+        XCTAssertEqual(paths, [])
+        XCTAssertEqual(counter.count, 0)
+    }
+
+    /// シャードの全 entry を除去 → 空シャード削除 + 宣言除去（`commitShardWrite` の共通テール）。
+    func testBatchRemoveLastEntriesDeleteShard() async throws {
+        let store = InMemoryManifestStore()
+        let counter = SignalCounter()
+        let (pa, pb) = findSameShardPair()
+        let shardId = ManifestSharding.shardId(for: pa)
+        var shard = ManifestShard.empty(id: shardId)
+        shard.files[pa] = makeManifestEntry(sha: "sha-a")
+        shard.files[pb] = makeManifestEntry(sha: "sha-b")
+        await store.seed(shard: shard)
+
+        let outcome = try await makeUpdater(store: store, counter: counter)
+            .removeFileEntries(expecting: [pa: "sha-a", pb: "sha-b"])
+
+        guard case .removed(let paths) = outcome else {
+            return XCTFail("expected .removed, got \(outcome)")
+        }
+        XCTAssertEqual(Set(paths), [pa, pb])
+        XCTAssertEqual(counter.count, 1)
+        let stored = await store.shards[shardId]
+        XCTAssertNil(stored)
+        let declared = await store.index?.shards[shardId]
+        XCTAssertNil(declared)
+    }
+
+    /// 412 リトライ（並行更新の一時失敗）→ 再取得・再評価して成功。発火は 1 回。
+    func testBatchRemove412RetryThenSuccess() async throws {
+        let store = InMemoryManifestStore()
+        let counter = SignalCounter()
+        let path = "docs/a.txt"
+        let shardId = ManifestSharding.shardId(for: path)
+        var shard = ManifestShard.empty(id: shardId)
+        shard.files[path] = makeManifestEntry(sha: "aaa")
+        shard.files[path + ".keep"] = makeManifestEntry(sha: "keep")
+        await store.seed(shard: shard)
+        await store.failNextPutShard(times: 1)
+
+        let outcome = try await makeUpdater(store: store, counter: counter)
+            .removeFileEntries(expecting: [path: "aaa"])
+
+        guard case .removed(let paths) = outcome else {
+            return XCTFail("expected .removed, got \(outcome)")
+        }
+        XCTAssertEqual(paths, [path])
+        XCTAssertEqual(counter.count, 1)
+        let stored = await store.shards[shardId]
+        XCTAssertNil(stored?.files[path])
+    }
 }

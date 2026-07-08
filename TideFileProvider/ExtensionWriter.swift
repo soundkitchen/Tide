@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import TideCore
 
@@ -33,12 +34,22 @@ struct ExtensionWriter: Sendable {
         case rejected(ManifestFileEntry)
     }
 
-    /// 既存ファイルの内容更新（modifyItem の .contents）。
+    enum DirectoryDeleteOutcome {
+        /// 配下の追跡ファイルをすべて除去した（`count` = マニフェストから除去した件数）。
+        case removed(count: Int)
+        /// `path` の権威 entry がベースより進んでいた = 中断（「拒否で即中断」・M5 Phase 5-3）。
+        /// 呼び出し側は `DirectoryNotEmpty` を返し、システムに dir と残存分を復元させる。
+        case rejected(path: String, remote: ManifestFileEntry)
+    }
+
+    /// ファイル内容の書込（modifyItem の .contents、および createItem = `baseSha: nil`・M5 Phase 5-3）。
     /// - Parameters:
-    ///   - baseSha: システムが最後に見た itemVersion 由来の sha（3-way ベース）。
+    ///   - contentsURL: 新しい内容。nil = 内容なしの createItem（空ファイルとして PUT する）。
+    ///   - baseSha: システムが最後に見た itemVersion 由来の sha（3-way ベース）。新規作成は nil —
+    ///     `decideUpload(base: nil)` が「リモート不在 = 作成 / 同一 sha = 冪等 / 別内容 = 競合」を裁く。
     ///   - contentModified: システム提供の contentModificationDate（無ければ now）。
     func modifyFileContents(
-        path: String, contentsURL: URL, baseSha: String?, contentModified: Date?
+        path: String, contentsURL: URL?, baseSha: String?, contentModified: Date?
     ) async throws -> ModifyOutcome {
         try PathValidator.validateRelativePath(path)
         let entry = try await uploadObject(
@@ -82,6 +93,58 @@ struct ExtensionWriter: Sendable {
         }
     }
 
+    /// ディレクトリ再帰削除（deleteItem の dir 版・M5 Phase 5-3）。
+    /// - マニフェスト除去は `ManifestUpdater.removeFileEntries` のシャード単位バッチ RMW
+    ///   （往復はファイル数ではなくシャード数で有界 ≤256 = deleteItem の「数秒以内」契約に収める）。
+    /// - ベースガードは RMW 内・「拒否で即中断」（部分シャードを作らない）。拒否時も先行シャードの
+    ///   除去分は確定済み（ベース一致 = 未変更ファイルのみなので安全）なので marker は発行する。
+    /// - 順序 = マニフェスト除去 → deleteObject（marker）は単発 `deleteFile` と同じ
+    ///   （権威判定点が RMW 内・marker 失敗は削除成功扱い）。
+    /// - Parameter expectedByPath: 配下の相対パス → 期待 sha256（呼び出し側がキャッシュ済み
+    ///   ツリーから取る。ツリー由来 = リモート由来なので S3 キー組み立て前に全件検証する）。
+    func deleteDirectory(expecting expectedByPath: [String: String]) async throws -> DirectoryDeleteOutcome {
+        for path in expectedByPath.keys {
+            try PathValidator.validateRelativePath(path)
+        }
+        let outcome = try await updater.removeFileEntries(expecting: expectedByPath)
+        let removedPaths: [String]
+        let result: DirectoryDeleteOutcome
+        switch outcome {
+        case .removed(let paths):
+            removedPaths = paths
+            result = .removed(count: paths.count)
+        case .rejected(let path, let remote, let partial):
+            removedPaths = partial
+            result = .rejected(path: path, remote: remote)
+        }
+        if !removedPaths.isEmpty {
+            // marker 発行（限定並列・失敗はログのみ = 単発 deleteFile と同じ規約）
+            let s3 = self.s3
+            await withTaskGroup(of: Void.self) { group in
+                var pending = removedPaths[...]
+                for _ in 0..<min(4, pending.count) {
+                    guard let path = pending.popFirst() else { break }
+                    group.addTask { await Self.emitDeleteMarker(s3: s3, path: path) }
+                }
+                while await group.next() != nil {
+                    guard let path = pending.popFirst() else { continue }
+                    group.addTask { await Self.emitDeleteMarker(s3: s3, path: path) }
+                }
+            }
+            // マニフェストを実際に書いた（= 世代が進むべき）ときだけ無効化 + 自己 signal
+            await cache.invalidateAfterLocalWrite()
+        }
+        return result
+    }
+
+    private static func emitDeleteMarker(s3: TideS3Client, path: String) async {
+        do {
+            try await s3.deleteObject(key: "files/\(path)")
+        } catch {
+            AppLogger.fileProvider.error("deleteObject after manifest removal failed (invisible live object remains): \(String(describing: error), privacy: .private)")
+        }
+    }
+
     /// ファイル削除（deleteItem）。順序 = マニフェスト除去（ベースガードは RMW 内）→
     /// deleteObject（delete marker）。marker 発行の失敗は削除成功扱い（マニフェスト = 真実は
     /// 除去済み・他デバイスは削除に収束・不可視 live は版履歴で回復可）。
@@ -112,9 +175,22 @@ struct ExtensionWriter: Sendable {
     /// S3 への本体アップロード 1 回分（アプリ側 `Uploader.processUpload` の S3 レグと対称・
     /// DB 簿記なし）。fileproviderd 提供の tmp は静止が契約だが `NoFollowFileReader` で開く
     /// （多層防御）。サイズ上限・SSE-S3（putObject/MPU 内で明示）・sha256 は同一規約。
+    /// `contentsURL == nil` は内容なしの createItem = 空ファイルを単発 PUT（M5 Phase 5-3）。
     private func uploadObject(
-        path: String, contentsURL: URL, contentModified: Date?
+        path: String, contentsURL: URL?, contentModified: Date?
     ) async throws -> ManifestFileEntry {
+        guard let contentsURL else {
+            let put = try await s3.putObject(key: "files/\(path)", data: Data())
+            return ManifestFileEntry(
+                size: 0,
+                mtime: ISO8601.format(contentModified ?? Date()),
+                sha256: HashCalculator.hex(SHA256.hash(data: Data())),
+                s3VersionId: put.versionId,
+                etag: put.etag,
+                deviceId: deviceId,
+                uploadedAt: ISO8601.now()
+            )
+        }
         let reader = try NoFollowFileReader(path: contentsURL.path)
         defer { reader.close() }
         let info = try reader.info()

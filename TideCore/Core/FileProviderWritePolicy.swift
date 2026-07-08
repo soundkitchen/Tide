@@ -30,4 +30,17 @@ public enum FileProviderWritePolicy {
         }
         return s
     }
+
+    /// createItem（M5 Phase 5-3）の「親ディレクトリ相対パス + filename」→ 相対 POSIX パス。
+    /// filename はデーモン供給値だがパス合成の入口なので構造的に検証する:
+    /// 空 / "." / ".." / `/` 含み（ネスト注入）/ NUL 含みは nil = 合成不能。
+    /// フルパスとしての妥当性（バックスラッシュ・トラバーサル等の網羅検証）は呼び出し側が
+    /// `PathValidator.validateRelativePath` で担う（この関数は filename 起因の構造破壊のみ塞ぐ）。
+    public static func childPath(parentPath: String, filename: String) -> String? {
+        guard !filename.isEmpty, filename != ".", filename != "..",
+              !filename.contains("/"), !filename.contains("\0") else {
+            return nil
+        }
+        return parentPath.isEmpty ? filename : "\(parentPath)/\(filename)"
+    }
 }

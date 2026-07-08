@@ -47,4 +47,28 @@ final class FileProviderWritePolicyTests: XCTestCase {
         // 非 UTF-8
         XCTAssertNil(FileProviderWritePolicy.baseSha(fromContentVersion: Data([0xFF, 0xFE, 0x00])))
     }
+
+    // MARK: - childPath（createItem のパス合成・M5 Phase 5-3）
+
+    func testChildPathJoinsParentAndFilename() {
+        XCTAssertEqual(FileProviderWritePolicy.childPath(parentPath: "", filename: "a.txt"), "a.txt")
+        XCTAssertEqual(
+            FileProviderWritePolicy.childPath(parentPath: "docs/sub", filename: "a.txt"),
+            "docs/sub/a.txt"
+        )
+        // dotfile も通常のファイル名（除外判定は呼び出し側の IgnoreDecision が担う）
+        XCTAssertEqual(
+            FileProviderWritePolicy.childPath(parentPath: "", filename: ".syncignore"), ".syncignore"
+        )
+    }
+
+    /// filename 起因の構造破壊（空 / "." / ".." / ネスト注入 / NUL）は合成不能 = nil。
+    func testChildPathRejectsStructuralBreakage() {
+        XCTAssertNil(FileProviderWritePolicy.childPath(parentPath: "docs", filename: ""))
+        XCTAssertNil(FileProviderWritePolicy.childPath(parentPath: "docs", filename: "."))
+        XCTAssertNil(FileProviderWritePolicy.childPath(parentPath: "docs", filename: ".."))
+        XCTAssertNil(FileProviderWritePolicy.childPath(parentPath: "docs", filename: "a/b.txt"))
+        XCTAssertNil(FileProviderWritePolicy.childPath(parentPath: "docs", filename: "/a.txt"))
+        XCTAssertNil(FileProviderWritePolicy.childPath(parentPath: "docs", filename: "a\0.txt"))
+    }
 }

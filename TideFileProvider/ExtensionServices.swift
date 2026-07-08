@@ -1,3 +1,4 @@
+import CryptoKit
 import FileProvider
 import Foundation
 import TideCore
@@ -16,6 +17,10 @@ struct ExtensionServices: Sendable {
     let cache: ManifestGenerationCache
     /// FP 書込経路（M5 Phase 5-2・deleteItem + modifyItem）。S3 とマニフェストのみを書く。
     let writer: ExtensionWriter
+    /// createItem の `.syncignore` 適用（M5 Phase 5-3・案 B = FSEvents モードと同じ除外挙動）。
+    /// マニフェスト宣言の `.syncignore` 群を S3 から取得して層状マッチャを組む（世代キー +
+    /// sha メモ化キャッシュ）。機密網（`HardcodedIgnoreRules`）は I/O 不要なのでこの外で判定する。
+    let ignore: ManifestIgnoreCache
     /// workingSet への自己 signal。現状の呼び手は機会的自己 signal（`onNewGeneration`）のみ。
     /// Phase 5-2 以降の書込通知（拡張自身の書込後にシステムへ変化を取りに来させる）の土台として
     /// 公開している。※「delete 確定 → signal → 新セッションで update」の 2 相配信パターンは
@@ -95,8 +100,28 @@ struct ExtensionServices: Sendable {
                 uploadSizeLimitBytes: config.uploadSizeLimitBytes,
                 uploadLimiter: RateLimiter(ratePerSec: Double(config.uploadBandwidthBytesPerSec))
             )
+            let ignore = ManifestIgnoreCache { path, versionId, maxPrefixBytes in
+                // `.syncignore` 本体の取得。path はマニフェスト（リモート）由来なので S3 キー
+                // 組み立て前に必ず検証する。sha256 は**全バイト**から計算しつつ、保持は先頭
+                // maxPrefixBytes のみ（超過分は打ち切りパース = アプリ側の読込打ち切りと同じ）。
+                // 404 / NoSuchVersion は nil（呼び出し側が最新版フォールバック / 層スキップ）。
+                try PathValidator.validateRelativePath(path)
+                var hasher = SHA256()
+                var prefix = Data()
+                let result = try await s3.streamObject(
+                    key: "files/\(path)", versionId: versionId, rangeStart: nil
+                ) { chunk in
+                    hasher.update(data: chunk)
+                    if prefix.count < maxPrefixBytes {
+                        prefix.append(chunk.prefix(maxPrefixBytes - prefix.count))
+                    }
+                }
+                guard result != nil else { return nil }
+                return .init(sha256: HashCalculator.hex(hasher.finalize()), prefix: prefix)
+            }
             return ExtensionServices(
-                s3: s3, cache: cache, writer: writer, signalWorkingSet: signalWorkingSet
+                s3: s3, cache: cache, writer: writer, ignore: ignore,
+                signalWorkingSet: signalWorkingSet
             )
         } catch {
             AppLogger.fileProvider.error("Extension: failed to construct S3 client: \(String(describing: error), privacy: .private)")

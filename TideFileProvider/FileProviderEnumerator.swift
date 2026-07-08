@@ -40,7 +40,11 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @uncheck
                 let nodes: [ManifestTree.Node]
                 if let dirPath {
                     guard let children = current.tree.children(of: dirPath) else {
-                        boxed.value.finishEnumeratingWithError(NSFileProviderError(.noSuchItem))
+                        // マニフェスト外 dir = ローカル作成の仮想フォルダ（M5 Phase 5-3・空フォルダ
+                        // 仮想受理）or 消滅直前の stale。空列挙で返す（エラーだとシステムが列挙
+                        // 失敗を繰り返す。削除の伝播は working set の didDeleteItems が権威）。
+                        lastServedAnchor.withLock { $0 = current.anchor }
+                        boxed.value.finishEnumerating(upTo: nil)
                         return
                     }
                     nodes = children

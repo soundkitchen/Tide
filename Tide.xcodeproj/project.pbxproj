@@ -124,6 +124,7 @@
 		BBFF23668817A804F38D4ACF /* TransferPruneTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 91F4AD8CE93628B2C74331DC /* TransferPruneTests.swift */; };
 		BDC9506DADD8E2FD2565E51B /* AWSClientRuntime in Frameworks */ = {isa = PBXBuildFile; productRef = 01162EE60D7DDC7437EDC111 /* AWSClientRuntime */; };
 		BF61474E3646636658F001DE /* ManifestSharding.swift in Sources */ = {isa = PBXBuildFile; fileRef = 768FFB4507784287C979E47D /* ManifestSharding.swift */; };
+		C2472472D07094FEC97C9177 /* ManifestIgnoreCacheTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 531D2ECE72EDCA95F598AAE6 /* ManifestIgnoreCacheTests.swift */; };
 		C5031FFC043FF9929A518931 /* NoFollowFileReaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00F21E2E210A7F9BC778BC5D /* NoFollowFileReaderTests.swift */; };
 		C89C4AA65987A0D84B009C08 /* AboutWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 304004BC24DB5BEA9B3BE68F /* AboutWindow.swift */; };
 		CC223B1F855BCDBB5CA5310E /* LocalDatabaseTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF88A6EE0AAE77A740A190A9 /* LocalDatabaseTests.swift */; };
@@ -135,6 +136,7 @@
 		D7D23DE1DE0A4CE7C23CA205 /* AppLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49713E6DCD21C7DD8E0CA274 /* AppLogger.swift */; };
 		D855190C2CC7DFA4BB316C5A /* IgnoreDecision.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7A0A251F46AE378434E0924 /* IgnoreDecision.swift */; };
 		DA9953E6A55401B032F710F5 /* ManifestTreeDiff.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF76EA7236010317B9F4211C /* ManifestTreeDiff.swift */; };
+		DDFD50981FFA6FC165CBE1A4 /* ManifestIgnoreCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4FCD3CEA0C421F3BCA27F46B /* ManifestIgnoreCache.swift */; };
 		DF8005A67DB49A381C34F7AE /* SyncIgnoreMatcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABA53BD284FABDE0FFCD2E28 /* SyncIgnoreMatcher.swift */; };
 		E3D4DAFA589C2880D927A40A /* NotificationPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3AC084C5077FA719F28246C /* NotificationPolicyTests.swift */; };
 		E55DDEB60B77D6E7A0D9C765 /* SyncActivityModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F7D699C779B62DF10CD7D621 /* SyncActivityModelTests.swift */; };
@@ -281,7 +283,9 @@
 		49E1926B86F26BCDCC8D71CF /* FileProviderExtension.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileProviderExtension.swift; sourceTree = "<group>"; };
 		4B51C567451A4C1C023697EF /* RemoteOpGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteOpGate.swift; sourceTree = "<group>"; };
 		4FA64F8C47733294DDECC49C /* LegacyStateMigratorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LegacyStateMigratorTests.swift; sourceTree = "<group>"; };
+		4FCD3CEA0C421F3BCA27F46B /* ManifestIgnoreCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManifestIgnoreCache.swift; sourceTree = "<group>"; };
 		5239E4D2F62809A68F07CFCE /* TideCore.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = TideCore.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		531D2ECE72EDCA95F598AAE6 /* ManifestIgnoreCacheTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManifestIgnoreCacheTests.swift; sourceTree = "<group>"; };
 		55A63530A904BB8A91710C73 /* RateLimiterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RateLimiterTests.swift; sourceTree = "<group>"; };
 		56AE2B52ED6D9C94B5C06BBF /* BucketPolicyBuilderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BucketPolicyBuilderTests.swift; sourceTree = "<group>"; };
 		57ED617F25861D75B21F4EE8 /* ManifestShardingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManifestShardingTests.swift; sourceTree = "<group>"; };
@@ -509,6 +513,7 @@
 				BF88A6EE0AAE77A740A190A9 /* LocalDatabaseTests.swift */,
 				135D07BF55C5C2216AAF6F41 /* ManifestGenerationCacheTests.swift */,
 				1AFDD6DC6B26F6450EF4A09D /* ManifestGenerationLogTests.swift */,
+				531D2ECE72EDCA95F598AAE6 /* ManifestIgnoreCacheTests.swift */,
 				57ED617F25861D75B21F4EE8 /* ManifestShardingTests.swift */,
 				106416243D1436EA43CACFA6 /* ManifestSnapshotLoaderTests.swift */,
 				268B6DB362449129207086A7 /* ManifestTreeDiffTests.swift */,
@@ -564,6 +569,7 @@
 				7D575C0984B4BABFC8234BB1 /* Manifest.swift */,
 				9516F89BD8B441C17E399714 /* ManifestGenerationCache.swift */,
 				D283FF14F141F298C9F27E9A /* ManifestGenerationLog.swift */,
+				4FCD3CEA0C421F3BCA27F46B /* ManifestIgnoreCache.swift */,
 				072F35488FAFA4BFE2EC6119 /* ManifestReader.swift */,
 				768FFB4507784287C979E47D /* ManifestSharding.swift */,
 				263CE52DDFC37C0F3B3FA41C /* ManifestSnapshot.swift */,
@@ -886,6 +892,7 @@
 				90276C63902A408F2EA29B5B /* Manifest.swift in Sources */,
 				3988342C66C7DCB15BBC8555 /* ManifestGenerationCache.swift in Sources */,
 				2230B958A48B5C1E03C1DFB8 /* ManifestGenerationLog.swift in Sources */,
+				DDFD50981FFA6FC165CBE1A4 /* ManifestIgnoreCache.swift in Sources */,
 				145BFD133A9439D84C83BF56 /* ManifestReader.swift in Sources */,
 				BF61474E3646636658F001DE /* ManifestSharding.swift in Sources */,
 				7EA58BAA4FBF6CA861AA6366 /* ManifestSnapshot.swift in Sources */,
@@ -953,6 +960,7 @@
 				CC223B1F855BCDBB5CA5310E /* LocalDatabaseTests.swift in Sources */,
 				35F4F2CD1B3147D6C7D87FC2 /* ManifestGenerationCacheTests.swift in Sources */,
 				CDCA61C692F809FA5B2210CE /* ManifestGenerationLogTests.swift in Sources */,
+				C2472472D07094FEC97C9177 /* ManifestIgnoreCacheTests.swift in Sources */,
 				6713D52E474D2DE81405414C /* ManifestShardingTests.swift in Sources */,
 				B6F899CB35C9C6872CE11EFA /* ManifestSnapshotLoaderTests.swift in Sources */,
 				348D9E70C7268F6FBBE617F3 /* ManifestTreeDiffTests.swift in Sources */,
