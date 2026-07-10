@@ -422,7 +422,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         if changedFields.contains(.filename) || changedFields.contains(.parentItemIdentifier) {
             // 改名 / 移動（M5 Phase 5-4）。sha 不変の path 移動 = copyObject + 二相 RMW。
             return handleMove(
-                item: item, ref: ref, changedFields: changedFields,
+                item: item, ref: ref, baseVersion: version, changedFields: changedFields,
                 newContents: newContents, services: services,
                 progress: progress, completion: completion
             )
@@ -532,6 +532,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
     private func handleMove(
         item: NSFileProviderItem,
         ref: (path: String, isDirectory: Bool),
+        baseVersion version: NSFileProviderItemVersion,
         changedFields: NSFileProviderItemFields,
         newContents: URL?,
         services: ExtensionServices,
@@ -567,10 +568,39 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             AppLogger.fileProvider.notice("modifyItem(move): unsyncable new name (excluded): \(item.filename, privacy: .private)")
         }
         guard validNewPath != oldPath else {
-            // 実質 no-op（同一 path への「移動」）: 現ツリーの item を返して消化する。
+            // 実質 no-op（同一 path への「移動」）。この分岐は実際に踏める — Swift の
+            // `String ==` は正準等価（NFC/NFD 同一視）のため、正規化差だけの rename が該当する。
+            // **`.contents` が同時に立っている複合 modifyItem はここで握りつぶさない**
+            //（PR #60 レビュー #4: 全フィールド消化で返すと新内容が未アップロードのまま
+            // 「同期済み」になる無エラー乖離）— rename は no-op とし、内容は通常の
+            // modifyFileContents 経路（modifyItem の .contents 分岐と同じ帰結写像）で処理する。
+            let noopContents =
+                changedFields.contains(.contents) && !ref.isDirectory ? newContents : nil
+            let boxedNoopURL = UncheckedSendableBox(value: noopContents)
+            let noopModified = item.contentModificationDate ?? nil
+            let noopBase = FileProviderWritePolicy.baseSha(
+                contentVersion: version.contentVersion, metadataVersion: version.metadataVersion)
             let task = Task {
                 defer { progress.completedUnitCount = progress.totalUnitCount }
                 do {
+                    if let contentsURL = boxedNoopURL.value {
+                        let outcome = try await services.writer.modifyFileContents(
+                            path: oldPath, contentsURL: contentsURL,
+                            baseSha: noopBase, contentModified: noopModified
+                        )
+                        switch outcome {
+                        case .written(let entry):
+                            completion.value(
+                                FileProviderItem(node: .file(path: oldPath, entry: entry)),
+                                [], false, nil)
+                        case .conflict(let remote, let copyPath, _):
+                            AppLogger.fileProvider.notice("modifyItem(move noop): upload conflict — local edit preserved as copy: \(copyPath, privacy: .private)")
+                            completion.value(
+                                FileProviderItem(node: .file(path: oldPath, entry: remote)),
+                                [], true, nil)
+                        }
+                        return
+                    }
                     let tree = try await services.cache.current().tree
                     let node = tree.node(at: oldPath)
                     completion.value(
@@ -810,8 +840,16 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 // システム後始末 deleteItem は baseVersion が sha 形でない（ローカル保留変更の
                 // 版スタンプ・実機観測）ため、ベースをツリー現行 sha に切り替えて受理する。
                 // RMW ガード自体は維持 = 読み替え後にリモートが進んでいれば従来どおり拒否。
+                // 読み替えは **baseSha が両 version から復元できなかったときだけ**
+                //（PR #60 レビュー #1）: 後始末が発行されないまま予約が残留しても（典型 =
+                // 予約後のドメイン作り直し）、有効な base を運ぶ将来の正当な deleteItem の
+                // ガードは弱めない（metadataVersion フォールバックで sha が取れるなら常に
+                // そちらを優先し、この読み替えは不発になる = どちらに転んでも正しい側）。
                 var effectiveBase = baseSha
-                let isCleanup = await services.exclusionCleanups.contains(ref.path)
+                var isCleanup = false
+                if baseSha == nil {
+                    isCleanup = await services.exclusionCleanups.contains(ref.path)
+                }
                 if isCleanup,
                    case .file(_, let entry)? =
                        (try await services.cache.current()).tree.node(at: ref.path) {
@@ -819,18 +857,17 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 }
                 switch try await services.writer.deleteFile(path: ref.path, baseSha: effectiveBase) {
                 case .removed, .alreadyGone:
+                    // 予約の掃除は成功時に無条件（読み替え不発 = 有効 base で消えた後始末でも
+                    // 残留させない。未予約 path への removeSubtree は no-op）。
+                    await services.exclusionCleanups.removeSubtree(at: ref.path)
                     if isCleanup {
-                        await services.exclusionCleanups.removeSubtree(at: ref.path)
                         AppLogger.fileProvider.notice("deleteItem: exclusion cleanup completed: \(ref.path, privacy: .private)")
                     }
                     completion.value(nil)
                 case .rejected(let remote):
                     // リモートがベースより進んでいた → 削除拒否 + 最新 item を添える
                     // （システムが最新版を復元する。「データ損失 < 重複」）。
-                    // 診断のため「ベース不明（nil）」と「sha 不一致」を区別してログする
-                    //（5-4 PoC で ExcludedFromSync 後のシステム deleteItem が非 sha 形の
-                    // baseVersion を渡す事例を観測 — 除外系の後始末は自前除去に変更済みだが、
-                    // 将来の同種調査のため区別を残す）。
+                    // 診断のため「ベース不明（nil）」と「sha 不一致」を区別してログする。
                     let reason = baseSha == nil ? "base unknown" : "remote changed since base"
                     AppLogger.fileProvider.notice("deleteItem: rejected (\(reason, privacy: .public)): \(ref.path, privacy: .private)")
                     completion.value(NSError.fileProviderErrorForRejectedDeletion(

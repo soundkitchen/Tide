@@ -238,13 +238,20 @@ struct ExtensionWriter: Sendable {
     ) async throws -> ManifestFileEntry {
         // CopyObject の単発上限（5 GiB）事前拒否。既定のアップロード上限（1 GiB）内なら
         // 非顕在・UploadPartCopy は実需が出るまで不採用（設計プラン確定事項）。
+        // 5 GiB 超 entry の rename は恒久保留になる既知の制限（docs/09・PR #60 レビュー #3）。
         let copyLimit: Int64 = 5 * 1024 * 1024 * 1024
         guard entry.size <= copyLimit else {
             throw SyncError.fileTooLarge(path: from, size: entry.size)
         }
+        // versionId 不明の entry は copy しない（PR #60 レビュー #2）: nil のまま copyObject へ
+        // 渡すと「最新版コピー」= 内容検証不能で宣言 sha と実体が乖離しうる形そのもの。
+        // バージョニング必須運用では実質非発生だが、規約を構造的に守る。
+        guard let versionId = entry.s3VersionId else {
+            throw MoveError.sourceVersionMissing(path: from)
+        }
         guard
             let copied = try await s3.copyObject(
-                fromKey: "files/\(from)", versionId: entry.s3VersionId, toKey: "files/\(to)")
+                fromKey: "files/\(from)", versionId: versionId, toKey: "files/\(to)")
         else {
             AppLogger.fileProvider.error("moveFile: pinned source version missing: \(from, privacy: .private)")
             throw MoveError.sourceVersionMissing(path: from)

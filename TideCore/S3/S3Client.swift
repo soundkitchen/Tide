@@ -284,8 +284,7 @@ public final class TideS3Client: @unchecked Sendable {
             let output = try await client.copyObject(input: input)
             let etag = Self.cleanETag(output.copyObjectResult?.eTag)
             return PutObjectResult(etag: etag, versionId: output.versionId)
-        } catch let error as NoSuchKey {
-            _ = error
+        } catch is NoSuchKey {
             return nil
         } catch {
             // 404 系（NoSuchVersion 含む）は nil（判定は S3ErrorClassifier.isNotFound に集約）
