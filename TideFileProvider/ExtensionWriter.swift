@@ -42,6 +42,28 @@ struct ExtensionWriter: Sendable {
         case rejected(path: String, remote: ManifestFileEntry)
     }
 
+    enum MoveOutcome {
+        /// move 成功。`newEntry` は新 path の確定 identity（dir move では未使用）。
+        case moved(newEntry: ManifestFileEntry?)
+        /// 移動先に別内容の entry が実在 = 衝突（呼び出し側 = `FilenameCollision` で
+        /// システムに名前バウンスさせる）。
+        case destinationOccupied(path: String)
+        /// 移動元がベースから進んでいた = 中断・新旧両存のまま（自動 rollback しない）。
+        /// 呼び出し側は一時エラーを返す — リモート変化がシステムへ届いて baseVersion が
+        /// 追いつけば、再試行の move は「進んだ後の内容」を対象に自己回復する
+        /// （copy は毎試行ツリー現行 entry から引き直すため stale 内容を運ばない）。
+        case sourceChanged(path: String, remote: ManifestFileEntry)
+    }
+
+    /// move 経路のエラー（fileproviderd はどのエラーも一時扱いで再試行する。
+    /// completion へ渡す前に呼び出し側が SDK 規約ドメインへ包むこと）。
+    enum MoveError: Error {
+        /// 宣言版（s3VersionId）のコピー元が消えていた（旧版失効等）。最新版フォールバックは
+        /// しない — コピーは内容検証ができず、宣言 sha と実体が乖離した entry を作ると
+        /// マニフェスト真実が壊れるため（`S3Client.copyObject` の規約）。
+        case sourceVersionMissing(path: String)
+    }
+
     /// ファイル内容の書込（modifyItem の .contents、および createItem = `baseSha: nil`・M5 Phase 5-3）。
     /// - Parameters:
     ///   - contentsURL: 新しい内容。nil = 内容なしの createItem（空ファイルとして PUT する）。
@@ -119,18 +141,7 @@ struct ExtensionWriter: Sendable {
         }
         if !removedPaths.isEmpty {
             // marker 発行（限定並列・失敗はログのみ = 単発 deleteFile と同じ規約）
-            let s3 = self.s3
-            await withTaskGroup(of: Void.self) { group in
-                var pending = removedPaths[...]
-                for _ in 0..<min(4, pending.count) {
-                    guard let path = pending.popFirst() else { break }
-                    group.addTask { await Self.emitDeleteMarker(s3: s3, path: path) }
-                }
-                while await group.next() != nil {
-                    guard let path = pending.popFirst() else { continue }
-                    group.addTask { await Self.emitDeleteMarker(s3: s3, path: path) }
-                }
-            }
+            await emitDeleteMarkers(paths: removedPaths)
             // マニフェストを実際に書いた（= 世代が進むべき）ときだけ無効化 + 自己 signal
             await cache.invalidateAfterLocalWrite()
         }
@@ -142,6 +153,146 @@ struct ExtensionWriter: Sendable {
             try await s3.deleteObject(key: "files/\(path)")
         } catch {
             AppLogger.fileProvider.error("deleteObject after manifest removal failed (invisible live object remains): \(String(describing: error), privacy: .private)")
+        }
+    }
+
+    /// ファイル 1 件の move（rename/reparent・M5 Phase 5-4）。sha 不変の path 移動。
+    /// 順序 = ① copyObject（**ツリー現行 entry の versionId に固定**・本体転送なし）→
+    /// ② `ManifestUpdater.moveFileEntries`（add → remove の二相・ベースガードは RMW 内）→
+    /// ③ 旧キーへ delete marker。中間クラッシュはどの点でも「新旧両存（重複）」側に倒れる。
+    ///
+    /// remove のベースは **itemVersion ではなくツリー現行 entry の sha**（dir move と同じ方式）:
+    /// ① rebind（一度 move した item）の次操作は baseVersion が sha 形で来ない（実機確定 =
+    /// baseUnknown で move が恒久失敗するリトライループになる）② move は「同一内容の add」と
+    /// 対の remove なので、ツリーベースでもデータ損失は構造的に起きない（copy はツリー現行版・
+    /// remove は同じ entry へのガード付き・失敗 = 両存側。リモートが並行編集していれば RMW の
+    /// 再評価が `.sourceChanged` で弾く）。
+    /// - Parameters:
+    ///   - entry: ツリー現行の旧 entry（copy 元 versionId / 新 entry の sha/size/mtime /
+    ///     remove ガードの出所）。
+    ///   - contentsURL: 非 nil なら「内容変更 + 改名」の複合 modifyItem — copy ではなく
+    ///     新内容を新 path へアップロードする（filename と contents は同時同期が SDK の推奨）。
+    func moveFile(
+        from: String, to: String,
+        entry: ManifestFileEntry, contentsURL: URL?, contentModified: Date?
+    ) async throws -> MoveOutcome {
+        try PathValidator.validateRelativePath(from)
+        try PathValidator.validateRelativePath(to)
+
+        let newEntry: ManifestFileEntry
+        if let contentsURL {
+            // 複合（rename + contents）: 新内容を新 path へ直接アップロード
+            newEntry = try await uploadObject(
+                path: to, contentsURL: contentsURL, contentModified: contentModified)
+        } else {
+            newEntry = try await copyEntry(from: from, to: to, entry: entry)
+        }
+        return try await commitMoves(
+            [ManifestFileMove(fromPath: from, toPath: to, base: entry.sha256, newEntry: newEntry)]
+        )
+    }
+
+    /// ディレクトリの move（rename/reparent・M5 Phase 5-4）。子孫を限定並列（4）で
+    /// copyObject → 全 add → 全 remove（`moveFileEntries`）→ 旧キー群へ marker。
+    /// ベース = キャッシュ済みツリーの各ファイル sha（5-3 の再帰削除と同源）。
+    /// path=id のため子孫 item は「旧 id 削除 + 新 id 出現」となり、materialize 済みは
+    /// dataless に戻る（既知の癖・docs/09）。
+    /// - Parameter descendants: (旧相対パス, 新相対パス, ツリー現行 entry) の全子孫。
+    func moveDirectory(
+        descendants: [(from: String, to: String, entry: ManifestFileEntry)]
+    ) async throws -> MoveOutcome {
+        for d in descendants {
+            try PathValidator.validateRelativePath(d.from)
+            try PathValidator.validateRelativePath(d.to)
+        }
+        // copy フェーズ（限定並列 4・1 件でも失敗したら throw = マニフェスト非接触のまま。
+        // 出来かけのコピー先オブジェクトは未参照 orphan 版としてライフサイクル失効に委ねる）
+        let copied: [String: ManifestFileEntry] = try await withThrowingTaskGroup(
+            of: (String, ManifestFileEntry).self
+        ) { group in
+            var results: [String: ManifestFileEntry] = [:]
+            var pending = descendants[...]
+            for _ in 0..<min(4, pending.count) {
+                guard let d = pending.popFirst() else { break }
+                group.addTask { (d.from, try await self.copyEntry(from: d.from, to: d.to, entry: d.entry)) }
+            }
+            while let (from, entry) = try await group.next() {
+                results[from] = entry
+                if let d = pending.popFirst() {
+                    group.addTask { (d.from, try await self.copyEntry(from: d.from, to: d.to, entry: d.entry)) }
+                }
+            }
+            return results
+        }
+        let moves = descendants.compactMap { d -> ManifestFileMove? in
+            guard let newEntry = copied[d.from] else { return nil }
+            return ManifestFileMove(
+                fromPath: d.from, toPath: d.to, base: d.entry.sha256, newEntry: newEntry)
+        }
+        return try await commitMoves(moves)
+    }
+
+    /// copyObject 1 件（versionId 固定・sha/size/mtime 維持・identity はコピー結果）。
+    private func copyEntry(
+        from: String, to: String, entry: ManifestFileEntry
+    ) async throws -> ManifestFileEntry {
+        // CopyObject の単発上限（5 GiB）事前拒否。既定のアップロード上限（1 GiB）内なら
+        // 非顕在・UploadPartCopy は実需が出るまで不採用（設計プラン確定事項）。
+        let copyLimit: Int64 = 5 * 1024 * 1024 * 1024
+        guard entry.size <= copyLimit else {
+            throw SyncError.fileTooLarge(path: from, size: entry.size)
+        }
+        guard
+            let copied = try await s3.copyObject(
+                fromKey: "files/\(from)", versionId: entry.s3VersionId, toKey: "files/\(to)")
+        else {
+            AppLogger.fileProvider.error("moveFile: pinned source version missing: \(from, privacy: .private)")
+            throw MoveError.sourceVersionMissing(path: from)
+        }
+        return ManifestFileEntry(
+            size: entry.size,
+            mtime: entry.mtime,  // 内容不変 = mtime 維持（[mtime 不変条件] と整合）
+            sha256: entry.sha256,
+            s3VersionId: copied.versionId,
+            etag: copied.etag,
+            deviceId: deviceId,
+            uploadedAt: ISO8601.now()
+        )
+    }
+
+    /// move の共通テール: 二相 RMW → marker → キャッシュ無効化。
+    private func commitMoves(_ moves: [ManifestFileMove]) async throws -> MoveOutcome {
+        let outcome = try await updater.moveFileEntries(moves)
+        switch outcome {
+        case .moved(let removedPaths):
+            await emitDeleteMarkers(paths: removedPaths)
+            await cache.invalidateAfterLocalWrite()
+            return .moved(newEntry: moves.count == 1 ? moves[0].newEntry : nil)
+        case .destinationOccupied(let path, _):
+            // 単一 move なら未書込 = 世代不変だが、複数シャードの dir move では先行 add が
+            // 確定していることがある → 一律 invalidate（余分でも 1 リロードで無害）。
+            await cache.invalidateAfterLocalWrite()
+            return .destinationOccupied(path: path)
+        case .sourceChanged(let path, let remote, let removedPaths):
+            await emitDeleteMarkers(paths: removedPaths)
+            await cache.invalidateAfterLocalWrite()
+            return .sourceChanged(path: path, remote: remote)
+        }
+    }
+
+    private func emitDeleteMarkers(paths: [String]) async {
+        guard !paths.isEmpty else { return }
+        let s3 = self.s3
+        await withTaskGroup(of: Void.self) { group in
+            var pending = paths[...]
+            for _ in 0..<min(4, pending.count) {
+                guard let path = pending.popFirst() else { break }
+                group.addTask { await Self.emitDeleteMarker(s3: s3, path: path) }
+            }
+            while await group.next() != nil {
+                guard let path = pending.popFirst() else { continue }
+                group.addTask { await Self.emitDeleteMarker(s3: s3, path: path) }
+            }
         }
     }
 

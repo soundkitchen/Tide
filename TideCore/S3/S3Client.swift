@@ -247,6 +247,53 @@ public final class TideS3Client: @unchecked Sendable {
         _ = try await client.deleteObject(input: input)
     }
 
+    /// `copySource` のキー部の percent エンコード用（unreserved + `/`。`/` は S3 キーの
+    /// 区切りとしてそのまま残す）。
+    private static let copySourceKeyAllowed: CharacterSet = {
+        var set = CharacterSet.alphanumerics
+        set.insert(charactersIn: "-._~/")
+        return set
+    }()
+
+    /// オブジェクトをサーバサイドコピーする（M5 Phase 5-4 rename/reparent 用・本体転送なし）。
+    /// - `versionId` 固定でコピーする（enumerate/fetch と同じ「宣言した版を使う」規約）。
+    ///   **最新版フォールバックはしない**: コピーは内容を検証できないため、宣言版が消えて
+    ///   いるときに最新へ倒すと「宣言 sha と実体が乖離した entry」を作り得る（マニフェスト
+    ///   真実の破壊）。404 / NoSuchVersion は nil を返し、呼び出し側が移動を失敗として扱う。
+    /// - SSE-S3 を明示（Copy は元オブジェクトの暗号化設定を引き継がない）・
+    ///   metadataDirective は COPY。
+    /// - Returns: コピー先の新しい identity（etag / versionId）。
+    public func copyObject(
+        fromKey: String, versionId: String?, toKey: String
+    ) async throws -> PutObjectResult? {
+        let encodedKey =
+            fromKey.addingPercentEncoding(withAllowedCharacters: Self.copySourceKeyAllowed)
+            ?? fromKey
+        var source = "\(bucket)/\(encodedKey)"
+        if let versionId {
+            source += "?versionId=\(versionId)"
+        }
+        let input = CopyObjectInput(
+            bucket: bucket,
+            copySource: source,
+            key: toKey,
+            metadataDirective: .copy,
+            serverSideEncryption: .aes256  // SSE-S3 を明示（putObject と揃える）
+        )
+        do {
+            let output = try await client.copyObject(input: input)
+            let etag = Self.cleanETag(output.copyObjectResult?.eTag)
+            return PutObjectResult(etag: etag, versionId: output.versionId)
+        } catch let error as NoSuchKey {
+            _ = error
+            return nil
+        } catch {
+            // 404 系（NoSuchVersion 含む）は nil（判定は S3ErrorClassifier.isNotFound に集約）
+            if S3ErrorClassifier.isNotFound(error) { return nil }
+            throw error
+        }
+    }
+
     public struct ObjectHead: Sendable {
         public let etag: String
         public let versionId: String?

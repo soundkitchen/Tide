@@ -40,11 +40,16 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @uncheck
                 let nodes: [ManifestTree.Node]
                 if let dirPath {
                     guard let children = current.tree.children(of: dirPath) else {
-                        // マニフェスト外 dir = ローカル作成の仮想フォルダ（M5 Phase 5-3・空フォルダ
-                        // 仮想受理）or 消滅直前の stale。空列挙で返す（エラーだとシステムが列挙
-                        // 失敗を繰り返す。削除の伝播は working set の didDeleteItems が権威）。
-                        lastServedAnchor.withLock { $0 = current.anchor }
-                        boxed.value.finishEnumerating(upTo: nil)
+                        // マニフェスト外 dir: レジストリ登録済みの仮想フォルダ（M5 Phase 5-3 の
+                        // 空フォルダ仮想受理）だけ空列挙で温存する。レジストリ外は noSuchItem —
+                        // 無条件の空列挙は消えた dir を「実在する空 dir」に見せてしまう
+                        //（item(for:) の合成 dir 限定と同じ理由・M5 Phase 5-4）。
+                        if await services.virtualDirs.contains(dirPath) {
+                            lastServedAnchor.withLock { $0 = current.anchor }
+                            boxed.value.finishEnumerating(upTo: nil)
+                        } else {
+                            boxed.value.finishEnumeratingWithError(NSFileProviderError(.noSuchItem))
+                        }
                         return
                     }
                     nodes = children

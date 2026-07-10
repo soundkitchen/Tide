@@ -11,8 +11,9 @@ import UniformTypeIdentifiers
 ///   S3 へ直接書く。旧「単一書き手＝拡張」構想は撤回）。
 /// - `fetchContents` は `streamObject`（マニフェストの `s3VersionId` に固定）+ サイズ/SHA-256 検証。
 /// - 書込系コールバック: modifyItem（.contents）+ deleteItem（file）= Phase 5-2、
-///   createItem（file/folder）+ deleteItem（dir 再帰）+ dir メタデータ modify = Phase 5-3。
-///   改名/移動（.filename / .parentItemIdentifier）のみ Phase 5-4 で対応予定。
+///   createItem（file/folder）+ deleteItem（dir 再帰）+ dir メタデータ modify = Phase 5-3、
+///   改名/移動（.filename / .parentItemIdentifier・copyObject による sha 不変の path 移動）
+///   = Phase 5-4。これで書込系は全対応。
 ///   除外（機密網 / `.syncignore` / symlink / 検証不能名）は `ExcludedFromSync` = ローカル温存。
 /// - item identifier は **kind 織り込み形式**: `f:`（ファイル）/ `d:`（ディレクトリ）+ 相対 POSIX
 ///   パス（マニフェスト・オブジェクトキーと 1:1。ルートは `.rootContainer`。M5 Phase 5-1 で
@@ -67,12 +68,13 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             do {
                 let tree = try await services.cache.current().tree
                 guard let node = tree.node(at: path) else {
-                    if ref.isDirectory {
-                        // マニフェスト外の dir id = ローカル作成の仮想フォルダ（M5 Phase 5-3 の
-                        // 空フォルダ仮想受理）。noSuchItem を返すとデーモンがローカルフォルダごと
-                        // 掃除してしまうため、合成 dir を返して温存する。リモート削除の伝播は
-                        // enumerateChanges の didDeleteItems が権威なので、消えた dir がここで
-                        // resurrect することはない。
+                    if ref.isDirectory, await services.virtualDirs.contains(path) {
+                        // 仮想フォルダ（createItem で仮想受理した = レジストリ登録済み）のみ
+                        // 合成 dir を返して温存する。noSuchItem を返すとデーモンがローカル
+                        // フォルダごと掃除してしまうため（M5 Phase 5-3）。
+                        // **レジストリ外のマニフェスト外 dir id は noSuchItem**（M5 Phase 5-4）:
+                        // 無条件合成にすると dir move/削除の reconcile 中の照会に生きた item を
+                        // 返してしまい、消えたはずの旧 dir が空フォルダとして復活する（実機確定）。
                         completion.value(FileProviderItem(node: .directory(path: path, mtime: nil)), nil)
                         return
                     }
@@ -92,7 +94,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 completion.value(FileProviderItem(node: node), nil)
             } catch {
                 AppLogger.fileProvider.error("item(for:) failed: \(String(describing: error), privacy: .private)")
-                completion.value(nil, error)
+                completion.value(nil, Self.wrapForCompletion(error))
             }
         }
         progress.cancellationHandler = { task.cancel() }
@@ -205,7 +207,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 completion.value(tmpURL, FileProviderItem(node: .file(path: path, entry: entry)), nil)
             } catch {
                 AppLogger.fileProvider.error("fetchContents failed: \(String(describing: error), privacy: .private)")
-                completion.value(nil, nil, error)
+                completion.value(nil, nil, Self.wrapForCompletion(error))
             }
         }
         progress.cancellationHandler = { task.cancel() }
@@ -285,12 +287,18 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             // "dir-<日時>" → "dir" へ一度揺れ得るが、contentVersion（"dir"）は不変なので
             // 再取得等の副作用はない（実機 bounce ゼロ確認済み）。実体化後は配下最大 mtime の
             // 合成値に収束する。
-            progress.completedUnitCount = 1
-            completionHandler(
-                FileProviderItem(
-                    node: .directory(path: path, mtime: itemTemplate.contentModificationDate ?? nil)),
-                [], false, nil
-            )
+            let dirMtime = itemTemplate.contentModificationDate ?? nil
+            let dirCompletion = UncheckedSendableBox(value: completionHandler)
+            let task = Task {
+                defer { progress.completedUnitCount = progress.totalUnitCount }
+                // レジストリ登録 = item(for:) / enumerator の合成 dir 温存の根拠（M5 Phase 5-4）
+                await services.virtualDirs.add(path)
+                dirCompletion.value(
+                    FileProviderItem(node: .directory(path: path, mtime: dirMtime)),
+                    [], false, nil
+                )
+            }
+            progress.cancellationHandler = { task.cancel() }
             return progress
         }
 
@@ -340,6 +348,11 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     let outcome = try await services.writer.modifyFileContents(
                         path: path, contentsURL: nil, baseSha: nil, contentModified: contentModified
                     )
+                    // 実体化した祖先の仮想フォルダはレジストリ保護を外す（M5 Phase 5-4 —
+                    // 残すと「実体化後にリモート削除された dir」を空フォルダとして復活させる）。
+                    // 同 path が除外後始末の予約中なら解除（再包含 = 除外の再評価で同期復帰）。
+                    await services.virtualDirs.removeAncestors(of: path)
+                    await services.exclusionCleanups.removeSubtree(at: path)
                     Self.completeCreate(outcome, path: path, completion: completion)
                     return
                 }
@@ -351,10 +364,12 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     path: path, contentsURL: contentsURL, baseSha: nil,
                     contentModified: contentModified
                 )
+                await services.virtualDirs.removeAncestors(of: path)
+                await services.exclusionCleanups.removeSubtree(at: path)
                 Self.completeCreate(outcome, path: path, completion: completion)
             } catch {
                 AppLogger.fileProvider.error("createItem failed: \(String(describing: error), privacy: .private)")
-                completion.value(nil, [], false, error)
+                completion.value(nil, [], false, Self.wrapForCompletion(error))
             }
         }
         progress.cancellationHandler = { task.cancel() }
@@ -401,14 +416,17 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             completionHandler(nil, [], false, NSFileProviderError(.noSuchItem))
             return progress
         }
-        guard !changedFields.contains(.filename), !changedFields.contains(.parentItemIdentifier) else {
-            // 改名 / 移動は Phase 5-4（capability 未許可なので通常は来ない防御・file/dir 共通）。
-            progress.completedUnitCount = 1
-            completionHandler(nil, [], false, Self.renameUnsupportedError())
-            return progress
-        }
         let path = ref.path
         let completion = UncheckedSendableBox(value: completionHandler)
+
+        if changedFields.contains(.filename) || changedFields.contains(.parentItemIdentifier) {
+            // 改名 / 移動（M5 Phase 5-4）。sha 不変の path 移動 = copyObject + 二相 RMW。
+            return handleMove(
+                item: item, ref: ref, changedFields: changedFields,
+                newContents: newContents, services: services,
+                progress: progress, completion: completion
+            )
+        }
 
         guard !ref.isDirectory else {
             // ディレクトリのメタデータ変更（mtime / タグ等・M5 Phase 5-3）: マニフェストに
@@ -430,7 +448,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                         [], false, nil
                     )
                 } catch {
-                    completion.value(nil, [], false, error)
+                    completion.value(nil, [], false, Self.wrapForCompletion(error))
                 }
             }
             progress.cancellationHandler = { task.cancel() }
@@ -451,7 +469,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     }
                     completion.value(FileProviderItem(node: node), [], false, nil)
                 } catch {
-                    completion.value(nil, [], false, error)
+                    completion.value(nil, [], false, Self.wrapForCompletion(error))
                 }
             }
             progress.cancellationHandler = { task.cancel() }
@@ -465,7 +483,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         }
         // 3-way ベース = システムが最後に見た itemVersion（= 旧 sha256）。DB 非接触のまま
         // 競合検出できる（「拡張 = 第 3 のデバイス」の要・docs/08）。
-        let baseSha = FileProviderWritePolicy.baseSha(fromContentVersion: version.contentVersion)
+        let baseSha = FileProviderWritePolicy.baseSha(
+            contentVersion: version.contentVersion, metadataVersion: version.metadataVersion)
         let contentModified = item.contentModificationDate ?? nil
         let boxedURL = UncheckedSendableBox(value: newContents)
         let task = Task {
@@ -489,7 +508,222 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 }
             } catch {
                 AppLogger.fileProvider.error("modifyItem failed: \(String(describing: error), privacy: .private)")
-                completion.value(nil, [], false, error)
+                completion.value(nil, [], false, Self.wrapForCompletion(error))
+            }
+        }
+        progress.cancellationHandler = { task.cancel() }
+        return progress
+    }
+
+    /// modifyItem の改名 / 移動分岐（M5 Phase 5-4・rename/reparent）。
+    ///
+    /// - 返却 item は**新 id**（`f:`/`d:` + 新 path）を運ぶ — SDK の merge 機構
+    ///   （「返却 item の itemIdentifier をシステムが採用し、他方をディスクから外す」）を
+    ///   path ベース id の rebind に使う（PoC 最大の未知点・実機実証項目）。
+    /// - 除外対象名への改名は `ExcludedFromSync` = ローカルで改名成立 + 同期対象外へ
+    ///   （システムが続けて旧 id の deleteItem を発行 → 旧 entry が S3 から外れる =
+    ///   FSEvents モードの「旧 path 削除伝播 + 新 path 非同期」と対称・2026-07-09 ユーザ確定）。
+    /// - dir move の除外判定は**新 dir パス単位のみ**（機密網 + ユーザパターンの dir 一致）。
+    ///   子ごとの新 path パターン一致は意図的に適用しない — FP では旧 id の削除配信が
+    ///   ローカル実体も消すため、「ローカル温存で非同期」を per-child に再現できない
+    ///   （dir 単位の ExcludedFromSync なら実体温存で全体が同期外 = 損失ゼロ）。docs/08 参照。
+    /// - `.sourceChanged`（リモート先行）は一時エラー返却 = 新旧両存のまま。リモート変化が
+    ///   届いて baseVersion が追いつくと再試行の move が「進んだ後の内容」で自己回復する。
+    private func handleMove(
+        item: NSFileProviderItem,
+        ref: (path: String, isDirectory: Bool),
+        changedFields: NSFileProviderItemFields,
+        newContents: URL?,
+        services: ExtensionServices,
+        progress: Progress,
+        completion: UncheckedSendableBox<(NSFileProviderItem?, NSFileProviderItemFields, Bool, Error?) -> Void>
+    ) -> Progress {
+        let oldPath = ref.path
+        // 新しい親: .parentItemIdentifier が変わっていれば template の親 id（Tide の dir id
+        // のみ受理・trash 等は未対応）、変わっていなければ旧 path の親。
+        let newParentPath: String
+        if changedFields.contains(.parentItemIdentifier) {
+            guard let parent = item.parentItemIdentifier.tidePathAndKind, parent.isDirectory else {
+                progress.completedUnitCount = 1
+                completion.value(nil, [], false, NSFileProviderError(.noSuchItem))
+                return progress
+            }
+            newParentPath = parent.path
+        } else {
+            let components = oldPath.split(separator: "/").dropLast()
+            newParentPath = components.joined(separator: "/")
+        }
+        // パス合成は createItem と同一のゲート（構造検証 → 網羅検証）。検証不能な新名は
+        // 除外扱い（nil = Task 内の除外分岐へ合流し、旧 entry の自前除去 → ExcludedFromSync）。
+        let validNewPath: String? = {
+            guard
+                let p = FileProviderWritePolicy.childPath(
+                    parentPath: newParentPath, filename: item.filename),
+                (try? PathValidator.validateRelativePath(p)) != nil
+            else { return nil }
+            return p
+        }()
+        if validNewPath == nil {
+            AppLogger.fileProvider.notice("modifyItem(move): unsyncable new name (excluded): \(item.filename, privacy: .private)")
+        }
+        guard validNewPath != oldPath else {
+            // 実質 no-op（同一 path への「移動」）: 現ツリーの item を返して消化する。
+            let task = Task {
+                defer { progress.completedUnitCount = progress.totalUnitCount }
+                do {
+                    let tree = try await services.cache.current().tree
+                    let node = tree.node(at: oldPath)
+                    completion.value(
+                        node.map(FileProviderItem.init(node:))
+                            ?? FileProviderItem(node: .directory(path: oldPath, mtime: nil)),
+                        [], false, nil)
+                } catch {
+                    completion.value(nil, [], false, Self.wrapForCompletion(error))
+                }
+            }
+            progress.cancellationHandler = { task.cancel() }
+            return progress
+        }
+
+        let hasNewContents = changedFields.contains(.contents)
+        let boxedURL = UncheckedSendableBox(value: newContents)
+        let contentModified = item.contentModificationDate ?? nil
+        let isDirectory = ref.isDirectory
+        let task = Task {
+            defer { progress.completedUnitCount = progress.totalUnitCount }
+            do {
+                let current = try await services.cache.current()
+
+                if isDirectory {
+                    let prefix = oldPath + "/"
+                    var children: [(from: String, entry: ManifestFileEntry)] = []
+                    for (p, node) in current.tree.nodesByPath {
+                        guard p.hasPrefix(prefix), case .file(_, let entry) = node else { continue }
+                        children.append((from: p, entry: entry))
+                    }
+                    // 除外判定: 検証不能な新名 / 機密網（component 一致）/ ユーザパターンの
+                    // dir 一致（`<dir>/` 評価）→ subtree ごと同期対象外（実体はローカル温存）。
+                    let excluded: Bool
+                    if let newPath = validNewPath {
+                        if HardcodedIgnoreRules.shouldIgnore(relativePath: newPath) {
+                            excluded = true
+                        } else {
+                            let layered = try await services.ignore.layeredIgnore(
+                                tree: current.tree, anchor: current.anchor)
+                            excluded = layered.evaluate(newPath + "/") == .ignored
+                        }
+                    } else {
+                        excluded = true
+                    }
+                    if excluded {
+                        // ExcludedFromSync = ローカルで改名成立・subtree ごと同期対象外。
+                        // **マニフェストはここでは触らない** — SDK は除外時に「内容をダウンロード
+                        // してから deleteItem を発行」する契約で、先に entry を消すと dataless の
+                        // 子が materialize できない殻になる（5-4 実機で確定）。後追い deleteItem
+                        //（dir 再帰）は子のベースをツリー現行 sha で取るため追加の予約は不要 =
+                        // そのまま受理される。
+                        AppLogger.fileProvider.notice("modifyItem(move): dir excluded (excludedFromSync; cleanup via system deleteItem): \(oldPath, privacy: .private)")
+                        await services.virtualDirs.removeSubtree(at: oldPath)
+                        completion.value(nil, [], false, NSFileProviderError(.excludedFromSync))
+                        return
+                    }
+                    let newPath = validNewPath!  // excluded が nil ケースを吸収済み
+                    guard current.tree.node(at: newPath) == nil else {
+                        completion.value(nil, [], false, NSFileProviderError(.filenameCollision))
+                        return
+                    }
+                    guard !children.isEmpty else {
+                        // 仮想フォルダ（マニフェスト非表現）の改名 = ローカル受理のみで成立
+                        //（5-3 の空フォルダ姿勢を継承。id は新 path で振り直し = rebind）。
+                        // レジストリも subtree ごと追従 + 新 path を登録（旧ビルドで作られた
+                        // レジストリ未登録の仮想フォルダも rename を機に保護下へ入れる）。
+                        await services.virtualDirs.renameSubtree(from: oldPath, to: newPath)
+                        await services.virtualDirs.add(newPath)
+                        completion.value(
+                            FileProviderItem(node: .directory(path: newPath, mtime: nil)),
+                            [], false, nil)
+                        return
+                    }
+                    let descendants = children.map {
+                        (from: $0.from, to: newPath + "/" + $0.from.dropFirst(prefix.count),
+                         entry: $0.entry)
+                    }
+                    let oldMtime: Date? = {
+                        if case .directory(_, let mtime)? = current.tree.node(at: oldPath) { return mtime }
+                        return nil
+                    }()
+                    switch try await services.writer.moveDirectory(descendants: descendants) {
+                    case .moved:
+                        AppLogger.fileProvider.notice("modifyItem(move): dir moved (\(descendants.count) files): -> \(newPath, privacy: .private)")
+                        // 配下の仮想サブフォルダ（空 dir）のレジストリエントリも新 path へ追従
+                        await services.virtualDirs.renameSubtree(from: oldPath, to: newPath)
+                        completion.value(
+                            FileProviderItem(node: .directory(path: newPath, mtime: oldMtime)),
+                            [], false, nil)
+                    case .destinationOccupied:
+                        completion.value(nil, [], false, NSFileProviderError(.filenameCollision))
+                    case .sourceChanged(let path, _):
+                        AppLogger.fileProvider.notice("modifyItem(move): source changed under dir (retry later): \(path, privacy: .private)")
+                        completion.value(nil, [], false, Self.moveConflictError())
+                    }
+                    return
+                }
+
+                // ファイル: 除外判定は createItem と同一関数・同一優先順位を**新 path**へ適用
+                //（検証不能な新名 = validNewPath nil も除外へ合流）。
+                let excluded: Bool
+                if let newPath = validNewPath {
+                    let isTracked = current.tree.node(at: newPath) != nil
+                    let layered = try await services.ignore.layeredIgnore(
+                        tree: current.tree, anchor: current.anchor)
+                    excluded = IgnoreDecision.shouldSkip(
+                        relativePath: newPath, isAlreadyTracked: isTracked, matcher: layered)
+                } else {
+                    excluded = true
+                }
+                if excluded {
+                    // ExcludedFromSync = ローカルで改名成立・同期対象外。マニフェストはここでは
+                    // 触らない（先に entry を消すと dataless が materialize できない殻になる —
+                    // SDK は除外時に「内容ダウンロード → deleteItem」の順で後始末する）。
+                    // 後追い deleteItem の baseVersion は sha 形でない（ローカル保留変更の
+                    // 版スタンプ）ことを実機観測したため、この path を**後始末予約**に登録し、
+                    // deleteItem 側でツリー現行 sha をベースに受理する。
+                    await services.exclusionCleanups.add(oldPath)
+                    AppLogger.fileProvider.notice("modifyItem(move): excluded new name (excludedFromSync; cleanup reserved): \(oldPath, privacy: .private)")
+                    completion.value(nil, [], false, NSFileProviderError(.excludedFromSync))
+                    return
+                }
+                let newPath = validNewPath!  // excluded が nil ケースを吸収済み
+                if let node = current.tree.node(at: newPath), node.isDirectory {
+                    // kind 衝突（新 path にマニフェスト dir が実在）→ 名前バウンス
+                    completion.value(nil, [], false, NSFileProviderError(.filenameCollision))
+                    return
+                }
+                guard case .file(_, let entry)? = current.tree.node(at: oldPath) else {
+                    // 旧 entry がもう無い（stale id / 他デバイスが先に削除）
+                    completion.value(nil, [], false, NSFileProviderError(.noSuchItem))
+                    return
+                }
+                let outcome = try await services.writer.moveFile(
+                    from: oldPath, to: newPath, entry: entry,
+                    contentsURL: hasNewContents ? boxedURL.value : nil,
+                    contentModified: contentModified
+                )
+                switch outcome {
+                case .moved(let newEntry):
+                    // 返却 item は新 id（rebind）。newEntry は単一 move では必ず非 nil。
+                    let entry = newEntry ?? entry
+                    completion.value(
+                        FileProviderItem(node: .file(path: newPath, entry: entry)), [], false, nil)
+                case .destinationOccupied:
+                    completion.value(nil, [], false, NSFileProviderError(.filenameCollision))
+                case .sourceChanged(let path, _):
+                    AppLogger.fileProvider.notice("modifyItem(move): source changed (retry later): \(path, privacy: .private)")
+                    completion.value(nil, [], false, Self.moveConflictError())
+                }
+            } catch {
+                AppLogger.fileProvider.error("modifyItem(move) failed: \(String(describing: error), privacy: .private)")
+                completion.value(nil, [], false, Self.wrapForCompletion(error))
             }
         }
         progress.cancellationHandler = { task.cancel() }
@@ -535,6 +769,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     guard !expected.isEmpty else {
                         // 追跡ファイルなし = ローカル仮想フォルダ / 既に空・消滅済み。
                         // S3 非接触でローカル削除だけ成立させる（冪等成功）。
+                        await services.virtualDirs.removeSubtree(at: dirPath)
                         dirCompletion.value(nil)
                         return
                     }
@@ -547,6 +782,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     switch try await services.writer.deleteDirectory(expecting: expected) {
                     case .removed(let count):
                         AppLogger.fileProvider.notice("deleteItem(dir): removed \(count) files under \(dirPath, privacy: .private)")
+                        await services.virtualDirs.removeSubtree(at: dirPath)
                         dirCompletion.value(nil)
                     case .rejected(let path, _):
                         // 配下にベースより進んだファイル（リモート先行）→ 1 件目で中断済み
@@ -558,31 +794,52 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     }
                 } catch {
                     AppLogger.fileProvider.error("deleteItem(dir) failed: \(String(describing: error), privacy: .private)")
-                    dirCompletion.value(error)
+                    dirCompletion.value(Self.wrapForCompletion(error))
                 }
             }
             progress.cancellationHandler = { task.cancel() }
             return progress
         }
-        let baseSha = FileProviderWritePolicy.baseSha(fromContentVersion: version.contentVersion)
+        let baseSha = FileProviderWritePolicy.baseSha(
+            contentVersion: version.contentVersion, metadataVersion: version.metadataVersion)
         let completion = UncheckedSendableBox(value: completionHandler)
         let task = Task {
             defer { progress.completedUnitCount = progress.totalUnitCount }
             do {
-                switch try await services.writer.deleteFile(path: ref.path, baseSha: baseSha) {
+                // 除外後始末の予約（M5 Phase 5-4）: `ExcludedFromSync` を返した path への
+                // システム後始末 deleteItem は baseVersion が sha 形でない（ローカル保留変更の
+                // 版スタンプ・実機観測）ため、ベースをツリー現行 sha に切り替えて受理する。
+                // RMW ガード自体は維持 = 読み替え後にリモートが進んでいれば従来どおり拒否。
+                var effectiveBase = baseSha
+                let isCleanup = await services.exclusionCleanups.contains(ref.path)
+                if isCleanup,
+                   case .file(_, let entry)? =
+                       (try await services.cache.current()).tree.node(at: ref.path) {
+                    effectiveBase = entry.sha256
+                }
+                switch try await services.writer.deleteFile(path: ref.path, baseSha: effectiveBase) {
                 case .removed, .alreadyGone:
+                    if isCleanup {
+                        await services.exclusionCleanups.removeSubtree(at: ref.path)
+                        AppLogger.fileProvider.notice("deleteItem: exclusion cleanup completed: \(ref.path, privacy: .private)")
+                    }
                     completion.value(nil)
                 case .rejected(let remote):
                     // リモートがベースより進んでいた → 削除拒否 + 最新 item を添える
                     // （システムが最新版を復元する。「データ損失 < 重複」）。
-                    AppLogger.fileProvider.notice("deleteItem: rejected (remote changed since base): \(ref.path, privacy: .private)")
+                    // 診断のため「ベース不明（nil）」と「sha 不一致」を区別してログする
+                    //（5-4 PoC で ExcludedFromSync 後のシステム deleteItem が非 sha 形の
+                    // baseVersion を渡す事例を観測 — 除外系の後始末は自前除去に変更済みだが、
+                    // 将来の同種調査のため区別を残す）。
+                    let reason = baseSha == nil ? "base unknown" : "remote changed since base"
+                    AppLogger.fileProvider.notice("deleteItem: rejected (\(reason, privacy: .public)): \(ref.path, privacy: .private)")
                     completion.value(NSError.fileProviderErrorForRejectedDeletion(
                         of: FileProviderItem(node: .file(path: ref.path, entry: remote))
                     ))
                 }
             } catch {
                 AppLogger.fileProvider.error("deleteItem failed: \(String(describing: error), privacy: .private)")
-                completion.value(error)
+                completion.value(Self.wrapForCompletion(error))
             }
         }
         progress.cancellationHandler = { task.cancel() }
@@ -610,12 +867,30 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         return FileProviderEnumerator(dirPath: ref.path, services: services)
     }
 
-    private static func renameUnsupportedError() -> Error {
+    /// completion へ渡すエラーを SDK 規約ドメイン（NSCocoaErrorDomain / NSFileProviderErrorDomain）
+    /// へ包む。規約外ドメイン（SyncError / MoveError 等の Swift エラー）を素通しすると
+    /// fileproviderd が CRIT fault を吐く（M5 Phase 5-4 実機で観測。挙動は同じ一時エラー扱い
+    /// だが規約違反）。SDK ヘッダの指示どおり NSXPCConnectionReplyInvalid + NSUnderlyingErrorKey。
+    private static func wrapForCompletion(_ error: Error) -> Error {
+        let ns = error as NSError
+        if ns.domain == NSCocoaErrorDomain || ns.domain == NSFileProviderErrorDomain {
+            return error
+        }
+        return NSError(
+            domain: NSCocoaErrorDomain, code: NSXPCConnectionReplyInvalid,
+            userInfo: [NSUnderlyingErrorKey: ns]
+        )
+    }
+
+    /// move の `.sourceChanged`（リモート先行で新旧両存のまま中断）用の一時エラー。
+    /// fileproviderd は任意のエラーを一時扱いで再試行する — リモート変化の取り込みで
+    /// baseVersion が追いつけば再試行の move が自己回復する（`ExtensionWriter.MoveOutcome` 参照）。
+    private static func moveConflictError() -> Error {
         NSError(
-            domain: NSCocoaErrorDomain, code: NSFeatureUnsupportedError,
+            domain: NSCocoaErrorDomain, code: NSFileWriteUnknownError,
             userInfo: [
                 NSLocalizedDescriptionKey:
-                    String(localized: "Renaming or moving items in Tide is not supported yet.")
+                    String(localized: "The item changed remotely while moving. The move will be retried.")
             ]
         )
     }

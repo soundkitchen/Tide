@@ -769,6 +769,175 @@ final class ManifestUpdaterTests: XCTestCase {
         XCTAssertNil(declared)
     }
 
+    // MARK: - moveFileEntries（rename/reparent・M5 Phase 5-4）
+
+    private func makeMove(
+        from: String, to: String, base: String, newSha: String? = nil
+    ) -> ManifestFileMove {
+        ManifestFileMove(
+            fromPath: from, toPath: to, base: base,
+            newEntry: makeManifestEntry(sha: newSha ?? base)
+        )
+    }
+
+    /// クロスシャード move の基本形: add → remove の二相で新 entry が現れ旧 entry が消える。
+    func testMoveAcrossShards() async throws {
+        let store = InMemoryManifestStore()
+        let counter = SignalCounter()
+        let (from, to) = findOrderedDifferentShardPair()
+        var shard = ManifestShard.empty(id: ManifestSharding.shardId(for: from))
+        shard.files[from] = makeManifestEntry(sha: "content")
+        await store.seed(shard: shard)
+
+        let outcome = try await makeUpdater(store: store, counter: counter)
+            .moveFileEntries([makeMove(from: from, to: to, base: "content")])
+
+        guard case .moved(let removed) = outcome else {
+            return XCTFail("expected .moved, got \(outcome)")
+        }
+        XCTAssertEqual(removed, [from])
+        XCTAssertEqual(counter.count, 2)  // add 1 コミット + remove 1 コミット
+        let fromShard = await store.shards[ManifestSharding.shardId(for: from)]
+        XCTAssertNil(fromShard?.files[from])
+        let toShard = await store.shards[ManifestSharding.shardId(for: to)]
+        XCTAssertEqual(toShard?.files[to]?.sha256, "content")
+    }
+
+    /// 同一シャード内 move（from/to が同シャード）も二相で正しく収束する。
+    func testMoveWithinSameShard() async throws {
+        let store = InMemoryManifestStore()
+        let counter = SignalCounter()
+        let (from, to) = findSameShardPair()
+        let shardId = ManifestSharding.shardId(for: from)
+        var shard = ManifestShard.empty(id: shardId)
+        shard.files[from] = makeManifestEntry(sha: "content")
+        await store.seed(shard: shard)
+
+        let outcome = try await makeUpdater(store: store, counter: counter)
+            .moveFileEntries([makeMove(from: from, to: to, base: "content")])
+
+        guard case .moved(let removed) = outcome else {
+            return XCTFail("expected .moved, got \(outcome)")
+        }
+        XCTAssertEqual(removed, [from])
+        let stored = await store.shards[shardId]
+        XCTAssertNil(stored?.files[from])
+        XCTAssertEqual(stored?.files[to]?.sha256, "content")
+    }
+
+    /// 移動先に**別内容**の entry が実在 → destinationOccupied で中断・remove 未実施 = 元は無傷。
+    func testMoveDestinationOccupiedAborts() async throws {
+        let store = InMemoryManifestStore()
+        let counter = SignalCounter()
+        let (from, to) = findSameShardPair()
+        let shardId = ManifestSharding.shardId(for: from)
+        let theirs = makeManifestEntry(sha: "theirs")
+        var shard = ManifestShard.empty(id: shardId)
+        shard.files[from] = makeManifestEntry(sha: "content")
+        shard.files[to] = theirs
+        await store.seed(shard: shard)
+
+        let outcome = try await makeUpdater(store: store, counter: counter)
+            .moveFileEntries([makeMove(from: from, to: to, base: "content")])
+
+        XCTAssertEqual(outcome, .destinationOccupied(path: to, remote: theirs))
+        XCTAssertEqual(counter.count, 0)
+        let stored = await store.shards[shardId]
+        XCTAssertEqual(stored?.files[from]?.sha256, "content")  // 元は無傷
+        XCTAssertEqual(stored?.files[to], theirs)
+    }
+
+    /// 移動先に**同一 sha** の entry が実在（冪等再入 / 同一内容の先客）→ add は素通しで完走。
+    func testMoveDestinationSameShaIsIdempotent() async throws {
+        let store = InMemoryManifestStore()
+        let counter = SignalCounter()
+        let (from, to) = findSameShardPair()
+        let shardId = ManifestSharding.shardId(for: from)
+        var shard = ManifestShard.empty(id: shardId)
+        shard.files[from] = makeManifestEntry(sha: "content")
+        shard.files[to] = makeManifestEntry(sha: "content")
+        await store.seed(shard: shard)
+
+        let outcome = try await makeUpdater(store: store, counter: counter)
+            .moveFileEntries([makeMove(from: from, to: to, base: "content")])
+
+        guard case .moved(let removed) = outcome else {
+            return XCTFail("expected .moved, got \(outcome)")
+        }
+        XCTAssertEqual(removed, [from])
+        let stored = await store.shards[shardId]
+        XCTAssertNil(stored?.files[from])
+        XCTAssertEqual(stored?.files[to]?.sha256, "content")
+    }
+
+    /// remove フェーズで旧 entry がベースから進んでいた → sourceChanged・新旧両存のまま
+    /// （自動 rollback しない）。
+    func testMoveSourceChangedLeavesBothPaths() async throws {
+        let store = InMemoryManifestStore()
+        let counter = SignalCounter()
+        let (from, to) = findSameShardPair()
+        let shardId = ManifestSharding.shardId(for: from)
+        let theirs = makeManifestEntry(sha: "theirs")
+        var shard = ManifestShard.empty(id: shardId)
+        shard.files[from] = theirs  // ベース "mine" とは別内容に進んでいる
+        await store.seed(shard: shard)
+
+        let outcome = try await makeUpdater(store: store, counter: counter)
+            .moveFileEntries([makeMove(from: from, to: to, base: "mine", newSha: "mine")])
+
+        guard case .sourceChanged(let path, let remote, let removedPaths) = outcome else {
+            return XCTFail("expected .sourceChanged, got \(outcome)")
+        }
+        XCTAssertEqual(path, from)
+        XCTAssertEqual(remote, theirs)
+        XCTAssertEqual(removedPaths, [])
+        let stored = await store.shards[shardId]
+        XCTAssertEqual(stored?.files[from], theirs)  // 旧 = リモート版のまま温存
+        XCTAssertEqual(stored?.files[to]?.sha256, "mine")  // 新 = 追加済み（両存）
+    }
+
+    /// 完了後の再入（同じ move の再実行）: add は同一 sha 素通し・remove は不在冪等 →
+    /// removedPaths 空の .moved（marker の二重発行なし）。
+    func testMoveIdempotentRerun() async throws {
+        let store = InMemoryManifestStore()
+        let counter = SignalCounter()
+        let (from, to) = findSameShardPair()
+        var shard = ManifestShard.empty(id: ManifestSharding.shardId(for: from))
+        shard.files[from] = makeManifestEntry(sha: "content")
+        await store.seed(shard: shard)
+        let updater = makeUpdater(store: store, counter: counter)
+        let move = makeMove(from: from, to: to, base: "content")
+
+        guard case .moved(let first) = try await updater.moveFileEntries([move]) else {
+            return XCTFail("first run should move")
+        }
+        XCTAssertEqual(first, [from])
+
+        guard case .moved(let second) = try await updater.moveFileEntries([move]) else {
+            return XCTFail("rerun should be idempotent .moved")
+        }
+        XCTAssertEqual(second, [])
+    }
+
+    /// add フェーズの 412 リトライ（並行更新の一時失敗）→ 再取得・再評価して完走。
+    func testMoveAddPhase412RetryThenSuccess() async throws {
+        let store = InMemoryManifestStore()
+        let counter = SignalCounter()
+        let (from, to) = findSameShardPair()
+        var shard = ManifestShard.empty(id: ManifestSharding.shardId(for: from))
+        shard.files[from] = makeManifestEntry(sha: "content")
+        await store.seed(shard: shard)
+        await store.failNextPutShard(times: 1)
+
+        let outcome = try await makeUpdater(store: store, counter: counter)
+            .moveFileEntries([makeMove(from: from, to: to, base: "content")])
+
+        guard case .moved(let removed) = outcome else {
+            return XCTFail("expected .moved, got \(outcome)")
+        }
+        XCTAssertEqual(removed, [from])
+    }
+
     /// 412 リトライ（並行更新の一時失敗）→ 再取得・再評価して成功。発火は 1 回。
     func testBatchRemove412RetryThenSuccess() async throws {
         let store = InMemoryManifestStore()
