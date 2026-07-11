@@ -12,13 +12,13 @@
         }
       }
     },
-    "Renaming or moving items in Tide is not supported yet." : {
+    "The item changed remotely while moving. The move will be retried." : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Tide での名称変更・移動にはまだ対応していません。"
+            "value" : "移動中に項目がリモートで変更されました。移動は自動的に再試行されます。"
           }
         }
       }

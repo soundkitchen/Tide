@@ -258,10 +258,10 @@ symlink を辿り、リンク先（例: `~/.ssh/id_rsa`）の中身を S3 へ送
 - **bucket キー**: `load(bucket:)` は現 bucket 一致時のみ採用（別バケットの世代で diff しない）。スキーマ不一致・壊れは nil（cold 扱い）。
 - **取り込みゲート**: 世代へ入るデータは `ManifestSnapshotLoader` が `validateShardId` / `validateRelativePath` を通した後のもののみ（`ManifestReader.read` と同一のセキュリティゲート）。さらに**読込時（`ManifestGenerationLog.load`）にも全世代の path を `validateRelativePath` で再検証**し、1 件でも不正なら全体を破棄（cold 扱い）— ディスク上のファイルはプロセス外で改ざん/破損しうるため、書込み時ゲートだけでは持ち越し経路（`load(previous:)` は検証済み前提の無検証コピー）を保証できない（PR #51 レビュー #3・2026-07-04）。
 
-## L17. File Provider 書込経路のゲート（M5 Phase 5-2〜5-3）
+## L17. File Provider 書込経路のゲート（M5 Phase 5-2〜5-4）
 
-**Status: Mitigated (2026-07-06, M5 Phase 5-2 / 2026-07-09, Phase 5-3 で createItem・dir 再帰削除へ拡大)** —
-FP 拡張の書込（deleteItem / modifyItem / createItem）は `ExtensionWriter` に集約し、以下のゲートを全経路で通す:
+**Status: Mitigated (2026-07-06, M5 Phase 5-2 / 2026-07-09, Phase 5-3 で createItem・dir 再帰削除へ拡大 / 2026-07-11, Phase 5-4 で rename/reparent へ拡大)** —
+FP 拡張の書込（deleteItem / modifyItem / createItem / move）は `ExtensionWriter` に集約し、以下のゲートを全経路で通す:
 - item identifier → path 変換直後の `PathValidator.validateRelativePath`（conflict copy 名も同様）。
   createItem は加えて filename 起因の構造破壊を `FileProviderWritePolicy.childPath` で構造的に拒否
   （空 / `.` / `..` / `/` 含み / NUL）し、検証不能な名前は `ExcludedFromSync` = ローカル温存・S3 非汚染
@@ -278,3 +278,12 @@ FP 拡張の書込（deleteItem / modifyItem / createItem）は `ExtensionWriter
   ユーザ `.syncignore` も FSEvents モードと同一の `IgnoreDecision.shouldSkip`（未追跡のみ・
   `.syncignore` 自身は除外しない）で適用 — `.syncignore` 本体はマニフェスト宣言の versionId 固定 +
   全バイト SHA-256 検証で取得する（`ManifestIgnoreCache`・改ざんされた層構成で除外判定しない）
+- **rename/reparent（M5 Phase 5-4・2026-07-11）も同一ゲート**: 新 path は `childPath` +
+  `validateRelativePath`・除外判定は新 path へ再適用（除外名への改名 = `ExcludedFromSync` +
+  後始末予約 `PersistedPathSet` — 読み替えは「予約済み path かつ base が両 version から
+  復元不能（nil）」のときだけツリー現行 sha ベースで受理し、それ以外は itemVersion 由来
+  ベースの「根拠なしに消さない」を維持。PR #60 レビュー #1 で nil 限定に縮小）。
+  `S3Client.copyObject` は versionId 固定 + SSE-S3 明示で、**最新版フォールバックを禁止**
+  （コピーは内容検証不能 = 宣言 sha と実体が乖離した entry によるマニフェスト真実の破壊を防ぐ）。
+  `PersistedPathSet`（仮想フォルダ温存 / 後始末予約）は世代ログと同じ at-rest 規約 =
+  App Group Caches・bucket キー・読込時 `validateRelativePath` 再適用・壊れは全体破棄

@@ -48,6 +48,31 @@ final class FileProviderWritePolicyTests: XCTestCase {
         XCTAssertNil(FileProviderWritePolicy.baseSha(fromContentVersion: Data([0xFF, 0xFE, 0x00])))
     }
 
+    // MARK: - baseSha の metadataVersion フォールバック（rebind 対応・M5 Phase 5-4）
+
+    /// contentVersion が sha 形でない（rebind item のローカル版スタンプ）とき、
+    /// metadataVersion から復元する。両方 nil で初めてベース不明。
+    func testBaseShaFallsBackToMetadataVersion() {
+        let sha = String(repeating: "0123456789abcdef", count: 4)
+        // contentVersion がローカルスタンプ（非 sha）でも metadataVersion から復元
+        XCTAssertEqual(
+            FileProviderWritePolicy.baseSha(
+                contentVersion: Data("local-stamp-1".utf8), metadataVersion: Data(sha.utf8)),
+            sha
+        )
+        // contentVersion が正常ならそちらを優先
+        XCTAssertEqual(
+            FileProviderWritePolicy.baseSha(
+                contentVersion: Data(sha.utf8), metadataVersion: Data("dir".utf8)),
+            sha
+        )
+        // 両方復元不能 = ベース不明
+        XCTAssertNil(
+            FileProviderWritePolicy.baseSha(
+                contentVersion: Data("x".utf8), metadataVersion: nil)
+        )
+    }
+
     // MARK: - childPath（createItem のパス合成・M5 Phase 5-3）
 
     func testChildPathJoinsParentAndFilename() {

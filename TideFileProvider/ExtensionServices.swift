@@ -21,6 +21,17 @@ struct ExtensionServices: Sendable {
     /// マニフェスト宣言の `.syncignore` 群を S3 から取得して層状マッチャを組む（世代キー +
     /// sha メモ化キャッシュ）。機密網（`HardcodedIgnoreRules`）は I/O 不要なのでこの外で判定する。
     let ignore: ManifestIgnoreCache
+    /// 仮想フォルダ（createItem 仮想受理・マニフェスト非表現）の温存レジストリ（M5 Phase 5-4）。
+    /// `item(for:)` / enumerator が合成 dir を返すのはここにあるパスだけ — マニフェスト外の
+    /// dir id へ無条件に合成 dir を返すと、dir move/削除の reconcile 中の照会で消えたはずの
+    /// 旧 dir が空フォルダとして復活する（5-4 実機 PoC で確定）。
+    let virtualDirs: PersistedPathSet
+    /// 除外後始末の予約（M5 Phase 5-4）。`ExcludedFromSync` を返した path を登録し、システムが
+    /// 「内容ダウンロード → deleteItem」の後始末を発行してきたとき（その baseVersion は sha 形で
+    /// ないことを実機観測 = ローカル保留変更の版スタンプ）、**ツリー現行 sha ベースの RMW ガード
+    /// 付き削除**として受理する根拠にする。除外以外の deleteItem は従来どおり itemVersion 由来
+    /// ベースで裁く（「根拠なしに消さない」の維持）。
+    let exclusionCleanups: PersistedPathSet
     /// workingSet への自己 signal。現状の呼び手は機会的自己 signal（`onNewGeneration`）のみ。
     /// Phase 5-2 以降の書込通知（拡張自身の書込後にシステムへ変化を取りに来させる）の土台として
     /// 公開している。※「delete 確定 → signal → 新セッションで update」の 2 相配信パターンは
@@ -119,8 +130,17 @@ struct ExtensionServices: Sendable {
                 guard result != nil else { return nil }
                 return .init(sha256: HashCalculator.hex(hasher.finalize()), prefix: prefix)
             }
+            let virtualDirsURL = try? PersistedPathSet.defaultURL(
+                filename: "fileprovider-virtual-dirs.json")
+            let cleanupsURL = try? PersistedPathSet.defaultURL(
+                filename: "fileprovider-exclusion-cleanups.json")
+            if virtualDirsURL == nil || cleanupsURL == nil {
+                AppLogger.fileProvider.error("Extension: path-set registry URL unavailable (persisting disabled)")
+            }
             return ExtensionServices(
                 s3: s3, cache: cache, writer: writer, ignore: ignore,
+                virtualDirs: PersistedPathSet(bucket: bucket, fileURL: virtualDirsURL),
+                exclusionCleanups: PersistedPathSet(bucket: bucket, fileURL: cleanupsURL),
                 signalWorkingSet: signalWorkingSet
             )
         } catch {

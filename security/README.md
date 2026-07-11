@@ -90,7 +90,7 @@ F4 の是正内容（2026-06-11・M4 Sync Activity 対応に同梱）: `recentEr
 | L14 | 設定 export/import の同梱範囲（プライバシー境界） | ✅ Reviewed（2026-07-01・Issue #29。AWS 認証情報・deviceId を構造的に含めない非機密設定のみ JSON 往復。`SettingsTransferTests` がシークレット非混入を回帰固定） |
 | L15 | 削除済み一覧キャッシュの at-rest 内容（プライバシー境界） | ✅ Reviewed（2026-07-01・Issue #29 (b)。Caches に削除済みパス + 版メタ + bucket のみ・認証情報なし・派生データで factoryReset 消去・bucket キー） |
 | L16 | File Provider 世代ログの at-rest 内容（プライバシー境界） | ✅ Reviewed（2026-07-04・M5 Phase 4。group Caches にマニフェスト由来メタデータ + bucket のみ・認証情報なし・派生データで factoryReset/make reset 消去・bucket キー・PathValidator ゲートを書込み時 + 読込時の両方で適用） |
-| L17 | File Provider 書込経路のゲート | ✅ Mitigated（2026-07-06・M5 Phase 5-2 / 2026-07-09・Phase 5-3 で createItem・dir 再帰削除へ拡大。PathValidator + `childPath` 構造検証・サイズ上限・SSE-S3・NoFollowFileReader・RMW 内ベースガード。**機密網/symlink/`.syncignore` の除外を FP createItem でも強制** = `ExcludedFromSync` でローカル温存・S3 非汚染） |
+| L17 | File Provider 書込経路のゲート | ✅ Mitigated（2026-07-06・M5 Phase 5-2 / 2026-07-09・Phase 5-3 で createItem・dir 再帰削除へ拡大 / 2026-07-11・Phase 5-4 で rename/reparent へ拡大。PathValidator + `childPath` 構造検証・サイズ上限・SSE-S3・NoFollowFileReader・RMW 内ベースガード・copyObject は versionId 固定 + 最新版フォールバック禁止。**機密網/symlink/`.syncignore` の除外を FP の作成・改名でも強制** = `ExcludedFromSync` でローカル温存・S3 非汚染） |
 
 凡例: ✅ Fixed / 🟡 Partial / ⏸ Deferred / 🔴 未対応
 

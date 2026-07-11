@@ -42,17 +42,23 @@ final class FileProviderItem: NSObject, NSFileProviderItem, @unchecked Sendable 
     var capabilities: NSFileProviderItemCapabilities {
         switch node {
         case .directory(let path, _):
-            // M5 Phase 5-3: 配下への新規作成と dir 削除（再帰）を解放。root は削除不可。
-            // 改名/移動（.allowsRenaming/.allowsReparenting）は Phase 5-4。
+            // M5 Phase 5-3: 配下への新規作成と dir 削除（再帰）、Phase 5-4: 改名/移動を解放。
+            // root は削除・改名・移動不可。
             var caps: NSFileProviderItemCapabilities = [
                 .allowsReading, .allowsContentEnumerating, .allowsAddingSubItems,
             ]
-            if !path.isEmpty { caps.insert(.allowsDeleting) }
+            if !path.isEmpty {
+                caps.insert(.allowsDeleting)
+                caps.insert(.allowsRenaming)
+                caps.insert(.allowsReparenting)
+            }
             return caps
         case .file:
-            // M5 Phase 5-2: 内容編集と削除を解放（改名/移動 = .allowsRenaming/.allowsReparenting
-            // は Phase 5-4。未許可なので Finder 上はグレーアウトされる）。
-            return [.allowsReading, .allowsWriting, .allowsDeleting]
+            // M5 Phase 5-2: 内容編集と削除、Phase 5-4: 改名/移動を解放。
+            return [
+                .allowsReading, .allowsWriting, .allowsDeleting,
+                .allowsRenaming, .allowsReparenting,
+            ]
         }
     }
 
@@ -68,6 +74,11 @@ final class FileProviderItem: NSObject, NSFileProviderItem, @unchecked Sendable 
             return NSFileProviderItemVersion(contentVersion: content, metadataVersion: Data(meta.utf8))
         case .file:
             // file は content == metadata（sha256）— 内容変化がメタ変化でもある。
+            // **この同一性は load-bearing**（M5 Phase 5-4）: rebind（move の返却 item で id を
+            // 変えた）item への次操作は、システムが渡す baseVersion の contentVersion が
+            // ローカル版スタンプに差し替わる（実機確定）。`FileProviderWritePolicy.baseSha` は
+            // metadataVersion から sha を復元してベースガードを維持するため、file の
+            // metadataVersion を sha 以外に変えると rebind 後の削除/編集が全滅する。
             return NSFileProviderItemVersion(contentVersion: content, metadataVersion: content)
         }
     }

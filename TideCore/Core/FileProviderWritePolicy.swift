@@ -31,6 +31,18 @@ public enum FileProviderWritePolicy {
         return s
     }
 
+    /// `NSFileProviderItemVersion` の contentVersion / metadataVersion の両方から 3-way ベースを
+    /// 復元する（M5 Phase 5-4）。**metadataVersion フォールバックの理由**: rebind（modifyItem の
+    /// 返却 item で id を変えた move）で生まれた item への次操作は、システムが渡す baseVersion の
+    /// contentVersion が sha 形でない（ローカル保留変更の版スタンプとみられる・実機確定）。
+    /// Tide の file item は metadataVersion == contentVersion（同じ sha）で発行しているため、
+    /// metadataVersion 側から復元できれば本来のベースガードがそのまま機能する。
+    /// 両方 nil = 本当にベース不明（呼び出し側の拒否側ポリシーへ）。
+    public static func baseSha(contentVersion: Data?, metadataVersion: Data?) -> String? {
+        baseSha(fromContentVersion: contentVersion)
+            ?? baseSha(fromContentVersion: metadataVersion)
+    }
+
     /// createItem（M5 Phase 5-3）の「親ディレクトリ相対パス + filename」→ 相対 POSIX パス。
     /// filename はデーモン供給値だがパス合成の入口なので構造的に検証する:
     /// 空 / "." / ".." / `/` 含み（ネスト注入）/ NUL 含みは nil = 合成不能。

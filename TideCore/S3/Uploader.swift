@@ -330,6 +330,36 @@ public enum ShardBatchRemoveOutcome: Equatable, Sendable {
     case rejected(path: String, remote: ManifestFileEntry, removedPaths: [String])
 }
 
+/// 1 ファイルぶんの move 指示（FP 拡張の rename/reparent 用・M5 Phase 5-4）。
+public struct ManifestFileMove: Sendable {
+    public let fromPath: String
+    public let toPath: String
+    /// 旧 entry の期待 sha256（remove フェーズのベースガード。「根拠なしに消さない」）。
+    public let base: String
+    /// 新 path に書く entry（sha/size/mtime は旧 entry 由来・versionId/etag はコピー結果）。
+    public let newEntry: ManifestFileEntry
+
+    public init(fromPath: String, toPath: String, base: String, newEntry: ManifestFileEntry) {
+        self.fromPath = fromPath
+        self.toPath = toPath
+        self.base = base
+        self.newEntry = newEntry
+    }
+}
+
+/// `moveFileEntries` の結果（M5 Phase 5-4）。
+public enum ShardMoveOutcome: Equatable, Sendable {
+    /// 全 move 完了。`removedPaths` は旧 entry を実際に除去したパス
+    /// （呼び出し側が旧キーへ delete marker を発行する対象。冪等再入では空になり得る）。
+    case moved(removedPaths: [String])
+    /// add フェーズで移動先に**別内容**の entry が実在 = 衝突（中断・remove 未実施 = 元は無傷。
+    /// 先行シャードで add 済みの分は移動先の重複として残る = 冪等リトライ / 次回 pull で収束）。
+    case destinationOccupied(path: String, remote: ManifestFileEntry)
+    /// remove フェーズで旧 entry がベースから進んでいた = 中断（新旧**両存**のまま返す。
+    /// 自動 rollback はしない — rollback 自体が新たな競合窓を作るため。「データ損失 < 重複」）。
+    case sourceChanged(path: String, remote: ManifestFileEntry, removedPaths: [String])
+}
+
 /// シャードと index.json を楽観的ロックで更新する。
 /// アプリ（Uploader 経由）と File Provider 拡張（M5 Phase 5〜）が共有する
 /// **マニフェスト書込の唯一のチョークポイント**。
@@ -524,6 +554,78 @@ public struct ManifestUpdater: Sendable {
     private enum BatchShardOutcome {
         case committed([String])
         case rejected(path: String, remote: ManifestFileEntry)
+    }
+
+    /// FP 拡張の rename/reparent（M5 Phase 5-4）用: 複数 entry の path 移動を
+    /// **二相のシャード単位バッチ RMW** で行う。
+    ///
+    /// - **Phase A（add）**: 移動先シャードごとに新 entry を書く。**全シャードの add が完了する
+    ///   まで remove を始めない** — どこで中断・クラッシュしても中間状態が常に「新旧両存
+    ///   （重複）」側に倒れる（「データ損失 < 重複」）。移動先に**別内容**の entry が実在したら
+    ///   `.destinationOccupied` で中断（同一 sha は冪等再入とみなし素通し）。
+    /// - **Phase B（remove）**: `removeFileEntries` に委譲（5-3 と同じベースガード・
+    ///   拒否で即中断）。拒否は `.sourceChanged` = 新旧両存のまま返す（自動 rollback は
+    ///   新たな競合窓を作るため不採用）。
+    /// - 同一シャードが from/to 両方に関与する場合も 2 回の RMW に分かれる（往復は最大
+    ///   2×シャード数で有界。1 RMW に畳むより中間状態の単純さを優先）。
+    ///
+    /// 呼び出し側の前提: 本体オブジェクトのコピー（copyObject）は **add より前に**完了して
+    /// いること（entry が指す versionId が実在してから可視化する）。
+    public func moveFileEntries(_ moves: [ManifestFileMove]) async throws -> ShardMoveOutcome {
+        // Phase A: add（移動先シャード順・決定的）
+        let addGroups = Dictionary(grouping: moves) { ManifestSharding.shardId(for: $0.toPath) }
+        for shardId in addGroups.keys.sorted() {
+            let group = addGroups[shardId]!.sorted { $0.toPath < $1.toPath }
+            let outcome = try await withConditionalRetry("shard \(shardId)") {
+                () -> AddShardOutcome in
+                let fetched = try await store.getShard(shardId)
+                var shard = fetched?.value ?? ManifestShard.empty(id: shardId)
+                let etag = fetched?.etag
+                var changed = false
+                for move in group {
+                    if let existing = shard.files[move.toPath] {
+                        if existing.sha256 == move.newEntry.sha256 { continue }  // 冪等再入
+                        return .occupied(path: move.toPath, remote: existing)
+                    }
+                    shard.files[move.toPath] = move.newEntry
+                    changed = true
+                }
+                guard changed else {
+                    // 全て追加済み = no-op。分断の後始末だけ突合（removeFileEntries と同じ規約）。
+                    if let fetchedEtag = etag {
+                        try await repairIndexDeclarationIfStale(
+                            shardId: shardId, fetchedEtag: fetchedEtag, count: shard.files.count
+                        )
+                    } else {
+                        try await removeDanglingDeclarationIfShardAbsent(shardId: shardId)
+                    }
+                    return .committed
+                }
+                try await commitShardWrite(shardId: shardId, shard: shard, etag: etag)
+                return .committed
+            }
+            if case .occupied(let path, let remote) = outcome {
+                return .destinationOccupied(path: path, remote: remote)
+            }
+        }
+        // Phase B: remove（5-3 のバッチ削除へ委譲 = ベースガード・拒否で即中断・
+        // 空シャード削除/index 突合も同一機構）
+        var expectedByPath: [String: String] = [:]
+        for move in moves {
+            expectedByPath[move.fromPath] = move.base
+        }
+        switch try await removeFileEntries(expecting: expectedByPath) {
+        case .removed(let paths):
+            return .moved(removedPaths: paths)
+        case .rejected(let path, let remote, let removedPaths):
+            return .sourceChanged(path: path, remote: remote, removedPaths: removedPaths)
+        }
+    }
+
+    /// `moveFileEntries` の add フェーズ 1 シャードぶんの RMW 結果（内部専用）。
+    private enum AddShardOutcome {
+        case committed
+        case occupied(path: String, remote: ManifestFileEntry)
     }
 
     public func updateShard(
