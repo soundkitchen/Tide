@@ -280,8 +280,9 @@ FP 拡張の書込（deleteItem / modifyItem / createItem / move）は `Extensio
   全バイト SHA-256 検証で取得する（`ManifestIgnoreCache`・改ざんされた層構成で除外判定しない）
 - **rename/reparent（M5 Phase 5-4・2026-07-11）も同一ゲート**: 新 path は `childPath` +
   `validateRelativePath`・除外判定は新 path へ再適用（除外名への改名 = `ExcludedFromSync` +
-  後始末予約 `PersistedPathSet` — 予約済み path の後始末 deleteItem だけツリー現行 sha ベースで
-  受理し、それ以外は itemVersion 由来ベースの「根拠なしに消さない」を維持）。
+  後始末予約 `PersistedPathSet` — 読み替えは「予約済み path かつ base が両 version から
+  復元不能（nil）」のときだけツリー現行 sha ベースで受理し、それ以外は itemVersion 由来
+  ベースの「根拠なしに消さない」を維持。PR #60 レビュー #1 で nil 限定に縮小）。
   `S3Client.copyObject` は versionId 固定 + SSE-S3 明示で、**最新版フォールバックを禁止**
   （コピーは内容検証不能 = 宣言 sha と実体が乖離した entry によるマニフェスト真実の破壊を防ぐ）。
   `PersistedPathSet`（仮想フォルダ温存 / 後始末予約）は世代ログと同じ at-rest 規約 =
