@@ -118,9 +118,10 @@ macOS のクリーンインストール後の復旧を主目的とした、Dropb
 - ✅ Phase 2: App Group 移設 + App Sandbox 化 + security-scoped bookmark（PR #49）
 - ✅ Phase 3: 読み取り materialize PoC（dataless → 開いた瞬間 S3 取得・PR #50）
 - ✅ Phase 4: 増分列挙 + リモート追従（世代 SyncAnchor + `enumerateChanges`・PR #51）
-- ⏳ Phase 5: 双方向書込（「拡張 = 第 3 のデバイス」方式）— 5-0 signal チョークポイント（PR #56）/
-  5-1 kind 変化対応（PR #57）/ 5-2 書込 PoC = deleteItem + modifyItem（PR #58）マージ済み、
-  5-3 createItem + dir 再帰削除 実装済み（実機受け入れ待ち）、残 = 5-4 rename/reparent
+- ✅ Phase 5: 双方向書込（「拡張 = 第 3 のデバイス」方式）— 5-0 signal チョークポイント（PR #56）/
+  5-1 kind 変化対応（PR #57）/ 5-2 書込 PoC = deleteItem + modifyItem（PR #58）/
+  5-3 createItem + dir 再帰削除（PR #59）/ 5-4 rename/reparent（PR #60）全マージ・
+  実機受け入れ済み（2026-07-11）。書込系コールバックはこれで全対応
 - ⏸ 以降: FSEvents モードとの並走 UI / soak（#40）後の既定化判断
 
 ## 技術スタック
