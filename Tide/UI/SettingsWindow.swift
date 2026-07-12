@@ -189,7 +189,7 @@ struct SettingsWindow: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                Text("Shows synced files in Finder (Locations → Tide) as cloud placeholders and downloads them when opened. Files you add, edit, or delete there sync directly to S3, like a separate device — the sync folder keeps working alongside. Disabling removes only the local placeholders; data in S3 is kept.")
+                Text("Shows synced files in Finder (Locations → Tide) as cloud placeholders and downloads them when opened. Files you add, edit, or delete there sync directly to S3, like a separate device — the sync folder keeps working alongside. Disabling removes the local replica (placeholders and downloaded copies); data in S3 is kept.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

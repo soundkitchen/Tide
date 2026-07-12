@@ -117,7 +117,9 @@ FP ドメイン内のファイル編集（`modifyItem` の .contents）と削除
 
 - Phase 5 完了（書込系コールバック全対応）を受けて、PoC 世代の UI/命名を正式化した。**既定化判断は #40 soak 後**のまま（FSEvents モードとの opt-in 並走は不変）。
 - **`FileProviderPoC` → `FileProviderController` リネーム**（`Tide/Core/`・ロジック不変）。設定画面の FP セクションから experimental / PoC 表記を除去し、説明文を実態（読み取り専用プレビュー → **双方向同期 = FP 側の追加・編集・削除は S3 へ直接同期される「第 3 のデバイス」**・無効化はレプリカ削除のみで S3 側データは残る）に是正。
-- **ドメイン identifier `"poc"` → `"main"`**（ユーザ確定 2026-07-12・作り直し了承済み）。identifier スキーマ変更は必ずドメイン作り直しで行う（Phase 5-1 実機確定: 無再作成移行は旧 id item が「名前 2」リネームで恒久残存）ため、**`migrateStaleDomainsIfNeeded()`** を新設し `AppEnvironment.bootstrap()` から fire-and-forget で実行 — 現行と異なる identifier のドメインを検出したら `removeAllDomains()` → `add(domain)` で作り直し、「有効化済み」というユーザ意図を引き継ぐ（無し/現行のみなら no-op・失敗は非致命 = 設定画面の Disable/Enable で回復可能）。
+- **ドメイン identifier `"poc"` → `"main"`**（ユーザ確定 2026-07-12・作り直し了承済み）。identifier スキーマ変更は必ずドメイン作り直しで行う（Phase 5-1 実機確定: 無再作成移行は旧 id item が「名前 2」リネームで恒久残存）ため、**`migrateStaleDomainsIfNeeded()`** を新設し `AppEnvironment.bootstrap()` から fire-and-forget で実行 — 現行と異なる identifier のドメインを検出したら作り直し、「有効化済み」というユーザ意図を引き継ぐ（無し/現行のみなら no-op・失敗は非致命 = 設定画面の Disable/Enable で回復可能）。
+- **移行の堅牢化（PR #61 レビュー #1/#2）**: ① stale は **per-domain `remove(_:)`** で外す（`removeAllDomains` は使わない）— stale と現行 `"main"` が共存するケースで健全な現行レプリカ（materialize 済みコピー・S3 未到達の保留書込）を巻き込まない。② remove 前に **pending フラグ**（group defaults `fileProviderMigrationPendingAdd`）を立て、成功時に消す — 「remove 成功 → add 失敗」の中断では stale 検出が no-op になり移行が再走しないため、次回起動はフラグから add だけ再開する（= 有効化意図が静かに失われる窓を閉鎖）。明示的な `disable()` はフラグも消す（ユーザの無効化意思が移行再開に勝る）。
+- **自動移行は旧ドメインのレプリカごと破棄する** = 旧ドメイン内の S3 未到達の保留書込（オフライン編集・拡張リトライ中の書込等）は失われる（PR #61 レビュー #3・記録）。手動 Disable/Enable と同じ挙動だがアップデート後の初回起動に無警告で起きる点が異なる。identifier 変更は今回の一度きり・ユーザ了承済み。今後 identifier / ドメイン属性を変える際はこの破棄を前提にアナウンスすること。
 - ドメインフォルダ名 `Tide-Tide` は displayName 由来で identifier 非依存（変わらない）。拡張側はドメインを引数で受けるため identifier 非参照 = 無傷。
 
 ### ダウンロード一時ディレクトリ

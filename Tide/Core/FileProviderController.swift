@@ -30,6 +30,8 @@ enum FileProviderController {
     /// 旧世代を含む全ドメインを外す（factoryReset からも呼ぶ）。
     static func disable() async throws {
         try await NSFileProviderManager.removeAllDomains()
+        // 明示的な無効化は移行再開の予約より優先する（残すと次回起動で勝手に再有効化される）。
+        TideAppGroup.sharedDefaults().removeObject(forKey: migrationPendingAddKey)
         AppLogger.ui.info("File Provider domains removed")
     }
 
@@ -38,19 +40,57 @@ enum FileProviderController {
         return domains.contains { $0.identifier == domain.identifier }
     }
 
+    /// 移行が「stale 除去済み・現行 add 未完了」で中断したことを示すフラグ（group defaults）。
+    /// 立っている間は次回の migrate が add を再試行する＝「有効化済み」意図が失われない
+    /// （PR #61 レビュー #1: remove 成功 → add 失敗だと stale 検出が no-op になり移行が再走しない）。
+    private static let migrationPendingAddKey = "fileProviderMigrationPendingAdd"
+
     /// 旧 identifier（PoC 世代の "poc"）のドメインが残っていたら現行 identifier で作り直す。
     /// identifier スキーマの変更は必ずドメイン作り直しで行う — 既存レプリカへの無再作成移行では
     /// 旧 id item が「名前 2」リネームで恒久残存する（docs/09 M5 節・Phase 5-1 実機確定）。
-    /// 「有効化済み」というユーザ意図は新ドメインの再登録で引き継ぐ。ドメイン無し/現行のみなら no-op。
+    /// 作り直しは旧ドメインのレプリカごと破棄する＝旧ドメイン内の S3 未到達の保留書込は失われる
+    /// （identifier 変更時に作り直しを了承済み・一度きり）。
+    /// stale は per-domain `remove(_:)` で外す — 現行 "main" が共存していてもそのレプリカ・
+    /// 保留書込は温存する（PR #61 レビュー #2。`removeAllDomains` は使わない）。
+    /// 「有効化済み」というユーザ意図は remove 前に立てる pending フラグ + 再登録で引き継ぐ。
+    /// ドメイン無し/現行のみ（かつ pending なし）なら no-op。
     static func migrateStaleDomainsIfNeeded() async {
+        let defaults = TideAppGroup.sharedDefaults()
         let domains = (try? await NSFileProviderManager.domains()) ?? []
-        guard domains.contains(where: { $0.identifier != domain.identifier }) else { return }
+        let staleDomains = domains.filter { $0.identifier != domain.identifier }
+        let hasCurrent = domains.contains { $0.identifier == domain.identifier }
+
+        if staleDomains.isEmpty {
+            // 前回の移行が「stale 除去後・add 前」で中断していたら add だけ再開する。
+            guard defaults.bool(forKey: migrationPendingAddKey) else { return }
+            if !hasCurrent {
+                do {
+                    try await NSFileProviderManager.add(domain)
+                    AppLogger.ui.info("Resumed File Provider domain migration (add completed)")
+                } catch {
+                    // フラグ残置＝次回起動で再試行。設定画面の Enable でも回復できる。
+                    AppLogger.ui.error("File Provider domain migration resume failed: \(String(describing: error), privacy: .private)")
+                    return
+                }
+            }
+            defaults.removeObject(forKey: migrationPendingAddKey)
+            return
+        }
+
+        // remove の前にフラグを立てる（remove 成功 → add 失敗/クラッシュでも意図が消えない順序）。
+        defaults.set(true, forKey: migrationPendingAddKey)
         do {
-            try await NSFileProviderManager.removeAllDomains()
-            try await NSFileProviderManager.add(domain)
+            for stale in staleDomains {
+                try await NSFileProviderManager.remove(stale)
+            }
+            if !hasCurrent {
+                try await NSFileProviderManager.add(domain)
+            }
+            defaults.removeObject(forKey: migrationPendingAddKey)
             AppLogger.ui.info("Migrated stale File Provider domain(s) to current identifier")
         } catch {
-            // 失敗しても致命ではない（旧ドメインが残るだけ）。設定画面の Disable → Enable で回復できる。
+            // remove 失敗なら stale が残り次回の migrate が再走する。add 失敗なら pending フラグが
+            // add の再開を保証する。いずれも設定画面の Disable → Enable で即時回復もできる。
             AppLogger.ui.error("File Provider domain migration failed: \(String(describing: error), privacy: .private)")
         }
     }
