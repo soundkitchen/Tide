@@ -96,6 +96,10 @@ run-en: build ## 英語ロケールで起動
 .PHONY: fresh
 fresh: reset run ## reset してから起動（新規セットアップのテストに）
 
+.PHONY: soak-check
+soak-check: ## soak 整合性突合: 同期フォルダ ↔ DB ↔ S3 マニフェスト ↔ S3 実体（#40）
+	python3 tools/soak/consistency_check.py
+
 .PHONY: clean
 clean: stop ## build/ を削除
 	rm -rf build/

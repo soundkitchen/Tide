@@ -41,6 +41,7 @@
 - **やること（加速 soak）**: 実 S3 × Mac 2 台で数日〜1〜2 週間の双方向同期を回す。自然な速度で待つ必要はなく、ポーリング間隔短縮・大量ファイル一括投入・編集→削除→復元の反復・転送中 kill・ネット切断/復帰・スリープ復帰を**能動注入**して回数を圧縮。「両端のファイル一覧 + ローカル DB + マニフェスト（`.tide/index.json` + `shards/`）」の一致を定期突合するスクリプトで常時観測。
 - **観測項目**: 整合維持／メモリ・FD リーク無し／tmp 残骸（`dl-*.part` / `restore-*.part`）・`transfer_state` 宙ぶらりん行・`shard_state` ドリフトの残留無し／`recentIssues` 異常無し／毎起動再アップロードループ非再発。
 - **完了条件 / 運用**: 観測期間中に整合が崩れず蓄積・取り残しが無いこと。受け入れチェックリストは運用ルールどおり `tmp/` に書き出し、全項目消化後に削除する。
+- **1 台先行整備（2026-07-13・PR #62）**: 常時観測の核となる**整合性突合スクリプト = `tools/soak/consistency_check.py`**（`make soak-check`）を先行構築。「ローカル同期フォルダ ↔ ローカル DB ↔ S3 マニフェスト ↔ S3 実体（files/ 現行版）」の 4 面突合 + index↔shards 構造整合（dangling 宣言 / etag ドリフト / ghost シャード / シャード誤配置）+ 残骸（tmp `*.part`・`transfer_state` 宙ぶらりん・`upload_queue` 滞留）+ リソース観測（本体/拡張の RSS・FD。`--watch` で JSONL 時系列）。**アプリと独立の別実装**（パース・シャード計算を再実装 = 同じバグで見逃さない）・全読み取り専用・認証は aws CLI（Keychain 非接触）。同期進行中の過渡状態は「`--recheck-delay` 後の再パスとの積集合 + `upload_queue` 掲載 path の INFO 落とし」で誤検出を抑制。実環境（dev-tide・19 件）で整合 OK / `--deep`（全 sha 再計算）OK / 意図的改変コピーでの DRIFT 検出 + exit 1 を検証済み。**M5 Phase 5 完了により FP 拡張 = 第 3 の書き手が 1 台内に居るため、1 台でも「2 書き手の交錯 soak」が可能**（起票時より 1 台 soak の価値が上昇）。残 = 負荷注入（churn）スクリプトと 2 台での正式合格判定。
 
 [#40]: https://github.com/soundkitchen/Tide/issues/40
 
