@@ -880,7 +880,7 @@ final class SyncEngine {
         // シャード変化を取り込んだら FP ドメインへ通知（M5 Phase 4・アプリ側が主経路）。
         // 拡張は独立の etag キャッシュを持つので、既知の変化なら向こうで no-op になる。
         if !affected.isEmpty {
-            FileProviderPoC.signalRemoteChanges()
+            FileProviderController.signalRemoteChanges()
         }
     }
 
@@ -1235,7 +1235,7 @@ final class SyncEngine {
             // マニフェスト書込の確定点（ManifestUpdater 成功）で FP ドメインへ通知
             //（M5 Phase 5-0 / PR #51 レビュー #4）。旧バッチ集約（anySucceeded）は
             // マニフェスト PUT 成功後の DB write throw で 1 バッチ分 signal が漏れる窓があった。
-            onManifestWrite: { Task { @MainActor in FileProviderPoC.signalRemoteChanges() } }
+            onManifestWrite: { Task { @MainActor in FileProviderController.signalRemoteChanges() } }
         )
         while !Task.isCancelled {
             if paused {

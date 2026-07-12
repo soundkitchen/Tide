@@ -2151,13 +2151,13 @@
         }
       }
     },
-    "File Provider (experimental)" : {
+    "File Provider" : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "File Provider（実験的）"
+            "value" : "File Provider"
           }
         }
       }
@@ -2184,13 +2184,13 @@
         }
       }
     },
-    "Enable File Provider (PoC)" : {
+    "Enable File Provider" : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "File Provider を有効化（PoC）"
+            "value" : "File Provider を有効化"
           }
         }
       }
@@ -2228,13 +2228,13 @@
         }
       }
     },
-    "Read-only preview (PoC): shows synced files as cloud placeholders and downloads them when opened. Independent from the sync folder — enabling or disabling does not affect syncing." : {
+    "Shows synced files in Finder (Locations → Tide) as cloud placeholders and downloads them when opened. Files you add, edit, or delete there sync directly to S3, like a separate device — the sync folder keeps working alongside. Disabling removes only the local placeholders; data in S3 is kept." : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "読み取り専用プレビュー（PoC）: 同期済みファイルをクラウドのプレースホルダとして表示し、開いた時に取得します。同期フォルダとは独立で、有効/無効は同期動作に影響しません。"
+            "value" : "同期済みファイルを Finder（場所 → Tide）にクラウドのプレースホルダとして表示し、開いた時に取得します。ここでの追加・編集・削除は別のデバイスと同様に S3 へ直接同期され、同期フォルダはそのまま並走して動作します。無効化するとローカルのプレースホルダのみ削除され、S3 上のデータは残ります。"
           }
         }
       }

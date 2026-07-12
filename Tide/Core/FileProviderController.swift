@@ -2,19 +2,21 @@ import FileProvider
 import Foundation
 import TideCore
 
-/// File Provider ドメインの登録/解除（M5 Phase 3・読み取り materialize PoC のデバッグ導線）。
+/// File Provider ドメインの登録/解除と signal 配線（M5・設定画面の Enable/Disable が正規導線）。
 /// ドメインを登録すると OS が `~/Library/CloudStorage` 配下に Tide のボリュームを生やし、
-/// `TideFileProvider.appex` がマニフェスト由来のプレースホルダを列挙する。
-/// 既存の FSEvents 同期（同期フォルダ）とは独立で、登録してもしなくても同期挙動は変わらない。
+/// `TideFileProvider.appex` がマニフェスト由来のプレースホルダを列挙・双方向同期する
+/// （拡張は S3 へ直接書く「第 3 のデバイス」方式。M5 Phase 5〜）。
+/// 既存の FSEvents 同期（同期フォルダ）とは並走し、どちらも同じバケットへ同期する。
 @MainActor
-enum FileProviderPoC {
-    /// PoC ドメイン。identifier は安定文字列（変えると別ドメイン＝別フォルダになる）。
+enum FileProviderController {
+    /// FP ドメイン。identifier は安定文字列（変えると別ドメイン＝別フォルダになる）。
+    /// 変更時は `migrateStaleDomainsIfNeeded` が旧 identifier ドメインを作り直す。
     static let domain: NSFileProviderDomain = {
         let domain = NSFileProviderDomain(
-            identifier: NSFileProviderDomainIdentifier(rawValue: "poc"),
+            identifier: NSFileProviderDomainIdentifier(rawValue: "main"),
             displayName: "Tide"
         )
-        // PoC はゴミ箱同期を扱わない。宣言しないとデーモンが .trashContainer の列挙を
+        // ゴミ箱同期は扱わない。宣言しないとデーモンが .trashContainer の列挙を
         // 要求し続け、itemNotFound を永久リトライする（実機 fileproviderctl dump で確認）。
         domain.supportsSyncingTrash = false
         return domain
@@ -22,10 +24,10 @@ enum FileProviderPoC {
 
     static func enable() async throws {
         try await NSFileProviderManager.add(domain)
-        AppLogger.ui.info("File Provider PoC domain added")
+        AppLogger.ui.info("File Provider domain added")
     }
 
-    /// PoC ドメインを含む全ドメインを外す（factoryReset からも呼ぶ）。
+    /// 旧世代を含む全ドメインを外す（factoryReset からも呼ぶ）。
     static func disable() async throws {
         try await NSFileProviderManager.removeAllDomains()
         AppLogger.ui.info("File Provider domains removed")
@@ -34,6 +36,23 @@ enum FileProviderPoC {
     static func isEnabled() async -> Bool {
         let domains = (try? await NSFileProviderManager.domains()) ?? []
         return domains.contains { $0.identifier == domain.identifier }
+    }
+
+    /// 旧 identifier（PoC 世代の "poc"）のドメインが残っていたら現行 identifier で作り直す。
+    /// identifier スキーマの変更は必ずドメイン作り直しで行う — 既存レプリカへの無再作成移行では
+    /// 旧 id item が「名前 2」リネームで恒久残存する（docs/09 M5 節・Phase 5-1 実機確定）。
+    /// 「有効化済み」というユーザ意図は新ドメインの再登録で引き継ぐ。ドメイン無し/現行のみなら no-op。
+    static func migrateStaleDomainsIfNeeded() async {
+        let domains = (try? await NSFileProviderManager.domains()) ?? []
+        guard domains.contains(where: { $0.identifier != domain.identifier }) else { return }
+        do {
+            try await NSFileProviderManager.removeAllDomains()
+            try await NSFileProviderManager.add(domain)
+            AppLogger.ui.info("Migrated stale File Provider domain(s) to current identifier")
+        } catch {
+            // 失敗しても致命ではない（旧ドメインが残るだけ）。設定画面の Disable → Enable で回復できる。
+            AppLogger.ui.error("File Provider domain migration failed: \(String(describing: error), privacy: .private)")
+        }
     }
 
     /// リモート変化（pull がシャード変化を取り込んだ / アップロードがマニフェストを書いた）を

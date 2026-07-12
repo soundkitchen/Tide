@@ -165,7 +165,7 @@ struct SettingsWindow: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            Section("File Provider (experimental)") {
+            Section("File Provider") {
                 if let fileProviderEnabled {
                     Text(fileProviderEnabled
                          ? String(localized: "Domain is enabled.")
@@ -173,14 +173,14 @@ struct SettingsWindow: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                Button("Enable File Provider (PoC)") {
+                Button("Enable File Provider") {
                     runFileProviderAction(
-                        FileProviderPoC.enable,
+                        FileProviderController.enable,
                         successMessage: String(localized: "Enabled — check “Tide” under Locations in Finder (~/Library/CloudStorage)."))
                 }
                 Button("Disable File Provider") {
                     runFileProviderAction(
-                        FileProviderPoC.disable,
+                        FileProviderController.disable,
                         successMessage: String(localized: "File Provider domain removed."))
                 }
                 if let fileProviderMessage {
@@ -189,7 +189,7 @@ struct SettingsWindow: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                Text("Read-only preview (PoC): shows synced files as cloud placeholders and downloads them when opened. Independent from the sync folder — enabling or disabling does not affect syncing.")
+                Text("Shows synced files in Finder (Locations → Tide) as cloud placeholders and downloads them when opened. Files you add, edit, or delete there sync directly to S3, like a separate device — the sync folder keeps working alongside. Disabling removes only the local placeholders; data in S3 is kept.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -209,7 +209,7 @@ struct SettingsWindow: View {
         .formStyle(.grouped)
         .padding()
         .onAppear { loadStateFromConfig() }
-        .task { fileProviderEnabled = await FileProviderPoC.isEnabled() }
+        .task { fileProviderEnabled = await FileProviderController.isEnabled() }
         .onChange(of: notificationsEnabled) { _, newValue in
             env.config.notificationsEnabled = newValue
         }
@@ -221,7 +221,7 @@ struct SettingsWindow: View {
         .onChange(of: downloadBwMBps) { _, _ in persistBandwidth() }
     }
 
-    /// File Provider PoC の有効化/無効化ボタン共通処理（成功文言と await する操作だけが差分）。
+    /// File Provider の有効化/無効化ボタン共通処理（成功文言と await する操作だけが差分）。
     private func runFileProviderAction(
         _ action: @escaping @MainActor () async throws -> Void,
         successMessage: String
@@ -233,7 +233,7 @@ struct SettingsWindow: View {
             } catch {
                 fileProviderMessage = String(describing: error)
             }
-            fileProviderEnabled = await FileProviderPoC.isEnabled()
+            fileProviderEnabled = await FileProviderController.isEnabled()
         }
     }
 
