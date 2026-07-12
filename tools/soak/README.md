@@ -28,19 +28,24 @@ python3 tools/soak/consistency_check.py --watch 300
 | DB ↔ マニフェスト | 片側欠落 / sha256・size 不一致 |
 | マニフェスト ↔ S3 実体 | 宣言実体の不在（現行 = 削除）/ size・etag 不一致 / 孤児オブジェクト |
 | ローカル ↔ DB | 追跡ファイル不在 / size 不一致 / mtime 乖離（再アップロードループ因子・WARN）/ `--deep` で sha256 |
+| shard_state ↔ shards | DB の etag キャッシュとシャード実体の不一致（pull 1 周期以内の stale は正常・持続すれば pull 停滞の兆候・WARN）/ 実在しないシャードのキャッシュ残存 |
 | 残骸 | tmp の `dl-*.part` / `restore-*.part`（1h 超）/ `transfer_state` 宙ぶらりん / `upload_queue` 滞留 |
-| リソース | 本体・FP 拡張の RSS / FD 数（watch モードで時系列 JSONL） |
+| リソース | 本体・FP 拡張の RSS / FD 数（watch モードで時系列 JSONL・複数プロセス並存時は全 PID を記録） |
 
 ### 誤検出の抑制
 
-- 同期進行中の過渡状態を誤検出しないため、DRIFT 候補が出たら `--recheck-delay`
-  （デフォルト 90 秒 = poll 1 周期強）後に全パスを取り直し、**両方に現れた所見だけ** DRIFT にする。
+- 同期進行中の過渡状態を誤検出しないため、DRIFT 候補が出たら `--recheck-delay` 後に
+  全パスを取り直し、**両方に現れた所見だけ** DRIFT にする。デフォルトは **poll 間隔 + 30 秒**
+  （group defaults の `tide.pollingIntervalSeconds`・未設定なら 180+30 = 210 秒）—
+  リモート先行書込（2 台目 / FP 拡張）の pull 反映は最大 poll 1 周期かかるため、
+  それより短いと正常な伝播遅延を DRIFT と誤検出する。
 - `upload_queue` に載っている path の片側欠落・不一致はアップロード待ちとして INFO に落とす。
 - DB 未追跡のローカルファイル（除外対象・未同期）は INFO（`.DS_Store` 等）。
 
 ### 終了コード
 
-`0` = 整合 / `1` = 持続する DRIFT あり / `2` = 実行エラー。
+`0` = 整合 / `1` = 持続する DRIFT あり / `2` = 実行エラー（設定解決不能・aws CLI 不在・
+DB ロック・JSON 破損等、すべての実行時例外）。cron / loop では 1 だけを発報対象にできる。
 
 ### 前提・注意
 

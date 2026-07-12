@@ -46,11 +46,27 @@ def defaults_read(key):
     try:
         out = subprocess.run(
             ["defaults", "read", GROUP_PLIST, key],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, encoding="utf-8", timeout=10,
         )
         return out.stdout.strip() if out.returncode == 0 else None
     except Exception:
         return None
+
+
+def config_error(message):
+    """設定エラーは exit 2（exit 1 = 持続 DRIFT と区別する・PR #62 レビュー中 1）。"""
+    print(f"設定エラー: {message}", file=sys.stderr)
+    sys.exit(2)
+
+
+def polling_interval_seconds():
+    """製品の poll 間隔。ConfigStore と同じく未設定/0 は 180 秒。"""
+    raw = defaults_read("tide.pollingIntervalSeconds")
+    try:
+        v = int(raw) if raw else 0
+    except ValueError:
+        v = 0
+    return v if v > 0 else 180
 
 
 def resolve_config(args):
@@ -61,11 +77,11 @@ def resolve_config(args):
     missing = [n for n, v in
                [("bucket", bucket), ("region", region), ("sync-root", sync_root)] if not v]
     if missing:
-        sys.exit(f"設定を解決できません（group defaults 未設定 or 引数不足）: {missing}")
+        config_error(f"解決できない設定があります（group defaults 未設定 or 引数不足）: {missing}")
     if not os.path.isdir(sync_root):
-        sys.exit(f"同期フォルダが存在しません: {sync_root}")
+        config_error(f"同期フォルダが存在しません: {sync_root}")
     if not os.path.isfile(db_path):
-        sys.exit(f"DB が存在しません: {db_path}")
+        config_error(f"DB が存在しません: {db_path}")
     return {
         "bucket": bucket, "region": region, "sync_root": sync_root,
         "db": db_path, "profile": args.profile,
@@ -85,7 +101,7 @@ def aws_get_text(cfg, key):
     """S3 オブジェクトを文字列で取得。存在しなければ None。"""
     r = subprocess.run(
         aws_cmd(cfg, "s3", "cp", f"s3://{cfg['bucket']}/{key}", "-"),
-        capture_output=True, text=True, timeout=120,
+        capture_output=True, text=True, encoding="utf-8", timeout=120,
     )
     if r.returncode != 0:
         if "NoSuchKey" in r.stderr or "404" in r.stderr:
@@ -103,7 +119,8 @@ def aws_list(cfg, prefix):
                "--prefix", prefix, "--output", "json"]
         if token:
             cmd += ["--continuation-token", token]
-        r = subprocess.run(aws_cmd(cfg, *cmd), capture_output=True, text=True, timeout=120)
+        r = subprocess.run(aws_cmd(cfg, *cmd), capture_output=True, text=True,
+                           encoding="utf-8", timeout=120)
         if r.returncode != 0:
             raise RuntimeError(f"S3 LIST {prefix} failed: {r.stderr.strip()[:300]}")
         body = json.loads(r.stdout or "{}")
@@ -126,11 +143,11 @@ def shard_id_of(path):
 
 
 def load_manifest(cfg, findings):
-    """index + 全シャードを読み、{path: entry} を返す。構造整合の所見も積む。"""
+    """index + 全シャードを読み、({path: entry}, シャード実体一覧) を返す。構造整合の所見も積む。"""
     raw = aws_get_text(cfg, ".tide/index.json")
     if raw is None:
         findings.add(DRIFT, "manifest:index-missing", ".tide/index.json が存在しない")
-        return {}
+        return {}, {}
     index = json.loads(raw)
     declared = index.get("shards", {})
     listed = aws_list(cfg, ".tide/shards/")
@@ -169,7 +186,7 @@ def load_manifest(cfg, findings):
                     findings.add(DRIFT, f"manifest:misplaced:{path}",
                                  f"{path} がシャード {sid} に居る（正 = {shard_id_of(path)}）")
                 entries[path] = entry
-    return entries
+    return entries, listed
 
 
 def load_db(cfg):
@@ -182,7 +199,9 @@ def load_db(cfg):
             "SELECT path, direction, updated_at FROM transfer_state"))
         queue = list(con.execute(
             "SELECT path, operation, enqueued_at, attempts FROM upload_queue"))
-        return files, transfers, queue
+        shard_cache = {r[0]: r[1] for r in con.execute(
+            "SELECT shard_id, etag FROM shard_state")}
+        return files, transfers, queue, shard_cache
     finally:
         con.close()
 
@@ -243,8 +262,8 @@ class Findings:
 
 def run_pass(cfg, deep=False):
     findings = Findings()
-    manifest = load_manifest(cfg, findings)
-    db_files, transfers, queue = load_db(cfg)
+    manifest, shard_objects = load_manifest(cfg, findings)
+    db_files, transfers, queue, shard_cache = load_db(cfg)
     local = scan_folder(cfg["sync_root"])
     s3_objects = aws_list(cfg, "files/")
     now = time.time()
@@ -304,12 +323,15 @@ def run_pass(cfg, deep=False):
             sev = INFO if path in pending_paths else DRIFT
             findings.add(sev, f"db-local:size:{path}",
                          f"size 不一致（ローカル ↔ DB）: {path}")
-        elif abs(st["mtime"] - rec["mtime"]) > 0.001:
+            continue  # 内容が違うのは自明なので sha 再計算はしない
+        if abs(st["mtime"] - rec["mtime"]) > 0.001:
             # [mtime 不変条件] の兆候（毎起動再アップロードループ因子）。編集直後は正常。
             sev = INFO if path in pending_paths else WARN
             findings.add(sev, f"db-local:mtime:{path}",
                          f"mtime 不一致（ローカル ↔ DB）: {path}")
-        elif deep and sha256_of(os.path.join(cfg["sync_root"], path)) != rec["sha256"]:
+        # deep は mtime 判定と独立に行う — mtime が乖離しているファイルこそ
+        # 「stat で見えない内容乖離」を確認したい（PR #62 レビュー小 4）。
+        if deep and sha256_of(os.path.join(cfg["sync_root"], path)) != rec["sha256"]:
             findings.add(DRIFT, f"db-local:sha:{path}",
                          f"sha256 不一致（ローカル実体 ↔ DB）: {path}")
     untracked = [p for p in local if p not in db_files]
@@ -317,6 +339,18 @@ def run_pass(cfg, deep=False):
         findings.add(INFO, "local:untracked",
                      f"DB 未追跡のローカルファイル {len(untracked)} 件"
                      f"（除外/未同期の可能性）: {sorted(untracked)[:5]}")
+
+    # --- shard_state キャッシュ ↔ シャード実体（#40 観測項目「shard_state ドリフト」） ---
+    # キャッシュなので pull 1 周期以内の stale は正常。持続すれば pull 停滞/取り込み漏れの兆候。
+    for sid, cached_etag in shard_cache.items():
+        obj = shard_objects.get(f".tide/shards/{sid}.json")
+        if obj is None:
+            findings.add(WARN, f"shard-state:orphan:{sid}",
+                         f"shard_state に実在しないシャード {sid} のキャッシュが残存")
+        elif cached_etag.strip('"') != obj["etag"]:
+            findings.add(WARN, f"shard-state:stale:{sid}",
+                         f"shard_state の etag がシャード実体と不一致（{sid}・"
+                         "pull 1 周期以内なら正常・持続すれば pull 停滞の兆候）")
 
     # --- 残骸・宙ぶらりん ---
     for tmp_dir in [CACHES_TMP, os.path.join(cfg["sync_root"], ".tide", "tmp")]:
@@ -350,25 +384,31 @@ def run_pass(cfg, deep=False):
 # ---------------------------------------------------------------- リソース観測
 
 def sample_resources():
-    """Tide 本体と FP 拡張の RSS(KB)/FD 数。プロセス不在は None。"""
+    """Tide 本体と FP 拡張の RSS(KB)/FD 数。プロセス不在は None。
+    複数一致（/Applications 側と build/ 側の並存等）は全 PID を記録する —
+    先頭 1 つだけだと時系列が別プロセスに飛んでリーク検出がノイズ化する（PR #62 レビュー nit）。"""
     result = {}
     for label, pattern in [("app", "Tide.app/Contents/MacOS/Tide"),
                            ("extension", "TideFileProvider.appex")]:
         pid_out = subprocess.run(["pgrep", "-f", pattern],
-                                 capture_output=True, text=True)
+                                 capture_output=True, text=True, encoding="utf-8")
         pids = [p for p in pid_out.stdout.split() if p.isdigit()]
         if not pids:
             result[label] = None
             continue
-        pid = pids[0]
-        rss = subprocess.run(["ps", "-o", "rss=", "-p", pid],
-                             capture_output=True, text=True).stdout.strip()
-        fd = subprocess.run(["lsof", "-p", pid], capture_output=True, text=True)
-        result[label] = {
-            "pid": int(pid),
-            "rss_kb": int(rss) if rss.isdigit() else None,
-            "fd": max(0, len(fd.stdout.splitlines()) - 1),
-        }
+        samples = []
+        for pid in pids:
+            rss = subprocess.run(["ps", "-o", "rss=", "-p", pid],
+                                 capture_output=True, text=True,
+                                 encoding="utf-8").stdout.strip()
+            fd = subprocess.run(["lsof", "-p", pid], capture_output=True,
+                                text=True, encoding="utf-8")
+            samples.append({
+                "pid": int(pid),
+                "rss_kb": int(rss) if rss.isdigit() else None,
+                "fd": max(0, len(fd.stdout.splitlines()) - 1),
+            })
+        result[label] = samples
     return result
 
 
@@ -384,9 +424,13 @@ def format_report(findings, stats, resources):
                  f"manifest {stats['manifest']} / db {stats['db']} / "
                  f"local {stats['local']} / s3 {stats['s3_objects']} 件")
     for label in ("app", "extension"):
-        r = resources.get(label)
-        lines.append(f"  {label}: " + (
-            f"pid {r['pid']}  rss {r['rss_kb']/1024:.1f}MB  fd {r['fd']}" if r else "非稼働"))
+        samples = resources.get(label)
+        if not samples:
+            lines.append(f"  {label}: 非稼働")
+            continue
+        for s in samples:
+            rss = f"{s['rss_kb']/1024:.1f}MB" if s["rss_kb"] is not None else "?"
+            lines.append(f"  {label}: pid {s['pid']}  rss {rss}  fd {s['fd']}")
     order = {DRIFT: 0, WARN: 1, INFO: 2}
     for key, (sev, msg) in sorted(findings.items.items(),
                                   key=lambda kv: (order[kv[1][0]], kv[0])):
@@ -404,14 +448,19 @@ def main():
     ap.add_argument("--profile", help="aws CLI プロファイル")
     ap.add_argument("--deep", action="store_true",
                     help="ローカル全ファイルを SHA-256 再計算して DB と突合（重い）")
-    ap.add_argument("--recheck-delay", type=int, default=90,
-                    help="DRIFT 検出時の再確認までの秒数（デフォルト 90 = poll 1 周期強）")
+    ap.add_argument("--recheck-delay", type=int, default=None,
+                    help="DRIFT 検出時の再確認までの秒数。デフォルトは poll 間隔 + 30"
+                         "（group defaults の tide.pollingIntervalSeconds・未設定なら 180+30=210）。"
+                         "リモート先行書込の pull 反映は最大 poll 1 周期かかるため、"
+                         "それより短いと正常な伝播遅延を DRIFT と誤検出する")
     ap.add_argument("--watch", type=int, metavar="SEC",
                     help="SEC 秒間隔で回し続け、JSONL を --log に追記する")
     ap.add_argument("--log", default=os.path.expanduser(
         "~/Library/Logs/TideSoak/soak.jsonl"), help="watch モードの JSONL 出力先")
     args = ap.parse_args()
     cfg = resolve_config(args)
+    if args.recheck_delay is None:
+        args.recheck_delay = polling_interval_seconds() + 30
 
     def one_round():
         findings, stats = run_pass(cfg, deep=args.deep)
@@ -458,6 +507,10 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         sys.exit(130)
-    except RuntimeError as e:
-        print(f"実行エラー: {e}", file=sys.stderr)
+    except SystemExit:
+        raise
+    except Exception as e:
+        # 実行エラー（aws CLI 不在 / DB ロック / JSON 破損 / タイムアウト等）はすべて exit 2 —
+        # exit 1 = 「持続 DRIFT」と区別し、cron/loop 運用での誤発報を防ぐ（PR #62 レビュー中 1）。
+        print(f"実行エラー: {type(e).__name__}: {e}", file=sys.stderr)
         sys.exit(2)
