@@ -121,6 +121,7 @@ FP ドメイン内のファイル編集（`modifyItem` の .contents）と削除
 - **移行の堅牢化（PR #61 レビュー #1/#2）**: ① stale は **per-domain `remove(_:)`** で外す（`removeAllDomains` は使わない）— stale と現行 `"main"` が共存するケースで健全な現行レプリカ（materialize 済みコピー・S3 未到達の保留書込）を巻き込まない。② remove 前に **pending フラグ**（group defaults `fileProviderMigrationPendingAdd`）を立て、成功時に消す — 「remove 成功 → add 失敗」の中断では stale 検出が no-op になり移行が再走しないため、次回起動はフラグから add だけ再開する（= 有効化意図が静かに失われる窓を閉鎖）。明示的な `disable()` はフラグも消す（ユーザの無効化意思が移行再開に勝る）。
 - **自動移行は旧ドメインのレプリカごと破棄する** = 旧ドメイン内の S3 未到達の保留書込（オフライン編集・拡張リトライ中の書込等）は失われる（PR #61 レビュー #3・記録）。手動 Disable/Enable と同じ挙動だがアップデート後の初回起動に無警告で起きる点が異なる。identifier 変更は今回の一度きり・ユーザ了承済み。今後 identifier / ドメイン属性を変える際はこの破棄を前提にアナウンスすること。
 - ドメインフォルダ名 `Tide-Tide` は displayName 由来で identifier 非依存（変わらない）。拡張側はドメインを引数で受けるため identifier 非参照 = 無傷。
+- **実機知見（2026-07-13 受け入れ）: 自動移行直後は Finder サイドバーの「場所」項目が消えたままになることがある** — remove → add が 20ms で連続するため Finder が再登録イベントを取りこぼすとみられる。ドメイン・列挙・レプリカは正常（fileproviderd は `Removing domain …/poc` → `Adding domain (main)` → starting domain を正常記録）で、**`killall Finder` で復帰**。一度きりの移行の cosmetic な癖として記録（設定の Disable → Enable のような人間の操作間隔では発生しない）。
 
 ### ダウンロード一時ディレクトリ
 - **`TideTmpDirectory.resolve(for:)` で同一ボリュームの tmp を返す**。第一選択は `~/Library/Caches/Tide/tmp/`。同期ルートと別ボリュームになる時のみ `<syncRoot>/.tide/tmp/` にフォールバック。`moveItem` の atomic 性を保つため。
