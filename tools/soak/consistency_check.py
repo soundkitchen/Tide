@@ -332,7 +332,9 @@ def run_pass(cfg, deep=False):
         # deep は mtime 判定と独立に行う — mtime が乖離しているファイルこそ
         # 「stat で見えない内容乖離」を確認したい（PR #62 レビュー小 4）。
         if deep and sha256_of(os.path.join(cfg["sync_root"], path)) != rec["sha256"]:
-            findings.add(DRIFT, f"db-local:sha:{path}",
+            # アップロード待ち（size 同一・内容変更）は他の db-local 系と同様 INFO へ降格
+            sev = INFO if path in pending_paths else DRIFT
+            findings.add(sev, f"db-local:sha:{path}",
                          f"sha256 不一致（ローカル実体 ↔ DB）: {path}")
     untracked = [p for p in local if p not in db_files]
     if untracked:
