@@ -70,6 +70,9 @@ final class AppEnvironment {
         isBootstrapping = true
         defer { isBootstrapping = false }
         bootstrapFailure = nil
+        // 旧 identifier（PoC 世代）の FP ドメインが残っていれば現行 identifier で作り直す。
+        // fire-and-forget（XPC 待ちで起動をブロックしない）・no-op が定常。
+        Task { await FileProviderController.migrateStaleDomainsIfNeeded() }
         // 旧ロケーション（非 App Group 時代）からの一度きり移行（M5 Phase 2）。冪等・非致命。
         // setupCompleted の判定より前に行う必要がある（設定自体が移行対象のため）。
         let migration = LegacyStateMigrator.migrateIfNeeded()
@@ -334,8 +337,8 @@ final class AppEnvironment {
         s3 = nil
         database = nil
 
-        // File Provider PoC ドメインも外す（残すと CloudStorage 側に空ドメインが孤児化する）
-        try? await FileProviderPoC.disable()
+        // File Provider ドメインも外す（残すと CloudStorage 側に空ドメインが孤児化する）
+        try? await FileProviderController.disable()
 
         // App Group コンテナ配下の DB ファイル一式（M5 Phase 2 以降の正位置）
         if let groupSupport = try? TideAppGroup.supportDirectoryURL() {
