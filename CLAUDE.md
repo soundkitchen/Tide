@@ -180,6 +180,7 @@
 | `Tide/Resources/` | `Localizable.xcstrings` / アセット |
 | `TideFileProvider/` | **File Provider 拡張**（`NSFileProviderReplicatedExtension`・M5 Phase 3〜）。読み取り materialize PoC。TideCore に依存・DB 非接触 |
 | `TideTests/` | ユニットテスト |
+| `tools/soak/` | soak（#40）支援: 整合性突合スクリプト `consistency_check.py`（`make soak-check`。アプリと独立実装・読み取り専用） |
 | `docs/` | 設計書（spec）。`00`〜`07` が仕様、`08-IMPLEMENTATION-NOTES.md` が実装ノート（旧 §7）、`09-DEFERRED.md` が据え置き/バックログ（旧 §8） |
 | `security/` | セキュリティレビューと対応サマリ |
 | `tmp/` | 動作チェックリスト等の使い捨て（`.gitignore` 済み） |
