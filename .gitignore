@@ -34,6 +34,10 @@ Package.pins
 .vscode/
 .idea/
 
+## Python (tools/soak/ のスクリプト実行で生成)
+__pycache__/
+*.py[cod]
+
 ## Scratch / throwaway notes
 tmp/
 

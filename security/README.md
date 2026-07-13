@@ -100,7 +100,7 @@ F4 の是正内容（2026-06-11・M4 Sync Activity 対応に同梱）: `recentEr
 |---|---|---|
 | 🔴 Critical | [critical.md](critical.md) | 3 |
 | 🟠 High | [high.md](high.md) | 3 |
-| 🟡 Medium | [medium.md](medium.md) | 7（M6 Fixed / M7 は 2026-06-02 検出・未対応） |
+| 🟡 Medium | [medium.md](medium.md) | 7（M6/M7 とも Fixed。M7 は 2026-06-02 検出・同日修正） |
 | 🟢 Low / Hardening | [low.md](low.md) | 17（L15 = 削除済み一覧キャッシュの at-rest 内容・2026-07-01 / L16 = FP 世代ログの at-rest 内容・2026-07-04 / L17 = FP 書込経路のゲート・2026-07-09 Phase 5-3 で createItem へ拡大） |
 
 ## 当初の推奨対応順（参考）
