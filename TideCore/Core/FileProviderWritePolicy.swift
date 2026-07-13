@@ -45,7 +45,9 @@ public enum FileProviderWritePolicy {
     ///   nil の扱いは呼び出し側の意味論に委ねる（削除ガードは「根拠なしに消さない」= 拒否側、
     ///   アップロード競合判定は `decideUpload(base: nil)` = remote 有りなら競合側、へ倒れる）。
     /// - 実体化バッジの複合符号化（`<sha>|m`・metadataVersion 経由で届く）は剥がしてから検証する。
-    ///   既知のサフィックス以外の付加は従来どおり不正として弾く（受理面を広げない）。
+    ///   既知のサフィックス以外の付加は従来どおり不正として弾く。なお `|m` は metadataVersion に
+    ///   しか発行しないため contentVersion 位置での剥がしは厳密には過剰受理だが、両 version を
+    ///   同一デコーダで裁く単純さを優先する（64-hex 検証は維持・PR #66 レビュー nit 2 の記録）。
     public static func baseSha(fromContentVersion data: Data?) -> String? {
         guard let data, var s = String(data: data, encoding: .utf8) else { return nil }
         if s.hasSuffix(Self.materializedSuffix) {

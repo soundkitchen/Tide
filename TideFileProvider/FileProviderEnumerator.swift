@@ -119,8 +119,16 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @uncheck
                         live: live.intersection(filePaths),
                         cap: ExtensionServices.materializedBadgeCap
                     )
+                    // dirsBefore は origin（= Finder が最後に見た世代）のツリー基準で計算する
+                    //（PR #66 レビュー指摘 1: 両側 current だと「ツリーだけが変わった」チェック
+                    // 反転 — リモート削除で全実体化 / 古い mtime のリモート追加で dataless 混入、
+                    // どちらも合成 mtime が動かずマニフェスト diff に dir が載らない — が対称差に
+                    // 現れず固着する）。同一 anchor なら origin == current で従来と等価。
                     (badgeFiles, badgeDirs) = MaterializedBadge.changedPaths(
-                        filePaths: filePaths, previousReported: reported, newReport: newReport)
+                        oldFilePaths: current.anchor == anchorString
+                            ? filePaths : Array(origin.files.keys),
+                        newFilePaths: filePaths,
+                        previousReported: reported, newReport: newReport)
                 }
                 // item 構築は常に newReport 基準（非 working set では newReport == reported）。
                 // マニフェスト diff で再配信される item にも正しいバッジを載せるため、フラグの
@@ -137,7 +145,12 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @uncheck
                         AppLogger.fileProvider.notice("enumerateChanges: badge-only update (\(badgeNodes.count) items)")
                     }
                     boxed.value.finishEnumeratingChanges(upTo: anchor, moreComing: false)
-                    if isWorkingSet, !badgeNodes.isEmpty {
+                    // replace は badge 配信の有無と独立に前進させる（PR #66 レビュー nit 1）:
+                    // 配信対象ゼロでも「ツリーから消えたパスが reported に残っているだけ」の
+                    // 差は起きえて、放置すると live != reported が恒常成立 → didChange のたびに
+                    // 空振り signal + 空の enumerateChanges が 1 周走る。replace 自体は
+                    // 同値なら内部で no-op。
+                    if isWorkingSet {
                         await services.materializedReported.replace(with: newReport)
                     }
                     return

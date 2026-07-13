@@ -42,16 +42,42 @@ public enum MaterializedBadge {
     }
 
     /// バッジ変化として didUpdate に載せるべきパス。
-    /// - files: reported と newReport の対称差のうち**現ツリーに実在するファイルのみ**
+    /// - files: reported と newReport の対称差のうち**新ツリーに実在するファイルのみ**
     ///   （消えたファイルはマニフェスト diff の delete 側が処理する = ここで update を出すと
     ///   削除済み item を蘇生させてしまう）。
     /// - directories: チェック集合（`checkedDirectories`）の反転分（点灯 ⇄ 消灯の両方向）。
+    ///   **dirsBefore は旧ツリー（= Finder が最後に見た世代）基準**（PR #66 レビュー指摘 1）:
+    ///   両側を新ツリーで計算すると「実体化集合は不変・ツリーだけが変わった」反転（リモート
+    ///   削除で全実体化化 / リモートの古い mtime ファイル追加で dataless 混入 — どちらも dir の
+    ///   合成 mtime が動かずマニフェスト diff に dir が載らないケース）が対称差に現れず、
+    ///   チェックが固着する。新ツリーに配下ファイルを持たない dir は配信対象外
+    ///   （消えた dir はマニフェスト diff の delete 側が処理する）。
     public static func changedPaths(
-        filePaths: [String], previousReported: Set<String>, newReport: Set<String>
+        oldFilePaths: [String], newFilePaths: [String],
+        previousReported: Set<String>, newReport: Set<String>
     ) -> (files: Set<String>, directories: Set<String>) {
-        let files = Set(filePaths).intersection(previousReported.symmetricDifference(newReport))
-        let dirsBefore = checkedDirectories(filePaths: filePaths, materialized: previousReported)
-        let dirsAfter = checkedDirectories(filePaths: filePaths, materialized: newReport)
-        return (files, dirsBefore.symmetricDifference(dirsAfter))
+        let files = Set(newFilePaths).intersection(previousReported.symmetricDifference(newReport))
+        let dirsBefore = checkedDirectories(filePaths: oldFilePaths, materialized: previousReported)
+        let dirsAfter = checkedDirectories(filePaths: newFilePaths, materialized: newReport)
+        let currentDirs = directoriesContainingFiles(newFilePaths)
+        return (
+            files,
+            dirsBefore.symmetricDifference(dirsAfter).intersection(currentDirs)
+        )
+    }
+
+    /// filePaths の祖先 dir 全集合（= 配下に 1 ファイル以上ある dir。ルート `""` は含まない）。
+    private static func directoriesContainingFiles(
+        _ filePaths: some Sequence<String>
+    ) -> Set<String> {
+        var dirs: Set<String> = []
+        for path in filePaths {
+            var ancestor = ""
+            for component in path.split(separator: "/").dropLast() {
+                ancestor = ancestor.isEmpty ? String(component) : "\(ancestor)/\(component)"
+                dirs.insert(ancestor)
+            }
+        }
+        return dirs
     }
 }

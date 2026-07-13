@@ -64,7 +64,7 @@ final class MaterializedBadgeTests: XCTestCase {
         let files = ["docs/a.txt", "docs/b.txt", "top.txt"]
         // materialize: b.txt が増えて docs が全実体化 → docs が反転
         let lit = MaterializedBadge.changedPaths(
-            filePaths: files,
+            oldFilePaths: files, newFilePaths: files,
             previousReported: ["docs/a.txt"],
             newReport: ["docs/a.txt", "docs/b.txt"]
         )
@@ -72,7 +72,7 @@ final class MaterializedBadgeTests: XCTestCase {
         XCTAssertEqual(lit.directories, ["docs"])
         // evict: a.txt が消えて docs のチェックも外れる
         let dimmed = MaterializedBadge.changedPaths(
-            filePaths: files,
+            oldFilePaths: files, newFilePaths: files,
             previousReported: ["docs/a.txt", "docs/b.txt"],
             newReport: ["docs/b.txt"]
         )
@@ -84,7 +84,7 @@ final class MaterializedBadgeTests: XCTestCase {
     /// ここで update を出すと削除済み item を蘇生させる）。
     func testChangedPathsIgnoresPathsGoneFromTree() {
         let changed = MaterializedBadge.changedPaths(
-            filePaths: ["kept.txt"],
+            oldFilePaths: ["kept.txt", "deleted.txt"], newFilePaths: ["kept.txt"],
             previousReported: ["kept.txt", "deleted.txt"],
             newReport: ["kept.txt"]
         )
@@ -94,10 +94,51 @@ final class MaterializedBadgeTests: XCTestCase {
 
     /// 変化なしなら空（enumerateChanges が badge-only 更新を出さない条件）。
     func testChangedPathsNoop() {
+        let files = ["docs/a.txt", "docs/b.txt"]
         let report: Set<String> = ["docs/a.txt"]
         let changed = MaterializedBadge.changedPaths(
-            filePaths: ["docs/a.txt", "docs/b.txt"],
+            oldFilePaths: files, newFilePaths: files,
             previousReported: report, newReport: report
+        )
+        XCTAssertEqual(changed.files, [])
+        XCTAssertEqual(changed.directories, [])
+    }
+
+    // MARK: - ツリー変化起因の dir チェック反転（PR #66 レビュー指摘 1 の回帰）
+
+    /// リモート削除で dataless の子が消え「配下全実体化」になった dir は、実体化集合が
+    /// 不変（reported == newReport）でも directories に出る（dirsBefore = 旧ツリー基準）。
+    func testChangedPathsDetectsRecheckByRemoteDeletion() {
+        let report: Set<String> = ["docs/a.txt"]
+        let changed = MaterializedBadge.changedPaths(
+            oldFilePaths: ["docs/a.txt", "docs/b.txt"],  // b.txt は dataless だった
+            newFilePaths: ["docs/a.txt"],  // リモートが b.txt を削除
+            previousReported: report, newReport: report
+        )
+        XCTAssertEqual(changed.files, [])
+        XCTAssertEqual(changed.directories, ["docs"])
+    }
+
+    /// チェック済みの dir にリモートが dataless の子を追加（古い mtime = 合成 mtime 不変で
+    /// マニフェスト diff に dir が載らないケース）→ チェック消灯が directories に出る。
+    /// 固着すると「実体があると誤読される」= 本機能が避けたかった状態の再発（レビュー指摘 1）。
+    func testChangedPathsDetectsUncheckByRemoteAddition() {
+        let report: Set<String> = ["docs/a.txt"]
+        let changed = MaterializedBadge.changedPaths(
+            oldFilePaths: ["docs/a.txt"],  // 全実体化でチェック済みだった
+            newFilePaths: ["docs/a.txt", "docs/b.txt"],  // リモートが dataless の b.txt を追加
+            previousReported: report, newReport: report
+        )
+        XCTAssertEqual(changed.files, [])
+        XCTAssertEqual(changed.directories, ["docs"])
+    }
+
+    /// 旧ツリーでのみチェックされていた dir が新ツリーから消えた（配下ファイルゼロ）場合は
+    /// directories に出ない（消えた dir はマニフェスト diff の delete 側が処理する）。
+    func testChangedPathsFiltersDirectoriesGoneFromNewTree() {
+        let changed = MaterializedBadge.changedPaths(
+            oldFilePaths: ["gone/a.txt"], newFilePaths: ["other/x.txt"],
+            previousReported: ["gone/a.txt"], newReport: []
         )
         XCTAssertEqual(changed.files, [])
         XCTAssertEqual(changed.directories, [])

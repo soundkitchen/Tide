@@ -127,19 +127,24 @@ final class FileProviderItem: NSObject, NSFileProviderItem, NSFileProviderItemDe
 }
 
 /// ツリー + 報告済み集合から、node ごとの実体化フラグを引いて item を構築するコンテキスト
-/// （Issue #65）。dir の集計（配下全実体化）を 1 回だけ計算して使い回す。
+/// （Issue #65）。dir の集計（配下全実体化）は **dir ノードを初めて判定したときだけ**計算し
+/// （lazy・1 回きり）、以後使い回す — `item(for:)` は単一 item の照会ごとに BadgeFlags を
+/// 作るため、eager 計算だとファイル照会でも毎回 O(全ファイル数) の集計を踏む
+/// （PR #66 レビュー perf 提案。fileproviderd は item(for:) をバースト発行することがある）。
 /// 判定本体は TideCore の `MaterializedBadge`（純粋・テスト可能層）。
-struct BadgeFlags {
+/// 単一 Task 内で生成・消費するローカルな文脈（Sendable 越境しない）。
+final class BadgeFlags {
+    private let tree: ManifestTree
     private let reported: Set<String>
-    private let checkedDirs: Set<String>
+    private lazy var checkedDirs: Set<String> = MaterializedBadge.checkedDirectories(
+        filePaths: tree.filePaths, materialized: reported)
 
     /// - Parameter reported: Finder へ報告する（した）実体化済みファイルパス集合。
     ///   working set の enumerateChanges では newReport、読み取り経路では
     ///   `materializedReported.snapshot()` を渡す。
     init(tree: ManifestTree, reported: Set<String>) {
+        self.tree = tree
         self.reported = reported
-        self.checkedDirs = MaterializedBadge.checkedDirectories(
-            filePaths: tree.filePaths, materialized: reported)
     }
 
     func isOn(_ node: ManifestTree.Node) -> Bool {
