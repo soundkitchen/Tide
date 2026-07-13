@@ -6,11 +6,27 @@ import UniformTypeIdentifiers
 /// `ManifestTree.Node` を `NSFileProviderItem` に写像する読み取り専用アイテム（M5 Phase 3）。
 /// identifier = kind プレフィックス + 相対 POSIX パス（`f:`/`d:`・ルートは `.rootContainer`。
 /// M5 Phase 5-1 で kind 織り込み形式へ変更）。バージョンは sha256 をそのまま使う。
-final class FileProviderItem: NSObject, NSFileProviderItem, @unchecked Sendable {
-    private let node: ManifestTree.Node
+/// 実体化バッジ（Issue #65）: `materialized` フラグが decorations（チェックバッジ）と
+/// metadataVersion の複合符号化（`|m` サフィックス）の両方に反映される。
+final class FileProviderItem: NSObject, NSFileProviderItem, NSFileProviderItemDecorating,
+    @unchecked Sendable
+{
+    /// Info.plist（`project.yml` の `NSFileProviderDecorations`）で宣言した実体化バッジの
+    /// identifier。宣言と一致しないと描画されない。
+    static let materializedDecoration = NSFileProviderItemDecorationIdentifier(
+        "org.izukawa.Tide.materialized")
 
-    init(node: ManifestTree.Node) {
+    private let node: ManifestTree.Node
+    private let materialized: Bool
+
+    /// - Parameter materialized: 実体化バッジ（Issue #65）。file = 報告済み集合に掲載 /
+    ///   dir = 配下 1 ファイル以上かつ全実体化（`BadgeFlags` で判定）。省略時 false = バッジなし
+    ///   （root・仮想フォルダ等、構造的にバッジが付かない構築箇所用）。**報告済みでありうる item を
+    ///   false で返すとバッジが消えたまま固着する**（メタデータ regress は次の差分が出るまで
+    ///   再配信されない）ので、ツリー由来の item は `BadgeFlags` 経由で構築すること。
+    init(node: ManifestTree.Node, materialized: Bool = false) {
         self.node = node
+        self.materialized = materialized
     }
 
     var itemIdentifier: NSFileProviderItemIdentifier {
@@ -63,24 +79,22 @@ final class FileProviderItem: NSObject, NSFileProviderItem, @unchecked Sendable 
     }
 
     var itemVersion: NSFileProviderItemVersion {
-        // contentVersion の符号化は TideCore の `FileProviderWritePolicy` に集約（`baseSha` の対・
-        // 書込経路の 3-way ベース抽出と往復整合を保証。PR #58 レビュー #8）。
-        let content = FileProviderWritePolicy.contentVersion(for: node)
-        switch node {
-        case .directory(_, let mtime):
-            // ディレクトリは合成物（コンテンツは持たない）。配下の最大 mtime（合成値）を
-            // metadataVersion に載せ、配下更新でメタデータ（表示日付）が追従するようにする。
-            let meta = mtime.map { "dir-\(ISO8601.format($0))" } ?? "dir"
-            return NSFileProviderItemVersion(contentVersion: content, metadataVersion: Data(meta.utf8))
-        case .file:
-            // file は content == metadata（sha256）— 内容変化がメタ変化でもある。
-            // **この同一性は load-bearing**（M5 Phase 5-4）: rebind（move の返却 item で id を
-            // 変えた）item への次操作は、システムが渡す baseVersion の contentVersion が
-            // ローカル版スタンプに差し替わる（実機確定）。`FileProviderWritePolicy.baseSha` は
-            // metadataVersion から sha を復元してベースガードを維持するため、file の
-            // metadataVersion を sha 以外に変えると rebind 後の削除/編集が全滅する。
-            return NSFileProviderItemVersion(contentVersion: content, metadataVersion: content)
-        }
+        // 符号化は TideCore の `FileProviderWritePolicy` に集約（`baseSha` の対・書込経路の
+        // 3-way ベース抽出と往復整合を保証。PR #58 レビュー #8）。
+        // - contentVersion: file = sha256 / dir = "dir"。**実体化フラグは絶対に載せない**
+        //   （内容変化の意味になり再取得を誘発する）。
+        // - metadataVersion: file = sha256（+ 実体化時 `|m`）/ dir = "dir-<mtime>"（+ `|m`）。
+        //   file の **sha プレフィックスは load-bearing**（M5 Phase 5-4）: rebind（move の返却
+        //   item で id を変えた）item への次操作は、システムが渡す baseVersion の contentVersion が
+        //   ローカル版スタンプに差し替わる（実機確定）。`FileProviderWritePolicy.baseSha` は
+        //   metadataVersion から sha を復元してベースガードを維持するため、sha を先頭に持たない
+        //   符号化に変えると rebind 後の削除/編集が全滅する（`|m` サフィックスは baseSha が
+        //   剥がして復元する = 往復は `FileProviderWritePolicyTests` が固定）。
+        NSFileProviderItemVersion(
+            contentVersion: FileProviderWritePolicy.contentVersion(for: node),
+            metadataVersion: FileProviderWritePolicy.metadataVersion(
+                for: node, materialized: materialized)
+        )
     }
 
     var documentSize: NSNumber? {
@@ -102,5 +116,37 @@ final class FileProviderItem: NSObject, NSFileProviderItem, @unchecked Sendable 
     var contentPolicy: NSFileProviderContentPolicy {
         // dataless PoC の本旨: 実体はダウンロードせずプレースホルダのまま（開いた時に fetch）
         .downloadLazily
+    }
+
+    /// 実体化バッジ（Issue #65）: 実体化されているときだけチェックを出す。静的バッジ
+    /// （全ファイル常時表示）は dataless にも付いて「ローカルに実体がある」と誤読されるため
+    /// 不採用（2026-07-12 試作 → 撤去の経緯・docs/09）。
+    var decorations: [NSFileProviderItemDecorationIdentifier]? {
+        materialized ? [Self.materializedDecoration] : nil
+    }
+}
+
+/// ツリー + 報告済み集合から、node ごとの実体化フラグを引いて item を構築するコンテキスト
+/// （Issue #65）。dir の集計（配下全実体化）を 1 回だけ計算して使い回す。
+/// 判定本体は TideCore の `MaterializedBadge`（純粋・テスト可能層）。
+struct BadgeFlags {
+    private let reported: Set<String>
+    private let checkedDirs: Set<String>
+
+    /// - Parameter reported: Finder へ報告する（した）実体化済みファイルパス集合。
+    ///   working set の enumerateChanges では newReport、読み取り経路では
+    ///   `materializedReported.snapshot()` を渡す。
+    init(tree: ManifestTree, reported: Set<String>) {
+        self.reported = reported
+        self.checkedDirs = MaterializedBadge.checkedDirectories(
+            filePaths: tree.filePaths, materialized: reported)
+    }
+
+    func isOn(_ node: ManifestTree.Node) -> Bool {
+        node.isDirectory ? checkedDirs.contains(node.path) : reported.contains(node.path)
+    }
+
+    func item(_ node: ManifestTree.Node) -> FileProviderItem {
+        FileProviderItem(node: node, materialized: isOn(node))
     }
 }

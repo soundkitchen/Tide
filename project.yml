@@ -76,6 +76,15 @@ targets:
           NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).FileProviderExtension
           NSExtensionFileProviderDocumentGroup: G5G54TCH8W.org.izukawa.Tide
           NSExtensionFileProviderSupportsEnumeration: true
+          # 実体化バッジ（Issue #65）: Identifier は FileProviderItem.materializedDecoration と
+          # 一致必須。BadgeImageType はシステム提供 UTI（com.apple.icon-decoration.badge 準拠・
+          # 2026-07-12 試作時に lsregister で利用可能を実測）。Label は hover / VoiceOver 用
+          #（Info.plist 値のローカライズは未対応 = en 固定。docs/09 に記録）。
+          NSFileProviderDecorations:
+            - Identifier: org.izukawa.Tide.materialized
+              BadgeImageType: com.apple.icon-decoration.badge.checkmark
+              Category: Badge
+              Label: Downloaded
     entitlements:
       path: TideFileProvider/TideFileProvider.entitlements
       properties:

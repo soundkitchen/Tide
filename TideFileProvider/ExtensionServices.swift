@@ -13,6 +13,12 @@ struct UncheckedSendableBox<T>: @unchecked Sendable {
 /// から構築する。**DB には触らない**（Phase 3 からの不変条件。世代ログは App Group Caches の
 /// 拡張専用 JSON = GRDB 非接触）。
 struct ExtensionServices: Sendable {
+    /// 実体化バッジ（Issue #65）: 報告済みレジストリの上限。実体化ファイル数は既定の 1000 を
+    /// 一括ダウンロード等で普通に超えるため引き上げ（2026-07-14 ユーザ確定）。溢れた分は
+    /// バッジが付かないだけ（`MaterializedBadge.cappedReport` / `PersistedPathSet.replace` が
+    /// 同一規則で決定的に切り詰める = チャーンなし）。
+    static let materializedBadgeCap = 10_000
+
     let s3: TideS3Client
     let cache: ManifestGenerationCache
     /// FP 書込経路（M5 Phase 5-2・deleteItem + modifyItem）。S3 とマニフェストのみを書く。
@@ -32,12 +38,36 @@ struct ExtensionServices: Sendable {
     /// 付き削除**として受理する根拠にする。除外以外の deleteItem は従来どおり itemVersion 由来
     /// ベースで裁く（「根拠なしに消さない」の維持）。
     let exclusionCleanups: PersistedPathSet
+    /// 実体化バッジ（Issue #65）: Finder へ最後に報告した実体化済みファイルパス集合（永続）。
+    /// 前進（replace）させるのは **working set の enumerateChanges のみ**（単一の報告点 —
+    /// コンテナ enumerator や書込コールバックが消費すると、working set 経由の差分配信が
+    /// 空振りしてバッジが固着する）。move/削除の構造追従（renameSubtree / removeSubtree）は例外。
+    let materializedReported: PersistedPathSet
+    /// 実体化バッジ（Issue #65）: fileproviderd から最後に観測した live 集合（メモリのみ）。
+    let materializedObserver: MaterializedObserver
+    /// 実体化バッジ（Issue #65）: live 集合の全量問い合わせ（`MaterializedSetQuery.filePaths`）。
+    /// domain を閉じ込めた closure で、`materializedItemsDidChange` と enumerateChanges の
+    /// 初回リフレッシュが共用する。失敗は nil（バッジ更新を見送るだけ・安全側）。
+    let queryMaterializedFilePaths: @Sendable () async -> Set<String>?
     /// workingSet への自己 signal。現状の呼び手は機会的自己 signal（`onNewGeneration`）のみ。
     /// Phase 5-2 以降の書込通知（拡張自身の書込後にシステムへ変化を取りに来させる）の土台として
     /// 公開している。※「delete 確定 → signal → 新セッションで update」の 2 相配信パターンは
     /// **再導入しないこと** — 22ms 差の別セッションでも ingest 合成で delete が update を打ち消す
     /// ことを実機確定済み（Phase 5-1。kind 変化は id 分離で解決済み・docs/08 参照）。
     let signalWorkingSet: @Sendable () -> Void
+
+    /// live 集合を観測し直し、報告済みと食い違えば working set を signal する（Issue #65）。
+    /// `materializedItemsDidChange`（materialize / evict の通知）と、enumerateChanges の
+    /// 初回リフレッシュ（プロセス起動後まだ didChange が来ていない場合の遅延観測）が共用。
+    /// 問い合わせ失敗は何もしない（バッジ更新を見送るだけ・安全側）。
+    func refreshMaterializedObservation() async {
+        guard let live = await queryMaterializedFilePaths() else { return }
+        await materializedObserver.update(live)
+        let reported = await materializedReported.snapshot()
+        if live != reported {
+            signalWorkingSet()
+        }
+    }
 
     /// 共有設定から構築する。未セットアップ / 認証情報なしなら nil
     /// （呼び出し側が `NSFileProviderError(.notAuthenticated)` に落とす）。
@@ -134,13 +164,22 @@ struct ExtensionServices: Sendable {
                 filename: "fileprovider-virtual-dirs.json")
             let cleanupsURL = try? PersistedPathSet.defaultURL(
                 filename: "fileprovider-exclusion-cleanups.json")
-            if virtualDirsURL == nil || cleanupsURL == nil {
+            let materializedURL = try? PersistedPathSet.defaultURL(
+                filename: "fileprovider-materialized.json")
+            if virtualDirsURL == nil || cleanupsURL == nil || materializedURL == nil {
                 AppLogger.fileProvider.error("Extension: path-set registry URL unavailable (persisting disabled)")
             }
             return ExtensionServices(
                 s3: s3, cache: cache, writer: writer, ignore: ignore,
                 virtualDirs: PersistedPathSet(bucket: bucket, fileURL: virtualDirsURL),
                 exclusionCleanups: PersistedPathSet(bucket: bucket, fileURL: cleanupsURL),
+                materializedReported: PersistedPathSet(
+                    bucket: bucket, fileURL: materializedURL,
+                    maxEntries: Self.materializedBadgeCap),
+                materializedObserver: MaterializedObserver(),
+                queryMaterializedFilePaths: {
+                    await MaterializedSetQuery.filePaths(domain: boxedDomain.value)
+                },
                 signalWorkingSet: signalWorkingSet
             )
         } catch {

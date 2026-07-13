@@ -56,29 +56,24 @@
 - **新しい App Extension ターゲットが要り、拡張は別プロセスでサンドボックス必須＝L1（App Sandbox）と密結合**。同期コア（`S3Client` / `Manifest` / `LocalDatabase`）を拡張プロセスから呼べる形に再編が必要。**L1 の security-scoped bookmark 対応もこの版で一度に行う**（arbitrary-folder モデルのまま 0.2.0 で先行サンドボックス化すると、ドメインへ移る本版で作り直しになるため＝二度手間回避。L1 / H3 を 0.2.0 から外した理由）。
 - **最小プロトタイプ**＝ドメイン登録 + `enumerator` + `fetchContents` で実現性を確認してから本実装に入る段取り。
 
-### バックログ: FP の実体化連動バッジ（Finder デコレーション・2026-07-12 試作 → 撤去）
+### FP の実体化連動バッジ（Finder デコレーション・2026-07-12 試作 → 撤去 → ✅ 実装 2026-07-14 = Issue #65）
 
 Google Drive 風の「同期済みチェックバッジ」を試作した（`NSExtension` 配下の `NSFileProviderDecorations` +
 `FileProviderItem` の `NSFileProviderItemDecorating` 準拠・システム提供 UTI
 `com.apple.icon-decoration.badge.checkmark` が利用可能なことを lsregister で実測）。しかし
 **静的バッジ（全ファイル常時表示）は dataless のファイルにも付き「ローカルに実体がある」と誤読される**
 UX 問題があり撤去（ユーザ判断・Google のチェックは「ピン留め = プロバイダ自身が管理する状態」だから
-正確に出し分けられるという構造差）。再挑戦するなら**「実体化されているときだけチェック」**が要件で、
-必要な工事は 3 点（5-3 級のサブ機能 1 本ぶん・独立 PR 推奨）:
+正確に出し分けられるという構造差）。
 
-1. **実体化状態の追跡**: 実体化は fileproviderd 側の状態で拡張は item 生成時に知らされない。
-   `NSFileProviderManager.enumeratorForMaterializedItems()` + `materializedItemsDidChange` で追跡し、
-   前回報告分との差分を永続化（`PersistedPathSet` の再利用候補）。
-2. **metadataVersion の複合符号化**: バッジ変更を Finder に届けるには metadataVersion を変えて
-   item 更新として再配信する必要があるが、**file の metadataVersion == sha は rebind 対応の
-   load-bearing**（5-4・`FileProviderItem.itemVersion` 参照）。`sha + 実体化フラグ` の複合符号化へ
-   変えるなら `FileProviderWritePolicy.baseSha` のデコーダ拡張（64-hex プレフィックス許容）+
-   後方互換 + 往復テストが必須。**ドメイン作り直しも必要**（capabilities と同じ）。
-3. **enumerateChanges への実体化差分オーバーレイ**: 増分配信はマニフェスト世代駆動で実体化を
-   知らない。materialize 時は `fetchContents` の返却 item に載せるだけで済む（無料）が、
-   **evict（「ダウンロードを削除」）は拡張を経由しない**ため、①の追跡 + 自己 signal +
-   enumerateChanges での差分合流が必須。anchor 意味論との厳密整合は cosmetic 用途として
-   eventual で妥協可、という設計判断込み。
+**✅ 「実体化されているときだけチェック」で再実装（2026-07-14・Issue #65）**。当初設計の工事 3 点
+（①実体化追跡 = `enumeratorForMaterializedItems` + `materializedItemsDidChange` + `PersistedPathSet`
+3 本目 ②metadataVersion の複合符号化 = `<sha>|m`・`baseSha` のサフィックス剥がし + 後方互換
+③enumerateChanges への実体化差分オーバーレイ = working set 単一報告点・eventual）をそのまま実施し、
+ユーザ確定 2 点を追加 — **対象はディレクトリにも**（チェック基準 = 配下 1 ファイル以上かつ全実体化・
+空/仮想フォルダは対象外）/ **レジストリ上限は init 注入化してバッジ用のみ 10,000**。
+設計詳細は `docs/08`「FP 実体化連動バッジ」節。実機検証項目（ファイル単位の materialize/evict が
+OS の実体化セットに現れるか = SDK ヘッダは dir 中心の記述）は受け入れチェックリストの最初の項目。
+バッジ Label の未ローカライズ（Info.plist 値 = en「Downloaded」固定）は残 nit として記録。
 
 ## ファイル → 同名ディレクトリ置換で FSEvents 同期が壊れる（2026-07-04 発見 = Issue #52・同日修正）
 

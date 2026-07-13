@@ -27,6 +27,7 @@
 		2230B958A48B5C1E03C1DFB8 /* ManifestGenerationLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = D283FF14F141F298C9F27E9A /* ManifestGenerationLog.swift */; };
 		224A489D4BBB6C02AD07F91D /* MultipartUploader.swift in Sources */ = {isa = PBXBuildFile; fileRef = B65FE95D48D3620972574EEB /* MultipartUploader.swift */; };
 		274736C1DFBC4F29E2A8D2D7 /* NotificationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8DB10BCAF7E41F7945E67A7 /* NotificationManager.swift */; };
+		29216E327173D658C9A4487F /* MaterializedBadgeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F332DCA3D09055A9FDB2448 /* MaterializedBadgeTests.swift */; };
 		2934320120BBFB444BED2195 /* ObjectVersionHistoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 218BF6C59F9429D95309C74F /* ObjectVersionHistoryTests.swift */; };
 		2A7293E041FA3050D24D52C9 /* ReconcileWiringTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6BC290FF01368C3B9C4056E2 /* ReconcileWiringTests.swift */; };
 		2ADD28F5A093205D7226FD0B /* ConflictNamer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04D0D58407498910750005E2 /* ConflictNamer.swift */; };
@@ -56,6 +57,7 @@
 		54582D1A90D493B8A49F7392 /* RateLimiterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 55A63530A904BB8A91710C73 /* RateLimiterTests.swift */; };
 		587C235534B792BD5FCA8E6F /* TideCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 5239E4D2F62809A68F07CFCE /* TideCore.framework */; };
 		5A0A18893286A0BF58665C56 /* ExtensionServices.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACE2A02A3924D54DA4CD876E /* ExtensionServices.swift */; };
+		5A9244168845FA6847D40E56 /* MaterializedSetObserver.swift in Sources */ = {isa = PBXBuildFile; fileRef = F03770F44AAE048A2CAB1058 /* MaterializedSetObserver.swift */; };
 		5C259B9E9FD8A01379711B38 /* S3Client.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88605F9B48FCB78A345BA0E1 /* S3Client.swift */; };
 		60CB368AAC5B75DF875C8116 /* TideFileProvider.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 863B37F925AB5A36B3362386 /* TideFileProvider.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		61041DF6FC224E4E889AEA59 /* RestoreService.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA79B58B863B37EB569088A6 /* RestoreService.swift */; };
@@ -129,6 +131,7 @@
 		C5031FFC043FF9929A518931 /* NoFollowFileReaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00F21E2E210A7F9BC778BC5D /* NoFollowFileReaderTests.swift */; };
 		C7A40BA450419C132982B828 /* FileProviderController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D267182BF4D5A067BA32C6D /* FileProviderController.swift */; };
 		C89C4AA65987A0D84B009C08 /* AboutWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 304004BC24DB5BEA9B3BE68F /* AboutWindow.swift */; };
+		C9D776D5C99A6EB00C498CCD /* MaterializedBadge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1E107EBBD4359FF734A4E032 /* MaterializedBadge.swift */; };
 		CC223B1F855BCDBB5CA5310E /* LocalDatabaseTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF88A6EE0AAE77A740A190A9 /* LocalDatabaseTests.swift */; };
 		CDCA61C692F809FA5B2210CE /* ManifestGenerationLogTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1AFDD6DC6B26F6450EF4A09D /* ManifestGenerationLogTests.swift */; };
 		CECE5F6A0DFB1688D2B8CE71 /* UploaderTypeChangeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ADD2E82201855CA97C6140BF /* UploaderTypeChangeTests.swift */; };
@@ -257,6 +260,7 @@
 		1D326FF459D50EF387EBD5E8 /* ThreeWayMergeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreeWayMergeTests.swift; sourceTree = "<group>"; };
 		1D6159D935D2BCDF5F10B9BA /* SettingsTransfer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsTransfer.swift; sourceTree = "<group>"; };
 		1DB7CAFD9534FF6A0268F3A1 /* TideFileProvider.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = TideFileProvider.entitlements; sourceTree = "<group>"; };
+		1E107EBBD4359FF734A4E032 /* MaterializedBadge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MaterializedBadge.swift; sourceTree = "<group>"; };
 		20F5F66DB9903E0F42061DAA /* StabilityCheckTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StabilityCheckTests.swift; sourceTree = "<group>"; };
 		218BF6C59F9429D95309C74F /* ObjectVersionHistoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ObjectVersionHistoryTests.swift; sourceTree = "<group>"; };
 		247AD143645CCEE156530544 /* PartPlan.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PartPlan.swift; sourceTree = "<group>"; };
@@ -270,6 +274,7 @@
 		2B6B12A4689B10709B734D22 /* Tide.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Tide.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		2D36284B0C5C600CD58102B9 /* TideTmpDirectory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TideTmpDirectory.swift; sourceTree = "<group>"; };
 		2EF3CA833E6E781AAE721EF6 /* SyncActivityModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncActivityModel.swift; sourceTree = "<group>"; };
+		2F332DCA3D09055A9FDB2448 /* MaterializedBadgeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MaterializedBadgeTests.swift; sourceTree = "<group>"; };
 		304004BC24DB5BEA9B3BE68F /* AboutWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AboutWindow.swift; sourceTree = "<group>"; };
 		308E6D6F3A4FF092DFB36BB4 /* MultipartUploaderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MultipartUploaderTests.swift; sourceTree = "<group>"; };
 		33EF3AEF2B8867E9EBADF4BA /* FileProviderEnumerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileProviderEnumerator.swift; sourceTree = "<group>"; };
@@ -365,6 +370,7 @@
 		EF18F96672340265B0CAE32E /* ConfigStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfigStore.swift; sourceTree = "<group>"; };
 		EF76EA7236010317B9F4211C /* ManifestTreeDiff.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManifestTreeDiff.swift; sourceTree = "<group>"; };
 		EF8E7684D0B1A5D8C577F7E8 /* FileProviderItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileProviderItem.swift; sourceTree = "<group>"; };
+		F03770F44AAE048A2CAB1058 /* MaterializedSetObserver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MaterializedSetObserver.swift; sourceTree = "<group>"; };
 		F04B07DC0E849CB713B2A06F /* TideAppGroup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TideAppGroup.swift; sourceTree = "<group>"; };
 		F210251B285ACE9A5ECED1A8 /* SyncEvent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncEvent.swift; sourceTree = "<group>"; };
 		F30DF069AA0B9737745C681A /* SettingsTransferTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsTransferTests.swift; sourceTree = "<group>"; };
@@ -432,6 +438,7 @@
 				FA2888ADA3741A6B9789F63F /* IgnoreRules.swift */,
 				3A35749893F24240084B7E8A /* ManifestTree.swift */,
 				EF76EA7236010317B9F4211C /* ManifestTreeDiff.swift */,
+				1E107EBBD4359FF734A4E032 /* MaterializedBadge.swift */,
 				0243D1F40FF684683FF7A8FA /* NoFollowFileReader.swift */,
 				1775C971BA4151BEBF4AA74C /* PathValidator.swift */,
 				12E97E750C4BF1695416B157 /* RateLimiter.swift */,
@@ -477,6 +484,7 @@
 				49E1926B86F26BCDCC8D71CF /* FileProviderExtension.swift */,
 				EF8E7684D0B1A5D8C577F7E8 /* FileProviderItem.swift */,
 				DFB0EE091C8021602553D322 /* Info.plist */,
+				F03770F44AAE048A2CAB1058 /* MaterializedSetObserver.swift */,
 				1DB7CAFD9534FF6A0268F3A1 /* TideFileProvider.entitlements */,
 			);
 			path = TideFileProvider;
@@ -523,6 +531,7 @@
 				268B6DB362449129207086A7 /* ManifestTreeDiffTests.swift */,
 				B8665F814F4338316C32E779 /* ManifestTreeTests.swift */,
 				8B82697061FD8E7EC204E814 /* ManifestUpdaterTests.swift */,
+				2F332DCA3D09055A9FDB2448 /* MaterializedBadgeTests.swift */,
 				AAAD1B304E2B82467B78B4F5 /* MenuBarPresentationTests.swift */,
 				308E6D6F3A4FF092DFB36BB4 /* MultipartUploaderTests.swift */,
 				00F21E2E210A7F9BC778BC5D /* NoFollowFileReaderTests.swift */,
@@ -905,6 +914,7 @@
 				F7F017FA5CF345F97250D0B1 /* ManifestStore.swift in Sources */,
 				F9775ABEBA07DE60E14AD2E7 /* ManifestTree.swift in Sources */,
 				DA9953E6A55401B032F710F5 /* ManifestTreeDiff.swift in Sources */,
+				C9D776D5C99A6EB00C498CCD /* MaterializedBadge.swift in Sources */,
 				A7270A51CC30ECB9570E74ED /* Migrations.swift in Sources */,
 				224A489D4BBB6C02AD07F91D /* MultipartUploader.swift in Sources */,
 				1088EBA6975DA2156CA1213F /* NoFollowFileReader.swift in Sources */,
@@ -940,6 +950,7 @@
 				AFE8717CC7609C4EFD47ED76 /* FileProviderEnumerator.swift in Sources */,
 				18CC8CC2489A6ADE04C9FF2A /* FileProviderExtension.swift in Sources */,
 				35C303CEB9F985D8F8418061 /* FileProviderItem.swift in Sources */,
+				5A9244168845FA6847D40E56 /* MaterializedSetObserver.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -973,6 +984,7 @@
 				348D9E70C7268F6FBBE617F3 /* ManifestTreeDiffTests.swift in Sources */,
 				FAEB8A42EB4D23963468CF15 /* ManifestTreeTests.swift in Sources */,
 				BB5BE7ADC71676AB0D73801D /* ManifestUpdaterTests.swift in Sources */,
+				29216E327173D658C9A4487F /* MaterializedBadgeTests.swift in Sources */,
 				05964BF3CA4229A7F5D5012A /* MenuBarPresentationTests.swift in Sources */,
 				AF9E6F2F13CAA4421223A22B /* MultipartUploaderTests.swift in Sources */,
 				C5031FFC043FF9929A518931 /* NoFollowFileReaderTests.swift in Sources */,

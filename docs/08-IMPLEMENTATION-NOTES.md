@@ -123,6 +123,15 @@ FP ドメイン内のファイル編集（`modifyItem` の .contents）と削除
 - ドメインフォルダ名 `Tide-Tide` は displayName 由来で identifier 非依存（変わらない）。拡張側はドメインを引数で受けるため identifier 非参照 = 無傷。
 - **実機知見（2026-07-13 受け入れ）: 自動移行直後は Finder サイドバーの「場所」項目が消えたままになることがある** — remove → add が 20ms で連続するため Finder が再登録イベントを取りこぼすとみられる。ドメイン・列挙・レプリカは正常（fileproviderd は `Removing domain …/poc` → `Adding domain (main)` → starting domain を正常記録）で、**`killall Finder` で復帰**。一度きりの移行の cosmetic な癖として記録（設定の Disable → Enable のような人間の操作間隔では発生しない）。
 
+#### FP 実体化連動バッジ（Issue #65・2026-07-14）
+
+- **要件**: 「実体化されているときだけ Finder にチェックバッジ」（静的バッジは dataless にも付き誤読される — 2026-07-12 試作 → 撤去の再挑戦）。対象は**ファイル + ディレクトリ両方**（ユーザ確定）。dir のチェック基準 = **配下に 1 ファイル以上あり、かつ配下全ファイルが実体化済み**（空フォルダ・仮想フォルダはチェックなし）。バッジは S3 非接触の純ローカル機能。
+- **実体化状態の追跡（live / reported の 2 面）**: 真実 = fileproviderd（`NSFileProviderManager.enumeratorForMaterializedItems()` で全量取得・`materializedItemsDidChange` が変化通知）。**live**（最後に観測した集合）は `MaterializedObserver`（actor・メモリのみ）、**reported**（Finder へ最後に報告した集合）は `PersistedPathSet` の 3 本目 `fileprovider-materialized.json`（**上限は init 注入化して 10,000**・既存 2 用途は 1000 不変・溢れ = バッジ欠落のみの安全側で `MaterializedBadge.cappedReport` と `replace(with:)` が同一の昇順 prefix 規則 = 再送チャーンなし）。evict（「ダウンロードを削除」）は拡張の他コールバックを経由しないため、didChange → 観測 → reported と食い違えば自己 signal、が唯一の消灯検知経路。
+- **metadataVersion の複合符号化**: file = `<sha256>`（+ 実体化時 `|m`）/ dir = `dir-<mtime>`（+ `|m`）。**contentVersion には絶対に載せない**（内容変化の意味になり再取得を誘発）。file の sha プレフィックスは rebind 対応の load-bearing のまま — `FileProviderWritePolicy.baseSha` が既知サフィックスだけ剥がして復元する（未知サフィックスは従来どおり不正・往復は `FileProviderWritePolicyTests` で固定）。非実体化形は旧形式と同一 = 後方互換。
+- **配信 = enumerateChanges への eventual オーバーレイ（anchor 意味論の外・docs/09 の設計判断どおり）**: **報告点（reported の前進 = `replace(with:)`）は working set の enumerateChanges だけ**（コンテナ enumerator が消費すると working set 経由の配信が空振りしてバッジが固着する）。live と reported の差分（`MaterializedBadge.changedPaths` = 点灯/消灯ファイル + チェック反転 dir）を didUpdate に合流させ、マニフェスト無変化でも badge-only 更新を同一 anchor のまま配る。didUpdate の全 item（マニフェスト diff 分も）のフラグは newReport 基準に統一。move は `renameSubtree` で reported を構造追従（チャーン防止）・削除は `removeSubtree`。fetchContents / createItem / modifyItem の返却 item は実体化済みフラグ付き（内容がローカルにある）だが reported はその場で触らない（先に足すと祖先 dir の反転差分が消える）。
+- **表示**: `FileProviderItem` が `NSFileProviderItemDecorating` 準拠・実体化時のみ `org.izukawa.Tide.materialized`（`project.yml` の `NSFileProviderDecorations` 宣言・BadgeImageType = システム UTI `com.apple.icon-decoration.badge.checkmark`）。ツリー由来の item 構築は `BadgeFlags`（tree + reported → dir 集計 1 回）経由 — プレーン構築で返すと報告済みバッジがメタデータ regress で消えたまま固着するため。判定本体は TideCore の `MaterializedBadge`（純粋・`MaterializedBadgeTests`）。
+- **既知の注意**: ① metadataVersion 形式 + Decorations 追加のため**既存レプリカはドメイン作り直し必須**（capabilities と同じ）。② **個々のファイルの materialize/evict が OS の実体化セットに現れるかは実機検証項目**（SDK ヘッダは dir 中心の記述。観測数を notice ログに出して `log show` で判定できるようにしてある）。③ バッジの Label（hover/VoiceOver）は Info.plist 値のため未ローカライズ = en「Downloaded」固定。
+
 ### ダウンロード一時ディレクトリ
 - **`TideTmpDirectory.resolve(for:)` で同一ボリュームの tmp を返す**。第一選択は `~/Library/Caches/Tide/tmp/`。同期ルートと別ボリュームになる時のみ `<syncRoot>/.tide/tmp/` にフォールバック。`moveItem` の atomic 性を保つため。
 

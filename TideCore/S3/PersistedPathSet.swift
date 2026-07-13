@@ -20,7 +20,12 @@ import Foundation
 ///   改ざん/破損しうる = 世代ログと同じ規約・security/low.md L16）。壊れ / bucket 不一致 /
 ///   不正パス混入は**全体破棄** = 空集合。失うのは空フォルダの温存保証だけで、同期の正しさ
 ///   には影響しない（デーモンに掃除され得るのは未実体化の空フォルダのみ）。
-/// - 上限 `maxEntries`: 超過 add は無視（notice ログ）。溢れた分は温存保証を失うだけ（安全側）。
+/// 3. **実体化バッジの報告済み集合**（Issue #65）。Finder へ最後に報告した「実体化済みファイル
+///    パス」の集合。live（fileproviderd の実体化セット）との差分が enumerateChanges の didUpdate に
+///    合流してバッジの点灯/消灯を届ける。失っても再報告でバッジが付き直るだけ（cosmetic）。
+///
+/// - 上限 `maxEntries`（init 注入・既定 1000）: 超過 add は無視（notice ログ）。溢れた分は
+///   温存保証/バッジを失うだけ（安全側）。
 public actor PersistedPathSet {
     public static let maxEntries = 1_000
     private static let currentSchemaVersion = 1
@@ -33,13 +38,17 @@ public actor PersistedPathSet {
 
     private let bucket: String
     private let fileURL: URL?
+    private let maxEntries: Int
     private var paths: Set<String> = []
     private var loaded = false
 
     /// - Parameter fileURL: nil = 永続化なし（構築失敗時の縮退。プロセス生存中のみ有効）。
-    public init(bucket: String, fileURL: URL?) {
+    /// - Parameter maxEntries: エントリ数の安全弁（既定 = `Self.maxEntries`。実体化バッジ用は
+    ///   実体化ファイル数が既定 1000 を普通に超えるため引き上げる・2026-07-14 ユーザ確定）。
+    public init(bucket: String, fileURL: URL?, maxEntries: Int = PersistedPathSet.maxEntries) {
         self.bucket = bucket
         self.fileURL = fileURL
+        self.maxEntries = maxEntries
     }
 
     /// 永続ファイルの既定 URL（App Group コンテナ内 `Library/Caches/Tide/`・用途別ファイル名）。
@@ -57,11 +66,33 @@ public actor PersistedPathSet {
     public func add(_ path: String) {
         loadIfNeeded()
         guard !paths.contains(path) else { return }
-        guard paths.count < Self.maxEntries else {
+        guard paths.count < maxEntries else {
             AppLogger.fileProvider.notice("persisted path set full; new entry dropped (preservation/cleanup guarantee lost for it)")
             return
         }
         paths.insert(path)
+        persist()
+    }
+
+    /// 現在の集合のスナップショット（実体化バッジ・Issue #65: フラグ判定の一括参照用）。
+    public func snapshot() -> Set<String> {
+        loadIfNeeded()
+        return paths
+    }
+
+    /// 集合を丸ごと差し替える（実体化バッジ・Issue #65:「報告済み集合」の前進）。
+    /// 上限超過分は**パス昇順の prefix で決定的に**切り詰める — `MaterializedBadge.cappedReport`
+    /// と同一規則。報告した集合と永続化した集合が食い違うと、溢れた分が毎回 didUpdate に
+    /// 再送されるチャーンになるため、規則の一致が本質。
+    public func replace(with newPaths: Set<String>) {
+        loadIfNeeded()
+        var capped = newPaths
+        if capped.count > maxEntries {
+            AppLogger.fileProvider.notice("persisted path set replace over cap; keeping first \(self.maxEntries) sorted entries")
+            capped = Set(capped.sorted().prefix(maxEntries))
+        }
+        guard capped != paths else { return }
+        paths = capped
         persist()
     }
 

@@ -17,13 +17,40 @@ public enum FileProviderWritePolicy {
         }
     }
 
+    /// 実体化バッジ（Issue #65）: `metadataVersion` に実体化フラグを織り込む複合符号化のサフィックス。
+    /// **contentVersion には絶対に付けない** — contentVersion の変化は「内容が変わった」の意味に
+    /// なり再取得を誘発する。バッジはメタデータ変化としてだけ届ける。
+    public static let materializedSuffix = "|m"
+
+    /// `NSFileProviderItemVersion.metadataVersion` に載せるバイト列（Issue #65 で複合符号化に拡張）。
+    /// - file = sha256（+ 実体化時 `|m`）。**sha プレフィックスは rebind 対応の load-bearing**
+    ///   （rebind 後の操作は contentVersion がローカル版スタンプに差し替わるため、`baseSha` が
+    ///   metadataVersion 側から 3-way ベースを復元する。M5 Phase 5-4）。
+    /// - directory = `dir-<ISO8601 mtime>` / `dir`（+ 実体化時 `|m`）。dir は `baseSha` の対象外
+    ///   なので符号化自体に rebind 制約は無い。
+    public static func metadataVersion(for node: ManifestTree.Node, materialized: Bool) -> Data {
+        let base: String
+        switch node {
+        case .file(_, let entry):
+            base = entry.sha256
+        case .directory(_, let mtime):
+            base = mtime.map { "dir-\(ISO8601.format($0))" } ?? "dir"
+        }
+        return Data((materialized ? base + Self.materializedSuffix : base).utf8)
+    }
+
     /// FP の `NSFileProviderItemVersion.contentVersion` の中身から 3-way ベースの sha256 を
     /// 取り出す（`contentVersion(for:)` の逆写像 + 防御的検証）。
     /// - "dir" / 非 UTF-8 / 空 / sha256 hex（64 桁小文字）以外 → nil = 内容ベース不明。
     ///   nil の扱いは呼び出し側の意味論に委ねる（削除ガードは「根拠なしに消さない」= 拒否側、
     ///   アップロード競合判定は `decideUpload(base: nil)` = remote 有りなら競合側、へ倒れる）。
+    /// - 実体化バッジの複合符号化（`<sha>|m`・metadataVersion 経由で届く）は剥がしてから検証する。
+    ///   既知のサフィックス以外の付加は従来どおり不正として弾く（受理面を広げない）。
     public static func baseSha(fromContentVersion data: Data?) -> String? {
-        guard let data, let s = String(data: data, encoding: .utf8) else { return nil }
+        guard let data, var s = String(data: data, encoding: .utf8) else { return nil }
+        if s.hasSuffix(Self.materializedSuffix) {
+            s = String(s.dropLast(Self.materializedSuffix.count))
+        }
         guard s.count == 64,
               s.allSatisfy({ ("0"..."9").contains($0) || ("a"..."f").contains($0) }) else {
             return nil
