@@ -91,7 +91,10 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     completion.value(nil, NSFileProviderError(.noSuchItem))
                     return
                 }
-                completion.value(FileProviderItem(node: node), nil)
+                // 実体化バッジ（Issue #65）: ツリー由来の item は報告済み集合基準のフラグ付きで
+                // 返す（プレーンで返すと報告済みバッジがメタデータ regress で消えたまま固着する）。
+                let reported = await services.materializedReported.snapshot()
+                completion.value(BadgeFlags(tree: tree, reported: reported).item(node), nil)
             } catch {
                 AppLogger.fileProvider.error("item(for:) failed: \(String(describing: error), privacy: .private)")
                 completion.value(nil, Self.wrapForCompletion(error))
@@ -203,8 +206,15 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 }
 
                 // 成功: tmp はシステムが引き取るので掃除対象から外す（Progress 完了は Task 冒頭の defer）
+                // 実体化バッジ（Issue #65）: 返却 item は実体化済みフラグ付き（この瞬間に内容が
+                // ローカルに載る）。報告済みレジストリはここでは触らない — 前進は working set の
+                // enumerateChanges が単一の報告点（先に足すと祖先 dir のチェック反転差分が
+                // 消えてしまう）。didChange → 自己 signal → 差分配信で dir 側も追従する。
                 cleanupURL = nil
-                completion.value(tmpURL, FileProviderItem(node: .file(path: path, entry: entry)), nil)
+                completion.value(
+                    tmpURL,
+                    FileProviderItem(node: .file(path: path, entry: entry), materialized: true),
+                    nil)
             } catch {
                 AppLogger.fileProvider.error("fetchContents failed: \(String(describing: error), privacy: .private)")
                 completion.value(nil, nil, Self.wrapForCompletion(error))
@@ -212,6 +222,26 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         }
         progress.cancellationHandler = { task.cancel() }
         return progress
+    }
+
+    // MARK: - 実体化バッジ（Issue #65）
+
+    /// システム通知: 実体化セットが変わった（materialize / evict）。live を観測し直し、報告済みと
+    /// 食い違えば working set を signal → enumerateChanges が差分（バッジの点灯/消灯 + 祖先 dir の
+    /// チェック反転）を配る。**evict（Finder の「ダウンロードを削除」）は拡張の他のコールバックを
+    /// 一切経由しない**ため、バッジ消灯はこの経路だけが検知できる（`NSFileProviderReplicatedExtension`
+    /// の optional メソッド・SDK ヘッダの反転プロトコル =「システムがこれを呼んだら拡張側が
+    /// `enumeratorForMaterializedItems` で列挙する」）。
+    func materializedItemsDidChange(completionHandler: @escaping () -> Void) {
+        guard let services else {
+            completionHandler()
+            return
+        }
+        let completion = UncheckedSendableBox(value: completionHandler)
+        Task {
+            await services.refreshMaterializedObservation()
+            completion.value()
+        }
     }
 
     // MARK: - 書込系（M5 Phase 5-2/5-3: 改名/移動 = 5-4 のみ未対応）
@@ -382,9 +412,13 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         path: String,
         completion: UncheckedSendableBox<(NSFileProviderItem?, NSFileProviderItemFields, Bool, Error?) -> Void>
     ) {
+        // 実体化バッジ（Issue #65）: いずれも内容がローカルにある（今書いたファイルそのもの）
+        // ので実体化済みフラグ付きで返す。レジストリの前進は enumerateChanges（単一の報告点）。
         switch outcome {
         case .written(let entry):
-            completion.value(FileProviderItem(node: .file(path: path, entry: entry)), [], false, nil)
+            completion.value(
+                FileProviderItem(node: .file(path: path, entry: entry), materialized: true),
+                [], false, nil)
         case .conflict(_, let copyPath, let copyEntry):
             // 並行作成の衝突（リモートが同 path を先に確定）: ローカル新規内容は conflict copy と
             // して上げ済みなので、作成 item を copy に束ねる（ローカル実体 = copy の内容そのもの・
@@ -392,7 +426,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             //（modifyItem 競合と同じ「正規パスはリモート勝ち」・データ損失ゼロ）。
             AppLogger.fileProvider.notice("createItem: collision with remote — created as conflict copy: \(copyPath, privacy: .private)")
             completion.value(
-                FileProviderItem(node: .file(path: copyPath, entry: copyEntry)), [], false, nil)
+                FileProviderItem(node: .file(path: copyPath, entry: copyEntry), materialized: true),
+                [], false, nil)
         }
     }
 
@@ -443,10 +478,18 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                         completion.value(nil, [], false, NSFileProviderError(.noSuchItem))
                         return
                     }
-                    completion.value(
-                        FileProviderItem(node: node ?? .directory(path: path, mtime: nil)),
-                        [], false, nil
-                    )
+                    if let node {
+                        // 実体化バッジ（Issue #65）: チェック中の dir をプレーンで返すと
+                        // マニフェスト無変化のままバッジが消えて固着する（dir メタデータ modify は
+                        // 世代を進めない）ため、報告済み集合基準のフラグを維持する。
+                        let reported = await services.materializedReported.snapshot()
+                        completion.value(
+                            BadgeFlags(tree: tree, reported: reported).item(node), [], false, nil)
+                    } else {
+                        completion.value(
+                            FileProviderItem(node: .directory(path: path, mtime: nil)),
+                            [], false, nil)
+                    }
                 } catch {
                     completion.value(nil, [], false, Self.wrapForCompletion(error))
                 }
@@ -467,7 +510,10 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                         completion.value(nil, [], false, NSFileProviderError(.noSuchItem))
                         return
                     }
-                    completion.value(FileProviderItem(node: node), [], false, nil)
+                    // 実体化バッジ（Issue #65）: 報告済み集合基準のフラグを維持（固着防止）。
+                    let reported = await services.materializedReported.snapshot()
+                    completion.value(
+                        BadgeFlags(tree: tree, reported: reported).item(node), [], false, nil)
                 } catch {
                     completion.value(nil, [], false, Self.wrapForCompletion(error))
                 }
@@ -498,13 +544,18 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 case .written(let entry):
                     // 返却 item は必ずシャードへ書いた entry から生成（自世代 append と同一
                     // itemVersion = 直後の enumerateChanges が no-op・bounce しない）。
-                    completion.value(FileProviderItem(node: .file(path: path, entry: entry)), [], false, nil)
+                    // 実体化バッジ（Issue #65）: 編集内容 = ローカル実体なので実体化済み。
+                    completion.value(
+                        FileProviderItem(node: .file(path: path, entry: entry), materialized: true),
+                        [], false, nil)
                 case .conflict(let remote, let copyPath, _):
                     // 正規パスはリモート版が勝つ（FSEvents 側と対称）。shouldFetchContent=true で
                     // システムにリモート内容を取り直させる。ローカル編集は conflict copy として
                     // 自世代に反映済み → 直後の enumerateChanges で新 item として出現する。
                     AppLogger.fileProvider.notice("modifyItem: upload conflict — local edit preserved as copy: \(copyPath, privacy: .private)")
-                    completion.value(FileProviderItem(node: .file(path: path, entry: remote)), [], true, nil)
+                    completion.value(
+                        FileProviderItem(node: .file(path: path, entry: remote), materialized: true),
+                        [], true, nil)
                 }
             } catch {
                 AppLogger.fileProvider.error("modifyItem failed: \(String(describing: error), privacy: .private)")
@@ -590,23 +641,32 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                         )
                         switch outcome {
                         case .written(let entry):
+                            // 実体化バッジ（Issue #65）: 編集内容 = ローカル実体（.written/.conflict
+                            // とも modifyItem の .contents 分岐と同じ帰結写像）。
                             completion.value(
-                                FileProviderItem(node: .file(path: oldPath, entry: entry)),
+                                FileProviderItem(
+                                    node: .file(path: oldPath, entry: entry), materialized: true),
                                 [], false, nil)
                         case .conflict(let remote, let copyPath, _):
                             AppLogger.fileProvider.notice("modifyItem(move noop): upload conflict — local edit preserved as copy: \(copyPath, privacy: .private)")
                             completion.value(
-                                FileProviderItem(node: .file(path: oldPath, entry: remote)),
+                                FileProviderItem(
+                                    node: .file(path: oldPath, entry: remote), materialized: true),
                                 [], true, nil)
                         }
                         return
                     }
                     let tree = try await services.cache.current().tree
-                    let node = tree.node(at: oldPath)
-                    completion.value(
-                        node.map(FileProviderItem.init(node:))
-                            ?? FileProviderItem(node: .directory(path: oldPath, mtime: nil)),
-                        [], false, nil)
+                    if let node = tree.node(at: oldPath) {
+                        // 実体化バッジ（Issue #65）: 報告済み集合基準のフラグを維持（固着防止）。
+                        let reported = await services.materializedReported.snapshot()
+                        completion.value(
+                            BadgeFlags(tree: tree, reported: reported).item(node), [], false, nil)
+                    } else {
+                        completion.value(
+                            FileProviderItem(node: .directory(path: oldPath, mtime: nil)),
+                            [], false, nil)
+                    }
                 } catch {
                     completion.value(nil, [], false, Self.wrapForCompletion(error))
                 }
@@ -685,10 +745,20 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     switch try await services.writer.moveDirectory(descendants: descendants) {
                     case .moved:
                         AppLogger.fileProvider.notice("modifyItem(move): dir moved (\(descendants.count) files): -> \(newPath, privacy: .private)")
+                        // 実体化バッジ（Issue #65）: move は内容を動かさないので実体化状態は不変。
+                        // 返却 dir のチェックは旧 path（移動前ツリー）の集計を引き継ぎ、報告済み
+                        // レジストリは subtree ごと新 path へ追従させる（追従しないと移動直後の
+                        // 差分が配下全件の再点灯として再送されるチャーンになる）。
+                        let reported = await services.materializedReported.snapshot()
+                        let wasChecked = BadgeFlags(tree: current.tree, reported: reported)
+                            .isOn(.directory(path: oldPath, mtime: oldMtime))
+                        await services.materializedReported.renameSubtree(from: oldPath, to: newPath)
                         // 配下の仮想サブフォルダ（空 dir）のレジストリエントリも新 path へ追従
                         await services.virtualDirs.renameSubtree(from: oldPath, to: newPath)
                         completion.value(
-                            FileProviderItem(node: .directory(path: newPath, mtime: oldMtime)),
+                            FileProviderItem(
+                                node: .directory(path: newPath, mtime: oldMtime),
+                                materialized: wasChecked),
                             [], false, nil)
                     case .destinationOccupied:
                         completion.value(nil, [], false, NSFileProviderError(.filenameCollision))
@@ -742,9 +812,17 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 switch outcome {
                 case .moved(let newEntry):
                     // 返却 item は新 id（rebind）。newEntry は単一 move では必ず非 nil。
+                    // 実体化バッジ（Issue #65）: move は内容を動かさない = 実体化状態は旧 path を
+                    // 引き継ぎ、報告済みレジストリも新 path へ追従（チャーン防止）。
                     let entry = newEntry ?? entry
+                    let wasMaterialized = await services.materializedReported.snapshot()
+                        .contains(oldPath)
+                    await services.materializedReported.renameSubtree(from: oldPath, to: newPath)
                     completion.value(
-                        FileProviderItem(node: .file(path: newPath, entry: entry)), [], false, nil)
+                        FileProviderItem(
+                            node: .file(path: newPath, entry: entry),
+                            materialized: wasMaterialized),
+                        [], false, nil)
                 case .destinationOccupied:
                     completion.value(nil, [], false, NSFileProviderError(.filenameCollision))
                 case .sourceChanged(let path, _):
@@ -813,6 +891,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     case .removed(let count):
                         AppLogger.fileProvider.notice("deleteItem(dir): removed \(count) files under \(dirPath, privacy: .private)")
                         await services.virtualDirs.removeSubtree(at: dirPath)
+                        // 実体化バッジ（Issue #65）: 消えた subtree の報告済みエントリも掃除
+                        await services.materializedReported.removeSubtree(at: dirPath)
                         dirCompletion.value(nil)
                     case .rejected(let path, _):
                         // 配下にベースより進んだファイル（リモート先行）→ 1 件目で中断済み
@@ -860,6 +940,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     // 予約の掃除は成功時に無条件（読み替え不発 = 有効 base で消えた後始末でも
                     // 残留させない。未予約 path への removeSubtree は no-op）。
                     await services.exclusionCleanups.removeSubtree(at: ref.path)
+                    // 実体化バッジ（Issue #65）: 消えた path の報告済みエントリも掃除
+                    await services.materializedReported.removeSubtree(at: ref.path)
                     if isCleanup {
                         AppLogger.fileProvider.notice("deleteItem: exclusion cleanup completed: \(ref.path, privacy: .private)")
                     }
@@ -870,8 +952,13 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     // 診断のため「ベース不明（nil）」と「sha 不一致」を区別してログする。
                     let reason = baseSha == nil ? "base unknown" : "remote changed since base"
                     AppLogger.fileProvider.notice("deleteItem: rejected (\(reason, privacy: .public)): \(ref.path, privacy: .private)")
+                    // 実体化バッジ（Issue #65）: 添える最新 item も報告済み基準のフラグを維持
+                    let isMaterialized = await services.materializedReported.snapshot()
+                        .contains(ref.path)
                     completion.value(NSError.fileProviderErrorForRejectedDeletion(
-                        of: FileProviderItem(node: .file(path: ref.path, entry: remote))
+                        of: FileProviderItem(
+                            node: .file(path: ref.path, entry: remote),
+                            materialized: isMaterialized)
                     ))
                 }
             } catch {

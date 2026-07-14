@@ -126,4 +126,49 @@ final class PersistedPathSetTests: XCTestCase {
         XCTAssertFalse(hasOverflow)
         XCTAssertTrue(hasFirst)
     }
+
+    // MARK: - 実体化バッジ向けの拡張（Issue #65）
+
+    /// maxEntries は init 注入できる（既定 1000 のまま・バッジ用は引き上げ）。
+    func testInjectedMaxEntriesIsHonored() async {
+        let registry = PersistedPathSet(bucket: "b", fileURL: nil, maxEntries: 2)
+        await registry.add("a")
+        await registry.add("b")
+        await registry.add("c")
+        let hasC = await registry.contains("c")
+        let hasA = await registry.contains("a")
+        XCTAssertFalse(hasC)
+        XCTAssertTrue(hasA)
+    }
+
+    /// replace は集合を丸ごと差し替えて永続化し、上限超過はパス昇順 prefix で決定的に切り詰める
+    /// （`MaterializedBadge.cappedReport` と同一規則 = 報告と永続の食い違いチャーン防止）。
+    func testReplacePersistsAndCapsDeterministically() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PersistedPathSetTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("replace.json")
+
+        let registry = PersistedPathSet(bucket: "b", fileURL: url, maxEntries: 2)
+        await registry.replace(with: ["c", "a", "b"])
+        // 昇順 prefix = a, b が生き残る
+        let hasA = await registry.contains("a")
+        let hasB = await registry.contains("b")
+        let hasC = await registry.contains("c")
+        XCTAssertTrue(hasA)
+        XCTAssertTrue(hasB)
+        XCTAssertFalse(hasC)
+
+        // 永続往復（別インスタンスで読み直し）
+        let reloaded = PersistedPathSet(bucket: "b", fileURL: url, maxEntries: 2)
+        let snapshot = await reloaded.snapshot()
+        XCTAssertEqual(snapshot, ["a", "b"])
+
+        // 空集合への差し替えも永続化される
+        await registry.replace(with: [])
+        let cleared = PersistedPathSet(bucket: "b", fileURL: url, maxEntries: 2)
+        let emptied = await cleared.snapshot()
+        XCTAssertEqual(emptied, [])
+    }
 }

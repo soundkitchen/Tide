@@ -100,6 +100,14 @@ public struct ManifestTree: Sendable {
         }
     }
 
+    /// 全ファイルノードの相対パス（実体化バッジ・Issue #65 の dir 集計入力）。順序不定。
+    public var filePaths: [String] {
+        nodesByPath.values.compactMap { node -> String? in
+            if case .file(let path, _) = node { return path }
+            return nil
+        }
+    }
+
     /// `dirPath` 直下の子（名前昇順）。ディレクトリが存在しなければ nil。
     public func children(of dirPath: String) -> [Node]? {
         childrenByDir[dirPath]

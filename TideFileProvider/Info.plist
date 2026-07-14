@@ -30,6 +30,19 @@
 		<string>com.apple.fileprovider-nonui</string>
 		<key>NSExtensionPrincipalClass</key>
 		<string>$(PRODUCT_MODULE_NAME).FileProviderExtension</string>
+		<key>NSFileProviderDecorations</key>
+		<array>
+			<dict>
+				<key>BadgeImageType</key>
+				<string>com.apple.icon-decoration.badge.checkmark</string>
+				<key>Category</key>
+				<string>Badge</string>
+				<key>Identifier</key>
+				<string>org.izukawa.Tide.materialized</string>
+				<key>Label</key>
+				<string>Downloaded</string>
+			</dict>
+		</array>
 	</dict>
 </dict>
 </plist>

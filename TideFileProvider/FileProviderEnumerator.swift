@@ -61,7 +61,11 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @uncheck
                         .map(\.value)
                 }
                 if !nodes.isEmpty {
-                    boxed.value.didEnumerate(nodes.map(FileProviderItem.init(node:)))
+                    // 実体化バッジ（Issue #65）: 列挙 item は報告済み集合基準のフラグ付き。
+                    // ここは読み取り専用（レジストリの前進は working set の enumerateChanges のみ）。
+                    let reported = await services.materializedReported.snapshot()
+                    let flags = BadgeFlags(tree: current.tree, reported: reported)
+                    boxed.value.didEnumerate(nodes.map(flags.item))
                 }
                 lastServedAnchor.withLock { $0 = current.anchor }
                 boxed.value.finishEnumerating(upTo: nil)
@@ -91,8 +95,64 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @uncheck
                 // 異なる世代のキャッシュ = diff を返せる」場合のみ効く（同世代なら必ず再ロード
                 // — 変更前キャッシュで「変更なし」と誤答して signal を消費しないため）。
                 let current = try await services.cache.refreshedCurrent(callerAnchor: anchorString)
+
+                // 実体化バッジ（Issue #65）: live（fileproviderd の実体化セット）と reported
+                // （前回 Finder へ報告した集合）の差分を didUpdate へオーバーレイする。
+                // **報告点（reported の前進）は working set（dirPath == nil）のみ** — コンテナ
+                // enumerator が消費すると working set 経由の配信が空振りしてバッジが固着する。
+                // anchor（マニフェスト世代）意味論とは独立の eventual（docs/09 の設計判断）。
+                let reported = await services.materializedReported.snapshot()
+                var newReport = reported
+                var badgeFiles: Set<String> = []
+                var badgeDirs: Set<String> = []
+                let isWorkingSet = (dirPath == nil)
+                if isWorkingSet {
+                    // プロセス起動後まだ didChange が来ていなければ一度だけ遅延観測を仕掛ける
+                    //（結果が差分を持てば自己 signal → 次の enumerateChanges で配られる）。
+                    if await services.materializedObserver.shouldStartInitialRefresh() {
+                        let refreshServices = services
+                        Task { await refreshServices.refreshMaterializedObservation() }
+                    }
+                    let live = await services.materializedObserver.current() ?? reported
+                    let filePaths = current.tree.filePaths
+                    newReport = MaterializedBadge.cappedReport(
+                        live: live.intersection(filePaths),
+                        cap: ExtensionServices.materializedBadgeCap
+                    )
+                    // dirsBefore は origin（= Finder が最後に見た世代）のツリー基準で計算する
+                    //（PR #66 レビュー指摘 1: 両側 current だと「ツリーだけが変わった」チェック
+                    // 反転 — リモート削除で全実体化 / 古い mtime のリモート追加で dataless 混入、
+                    // どちらも合成 mtime が動かずマニフェスト diff に dir が載らない — が対称差に
+                    // 現れず固着する）。同一 anchor なら origin == current で従来と等価。
+                    (badgeFiles, badgeDirs) = MaterializedBadge.changedPaths(
+                        oldFilePaths: current.anchor == anchorString
+                            ? filePaths : Array(origin.files.keys),
+                        newFilePaths: filePaths,
+                        previousReported: reported, newReport: newReport)
+                }
+                // item 構築は常に newReport 基準（非 working set では newReport == reported）。
+                // マニフェスト diff で再配信される item にも正しいバッジを載せるため、フラグの
+                // 基準を didUpdate 全体で 1 つに揃える。
+                let flags = BadgeFlags(tree: current.tree, reported: newReport)
+
                 if current.anchor == anchorString {
+                    // マニフェスト無変化。バッジ差分だけあれば didUpdate で配る（anchor は
+                    // 前進しない — 実体化状態は anchor の外の eventual オーバーレイ）。
+                    let badgeNodes = badgeFiles.union(badgeDirs)
+                        .sorted().compactMap { current.tree.node(at: $0) }
+                    if !badgeNodes.isEmpty {
+                        boxed.value.didUpdate(badgeNodes.map(flags.item))
+                        AppLogger.fileProvider.notice("enumerateChanges: badge-only update (\(badgeNodes.count) items)")
+                    }
                     boxed.value.finishEnumeratingChanges(upTo: anchor, moreComing: false)
+                    // replace は badge 配信の有無と独立に前進させる（PR #66 レビュー nit 1）:
+                    // 配信対象ゼロでも「ツリーから消えたパスが reported に残っているだけ」の
+                    // 差は起きえて、放置すると live != reported が恒常成立 → didChange のたびに
+                    // 空振り signal + 空の enumerateChanges が 1 周走る。replace 自体は
+                    // 同値なら内部で no-op。
+                    if isWorkingSet {
+                        await services.materializedReported.replace(with: newReport)
+                    }
                     return
                 }
                 // ドメイン全体の diff を報告する（コンテナ enumerator にも同じ diff を返す —
@@ -111,13 +171,22 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @uncheck
                         withIdentifiers: changes.deleted.map(NSFileProviderItemIdentifier.init(tideNode:))
                     )
                 }
-                if !changes.updated.isEmpty {
-                    boxed.value.didUpdate(changes.updated.map(FileProviderItem.init(node:)))
+                // バッジ差分のみの item（マニフェスト diff に載っていない path）を合流させる。
+                let updatedPaths = Set(changes.updated.map(\.path))
+                let badgeOnlyNodes = badgeFiles.union(badgeDirs)
+                    .subtracting(updatedPaths)
+                    .sorted().compactMap { current.tree.node(at: $0) }
+                let updateItems = (changes.updated + badgeOnlyNodes).map(flags.item)
+                if !updateItems.isEmpty {
+                    boxed.value.didUpdate(updateItems)
                 }
-                AppLogger.fileProvider.notice("enumerateChanges: \(changes.updated.count) updated / \(changes.deleted.count) deleted")
+                AppLogger.fileProvider.notice("enumerateChanges: \(changes.updated.count) updated / \(changes.deleted.count) deleted / \(badgeOnlyNodes.count) badge-only")
                 boxed.value.finishEnumeratingChanges(
                     upTo: NSFileProviderSyncAnchor(Data(current.anchor.utf8)), moreComing: false
                 )
+                if isWorkingSet {
+                    await services.materializedReported.replace(with: newReport)
+                }
             } catch {
                 AppLogger.fileProvider.error("enumerateChanges failed: \(String(describing: error), privacy: .private)")
                 boxed.value.finishEnumeratingWithError(error)

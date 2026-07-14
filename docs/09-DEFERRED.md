@@ -56,29 +56,50 @@
 - **新しい App Extension ターゲットが要り、拡張は別プロセスでサンドボックス必須＝L1（App Sandbox）と密結合**。同期コア（`S3Client` / `Manifest` / `LocalDatabase`）を拡張プロセスから呼べる形に再編が必要。**L1 の security-scoped bookmark 対応もこの版で一度に行う**（arbitrary-folder モデルのまま 0.2.0 で先行サンドボックス化すると、ドメインへ移る本版で作り直しになるため＝二度手間回避。L1 / H3 を 0.2.0 から外した理由）。
 - **最小プロトタイプ**＝ドメイン登録 + `enumerator` + `fetchContents` で実現性を確認してから本実装に入る段取り。
 
-### バックログ: FP の実体化連動バッジ（Finder デコレーション・2026-07-12 試作 → 撤去）
+### FP の実体化連動バッジ（Finder デコレーション・2026-07-12 試作 → 撤去 → ✅ 実装 2026-07-14・✅ 実機受け入れ 2026-07-15 = Issue #65）
 
 Google Drive 風の「同期済みチェックバッジ」を試作した（`NSExtension` 配下の `NSFileProviderDecorations` +
 `FileProviderItem` の `NSFileProviderItemDecorating` 準拠・システム提供 UTI
 `com.apple.icon-decoration.badge.checkmark` が利用可能なことを lsregister で実測）。しかし
 **静的バッジ（全ファイル常時表示）は dataless のファイルにも付き「ローカルに実体がある」と誤読される**
 UX 問題があり撤去（ユーザ判断・Google のチェックは「ピン留め = プロバイダ自身が管理する状態」だから
-正確に出し分けられるという構造差）。再挑戦するなら**「実体化されているときだけチェック」**が要件で、
-必要な工事は 3 点（5-3 級のサブ機能 1 本ぶん・独立 PR 推奨）:
+正確に出し分けられるという構造差）。
 
-1. **実体化状態の追跡**: 実体化は fileproviderd 側の状態で拡張は item 生成時に知らされない。
-   `NSFileProviderManager.enumeratorForMaterializedItems()` + `materializedItemsDidChange` で追跡し、
-   前回報告分との差分を永続化（`PersistedPathSet` の再利用候補）。
-2. **metadataVersion の複合符号化**: バッジ変更を Finder に届けるには metadataVersion を変えて
-   item 更新として再配信する必要があるが、**file の metadataVersion == sha は rebind 対応の
-   load-bearing**（5-4・`FileProviderItem.itemVersion` 参照）。`sha + 実体化フラグ` の複合符号化へ
-   変えるなら `FileProviderWritePolicy.baseSha` のデコーダ拡張（64-hex プレフィックス許容）+
-   後方互換 + 往復テストが必須。**ドメイン作り直しも必要**（capabilities と同じ）。
-3. **enumerateChanges への実体化差分オーバーレイ**: 増分配信はマニフェスト世代駆動で実体化を
-   知らない。materialize 時は `fetchContents` の返却 item に載せるだけで済む（無料）が、
-   **evict（「ダウンロードを削除」）は拡張を経由しない**ため、①の追跡 + 自己 signal +
-   enumerateChanges での差分合流が必須。anchor 意味論との厳密整合は cosmetic 用途として
-   eventual で妥協可、という設計判断込み。
+**✅ 「実体化されているときだけチェック」で再実装（2026-07-14・Issue #65）**。当初設計の工事 3 点
+（①実体化追跡 = `enumeratorForMaterializedItems` + `materializedItemsDidChange` + `PersistedPathSet`
+3 本目 ②metadataVersion の複合符号化 = `<sha>|m`・`baseSha` のサフィックス剥がし + 後方互換
+③enumerateChanges への実体化差分オーバーレイ = working set 単一報告点・eventual）をそのまま実施し、
+ユーザ確定 2 点を追加 — **対象はディレクトリにも**（チェック基準 = 配下 1 ファイル以上かつ全実体化・
+空/仮想フォルダは対象外）/ **レジストリ上限は init 注入化してバッジ用のみ 10,000**。
+設計詳細は `docs/08`「FP 実体化連動バッジ」節。
+バッジ Label の未ローカライズ（Info.plist 値 = en「Downloaded」固定）は残 nit として記録。
+
+**✅ 実機受け入れ完了（2026-07-15・dev バケット・全項目パス）**。設計の最大前提（ファイル単位の
+materialize / evict が OS の実体化セット = `enumeratorForMaterializedItems` に現れるか — SDK ヘッダは
+dir 中心の記述）は**実機で成立を確認**。ほか、点灯/消灯・dir 集計（一部実体化ではチェックなし・
+全実体化で点灯・dataless 到着で消灯）・ツリー変化だけの dir 反転（origin ツリー基準 changedPaths =
+PR #66 レビュー指摘 1 の回帰・両方向）・rebind 回帰（rename 後の削除が復元されない = `|m` サフィックス
+剥がしの実機裏付け）・rename/move 直後のちらつきゼロ（90 秒監視・観察依頼は手当て不要で確定）・
+拡張 kill / Mac 再起動でのバッジ維持・ドメイン作り直しでの全消灯・factoryReset での永続ファイル削除・
+受け入れ全期間 sync_log エラー 0（DB は factoryReset で消滅のため OS ログ代替 = 予期しないエラーなし）
+を確認。**受け入れで得た知見 4 件**:
+
+1. **Finder のプレビューペイン表示中は「ダウンロードを削除」（evict）が失敗する** — 選択時に
+   プレビューがファイルを掴み、fileproviderd の `APFSIOC_PURGE_SINGLE_FILE` が EBUSY
+   （「リソースを使用中」）。リスト表示 + プレビュー非表示（Cmd-Shift-P）なら成功。OS 挙動で
+   Tide のバグではない。
+2. **dir move では配下ファイルの実体化そのものが失われる（dataless 化）** — パスベース item id
+   （Phase 5-4）の帰結で、fileproviderd が配下を旧 id 削除 + 新 id 作成として扱うため。バッジは
+   実状態を正しく反映して消灯（誤点灯なし・badge-only 反復チャーンなし）。データロスなし
+   （S3 から再取得可能）。対比: 単一ファイルの rename/reparent は modifyItem の id rebind で
+   実体化ごと維持される。
+3. **dir move をアプリ側が pull すると移動元の空 dir が syncRoot に残置される** — マニフェストに
+   dir エントリが無く pull は空 dir を掃除しないため（5-3 受け入れの「削除伝播後の空ディレクトリ殻」
+   と同根の既存挙動・#66 起因ではない・データロスなし）。**Issue #67 として起票済み（2026-07-15）**。
+4. **ドメイン作り直し直後の stale reported は約 0.3 秒の過渡を経て自己修復する** — 前レプリカの
+   `fileprovider-materialized.json` 残置分が新レプリカ初回 insert 時に deco 付きで載るが、直後の
+   badge-only update（live vs reported 差分）が deco を除去（fileproviderd スナップショット変異ログ
+   `diffs:itemDecoration` で確認・固着なし＝設計どおりの eventual 収束）。
 
 ## ファイル → 同名ディレクトリ置換で FSEvents 同期が壊れる（2026-07-04 発見 = Issue #52・同日修正）
 

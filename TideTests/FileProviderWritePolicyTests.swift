@@ -73,6 +73,78 @@ final class FileProviderWritePolicyTests: XCTestCase {
         )
     }
 
+    // MARK: - 実体化バッジの複合符号化（Issue #65）
+
+    /// metadataVersion の複合形式（`<sha>|m`）は baseSha が剥がして復元する（rebind 互換の要）。
+    func testBaseShaStripsMaterializedSuffix() {
+        let sha = String(repeating: "0123456789abcdef", count: 4)
+        XCTAssertEqual(
+            FileProviderWritePolicy.baseSha(
+                fromContentVersion: Data((sha + FileProviderWritePolicy.materializedSuffix).utf8)),
+            sha
+        )
+        // metadataVersion フォールバック経由でも同様（rebind 後の実体化済み item の操作）
+        XCTAssertEqual(
+            FileProviderWritePolicy.baseSha(
+                contentVersion: Data("local-stamp-1".utf8),
+                metadataVersion: Data((sha + FileProviderWritePolicy.materializedSuffix).utf8)),
+            sha
+        )
+    }
+
+    /// 既知サフィックス以外の付加は従来どおり不正（受理面を広げない）。dir 形も引き続き nil。
+    func testBaseShaRejectsUnknownSuffixShapes() {
+        let sha = String(repeating: "0123456789abcdef", count: 4)
+        XCTAssertNil(FileProviderWritePolicy.baseSha(fromContentVersion: Data((sha + "|x").utf8)))
+        XCTAssertNil(FileProviderWritePolicy.baseSha(fromContentVersion: Data((sha + "m").utf8)))
+        XCTAssertNil(FileProviderWritePolicy.baseSha(fromContentVersion: Data((sha + "|m|m").utf8)))
+        // サフィックスだけ / dir 複合形
+        XCTAssertNil(FileProviderWritePolicy.baseSha(fromContentVersion: Data("|m".utf8)))
+        XCTAssertNil(FileProviderWritePolicy.baseSha(fromContentVersion: Data("dir|m".utf8)))
+    }
+
+    /// metadataVersion の符号化: file = sha（+ `|m`）/ dir = "dir-<mtime>"（+ `|m`）。
+    /// file の非実体化形は旧形式（素の sha）と同一 = 後方互換（既存レプリカの baseVersion が
+    /// そのまま復元できる）。
+    func testMetadataVersionEncoding() {
+        let sha = String(repeating: "0123456789abcdef", count: 4)
+        let entry = ManifestFileEntry(
+            size: 1, mtime: "2026-07-14T00:00:00Z", sha256: sha,
+            s3VersionId: nil, etag: "e", deviceId: "d", uploadedAt: "2026-07-14T00:00:00Z"
+        )
+        let file = ManifestTree.Node.file(path: "a.txt", entry: entry)
+        XCTAssertEqual(
+            FileProviderWritePolicy.metadataVersion(for: file, materialized: false),
+            Data(sha.utf8)
+        )
+        XCTAssertEqual(
+            FileProviderWritePolicy.metadataVersion(for: file, materialized: true),
+            Data((sha + "|m").utf8)
+        )
+        // 往復: 実体化形 metadataVersion → baseSha が sha を復元する
+        XCTAssertEqual(
+            FileProviderWritePolicy.baseSha(
+                fromContentVersion: FileProviderWritePolicy.metadataVersion(
+                    for: file, materialized: true)),
+            sha
+        )
+        // dir: mtime なし / あり / 実体化形。いずれも baseSha は nil のまま（dir に内容ベースは無い）
+        let bare = ManifestTree.Node.directory(path: "d", mtime: nil)
+        XCTAssertEqual(
+            FileProviderWritePolicy.metadataVersion(for: bare, materialized: false),
+            Data("dir".utf8)
+        )
+        XCTAssertEqual(
+            FileProviderWritePolicy.metadataVersion(for: bare, materialized: true),
+            Data("dir|m".utf8)
+        )
+        let dated = ManifestTree.Node.directory(
+            path: "d", mtime: ISO8601.parse("2026-07-14T00:00:00Z"))
+        let datedMeta = FileProviderWritePolicy.metadataVersion(for: dated, materialized: true)
+        XCTAssertEqual(String(data: datedMeta, encoding: .utf8), "dir-2026-07-14T00:00:00Z|m")
+        XCTAssertNil(FileProviderWritePolicy.baseSha(fromContentVersion: datedMeta))
+    }
+
     // MARK: - childPath（createItem のパス合成・M5 Phase 5-3）
 
     func testChildPathJoinsParentAndFilename() {
