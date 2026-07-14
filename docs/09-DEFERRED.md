@@ -95,7 +95,7 @@ PR #66 レビュー指摘 1 の回帰・両方向）・rebind 回帰（rename �
    実体化ごと維持される。
 3. **dir move をアプリ側が pull すると移動元の空 dir が syncRoot に残置される** — マニフェストに
    dir エントリが無く pull は空 dir を掃除しないため（5-3 受け入れの「削除伝播後の空ディレクトリ殻」
-   と同根の既存挙動・#66 起因ではない・データロスなし）。issue 化するかは未判断（本メモで追跡）。
+   と同根の既存挙動・#66 起因ではない・データロスなし）。**Issue #67 として起票済み（2026-07-15）**。
 4. **ドメイン作り直し直後の stale reported は約 0.3 秒の過渡を経て自己修復する** — 前レプリカの
    `fileprovider-materialized.json` 残置分が新レプリカ初回 insert 時に deco 付きで載るが、直後の
    badge-only update（live vs reported 差分）が deco を除去（fileproviderd スナップショット変異ログ
