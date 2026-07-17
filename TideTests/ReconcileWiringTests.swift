@@ -100,6 +100,49 @@ final class ReconcileWiringTests: XCTestCase {
         XCTAssertTrue(copySpy.calls.isEmpty)
     }
 
+    // MARK: - .awaitLocalDeletePropagation（Issue #68: pull がローカル削除を復活させない）
+
+    func testAwaitLocalDeletePropagationDoesNotResurrect() async throws {
+        let env = try makeEnv()
+        let path = "notes/deleted-locally.txt"
+        let bytes = TestData.deterministicBytes(800, salt: 10)
+        // 追跡済み（base = 前回同期の sha）だがローカル実体は無い ＝ ローカル削除の伝播待ち。
+        try await seedFileRecord(env.db, path: path, sha: TestData.shaHex(bytes), size: Int64(bytes.count))
+        // リモートは前回同期から不変（base == remote）。
+        let entry = remoteEntry(for: bytes)
+        let fake = FakeRangedDownloadClient(fullData: bytes, etag: entry.etag)
+        let copySpy = ConflictCopySpy(); let issueSpy = IssueSpy()
+
+        await reconcile(path: path, entry: entry, dl: makeDownloader(client: fake, env: env), env: env, copySpy: copySpy, issueSpy: issueSpy)
+
+        XCTAssertEqual(fake.callCount, 0, "base == remote のローカル欠落は削除の伝播待ち → 取得しない（#68）")
+        let url = env.root.appendingPathComponent(path)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path), "ファイルを復活させない")
+        let rec = try await fetchFileRecord(env.db, path: path)
+        XCTAssertEqual(rec?.sha256, TestData.shaHex(bytes), "FileRecord は温存（scan の削除検出＝record vs 実ファイル突合に必要）")
+        XCTAssertTrue(copySpy.calls.isEmpty)
+        let issues = await issueSpy.issues
+        XCTAssertTrue(issues.isEmpty, "正常系なので issue を記録しない")
+    }
+
+    func testDownloadWhenLocalDeletedButRemoteChanged() async throws {
+        let env = try makeEnv()
+        let path = "notes/deleted-then-remote-changed.txt"
+        let baseBytes = TestData.deterministicBytes(700, salt: 11)
+        let remoteBytes = TestData.deterministicBytes(900, salt: 12)   // 削除後にリモートが別内容へ変化
+        try await seedFileRecord(env.db, path: path, sha: TestData.shaHex(baseBytes), size: Int64(baseBytes.count))
+        let entry = remoteEntry(for: remoteBytes)
+        let fake = FakeRangedDownloadClient(fullData: remoteBytes, etag: entry.etag)
+        let copySpy = ConflictCopySpy(); let issueSpy = IssueSpy()
+
+        await reconcile(path: path, entry: entry, dl: makeDownloader(client: fake, env: env), env: env, copySpy: copySpy, issueSpy: issueSpy)
+
+        XCTAssertEqual(fake.callCount, 1, "base != remote（削除後にリモート変化）はリモート勝ちで取得（現行意味論の維持）")
+        let url = env.root.appendingPathComponent(path)
+        XCTAssertEqual(try Data(contentsOf: url), remoteBytes)
+        XCTAssertTrue(copySpy.calls.isEmpty)
+    }
+
     // MARK: - .localMatchesRemote（download せず markSynced）
 
     func testLocalMatchesRemoteDoesNotDownload() async throws {

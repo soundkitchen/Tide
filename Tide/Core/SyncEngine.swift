@@ -984,6 +984,10 @@ final class SyncEngine {
                 // fire-and-forget: 初回の許可プロンプト待ちで同期処理を止めない（PR #18 レビュー Medium）。
                 postConflictCopy(path, localCopy)
                 try await dl.download(relativePath: path, entry: entry)
+            case .awaitLocalDeletePropagation:
+                // ローカル削除の伝播待ち（base == remote・Issue #68）: download すると削除が復活する。
+                // 削除の伝播は scan / event 側の enqueueDelete に委ね、ここでは何もしない。
+                AppLogger.sync.info("Skip download (awaiting local-delete propagation): \(path, privacy: .private)")
             case .deleteLocal, .keepLocalRemoteDeleted, .noop:
                 // remote が非 nil のここでは到達しない。来たら decide() のロジックバグ。
                 assertionFailure("unreachable: remote is non-nil in reconcileRemoteEntry")

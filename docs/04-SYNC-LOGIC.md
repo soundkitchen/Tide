@@ -490,7 +490,8 @@ M2 で **S3 → ローカルの取り込み** が追加された。ローカル 
    │  ├─ PathValidator で path / shardId を検証（攻撃面の遮断）
    │  ├─ stat ゲート: ローカル stat == DB かつ DB がリモートを反映（sha/etag/versionId 一致）
    │  │    → 完全スキップ（hash も DB write もしない・steady-state の大半／ChangeDetector.reconcileIsNoop）
-   │  ├─ ローカル無し → ダウンロード
+   │  ├─ ローカル無し / 未追跡 or SHA != remote → ダウンロード
+   │  ├─ ローカル無し / SHA = DB = remote → 取得しない（ローカル削除の伝播待ち・#68）
    │  ├─ ローカルあり / SHA 一致 → markSynced（DB メタデータのみ最新化＝mtime/etag ドリフト修復・ゲートを抜けた分だけ）
    │  ├─ ローカルあり / SHA != remote / DB と一致 → ローカル未編集 → ダウンロード（上書き）
    │  └─ ローカルあり / SHA != remote / DB とも違う → コンフリクト
@@ -574,7 +575,8 @@ M3 サブ C で **ベース / ローカル / リモートの 3 SHA による 3-w
 
 | ローカル状態 | リモート状態 | 動作 | `MergeDecision` |
 |---|---|---|---|
-| 無 | あり | ダウンロード | `.download` |
+| 無 / DB 記録なし（未追跡）or SHA != remote | あり | ダウンロード（クリーンインストール復旧・再セットアップ / 削除後にリモートが変化＝リモート勝ち） | `.download` |
+| 無 / SHA = DB（前回 sync 時）= remote | あり | **取得しない**（ローカル削除の伝播待ち。削除は scan / event 側の enqueueDelete に委ねる。Issue #68） | `.awaitLocalDeletePropagation` |
 | あり / SHA = remote | あり | スキップ + DB 最新化（mtime は**ローカル stat 実値**を記録。マニフェストの秒精度値で上書きするとフルスキャンの mtime 比較が外れ毎起動再アップロードになる） | `.localMatchesRemote` |
 | あり / SHA != remote / SHA = DB（前回 sync 時） | あり | ダウンロード（remote が新しいと判断） | `.download` |
 | あり / SHA != remote / SHA != DB（or DB 記録なし） | あり | **コンフリクト**: `<stem> (local copy YYYY-MM-DD HH-MM-SS).<ext>` にリネーム → remote をダウンロード。リネーム後のファイルは FSEvents 経由で M1 アップロードキューに乗る | `.conflictThenDownload` |
@@ -585,6 +587,8 @@ M3 サブ C で **ベース / ローカル / リモートの 3 SHA による 3-w
 **`.unreadable`（ファイルは在るが SHA を計算できない＝権限/I-O エラー等）の扱い**: 乖離の有無を確認できないので**データ安全側へ倒す**。リモートあり（pull）→ 無確認で上書きせず `.conflictThenDownload`（ローカルをコンフリクトコピーへ退避してから取得）／リモート無（削除）→ `.keepLocalRemoteDeleted`（温存）。旧 M2 は pull 側のハッシュ失敗を無確認 download に倒していた（＝乖離ローカルを失い得た）が、サブ C で `LocalState` に持ち上げてこの 1 点だけ厳格化した（PR #3 レビュー指摘 1）。
 
 「両方が同じ方向に変化」（ベースから local も remote も同一内容へ）は `local == remote` なので `.localMatchesRemote`（fast-forward）に入る。リネーム規則は `ConflictNamer.localCopyRelativePath(for:at:)`。dotfile / 拡張子なしも対応。
+
+**`.awaitLocalDeletePropagation`（ローカル削除の伝播待ち・Issue #68・2026-07-18）**: 追跡済みファイルをローカルで削除した直後、その削除がマニフェストへ伝播する**前に**定期 pull（既定 3 分間隔）が走ると、旧実装は「ローカル欠落 / リモートあり」を無条件 `.download` に倒していたためファイルを再ダウンロードして**復活**させていた。削除イベントの検知〜delete marker 書込が pull より遅れると必ず負ける構造だった。修正では `local == .absent && remote != nil` を base で分岐する — **`base == remote`（前回同期からリモート不変・ローカルだけ欠落）は「削除の伝播待ち」として取得しない**（`.awaitLocalDeletePropagation`。pull 側 `reconcileRemoteEntry` では info ログのみの no-op）。`base == nil`（未追跡＝クリーンインストール復旧・再セットアップ）と `base != remote`（削除後にリモートが変化＝リモート勝ち）は従来どおり `.download`。オフライン中 / アプリ停止中のローカル削除は起動時フルスキャン（`FileRecord` と実ファイルの突合）が削除検出を担うため、この変更で取りこぼしは生じない。**FileRecord は温存する**（削除しない）— scan の削除検出が record vs 実ファイルの突合である以上、record を消すとフルスキャンでも削除を検出できなくなるため。関連: 再セットアップ直後の採用未了ウィンドウでは base 自体がまだ無く本修正だけでは一度復活し得る（別 issue #69 = 削除イベントの黙殺）。回帰は `ThreeWayMergeTests`（判定表）と `ReconcileWiringTests`（配線 = 非取得 / FileRecord 温存 / base != remote は取得）。
 
 ### アップロード側の並行更新検出（last-writer-wins 解消・Issue #25 / A・2026-06-23）
 
