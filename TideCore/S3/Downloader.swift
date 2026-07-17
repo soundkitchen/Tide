@@ -363,6 +363,10 @@ public struct Downloader: Sendable {
         let localState: LocalState = (try? HashCalculator.sha256NoFollow(of: fullURL)).map(LocalState.present) ?? .unreadable
         let decision = ThreeWayMerge.decide(base: dbRec?.sha256, local: localState, remote: nil)
 
+        // 明示列挙（default を使わない）: remote = nil 固定なのでここに来る decide() の結果は
+        // .deleteLocal / .keepLocalRemoteDeleted の 2 つだけ。残りは到達不能で、来たら decide() の
+        // ロジックバグとして assertionFailure で検出しつつ安全側（削除しない）に倒す。pull 側
+        // reconcileRemoteEntry の 7 case 明示列挙 + assertionFailure と対称の防御（PR #70 レビュー観察 1）。
         switch decision {
         case .deleteLocal:
             try FileManager.default.removeItem(at: fullURL)
@@ -380,8 +384,8 @@ public struct Downloader: Sendable {
             }
             AppLogger.sync.info("Removed locally (remote deletion): \(relativePath, privacy: .private)")
             return true
-        default:
-            // .keepLocalRemoteDeleted（ローカル編集/未追跡 or ハッシュ不能）→ 温存し warning。
+        case .keepLocalRemoteDeleted:
+            // ローカル編集/未追跡 or ハッシュ不能 → 温存し warning。
             try await db.pool.write { db in
                 var log = SyncLogRecord(
                     id: nil,
@@ -394,6 +398,10 @@ public struct Downloader: Sendable {
                 try log.insert(db)
             }
             AppLogger.sync.info("Skip remote-deletion (local modified): \(relativePath, privacy: .private)")
+            return false
+        case .download, .localMatchesRemote, .conflictThenDownload, .awaitLocalDeletePropagation, .noop:
+            // remote = nil 固定なので到達不能。安全側（削除しない）に倒す。
+            assertionFailure("unreachable: remote is nil in applyRemoteDeletion")
             return false
         }
     }
