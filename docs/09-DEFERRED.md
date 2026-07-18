@@ -108,7 +108,7 @@ PR #66 レビュー指摘 1 の回帰・両方向）・rebind 回帰（rename �
 - **原因**: `ThreeWayMerge.decide` の `(.absent, _?)` 分岐が base を見ず無条件 `.download`。`base == remote`（前回同期からリモート不変・ローカルだけ欠落）は 3-way 的に「ローカル削除の伝播待ち」だが、クリーンインストール復旧（base なし → 取得）に振った判定が削除伝播とのレースを生んでいた。
 - **修正**: `local == .absent && remote != nil` を base で分岐。`base == remote` → 新ケース `.awaitLocalDeletePropagation`（pull 側は info ログのみの no-op・**FileRecord は温存** = scan の削除検出が record vs 実ファイルの突合であるため）。`base == nil`（未追跡＝クリーンインストール復旧・再セットアップ）と `base != remote`（削除後にリモート変化＝リモート勝ち）は従来どおり `.download`。オフライン中 / アプリ停止中のローカル削除は起動時フルスキャンが削除検出を担うため取りこぼしは生じない。判定→I/O の配線・意味論は `docs/04`「競合解決」節と判定表を参照。
 - **回帰**: `ThreeWayMergeTests`（判定表に `("A", .absent, "A") → .awaitLocalDeletePropagation` ほか）+ `ReconcileWiringTests`（`testAwaitLocalDeletePropagationDoesNotResurrect` = 非取得 + FileRecord 温存 / `testDownloadWhenLocalDeletedButRemoteChanged` = base != remote は取得）。
-- **残る相方 = Issue #69（未解消）**: 再セットアップ直後の**採用未了ウィンドウ**では base 自体がまだ無いため、本修正だけでは一度復活し得る（`decide` は `base == nil` を `.download` に倒す）。#69（削除イベントの黙殺）で扱う。
+- **残る相方 = Issue #69 ✅ 解消済み（2026-07-18）**: 再セットアップ直後の**採用未了ウィンドウ**（base 自体がまだ無い）を、event 側「未追跡 ∧ リモート既知（直近 pull の `remoteKnownPaths`・シャード単位マージ）∧ ignore 非該当 → delete enqueue」（`shouldPropagateDeletion`）+ pull 側「record 無し × ローカル不在 × delete 行 pending → 取得しない」（`hasPendingDelete`）の 2 点セットで解消。scan への展開は禁止（復旧中の未 DL ファイル全消し事故）。残余（初回 read() 前の数秒窓・採用途中の再起動後）は「一度復活 → 再削除で収束」として許容（ユーザ確定）。詳細は `docs/08`「リモート削除の取り扱い」・`docs/04` #68 節末尾。
 
 ## ファイル → 同名ディレクトリ置換で FSEvents 同期が壊れる（2026-07-04 発見 = Issue #52・同日修正）
 

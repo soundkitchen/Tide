@@ -11,8 +11,10 @@ import TideCore
 ///
 /// 注記: ツリー走査・symlink skip・PathValidator・foundPaths 簿記は @MainActor の
 /// `performFullScan` クロージャに、`.syncignore` reload / triggerFullScan ディスパッチ・
-/// event の `.deleted` / file-gone → enqueueDelete は @MainActor `processEventToQueue` に残り、
-/// 直接駆動面がない（このファイルのスコープ外）。
+/// event の `.deleted` / file-gone → enqueueDelete の enqueue 配線は @MainActor
+/// `processEventToQueue` に残り、直接駆動面がない（このファイルのスコープ外）。
+/// ただし `.deleted` の伝播判定自体は `shouldPropagateDeletion`（nonisolated static・Issue #69）に
+/// 抽出済みで、本ファイルが真理値表を固定する。
 final class ScanEventWiringTests: XCTestCase {
 
     private func makeEnv() throws -> (db: LocalDatabase, root: URL) {
@@ -197,6 +199,76 @@ final class ScanEventWiringTests: XCTestCase {
         let rows = try await queueRows(env.db, path: "gone.txt")
         XCTAssertEqual(rows.count, 1)
         XCTAssertEqual(rows.first?.operation, "delete")
+    }
+
+    // MARK: - shouldPropagateDeletion（event `.deleted` の伝播判定 / Issue #69）
+
+    /// 真理値表を固定する。追跡済みは常に伝播（従来挙動）。未追跡は「リモート既知 ∧ ignore 非該当」
+    /// のときだけ伝播＝再セットアップ直後の採用未了ウィンドウの削除を拾い、同期対象外の一時ファイルと
+    /// ignore 被マッチ（他デバイス由来 entry の片方向破壊防止）は従来どおり無視する。
+    func testShouldPropagateDeletionTruthTable() {
+        // 追跡済み: remoteKnown / ignore の値によらず常に伝播（既存追跡は ignore 対象外の規約と対称）。
+        XCTAssertTrue(SyncEngine.shouldPropagateDeletion(isTracked: true, isRemoteKnown: false, isIgnoredUntracked: false))
+        XCTAssertTrue(SyncEngine.shouldPropagateDeletion(isTracked: true, isRemoteKnown: true, isIgnoredUntracked: true))
+        // 未追跡 × リモート既知 × ignore 非該当 = 採用未了ウィンドウの削除 → 伝播（#69 の本体）。
+        XCTAssertTrue(SyncEngine.shouldPropagateDeletion(isTracked: false, isRemoteKnown: true, isIgnoredUntracked: false))
+        // 未追跡 × リモート未知 = 同期対象外（一時ファイル等）→ 従来どおり無視。
+        XCTAssertFalse(SyncEngine.shouldPropagateDeletion(isTracked: false, isRemoteKnown: false, isIgnoredUntracked: false))
+        // 未追跡 × リモート既知でも ignore 被マッチは伝播しない。
+        XCTAssertFalse(SyncEngine.shouldPropagateDeletion(isTracked: false, isRemoteKnown: true, isIgnoredUntracked: true))
+    }
+
+    // MARK: - mergedRemoteKnownPaths（remoteKnownPaths のシャード単位マージ / Issue #69・PR #71 指摘 1）
+
+    /// 決定的に「シャードが異なる 2 path」を得る（sha1 先頭バイトの偶然衝突をテスト構造から排除）。
+    private func twoPathsWithDistinctShards() -> (a: String, b: String) {
+        let a = "merge/a.txt"
+        let aShard = ManifestSharding.shardId(for: a)
+        var i = 0
+        while true {
+            let b = "merge/b\(i).txt"
+            if ManifestSharding.shardId(for: b) != aShard { return (a, b) }
+            i += 1
+        }
+    }
+
+    /// 無変化シャード分は温存する。丸ごと差し替えへの退行（ManifestReader が無変化シャードを
+    /// FileRecord 再合成 = 採用済みサブセットしか返さないため、未採用 path が脱落して
+    /// #69 の窓が再び開く）を防ぐ本丸の固定。
+    func testMergedRemoteKnownPathsPreservesUnchangedShardPaths() {
+        let (kept, changed) = twoPathsWithDistinctShards()
+        let merged = SyncEngine.mergedRemoteKnownPaths(
+            previous: [kept],
+            affectedShards: [ManifestSharding.shardId(for: changed)],
+            freshPaths: [changed]
+        )
+        XCTAssertTrue(merged.contains(kept), "無変化シャードの前回分（未採用 path 含む）は温存")
+        XCTAssertTrue(merged.contains(changed), "今回 pull の path は合流")
+    }
+
+    /// 変化シャード分は差し替える（今回 pull に現れなければ脱落 = そのシャードでの削除を反映）。
+    func testMergedRemoteKnownPathsReplacesAffectedShardPaths() {
+        let (gone, fresh) = twoPathsWithDistinctShards()
+        let merged = SyncEngine.mergedRemoteKnownPaths(
+            previous: [gone],
+            affectedShards: [ManifestSharding.shardId(for: gone)],
+            freshPaths: [fresh]
+        )
+        XCTAssertFalse(merged.contains(gone), "変化シャードの前回分は差し替え（fresh に無ければ脱落）")
+        XCTAssertEqual(merged, [fresh])
+    }
+
+    /// 削除シャード（removedShards 由来の affected）分は脱落する。
+    /// pull 自身が適用したリモート削除の FSEvents エコーを打ち返さない前提（マージが
+    /// フェーズ 2 = applyRemoteDeletion より前に走る）を集合側から支える。
+    func testMergedRemoteKnownPathsDropsRemovedShardPaths() {
+        let (removed, _) = twoPathsWithDistinctShards()
+        let merged = SyncEngine.mergedRemoteKnownPaths(
+            previous: [removed],
+            affectedShards: [ManifestSharding.shardId(for: removed)],
+            freshPaths: [String]()
+        )
+        XCTAssertTrue(merged.isEmpty, "removed シャードの前回分は脱落")
     }
 
     // MARK: - enqueueDescendantDeletes（dir → file 置換の鏡像 / PR #53 レビュー #3）

@@ -143,6 +143,70 @@ final class ReconcileWiringTests: XCTestCase {
         XCTAssertTrue(copySpy.calls.isEmpty)
     }
 
+    // MARK: - 採用未了の削除待ちガード（Issue #69: 未追跡 delete 行 pending は取得しない）
+
+    @discardableResult
+    private func seedQueueRow(_ db: LocalDatabase, path: String, operation: String) async throws -> Int64 {
+        try await db.pool.write { db in
+            var rec = UploadQueueRecord(
+                id: nil, path: path, operation: operation,
+                enqueuedAt: 1_000, attempts: 0, nextRetryAt: nil, lastError: nil
+            )
+            try rec.insert(db)
+            return rec.id ?? -1
+        }
+    }
+
+    func testPendingUntrackedDeleteSkipsDownload() async throws {
+        let env = try makeEnv()
+        let path = "adopting/removed.txt"
+        let bytes = TestData.deterministicBytes(700, salt: 20)
+        let entry = remoteEntry(for: bytes)
+        let fake = FakeRangedDownloadClient(fullData: bytes, etag: entry.etag)
+        // 採用未了（record 無し）× ローカル不在 × 同 path の delete 行 pending（event 側 #69 が enqueue 済み想定）。
+        try await seedQueueRow(env.db, path: path, operation: "delete")
+        let copySpy = ConflictCopySpy(); let issueSpy = IssueSpy()
+
+        await reconcile(path: path, entry: entry, dl: makeDownloader(client: fake, env: env), env: env, copySpy: copySpy, issueSpy: issueSpy)
+
+        XCTAssertEqual(fake.callCount, 0, "delete 行 pending の未追跡パスは取得しない（#69: 復活 → 片肺 delete の逆転レースを閉じる）")
+        let url = env.root.appendingPathComponent(path)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path), "ファイルを復活させない")
+        let issues = await issueSpy.issues
+        XCTAssertTrue(issues.isEmpty, "正常系なので issue を記録しない")
+    }
+
+    func testPendingUploadRowDoesNotSkipDownload() async throws {
+        let env = try makeEnv()
+        let path = "adopting/normal.txt"
+        let bytes = TestData.deterministicBytes(650, salt: 21)
+        let entry = remoteEntry(for: bytes)
+        let fake = FakeRangedDownloadClient(fullData: bytes, etag: entry.etag)
+        // upload 行はガードの根拠にならない（delete 行だけが「削除待ち」の証跡）。
+        try await seedQueueRow(env.db, path: path, operation: "upload")
+        let copySpy = ConflictCopySpy(); let issueSpy = IssueSpy()
+
+        await reconcile(path: path, entry: entry, dl: makeDownloader(client: fake, env: env), env: env, copySpy: copySpy, issueSpy: issueSpy)
+
+        XCTAssertEqual(fake.callCount, 1, "upload 行 pending は従来どおり取得する")
+    }
+
+    func testTrackedRecordKeepsExistingSemanticsDespitePendingDelete() async throws {
+        let env = try makeEnv()
+        let path = "tracked/remote-changed.txt"
+        let baseBytes = TestData.deterministicBytes(800, salt: 22)
+        let remoteBytes = TestData.deterministicBytes(950, salt: 23)   // base != remote
+        try await seedFileRecord(env.db, path: path, sha: TestData.shaHex(baseBytes), size: Int64(baseBytes.count))
+        try await seedQueueRow(env.db, path: path, operation: "delete")
+        let entry = remoteEntry(for: remoteBytes)
+        let fake = FakeRangedDownloadClient(fullData: remoteBytes, etag: entry.etag)
+        let copySpy = ConflictCopySpy(); let issueSpy = IssueSpy()
+
+        await reconcile(path: path, entry: entry, dl: makeDownloader(client: fake, env: env), env: env, copySpy: copySpy, issueSpy: issueSpy)
+
+        XCTAssertEqual(fake.callCount, 1, "追跡済み（record あり）はガード対象外＝base 分岐の既存意味論（base != remote はリモート勝ち）を維持")
+    }
+
     // MARK: - .localMatchesRemote（download せず markSynced）
 
     func testLocalMatchesRemoteDoesNotDownload() async throws {
