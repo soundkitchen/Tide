@@ -59,6 +59,13 @@ final class SyncEngine {
     private var paused: Bool = false
     private var running: Bool = false
     private var ignoreMatcher: LayeredSyncIgnore = .empty
+    /// 直近 pull が観測したリモート全 path（Issue #69）。event `.deleted` で FileRecord 不在
+    /// （再セットアップ直後の採用未了）の削除がリモート追跡分かを S3 往復なしで照会する。
+    /// 更新はシャード単位のマージ（`performRemotePull`）: 変化/削除シャード分だけ差し替え、
+    /// 無変化シャード分は前回値を温存する。丸ごと差し替えると 2 回目以降の pull で
+    /// ManifestReader が無変化シャードを FileRecord から再合成（＝採用済みサブセットのみ）するため
+    /// 未採用 path が脱落し、採用未了ウィンドウが再び開く。非永続（再起動直後は空 = 既知の残余）。
+    @ObservationIgnored private var remoteKnownPaths: Set<String> = []
     /// 読込中に変化し続けて安定しないファイル（L6 A-detect の延期対象）で、既に「未バックアップ」警告を
     /// 出した path。recentIssues への重複表示を防ぐ。キューから消えた path はアイドル周回で間引く
     /// （= 安定して同期完了 or 除去されたら再エピソードでまた警告できる）。
@@ -818,6 +825,13 @@ final class SyncEngine {
         let reader = ManifestReader(s3: s3, db: db)
         guard let result = try await reader.read() else { return }
         let remoteMap = result.files
+        let affected = result.updatedShards.union(result.removedShards)
+        // Issue #69: リモート既知 path 集合をシャード単位でマージ（変化/削除シャード分を差し替え、
+        // 無変化シャード分は温存）。remoteMap の無変化シャード分は FileRecord 再合成＝採用済み
+        // サブセットしか含まないため、丸ごと差し替えにはできない（プロパティのコメント参照）。
+        remoteKnownPaths = Set(
+            remoteKnownPaths.filter { !affected.contains(ManifestSharding.shardId(for: $0)) }
+        ).union(remoteMap.keys)
         let dl = makeDownloader()
 
         // 1) 取り込み（最大 5 並列）
@@ -838,8 +852,7 @@ final class SyncEngine {
             await group.waitForAll()
         }
 
-        // 2) 削除反映: 変更があったシャードに属するファイルで、remoteMap に無いもの
-        let affected = result.updatedShards.union(result.removedShards)
+        // 2) 削除反映: 変更があったシャード（affected・上で算出済み）に属するファイルで、remoteMap に無いもの
         // 今回の pull で .syncignore（ルート/ネスト）が変化したか。変化時のみ層状マッチャを再構築し、
         // 定常 pull でのツリー再走査を避ける（「変更時フル再構築」戦略・docs/08）。
         // 過大近似: shard が変化 ∧ path が .syncignore なら（reconcile が no-op でも）再構築する＝取りこぼし防止。
@@ -971,6 +984,16 @@ final class SyncEngine {
             // 競合解決は ThreeWayMerge に一本化（remote はここでは常に非 nil）。
             switch ThreeWayMerge.decide(base: localRec?.sha256, local: localState, remote: entry.sha256) {
             case .download:
+                // 採用未了の削除待ち（Issue #69）: 未追跡（record 無し）× ローカル不在 × 同 path の
+                // delete 行 pending なら取得しない。event 側（shouldPropagateDeletion）の enqueue と
+                // in-flight pull が逆転すると「復活 → 後続 delete がリモートだけ消す」片肺になる。
+                // [ローカル削除の伝播待ち]（#68・base 分岐）の未追跡版＝base が無いのでキュー行を
+                // 根拠にする。DB 読み失敗は従来挙動（取得）へフォールバック。
+                if localRec == nil, case .absent = localState,
+                   (try? await Self.hasPendingDelete(db: db, path: path)) == true {
+                    AppLogger.sync.info("Skip download (untracked delete pending): \(path, privacy: .private)")
+                    return
+                }
                 // リモート採用（ローカル欠落 / ローカル未編集でリモートのみ変化 → 上書き取得）。
                 try await dl.download(relativePath: path, entry: entry)
             case .localMatchesRemote:
@@ -1139,11 +1162,23 @@ final class SyncEngine {
             await refreshQueueDepth()
 
         case .deleted:
-            // DB にいないなら無視
             let existing = try await db.pool.read { db in
                 try FileRecord.fetchOne(db, key: path)
             }
-            guard existing != nil else { return }
+            // record 不在は原則 no-op（未追跡＝同期対象外）だが、再セットアップ直後の採用未了
+            // ウィンドウ（マニフェスト掲載済み・DB 採用前）では削除の黙殺になる（Issue #69）。
+            // 直近 pull の remoteKnownPaths でリモート追跡分だけ伝播させる。ignore 被マッチの
+            // 未追跡パスは除外（他デバイス由来でマニフェストに載っている場合、ローカルと紐付いた
+            // ことのない entry を消す片方向データ破壊になる）。
+            guard Self.shouldPropagateDeletion(
+                isTracked: existing != nil,
+                isRemoteKnown: remoteKnownPaths.contains(path),
+                isIgnoredUntracked: IgnoreDecision.shouldSkip(
+                    relativePath: path,
+                    isAlreadyTracked: existing?.lastSyncedAt != nil,
+                    matcher: ignoreMatcher
+                )
+            ) else { return }
             try await enqueueDelete(path: path, now: now)
         }
     }
@@ -1151,6 +1186,30 @@ final class SyncEngine {
     private func enqueueDelete(path: String, now: Double) async throws {
         try await Self.enqueueDelete(db: db, path: path, now: now)
         await refreshQueueDepth()
+    }
+
+    /// event `.deleted` の伝播判定（Issue #69）。追跡済み（FileRecord あり）は従来どおり常に伝播。
+    /// 未追跡は「リモート既知（直近 pull の `remoteKnownPaths` 掲載）かつ ignore 非該当」のときだけ
+    /// 伝播する＝再セットアップ直後の採用未了ウィンドウの削除を拾う。
+    /// **この判定をフルスキャンへ展開してはならない** — 「リモート既知だが record も実ファイルも無い」を
+    /// scan で delete に倒すと、クリーンインストール復旧中の未ダウンロードファイル全部に delete を打つ。
+    /// FSEvents の `.deleted` イベント（＝ローカルに実在したものが消えた証跡）に限定するのが load-bearing。
+    nonisolated static func shouldPropagateDeletion(
+        isTracked: Bool, isRemoteKnown: Bool, isIgnoredUntracked: Bool
+    ) -> Bool {
+        if isTracked { return true }
+        return isRemoteKnown && !isIgnoredUntracked
+    }
+
+    /// 同 path の delete 行がキューに存在するか（Issue #69 の pull 側ガード用・読み取りのみ＝
+    /// [キュー行 id 基準] 非抵触）。
+    nonisolated static func hasPendingDelete(db: LocalDatabase, path: String) async throws -> Bool {
+        try await db.pool.read { db in
+            try UploadQueueRecord
+                .filter(Column("path") == path)
+                .filter(Column("operation") == "delete")
+                .fetchOne(db) != nil
+        }
     }
 
     /// delete キューへ 1 行投入する（常に onConflict: .replace ＝処理中の同 path 行を置換する。

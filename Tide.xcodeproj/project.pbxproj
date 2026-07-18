@@ -825,9 +825,9 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				3DFFE12DD84D9B50195B8141 /* Tide */,
 				897ED17357ABA6301C317389 /* TideCore */,
 				ECE222E1EB7C4AE54F4CD4E5 /* TideFileProvider */,
+				3DFFE12DD84D9B50195B8141 /* Tide */,
 				170C49D9D8E64E2F3E539E47 /* TideTests */,
 			);
 		};

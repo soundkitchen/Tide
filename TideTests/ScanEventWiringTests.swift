@@ -11,8 +11,10 @@ import TideCore
 ///
 /// 注記: ツリー走査・symlink skip・PathValidator・foundPaths 簿記は @MainActor の
 /// `performFullScan` クロージャに、`.syncignore` reload / triggerFullScan ディスパッチ・
-/// event の `.deleted` / file-gone → enqueueDelete は @MainActor `processEventToQueue` に残り、
-/// 直接駆動面がない（このファイルのスコープ外）。
+/// event の `.deleted` / file-gone → enqueueDelete の enqueue 配線は @MainActor
+/// `processEventToQueue` に残り、直接駆動面がない（このファイルのスコープ外）。
+/// ただし `.deleted` の伝播判定自体は `shouldPropagateDeletion`（nonisolated static・Issue #69）に
+/// 抽出済みで、本ファイルが真理値表を固定する。
 final class ScanEventWiringTests: XCTestCase {
 
     private func makeEnv() throws -> (db: LocalDatabase, root: URL) {
@@ -197,6 +199,23 @@ final class ScanEventWiringTests: XCTestCase {
         let rows = try await queueRows(env.db, path: "gone.txt")
         XCTAssertEqual(rows.count, 1)
         XCTAssertEqual(rows.first?.operation, "delete")
+    }
+
+    // MARK: - shouldPropagateDeletion（event `.deleted` の伝播判定 / Issue #69）
+
+    /// 真理値表を固定する。追跡済みは常に伝播（従来挙動）。未追跡は「リモート既知 ∧ ignore 非該当」
+    /// のときだけ伝播＝再セットアップ直後の採用未了ウィンドウの削除を拾い、同期対象外の一時ファイルと
+    /// ignore 被マッチ（他デバイス由来 entry の片方向破壊防止）は従来どおり無視する。
+    func testShouldPropagateDeletionTruthTable() {
+        // 追跡済み: remoteKnown / ignore の値によらず常に伝播（既存追跡は ignore 対象外の規約と対称）。
+        XCTAssertTrue(SyncEngine.shouldPropagateDeletion(isTracked: true, isRemoteKnown: false, isIgnoredUntracked: false))
+        XCTAssertTrue(SyncEngine.shouldPropagateDeletion(isTracked: true, isRemoteKnown: true, isIgnoredUntracked: true))
+        // 未追跡 × リモート既知 × ignore 非該当 = 採用未了ウィンドウの削除 → 伝播（#69 の本体）。
+        XCTAssertTrue(SyncEngine.shouldPropagateDeletion(isTracked: false, isRemoteKnown: true, isIgnoredUntracked: false))
+        // 未追跡 × リモート未知 = 同期対象外（一時ファイル等）→ 従来どおり無視。
+        XCTAssertFalse(SyncEngine.shouldPropagateDeletion(isTracked: false, isRemoteKnown: false, isIgnoredUntracked: false))
+        // 未追跡 × リモート既知でも ignore 被マッチは伝播しない。
+        XCTAssertFalse(SyncEngine.shouldPropagateDeletion(isTracked: false, isRemoteKnown: true, isIgnoredUntracked: true))
     }
 
     // MARK: - enqueueDescendantDeletes（dir → file 置換の鏡像 / PR #53 レビュー #3）
