@@ -386,6 +386,8 @@ public struct Downloader: Sendable {
                 try log.insert(db)
             }
             AppLogger.sync.info("Removed locally (remote deletion): \(relativePath, privacy: .private)")
+            // 空になった祖先 dir 殻の掃除（Issue #67・best-effort。実削除 + DB Tx 成功後のみ）。
+            removeEmptyAncestors(ofDeleted: relativePath)
             return true
         case .keepLocalRemoteDeleted:
             // ローカル編集/未追跡 or ハッシュ不能 → 温存し warning。
@@ -406,6 +408,37 @@ public struct Downloader: Sendable {
             // remote = nil + 存在ガード（.absent 排除）により到達不能。安全側（削除しない）に倒す。
             assertionFailure("unreachable: remote is nil and local exists in applyRemoteDeletion")
             return false
+        }
+    }
+
+    /// pull の削除反映（`.deleteLocal`）でファイルを消した結果、空になった祖先ディレクトリ殻を
+    /// 掃除する（Issue #67）。マニフェストはファイルのみ管理のため削除反映は dir を触らず、
+    /// FP 側 dir move（= 移動元全ファイル削除 + 移動先全追加として伝播）のたびに殻が残っていた。
+    /// - 遡るのは**削除した path の祖先のみ**（ユーザが別所に作った空 dir には到達しない）。
+    /// - 削除は `rmdir(2)`＝空でなければ ENOTEMPTY で失敗する。「空確認 → 削除」の 2 段にしない
+    ///   ことで TOCTOU を構造的に排除する（`FileManager.removeItem` は再帰削除のため絶対に使わない）。
+    /// - 中身が `.DS_Store` 1 件のみ（lstat 相当で regular file 確認）なら先に unlink してから rmdir
+    ///   （Finder が dir を閲覧しただけで置く恒久同期外メタデータ。残すと殻が再残置され続ける）。
+    /// - 祖先ごとに `PathValidator.resolveForWrite`（書込系ガード = 祖先 symlink 脱出拒否・F2/M6）を
+    ///   通し、dir 自体が symlink なら停止。`.tide` は対象外。syncRoot 自体には到達しない
+    ///   （`while !dir.isEmpty`）。
+    /// - best-effort（非 throw）: 失敗はその場で打ち切り（残った殻は次の削除反映が再試行する）。
+    private func removeEmptyAncestors(ofDeleted relativePath: String) {
+        let fm = FileManager.default
+        var dir = (relativePath as NSString).deletingLastPathComponent
+        while !dir.isEmpty {
+            if dir == ".tide" || dir.hasPrefix(".tide/") { return }
+            guard let url = try? PathValidator.resolveForWrite(relativePath: dir, syncRoot: syncRoot),
+                  !PathValidator.isSymbolicLink(at: url) else { return }
+            // `.DS_Store` 単独残置なら先に unlink（regular file のみ。symlink 等は消さず打ち切り）。
+            if let entries = try? fm.contentsOfDirectory(atPath: url.path), entries == [".DS_Store"] {
+                let ds = url.appendingPathComponent(".DS_Store")
+                let attrs = try? fm.attributesOfItem(atPath: ds.path)   // lstat 相当（symlink を辿らない）
+                guard (attrs?[.type] as? FileAttributeType) == .typeRegular, unlink(ds.path) == 0 else { return }
+            }
+            guard rmdir(url.path) == 0 else { return }   // ENOTEMPTY / ENOENT 等 → 打ち切り
+            AppLogger.sync.info("Removed empty dir left by remote deletion: \(dir, privacy: .private)")
+            dir = (dir as NSString).deletingLastPathComponent
         }
     }
 
