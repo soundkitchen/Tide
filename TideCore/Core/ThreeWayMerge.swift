@@ -35,6 +35,11 @@ public enum MergeDecision: Equatable, Sendable {
     case deleteLocal
     /// リモート削除だがローカルは編集済み / 未追跡 / unreadable → 温存し warning（ユーザが触っているとみなす）。
     case keepLocalRemoteDeleted
+    /// ローカル欠落・リモートあり・base == remote（前回同期からリモート不変でローカルだけ消えた）
+    /// → **ローカル削除の伝播待ち**として取得しない（Issue #68）。削除の伝播は scan / event 側の
+    /// enqueueDelete に委ねる。ここで download すると、削除イベントの検知〜delete marker 書込が
+    /// 定期 pull より遅れたとき pull がファイルを復活させる。
+    case awaitLocalDeletePropagation
     /// 何もしない（双方不在など）。
     case noop
 }
@@ -62,8 +67,12 @@ public enum ThreeWayMerge {
         case (.absent, nil):
             // どちらにも無い。
             return .noop
-        case (.absent, _?):
-            // ローカル欠落 / リモートあり → 取得（再作成含む）。
+        case let (.absent, r?):
+            // ローカル欠落 / リモートあり。base == remote（前回同期からリモート不変・ローカルだけ欠落）は
+            // 3-way 的に「ローカル削除の伝播待ち」＝取得しない（Issue #68。無条件 download だと定期 pull と
+            // 削除伝播のレースで削除が復活する）。base 不明（未追跡＝クリーンインストール復旧 / 再セットアップ）と
+            // base != remote（削除後にリモートが変化＝リモート勝ち）は従来どおり取得。
+            if let base, base == r { return .awaitLocalDeletePropagation }
             return .download
         case (.unreadable, nil):
             // 削除側: 存在するが読めない → 未編集と確認できないので温存（保守的）。

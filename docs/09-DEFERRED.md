@@ -101,6 +101,15 @@ PR #66 レビュー指摘 1 の回帰・両方向）・rebind 回帰（rename �
    badge-only update（live vs reported 差分）が deco を除去（fileproviderd スナップショット変異ログ
    `diffs:itemDecoration` で確認・固着なし＝設計どおりの eventual 収束）。
 
+## pull がローカル削除を復活させる（✅ 解消 2026-07-18・Issue #68）
+
+上記バッジ受け入れ（2026-07-15）と同じテストセッションの factoryReset 後クリーンアップで実発生した**既存挙動**（バッジ機能とは無関係）。追跡済みファイルをローカルで削除した直後、その削除がマニフェストへ伝播する**前に**定期 pull（既定 3 分間隔）が走ると、pull がファイルを再ダウンロードして**復活**させていた（02:43 / 02:46 の pull で削除済みテストファイルの再取得を OS ログで確認）。
+
+- **原因**: `ThreeWayMerge.decide` の `(.absent, _?)` 分岐が base を見ず無条件 `.download`。`base == remote`（前回同期からリモート不変・ローカルだけ欠落）は 3-way 的に「ローカル削除の伝播待ち」だが、クリーンインストール復旧（base なし → 取得）に振った判定が削除伝播とのレースを生んでいた。
+- **修正**: `local == .absent && remote != nil` を base で分岐。`base == remote` → 新ケース `.awaitLocalDeletePropagation`（pull 側は info ログのみの no-op・**FileRecord は温存** = scan の削除検出が record vs 実ファイルの突合であるため）。`base == nil`（未追跡＝クリーンインストール復旧・再セットアップ）と `base != remote`（削除後にリモート変化＝リモート勝ち）は従来どおり `.download`。オフライン中 / アプリ停止中のローカル削除は起動時フルスキャンが削除検出を担うため取りこぼしは生じない。判定→I/O の配線・意味論は `docs/04`「競合解決」節と判定表を参照。
+- **回帰**: `ThreeWayMergeTests`（判定表に `("A", .absent, "A") → .awaitLocalDeletePropagation` ほか）+ `ReconcileWiringTests`（`testAwaitLocalDeletePropagationDoesNotResurrect` = 非取得 + FileRecord 温存 / `testDownloadWhenLocalDeletedButRemoteChanged` = base != remote は取得）。
+- **残る相方 = Issue #69（未解消）**: 再セットアップ直後の**採用未了ウィンドウ**では base 自体がまだ無いため、本修正だけでは一度復活し得る（`decide` は `base == nil` を `.download` に倒す）。#69（削除イベントの黙殺）で扱う。
+
 ## ファイル → 同名ディレクトリ置換で FSEvents 同期が壊れる（2026-07-04 発見 = Issue #52・同日修正）
 
 M5 Phase 4 実機受け入れの種別変化エッジテストで発覚した**本体コア（FSEvents モード）の既存バグ**（M1〜M4 から存在。Phase 4 のコードは無関係）。

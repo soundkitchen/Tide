@@ -21,10 +21,10 @@ final class ThreeWayMergeTests: XCTestCase {
             ("A", .present("B"), nil, .keepLocalRemoteDeleted),   // ローカル編集 + リモート削除 → 温存
             ("B", .present("A"), nil, .keepLocalRemoteDeleted),
 
-            // local = .absent（ローカル欠落）→ remote があれば常に download
-            (nil, .absent, "A", .download),
-            ("A", .absent, "A", .download),
-            ("A", .absent, "B", .download),
+            // local = .absent（ローカル欠落）/ remote あり
+            (nil, .absent, "A", .download),                       // 未追跡（クリーンインストール復旧）→ 取得
+            ("A", .absent, "A", .awaitLocalDeletePropagation),    // base==remote → ローカル削除の伝播待ち（#68）
+            ("A", .absent, "B", .download),                       // 削除後にリモート変化 → リモート勝ちで取得
 
             // local == remote → 内容一致（fast-forward 含む）
             (nil, .present("A"), "A", .localMatchesRemote),
@@ -55,8 +55,17 @@ final class ThreeWayMergeTests: XCTestCase {
     // MARK: - M2 表の各行に対応する named ケース（docs/04-SYNC-LOGIC.md）
 
     func testRemotePresentLocalMissingDownloads() {
-        // 「ローカル無 / リモートあり → ダウンロード」
-        XCTAssertEqual(decide("A", .absent, "A"), .download)
+        // 「ローカル無 / リモートあり」— 未追跡（base なし）と「削除後にリモート変化」は取得
+        XCTAssertEqual(decide(nil, .absent, "A"), .download)
+        XCTAssertEqual(decide("A", .absent, "B"), .download)
+    }
+
+    // MARK: - ローカル削除の伝播待ち（Issue #68: pull がローカル削除を復活させない）
+
+    func testLocalDeletePendingPropagationDoesNotDownload() {
+        // base == remote（前回同期からリモート不変・ローカルだけ欠落）＝ローカル削除の伝播待ち。
+        // ここで download すると定期 pull と削除伝播のレースで削除が復活する（Issue #68）。
+        XCTAssertEqual(decide("A", .absent, "A"), .awaitLocalDeletePropagation)
     }
 
     func testContentEqualSkipsWithDbRefresh() {
