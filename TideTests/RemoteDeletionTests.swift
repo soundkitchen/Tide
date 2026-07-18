@@ -267,6 +267,19 @@ final class RemoteDeletionTests: XCTestCase {
         XCTAssertTrue(exists(env, "d2"), "dir も温存")
     }
 
+    func testDSStoreAtUpperAncestorChainsSweep() async throws {
+        let env = try makeEnv()
+        // 複合ケース（PR #72 レビュー任意提案）: 子 dir を掃除した後、上位祖先が `.DS_Store` 単独に
+        // なる連鎖 — rmdir 先行の ENOTEMPTY 分岐 → unlink → 再 rmdir の経路を上位レベルで踏む。
+        try await seedDeletable(env, path: "a2/b/c.txt", salt: 45)
+        _ = try writeFile(env.root, "a2/.DS_Store", TestData.deterministicBytes(16, salt: 46))
+
+        _ = try await makeDownloader(env: env).applyRemoteDeletion(relativePath: "a2/b/c.txt")
+
+        XCTAssertFalse(exists(env, "a2/b"), "子 dir（空）は掃除")
+        XCTAssertFalse(exists(env, "a2"), "`.DS_Store` 単独になった上位祖先も連鎖して掃除")
+    }
+
     func testTideDirectoryIsNeverSwept() async throws {
         let env = try makeEnv()
         // 防御的ガード: `.tide` 配下（マニフェスト上は現れないはずのパス）でも殻掃除は踏み込まない。

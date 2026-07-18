@@ -430,13 +430,22 @@ public struct Downloader: Sendable {
             if dir == ".tide" || dir.hasPrefix(".tide/") { return }
             guard let url = try? PathValidator.resolveForWrite(relativePath: dir, syncRoot: syncRoot),
                   !PathValidator.isSymbolicLink(at: url) else { return }
-            // `.DS_Store` 単独残置なら先に unlink（regular file のみ。symlink 等は消さず打ち切り）。
-            if let entries = try? fm.contentsOfDirectory(atPath: url.path), entries == [".DS_Store"] {
+            // rmdir(2) 先行（PR #72 レビュー指摘 1）: 非空 dir の打ち切りを syscall 1 回で済ませる。
+            // 無条件で列挙してから rmdir すると、大きな dir move（= 同一 dir 内 N ファイルの連続削除）で
+            // 削除ごとに残エントリ全列挙が走り合計 O(N²) になる。列挙 + `.DS_Store` 単独判定は
+            // ENOTEMPTY のときだけ（`.DS_Store` 単独 dir は rmdir → 列挙 → unlink → 再 rmdir で同結果）。
+            if rmdir(url.path) != 0 {
+                // errno は次の呼び出しで上書きされるため guard 先頭（列挙より前）で判定する。
+                guard errno == ENOTEMPTY,
+                      let entries = try? fm.contentsOfDirectory(atPath: url.path),
+                      entries == [".DS_Store"] else { return }
+                // `.DS_Store` 単独残置なら unlink → 再 rmdir（regular file のみ。symlink 等は消さず打ち切り）。
                 let ds = url.appendingPathComponent(".DS_Store")
                 let attrs = try? fm.attributesOfItem(atPath: ds.path)   // lstat 相当（symlink を辿らない）
-                guard (attrs?[.type] as? FileAttributeType) == .typeRegular, unlink(ds.path) == 0 else { return }
+                guard (attrs?[.type] as? FileAttributeType) == .typeRegular,
+                      unlink(ds.path) == 0,
+                      rmdir(url.path) == 0 else { return }
             }
-            guard rmdir(url.path) == 0 else { return }   // ENOTEMPTY / ENOENT 等 → 打ち切り
             AppLogger.sync.info("Removed empty dir left by remote deletion: \(dir, privacy: .private)")
             dir = (dir as NSString).deletingLastPathComponent
         }
