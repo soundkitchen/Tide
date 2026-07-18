@@ -218,6 +218,59 @@ final class ScanEventWiringTests: XCTestCase {
         XCTAssertFalse(SyncEngine.shouldPropagateDeletion(isTracked: false, isRemoteKnown: true, isIgnoredUntracked: true))
     }
 
+    // MARK: - mergedRemoteKnownPaths（remoteKnownPaths のシャード単位マージ / Issue #69・PR #71 指摘 1）
+
+    /// 決定的に「シャードが異なる 2 path」を得る（sha1 先頭バイトの偶然衝突をテスト構造から排除）。
+    private func twoPathsWithDistinctShards() -> (a: String, b: String) {
+        let a = "merge/a.txt"
+        let aShard = ManifestSharding.shardId(for: a)
+        var i = 0
+        while true {
+            let b = "merge/b\(i).txt"
+            if ManifestSharding.shardId(for: b) != aShard { return (a, b) }
+            i += 1
+        }
+    }
+
+    /// 無変化シャード分は温存する。丸ごと差し替えへの退行（ManifestReader が無変化シャードを
+    /// FileRecord 再合成 = 採用済みサブセットしか返さないため、未採用 path が脱落して
+    /// #69 の窓が再び開く）を防ぐ本丸の固定。
+    func testMergedRemoteKnownPathsPreservesUnchangedShardPaths() {
+        let (kept, changed) = twoPathsWithDistinctShards()
+        let merged = SyncEngine.mergedRemoteKnownPaths(
+            previous: [kept],
+            affectedShards: [ManifestSharding.shardId(for: changed)],
+            freshPaths: [changed]
+        )
+        XCTAssertTrue(merged.contains(kept), "無変化シャードの前回分（未採用 path 含む）は温存")
+        XCTAssertTrue(merged.contains(changed), "今回 pull の path は合流")
+    }
+
+    /// 変化シャード分は差し替える（今回 pull に現れなければ脱落 = そのシャードでの削除を反映）。
+    func testMergedRemoteKnownPathsReplacesAffectedShardPaths() {
+        let (gone, fresh) = twoPathsWithDistinctShards()
+        let merged = SyncEngine.mergedRemoteKnownPaths(
+            previous: [gone],
+            affectedShards: [ManifestSharding.shardId(for: gone)],
+            freshPaths: [fresh]
+        )
+        XCTAssertFalse(merged.contains(gone), "変化シャードの前回分は差し替え（fresh に無ければ脱落）")
+        XCTAssertEqual(merged, [fresh])
+    }
+
+    /// 削除シャード（removedShards 由来の affected）分は脱落する。
+    /// pull 自身が適用したリモート削除の FSEvents エコーを打ち返さない前提（マージが
+    /// フェーズ 2 = applyRemoteDeletion より前に走る）を集合側から支える。
+    func testMergedRemoteKnownPathsDropsRemovedShardPaths() {
+        let (removed, _) = twoPathsWithDistinctShards()
+        let merged = SyncEngine.mergedRemoteKnownPaths(
+            previous: [removed],
+            affectedShards: [ManifestSharding.shardId(for: removed)],
+            freshPaths: [String]()
+        )
+        XCTAssertTrue(merged.isEmpty, "removed シャードの前回分は脱落")
+    }
+
     // MARK: - enqueueDescendantDeletes（dir → file 置換の鏡像 / PR #53 レビュー #3）
 
     /// `parentPath/` 配下の追跡行だけが delete に乗る。PK 範囲比較（`>= "p/" AND < "p0"`）が

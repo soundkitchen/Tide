@@ -826,12 +826,14 @@ final class SyncEngine {
         guard let result = try await reader.read() else { return }
         let remoteMap = result.files
         let affected = result.updatedShards.union(result.removedShards)
-        // Issue #69: リモート既知 path 集合をシャード単位でマージ（変化/削除シャード分を差し替え、
-        // 無変化シャード分は温存）。remoteMap の無変化シャード分は FileRecord 再合成＝採用済み
-        // サブセットしか含まないため、丸ごと差し替えにはできない（プロパティのコメント参照）。
-        remoteKnownPaths = Set(
-            remoteKnownPaths.filter { !affected.contains(ManifestSharding.shardId(for: $0)) }
-        ).union(remoteMap.keys)
+        // Issue #69: リモート既知 path 集合をシャード単位でマージ（規則は mergedRemoteKnownPaths 参照）。
+        // **フェーズ 2（applyRemoteDeletion）より前に置くのが load-bearing**（PR #71 レビュー確認事項）:
+        // pull 自身が適用したリモート削除の FSEvents エコー（`.deleted`）が届く時点で、該当 path は
+        // 「affected シャードで除外済み ∧ remoteMap 不掲載」＝集合から脱落済みになり、削除を
+        // リモートへ打ち返さない。
+        remoteKnownPaths = Self.mergedRemoteKnownPaths(
+            previous: remoteKnownPaths, affectedShards: affected, freshPaths: remoteMap.keys
+        )
         let dl = makeDownloader()
 
         // 1) 取り込み（最大 5 並列）
@@ -1186,6 +1188,20 @@ final class SyncEngine {
     private func enqueueDelete(path: String, now: Double) async throws {
         try await Self.enqueueDelete(db: db, path: path, now: now)
         await refreshQueueDepth()
+    }
+
+    /// `remoteKnownPaths` のシャード単位マージ（Issue #69・PR #71 レビュー指摘 1 で純関数化）。
+    /// 変化/削除シャード（`affectedShards`）に属する前回分は差し替え（脱落）、無変化シャード分は
+    /// 温存し、今回 pull の全 path（`freshPaths`）を合流させる。**丸ごと差し替えにしてはならない** —
+    /// `ManifestReader.read()` は無変化シャードを FileRecord から再合成する（＝採用済みサブセット
+    /// しか返さない）ため、2 回目以降の pull で未採用 path が集合から脱落し、採用未了ウィンドウの
+    /// 削除黙殺（#69 の窓）が再び開く。回帰は `ScanEventWiringTests` のマージ規則 3 点。
+    nonisolated static func mergedRemoteKnownPaths(
+        previous: Set<String>, affectedShards: Set<String>, freshPaths: some Sequence<String>
+    ) -> Set<String> {
+        previous
+            .filter { !affectedShards.contains(ManifestSharding.shardId(for: $0)) }
+            .union(freshPaths)
     }
 
     /// event `.deleted` の伝播判定（Issue #69）。追跡済み（FileRecord あり）は従来どおり常に伝播。
