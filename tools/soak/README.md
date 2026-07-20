@@ -93,7 +93,9 @@ python3 tools/soak/churn.py --dry-run
   インプレース更新のみ**）。`--max-total-mb` は生存ファイルの合計から算出＝ delete で正しく減る。
 - **安全ガード**: 書込は専用サブツリー内限定（realpath 検証）・`--max-files`（500）・
   `--max-total-mb`（512）で有界・dotfile / `.syncignore` 名は生成しない・symlink 非生成非追従。
-  competing 書込が作る競合コピーは台帳外（触らないが上限の概算外になる点は許容）。
+  competing 書込が作る競合コピーは台帳外（個別 op では触らないが、dir ごと削除（dir_delete）に
+  同居分が巻き込まれることはある = サブツリー内なので安全・競合コピー掃除のカバレッジとして好都合。
+  上限の概算外になる点は許容）。
 - **再現性**: `--seed`（既定 40）+ 全操作 JSONL（`~/Library/Logs/TideSoak/churn.jsonl`）。
 - **duty cycle**: `--active-min 50 --quiesce-min 10`（毎時 10 分の完全静穏窓で
   consistency_check の DRIFT 判定を確定させる）。
