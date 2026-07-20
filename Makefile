@@ -100,6 +100,14 @@ fresh: reset run ## reset してから起動（新規セットアップのテス
 soak-check: ## soak 整合性突合: 同期フォルダ ↔ DB ↔ S3 マニフェスト ↔ S3 実体（#40）
 	python3 tools/soak/consistency_check.py
 
+.PHONY: soak-watch
+soak-watch: ## soak 常時観測: consistency_check を 300 秒間隔で回し JSONL 追記（#40）
+	python3 tools/soak/consistency_check.py --watch 300
+
+.PHONY: soak-churn
+soak-churn: ## soak 負荷注入: FSEvents/FP 両サイドへ create/edit/rename/delete 等を交錯注入（#40）
+	python3 tools/soak/churn.py
+
 .PHONY: clean
 clean: stop ## build/ を削除
 	rm -rf build/
