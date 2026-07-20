@@ -134,4 +134,160 @@ final class RemoteDeletionTests: XCTestCase {
         let deleteLogs = try await countLogs(env.db, type: .delete, path: path)
         XCTAssertEqual(deleteLogs, 0, "不在掃除はログを積まない")
     }
+
+    // MARK: - 空 dir 殻の掃除（Issue #67: `.deleteLocal` 後の removeEmptyAncestors）
+
+    /// `.deleteLocal` を成立させるフィクスチャ（実ファイル + 同 sha の FileRecord）を作る。
+    private func seedDeletable(_ env: (db: LocalDatabase, store: TransferStateStore, root: URL, tmp: URL), path: String, salt: UInt8) async throws {
+        let bytes = TestData.deterministicBytes(256, salt: salt)
+        _ = try writeFile(env.root, path, bytes)
+        try await seedFileRecord(env.db, path: path, sha: TestData.shaHex(bytes), size: Int64(bytes.count))
+    }
+
+    private func exists(_ env: (db: LocalDatabase, store: TransferStateStore, root: URL, tmp: URL), _ relative: String) -> Bool {
+        FileManager.default.fileExists(atPath: env.root.appendingPathComponent(relative).path)
+    }
+
+    func testEmptyAncestorsRemovedRecursively() async throws {
+        let env = try makeEnv()
+        let path = "a/b/c.txt"
+        try await seedDeletable(env, path: path, salt: 30)
+
+        let removed = try await makeDownloader(env: env).applyRemoteDeletion(relativePath: path)
+
+        XCTAssertTrue(removed)
+        XCTAssertFalse(exists(env, "a/b"), "空になった直近の親を掃除")
+        XCTAssertFalse(exists(env, "a"), "祖先方向へ再帰して掃除")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: env.root.path), "syncRoot 自体は消さない")
+    }
+
+    func testSiblingFilePreservesDirectory() async throws {
+        let env = try makeEnv()
+        try await seedDeletable(env, path: "a/b/target.txt", salt: 31)
+        _ = try writeFile(env.root, "a/b/keep.txt", TestData.deterministicBytes(64, salt: 32))
+
+        _ = try await makeDownloader(env: env).applyRemoteDeletion(relativePath: "a/b/target.txt")
+
+        XCTAssertTrue(exists(env, "a/b/keep.txt"), "兄弟ファイルは無傷")
+        XCTAssertTrue(exists(env, "a/b"), "空でない dir は温存（rmdir が ENOTEMPTY で打ち切り）")
+    }
+
+    func testSiblingEmptyDirStopsAtParent() async throws {
+        let env = try makeEnv()
+        try await seedDeletable(env, path: "a/b/target.txt", salt: 33)
+        // ユーザが意図して作った空 dir（同期対象外）を兄弟に置く。
+        try FileManager.default.createDirectory(
+            at: env.root.appendingPathComponent("a/empty"), withIntermediateDirectories: true)
+
+        _ = try await makeDownloader(env: env).applyRemoteDeletion(relativePath: "a/b/target.txt")
+
+        XCTAssertFalse(exists(env, "a/b"), "削除ファイルの直近親（空）は掃除")
+        XCTAssertTrue(exists(env, "a/empty"), "ユーザの空 dir は巻き込まない")
+        XCTAssertTrue(exists(env, "a"), "空 dir が残る親は温存（掃除は削除 path の祖先のみ + rmdir 打ち切り）")
+    }
+
+    func testKeepLocalDoesNotSweep() async throws {
+        let env = try makeEnv()
+        let path = "k/edited.txt"
+        let onDisk = TestData.deterministicBytes(300, salt: 34)
+        let baseBytes = TestData.deterministicBytes(300, salt: 35)   // base != local（編集済み）
+        _ = try writeFile(env.root, path, onDisk)
+        try await seedFileRecord(env.db, path: path, sha: TestData.shaHex(baseBytes), size: Int64(baseBytes.count))
+
+        let removed = try await makeDownloader(env: env).applyRemoteDeletion(relativePath: path)
+
+        XCTAssertFalse(removed)
+        XCTAssertTrue(exists(env, path), "温存経路（.keepLocalRemoteDeleted）は掃除に入らない")
+        XCTAssertTrue(exists(env, "k"))
+    }
+
+    func testAbsentLocalDoesNotSweep() async throws {
+        let env = try makeEnv()
+        // 空 dir + 孤児 record（実ファイル無し）: 孤児掃除経路では dir を触らない。
+        try FileManager.default.createDirectory(
+            at: env.root.appendingPathComponent("g"), withIntermediateDirectories: true)
+        try await seedFileRecord(env.db, path: "g/ghost.txt", sha: "deadbeef", size: 1)
+
+        let removed = try await makeDownloader(env: env).applyRemoteDeletion(relativePath: "g/ghost.txt")
+
+        XCTAssertFalse(removed)
+        XCTAssertTrue(exists(env, "g"), "ローカル不在（孤児 record 掃除）経路では dir 殻を掃除しない")
+    }
+
+    func testSymlinkEntryPreservesDirectoryAndTarget() async throws {
+        let env = try makeEnv()
+        // dir に symlink が残っている場合: rmdir は ENOTEMPTY で打ち切り（非再帰＝リンク先へ絶対に踏み込まない）。
+        let outside = env.tmp.appendingPathComponent("outside-dir")
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        let keep = outside.appendingPathComponent("keep.txt")
+        try TestData.deterministicBytes(32, salt: 36).write(to: keep)
+        try await seedDeletable(env, path: "s/target.txt", salt: 37)
+        try FileManager.default.createSymbolicLink(
+            at: env.root.appendingPathComponent("s/link"), withDestinationURL: outside)
+
+        _ = try await makeDownloader(env: env).applyRemoteDeletion(relativePath: "s/target.txt")
+
+        XCTAssertTrue(exists(env, "s"), "symlink が残る dir は空でないため温存")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: keep.path), "リンク先実体は無傷（掃除は非再帰）")
+    }
+
+    func testDSStoreSymlinkStopsSweep() async throws {
+        let env = try makeEnv()
+        // `.DS_Store` の名で symlink が置かれている場合は unlink せず打ち切り（regular file 限定ガード）。
+        let outside = env.tmp.appendingPathComponent("outside-file.txt")
+        try TestData.deterministicBytes(24, salt: 42).write(to: outside)
+        try await seedDeletable(env, path: "d3/target.txt", salt: 43)
+        try FileManager.default.createSymbolicLink(
+            at: env.root.appendingPathComponent("d3/.DS_Store"), withDestinationURL: outside)
+
+        _ = try await makeDownloader(env: env).applyRemoteDeletion(relativePath: "d3/target.txt")
+
+        XCTAssertTrue(exists(env, "d3"), "`.DS_Store` が symlink の dir は掃除しない")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: outside.path), "リンク先実体は無傷")
+    }
+
+    func testDSStoreOnlyDirectoryIsSwept() async throws {
+        let env = try makeEnv()
+        try await seedDeletable(env, path: "d/target.txt", salt: 38)
+        _ = try writeFile(env.root, "d/.DS_Store", TestData.deterministicBytes(16, salt: 39))
+
+        _ = try await makeDownloader(env: env).applyRemoteDeletion(relativePath: "d/target.txt")
+
+        XCTAssertFalse(exists(env, "d"), ".DS_Store 単独残置は一緒に掃除（Finder 閲覧だけで殻が再残置され続けるのを防ぐ）")
+    }
+
+    func testOtherDotfilePreservesDirectory() async throws {
+        let env = try makeEnv()
+        try await seedDeletable(env, path: "d2/target.txt", salt: 40)
+        _ = try writeFile(env.root, "d2/.gitignore", TestData.deterministicBytes(16, salt: 41))
+
+        _ = try await makeDownloader(env: env).applyRemoteDeletion(relativePath: "d2/target.txt")
+
+        XCTAssertTrue(exists(env, "d2/.gitignore"), ".DS_Store 以外の dotfile は消さない")
+        XCTAssertTrue(exists(env, "d2"), "dir も温存")
+    }
+
+    func testDSStoreAtUpperAncestorChainsSweep() async throws {
+        let env = try makeEnv()
+        // 複合ケース（PR #72 レビュー任意提案）: 子 dir を掃除した後、上位祖先が `.DS_Store` 単独に
+        // なる連鎖 — rmdir 先行の ENOTEMPTY 分岐 → unlink → 再 rmdir の経路を上位レベルで踏む。
+        try await seedDeletable(env, path: "a2/b/c.txt", salt: 45)
+        _ = try writeFile(env.root, "a2/.DS_Store", TestData.deterministicBytes(16, salt: 46))
+
+        _ = try await makeDownloader(env: env).applyRemoteDeletion(relativePath: "a2/b/c.txt")
+
+        XCTAssertFalse(exists(env, "a2/b"), "子 dir（空）は掃除")
+        XCTAssertFalse(exists(env, "a2"), "`.DS_Store` 単独になった上位祖先も連鎖して掃除")
+    }
+
+    func testTideDirectoryIsNeverSwept() async throws {
+        let env = try makeEnv()
+        // 防御的ガード: `.tide` 配下（マニフェスト上は現れないはずのパス）でも殻掃除は踏み込まない。
+        try await seedDeletable(env, path: ".tide/sub/x.txt", salt: 44)
+
+        _ = try await makeDownloader(env: env).applyRemoteDeletion(relativePath: ".tide/sub/x.txt")
+
+        XCTAssertTrue(exists(env, ".tide/sub"), "`.tide` 配下は空でも掃除対象外")
+        XCTAssertTrue(exists(env, ".tide"))
+    }
 }
