@@ -606,7 +606,7 @@ M3 サブ C で **ベース / ローカル / リモートの 3 SHA による 3-w
 
 - マニフェスト由来の `relativePath` / `shardId` は **すべて** `PathValidator` を通す（`..` / 絶対パス / NUL / バックスラッシュ等を拒否し、解決後 URL が syncRoot 配下にあることまで確認）
 - マニフェスト系の `getObject` は `maxBytes` 16 MiB（OOM 自己防衛）。通常ファイルの DL は `streamObject` でチャンク・ストリーミング書込（メモリ有界）。旧 200MiB インメモリ cap は撤廃。**復元の DoS ガード（M7）は `Downloader` 側**: streaming の sink で受信累積長を**マニフェストの真実サイズ `entry.size`** と突合し、超過は破棄して仕切り直す（巨大本文によるローカルディスク枯渇を復元経路でも防ぐ＝M4 を復元でも維持）。アップロード上限とは別物（復元方向はユーザ上限を適用しない）
-- フルスキャンの enumerator はシンボリックリンクを追従しない（symlink item は `continue` のみ。deep enumeration は symlink へそもそも再帰しない。**symlink item で `skipDescendants()` を呼んではならない** — 無関係な隣接ディレクトリへの再帰がスキップされ、実在する追跡ファイルが削除検出に乗って S3 へ誤 delete される。Issue #54）
+- フルスキャンはシンボリックリンクを追従しない。走査は再帰下降（`singlePassScan`・#64）で symlink（dir リンク含む）を**スタックへ push しない**＝構造的に降りない。`.syncignore` の discovery 走査（`loadLayeredIgnore`・pull 末尾専用）は enumerator ベースのままで、symlink item は `continue` のみ（deep enumeration は symlink へそもそも再帰しない。**symlink item で `skipDescendants()` を呼んではならない** — 無関係な隣接ディレクトリへの再帰がスキップされ、実在する追跡ファイルが削除検出に乗って S3 へ誤 delete される。Issue #54）
 - Downloader の書き込み先（最終コンポーネント）がシンボリックリンクなら拒否
 - 書込・削除経路（Downloader の `download` / `applyRemoteDeletion` / `renameLocalForConflict`）は `PathValidator.resolveForWrite` を通し、**祖先ディレクトリの symlink 経由のルート脱出**も拒否する（F2 / M6）
 - **Uploader は `O_NOFOLLOW` の単一 FD で open し、最終コンポーネントが symlink なら ELOOP で拒否してキューから外す。ハッシュ計算と本体読込/パート送信は同一 FD から行うので、「ハッシュ用 open → 本体用 open」の 2 回 open に存在した TOCTOU 窓を解消した（M5 / F3 / L9）**。祖先 symlink は対象外で `resolveSafely` の字句検証とスキャンの skip に委ねる

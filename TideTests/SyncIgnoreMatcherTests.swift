@@ -213,6 +213,34 @@ final class SyncIgnoreMatcherTests: XCTestCase {
         XCTAssertEqual(lay2.fileCount, 1)
     }
 
+    // MARK: - インプレース層差し替え（#64 patch 用 API）
+
+    func testUpdatingLayerAddsAndReplaces() {
+        let base = layered(["": "*.log"])
+        // 追加: ネスト層が増える。
+        let added = base.updatingLayer(directory: "sub", matcher: m("*.tmp"))
+        XCTAssertEqual(added.directoryGroups.map(\.directory), ["", "sub"])
+        XCTAssertTrue(added.isIgnored("sub/a.tmp"))
+        XCTAssertTrue(base.hasLayer(directory: ""))
+        XCTAssertFalse(base.hasLayer(directory: "sub"))  // 元の値は不変（値型）
+        // 置換: 同一 dir の層を差し替えると評価結果が変わる。
+        let replaced = base.updatingLayer(directory: "", matcher: m("*.dat"))
+        XCTAssertFalse(replaced.isIgnored("a.log"))
+        XCTAssertTrue(replaced.isIgnored("a.dat"))
+    }
+
+    func testUpdatingLayerRemovesOnNilAndEmpty() {
+        let base = layered(["": "*.log", "sub": "*.tmp"])
+        // nil = ファイル消滅/読込不能 → 層の除去。
+        let removed = base.updatingLayer(directory: "sub", matcher: nil)
+        XCTAssertEqual(removed.directoryGroups.map(\.directory), [""])
+        XCTAssertFalse(removed.isIgnored("sub/a.tmp"))
+        // 空パターン（コメントのみ）も init のフィルタで層の除去と同値。
+        let emptied = base.updatingLayer(directory: "sub", matcher: m("# comment only"))
+        XCTAssertEqual(emptied.directoryGroups.map(\.directory), [""])
+        XCTAssertFalse(emptied.hasLayer(directory: "sub"))
+    }
+
     // MARK: - ReDoS 速攻ガード (F1 / L8)
 
     /// k 個のワイルドカードを持つグロブを生成（`*s0*s1*…`）。

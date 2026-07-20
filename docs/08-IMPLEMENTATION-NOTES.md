@@ -165,13 +165,57 @@ FP ドメイン内のファイル編集（`modifyItem` の .contents）と削除
 - **ハードコード除外（機密網）は常に最優先**。`.syncignore` の否定 `!` では `.env` 等を再包含できない。「既存は触らない」緩和は**ユーザパターンにのみ**適用し、ハードコード除外には適用しない。
 - **gitignore 純正（既存は触らない）**: `.syncignore` のユーザパターンは**新規ファイル（未追跡 = `FileRecord.lastSyncedAt == nil`）にのみ**適用。既に同期済みのファイルは同期継続、S3 からも自動削除しない。バックアップから外したい時はローカル削除 → 通常の削除伝播。
 - **`.syncignore` 自身は同期対象に含める**（S3 経由で全デバイス・復旧後にも伝播）。`IgnoreDecision.shouldSkip` は `.syncignore` 自身（ルート/ネスト両方＝末尾 `/.syncignore`）を決して除外しない。判定は共有ヘルパ `IgnoreDecision.isSyncignoreFile` に一本化（自己保護と変更検知の両方で使う）。
-- スキップ判定は純粋関数 **`IgnoreDecision.shouldSkip(relativePath:isAlreadyTracked:matcher:)`** に集約し、`performFullScan` / `processEventToQueue` / `reconcileRemoteEntry` の 3 経路すべてで通す。`.syncignore` の読込は `PathValidator.resolveSafely` 経由 + symlink 非追従。`.syncignore` 変更は FSEvents で拾って `reloadIgnoreMatcher()` + フルスキャン再評価。
+- スキップ判定は純粋関数 **`IgnoreDecision.shouldSkip(relativePath:isAlreadyTracked:matcher:)`** に集約し、`performFullScan`（走査本体は `singlePassScan`）/ `processEventToQueue` / `reconcileRemoteEntry` の 3 経路すべてで通す。`.syncignore` の読込は `PathValidator.resolveSafely` 経由 + symlink 非追従（共通実装は `readSyncignoreLayer`）。`.syncignore` 変更は FSEvents で拾い、変更された 1 枚のインプレース patch（`patchIgnoreLayer`・#64）+ フルスキャン再評価（層辞書の全体再構築は scan の走査副産物）。
 - **ネスト `.syncignore`（git 風の階層オーバーライド・[#27] / C1・2026-06-25）**: ディレクトリごとの `.syncignore` を階層適用する。`SyncIgnoreMatcher.evaluate` を三状態（`unmatched`/`ignored`/`included`）化し、新 `LayeredSyncIgnore`（`[dir 相対パス: SyncIgnoreMatcher]` を束ねる `Sendable` 値型）が層合成を担う。対象パスの祖先ディレクトリの `.syncignore` を**浅い→深い順**に評価し、各層には「その層のディレクトリからの相対パス」を渡す（深い層が浅い層を上書き＝last-match-wins を階層へ拡張・マッチ無しの層は上位の判定を維持）。`IgnoreDecision.shouldSkip` の `matcher` 引数は `LayeredSyncIgnore`。
-  - **キャッシュ戦略 = 変更時フル再構築**（会話で確定・2026-06-25）: in-memory の dir→matcher 辞書がキャッシュ本体で、**評価のホットパス（scan/event/reconcile の 3 経路）は I/O ゼロ**（祖先 dir を辞書引きするだけ）。辞書の再構築（`SyncEngine.loadLayeredIgnore` のツリー走査）は**起動時**と**実際の `.syncignore` 変更時のみ** — ローカル変更は FSEvents（`isSyncignoreFile`）で `reloadIgnoreMatcher()`、リモート由来は **pull が `.syncignore` を触ったときだけ**（`performRemotePull` で「shard 変化 ∧ path が `.syncignore`」を過大近似検出して再構築・取りこぼし防止）。**定常 pull / 通常ファイル編集ではツリーを再走査しない**（pull 末尾の無条件再読込を条件化）。
-  - **走査の安全境界**: `loadLayeredIgnore` のツリー走査は symlink を絶対に追従せず（symlink item は `continue` のみ。deep enumeration は symlink へそもそも再帰しないため十分で、**symlink item での `skipDescendants()` は無関係な隣接ディレクトリを走査から脱落させるため呼ばない** — Issue #54・2026-07-05 修正）、機密網ディレクトリ（`HardcodedIgnoreRules`、`.tide`/`.aws` 等）は丸ごとスキップ（こちらは「現在 item がディレクトリ」の文脈での正しい `skipDescendants` 使用）、各 `.syncignore` は `PathValidator.resolveSafely` + symlink 再確認 + 256KB 上限。読み込む `.syncignore` 数は `LayeredSyncIgnore.maxFiles`(1000) で防御的に有界化（超過分は「除外しない＝同期する」安全側）。
+  - **キャッシュ戦略**（2026-06-25 確定「変更時フル再構築」→ #64・2026-07-21 で更新）: in-memory の dir→matcher 辞書がキャッシュ本体で、**評価のホットパス（scan/event/reconcile の 3 経路）は I/O ゼロ**（祖先 dir を辞書引きするだけ）。辞書の再構築は — **起動時・ローカル `.syncignore` 変更時はフルスキャンの走査副産物**（`singlePassScan` が走査中に組み上げ scan 完了時に publish・先行 discovery 走査なし＝ツリー走査 1 回）、ローカル変更時はさらに**変更された 1 枚のインプレース patch**（`patchIgnoreLayer`・走査ゼロ）を scan 前に同期適用、リモート由来は **pull が `.syncignore` を触ったときだけ** `reloadIgnoreMatcher()`（`performRemotePull` で「shard 変化 ∧ path が `.syncignore`」を過大近似検出・取りこぼし防止＝`loadLayeredIgnore` の discovery 走査はこの経路専用に残置）。**定常 pull / 通常ファイル編集ではツリーを再走査しない**。詳細は下記「フルスキャンの単一走査化」節。
+  - **走査の安全境界**: `loadLayeredIgnore` のツリー走査は symlink を絶対に追従せず（symlink item は `continue` のみ。deep enumeration は symlink へそもそも再帰しないため十分で、**symlink item での `skipDescendants()` は無関係な隣接ディレクトリを走査から脱落させるため呼ばない** — Issue #54・2026-07-05 修正）、機密網ディレクトリ（`HardcodedIgnoreRules`、`.tide`/`.aws` 等）は丸ごとスキップ（こちらは「現在 item がディレクトリ」の文脈での正しい `skipDescendants` 使用）、各 `.syncignore` は `PathValidator.resolveSafely` + symlink 再確認 + 256KB 上限。読み込む `.syncignore` 数は `LayeredSyncIgnore.maxFiles`(1000) で防御的に有界化（超過分は「除外しない＝同期する」安全側）。scan 側（`singlePassScan`・再帰下降）の同等の境界は下記「フルスキャンの単一走査化」節。
   - **Settings 表示**: `LayeredSyncIgnore.directoryGroups`（ディレクトリ深さ昇順）でディレクトリ単位にグルーピング表示。`activeIgnorePatterns` の型も `[LayeredSyncIgnore.DirectoryGroup]` へ変更。
   - **据え置き**: 親ディレクトリが除外された配下のファイルを `!` で再包含する gitignore 挙動は本対応でも厳密には再現しない（同一/別階層の否定は正しく動く）。
 - **既定テンプレートの自動生成**: `AppEnvironment.completeSetup` で、**ローカルに `.syncignore` が無く、かつリモートにマニフェスト（`getIndex()`）も無い「新規バケット」のときだけ** `SyncIgnoreMatcher.defaultTemplate`（`node_modules/` 等の再生成可能な開発ジャンク）を `<syncRoot>/.syncignore` に書き出す。**既存バケットに参加する場合は作らない**（他デバイスの `.syncignore` と競合してコンフリクトコピーが散らかるのを防ぐ）。`HardcodedIgnoreRules` とは別物（ユーザが編集・削除でき、`!` で上書きも可能）。`.git/` は復旧目的のためテンプレートに含めない＝同期対象のまま。
+
+### フルスキャンの単一走査化と `.syncignore` 層辞書の走査副産物化（[#64]・2026-07-21）
+
+起動時とローカル `.syncignore` 保存時に discovery 走査（`loadLayeredIgnore`）→ scan 走査（`performFullScan`）と
+**同じツリーを 2 回フル走査**していた問題（PR #39 レビュー指摘・docs/09）の解消。flat な `FileManager.enumerator`
+は子の列挙順が不定で「dir の `.syncignore` を配下ファイル評価より先に読む」を保証できない（鶏卵）ため、
+走査本体を**ディレクトリ再帰下降**へ書き換えた。
+
+- **走査本体 = `SyncEngine.singlePassScan(root:db:now:)`**（`Tide/Core/SyncEngine+FullScan.swift`・
+  `nonisolated static` + 依存注入＝直接駆動テスト可能。`performFullScan` は従来どおり
+  `Task.detached(.utility)` で包む薄い @MainActor 殻）。明示スタックの反復 DFS（深いツリーでコールスタックを
+  消費しない）で、各 dir **進入時にその dir の `.syncignore` を読んで層コンテキストへ加えてから**配下ファイルを
+  評価する（git モデル）。評価コンテキストは**祖先層のみ**の `LayeredSyncIgnore` を dir ごとに構築
+  （旧実装の「全 dir を毎回なめる評価」も解消）。per-file パイプライン（機密網 → `validateRelativePath` →
+  DB read → `shouldSkip`（未追跡のみ）→ foundPaths 簿記 → `classifyLocalChange` → 削除先行の 2 段 enqueue）は
+  旧 flat 実装と同一・順序も維持。
+- **走査副産物の publish**: 走査中に全 `.syncignore` の層辞書も組み上げ、scan 完了時に
+  `ignoreMatcher` / `activeIgnorePatterns`（Settings 表示）へ publish する。起動時・`.syncignore` 保存時の
+  先行 `reloadIgnoreMatcher()` は撤去（`start()` は `triggerFullScan()` 直行）＝**ツリー走査が 1 回**になる。
+- **世代ガード（`ignoreGeneration`）**: publish は「走査開始時点から matcher 世代が進んでいない」ときだけ行う
+  （`publishScanIgnoreMatcher`）。走査中にイベント patch / pull reload が挟まった場合、走査の副産物は stale と
+  して捨てる — patch 側は `triggerFullScan` を coalesce（`pendingFullScan`）しているので続く scan が新世代の
+  完全な辞書を publish し、pull reload は自身が完全な辞書を publish 済みなので損失は無い。
+- **event 経路 = 変更 1 枚のインプレース patch（`patchIgnoreLayer`）**: FSEvents は変更された `.syncignore` の
+  path を知っているので、その 1 枚だけを安全読込（`readSyncignoreLayer` = `resolveSafely` + symlink 再確認 +
+  256KB 上限・走査と共通実装）して `LayeredSyncIgnore.updatingLayer` で層差し替えし即 publish する
+  （**ツリー走査ゼロで「保存直後〜scan 完了までの後続イベントが旧 matcher で評価される窓」を閉じる**。
+  窓を許容すると、ビルド実行中に `build/` を `.syncignore` へ追記したケースで窓中の生成物イベントが upload →
+  追跡化され、除外が未追跡限定のため恒久同期化する事故があり得た）。消滅 / 読込不能 / 空パターンは層の除去。
+  機密網配下はゲートで no-op。新規層の追加が `maxFiles` を超える場合は patch を見送る（既存層の更新/除去は通す）。
+- **旧 flat 実装との意図的な挙動差**: ① 機密網 dir は subtree ごと**降りない**（旧実装は降りて per-file
+  フィルタ。`HardcodedIgnoreRules.shouldIgnore` はコンポーネント単位判定なので検出結果は同値・stat が減るだけ）。
+  ② dir の子列挙に失敗したら**スキャン全体を中断**（旧 enumerator は黙って skip ＝配下の追跡ファイルが
+  foundPaths から欠落し誤 delete に乗り得た。中断なら削除検出まで進まない fail-safe）。③ `.syncignore` が
+  `maxFiles` 超過でも**走査は最後まで続ける**（層の追加だけ打ち切り。旧 discovery は走査ごと break だったが、
+  scan は削除検出の正しさのため全域走査が必須）。
+- **symlink 非追従（C2 / Issue #54）**: 再帰下降では symlink（dir リンク含む）を**スタックへ push しない**＝
+  構造的に降りない。他の子の走査へ影響する API（`skipDescendants()`）自体を使わないため、Issue #54 型の
+  誤用は起こり得ない。終端不変条件（全ファイルが走査に載る・dir-symlink に降りない）は既存
+  `FullScanSymlinkTests` が引き続き固定（`loadLayeredIgnore` は enumerator 残置なので同スイートの
+  列挙順前提アサートもそちらで生きる）。
+- **テスト**: `FullScanSinglePassTests`（走査本体の直接駆動: 同一走査内の層適用・深い層の上書き・層辞書副産物・
+  機密網 subtree 非降下・maxFiles 打ち切り後の走査継続・列挙失敗の fail-safe）/ `SyncEngineIgnorePatchTests`
+  （patch の追加/更新/除去・symlink/機密網ゲート・世代ガード）/ `SyncIgnoreMatcherTests`（`updatingLayer`）。
 
 ### `xcodegen` / Xcode プロジェクト
 - **`Tide.xcodeproj/` は git 追跡対象**。`make generate` 後の差分も同じコミットに含めるのがルール。
@@ -315,6 +359,8 @@ FP ドメイン内のファイル編集（`modifyItem` の .contents）と削除
 - **残ギャップ（@MainActor 直接駆動面なし＝スコープ外）**: `.syncignore` reload/triggerFullScan ディスパッチ、
   event の `.deleted` / file-gone → `enqueueDelete`、scan の巨大クロージャ本体（走査）。単一走査リライト
   （`docs/09` ネスト `.syncignore` の「効率: ツリー二重走査」）の前提だった「先に scan 結合テスト」は本タスクで満たした。
+  → **走査本体は #64（2026-07-21）で `singlePassScan` として抽出・直接駆動テスト整備済み**（上記
+  「フルスキャンの単一走査化」節）。event ディスパッチ面は残存。
 
 ### バージョン単一化と診断エクスポート（2026-06-19・PR #24）
 

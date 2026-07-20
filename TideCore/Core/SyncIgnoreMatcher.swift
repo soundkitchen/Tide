@@ -360,6 +360,21 @@ public struct LayeredSyncIgnore: Sendable {
         evaluate(relativePath) == .ignored
     }
 
+    /// 指定ディレクトリの層だけを差し替えた新しい値を返す（`.syncignore` 保存イベントの
+    /// インプレース patch・#64）。`matcher == nil`（ファイル消滅/読込不能）と空パターンは層の除去。
+    /// FSEvents は変更された `.syncignore` の path を教えてくれるため、その 1 枚だけ読み直せば
+    /// ツリー走査なしで matcher を最新化できる（全体再構築はフルスキャンの走査副産物が担う）。
+    public func updatingLayer(directory: String, matcher: SyncIgnoreMatcher?) -> LayeredSyncIgnore {
+        var updated = matchers
+        updated[directory] = matcher
+        return LayeredSyncIgnore(matchers: updated)
+    }
+
+    /// 指定ディレクトリの層を保持しているか（インプレース patch の `maxFiles` 上限判定用）。
+    public func hasLayer(directory: String) -> Bool {
+        matchers[directory] != nil
+    }
+
     /// 祖先ディレクトリの `.syncignore` を浅い→深い順に合成した三状態の照合結果。
     public func evaluate(_ relativePath: String) -> SyncIgnoreMatcher.Verdict {
         guard !matchers.isEmpty else { return .unmatched }
