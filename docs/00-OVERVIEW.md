@@ -125,7 +125,11 @@ macOS のクリーンインストール後の復旧を主目的とした、Dropb
 - ✅ 並走 UI の本実装化（2026-07-12）: 設定画面の FP セクションを正式化（experimental/PoC 表記を
   除去し双方向同期の実態説明へ）・`FileProviderPoC` → `FileProviderController` リネーム・
   ドメイン identifier `"poc"` → `"main"`（bootstrap の自動作り直し移行付き）
-- ⏸ 以降: soak（#40）後の既定化判断
+- ✅ FP 一本化・切替前の前提整備（Track A・2026-07-21）: #69（採用未了ウィンドウの削除黙殺・PR #71）と
+  #67（pull 削除反映の空 dir 殻・PR #72）を修正、soak 負荷注入スクリプト（`tools/soak/churn.py`・PR #73）を整備
+- ⏸ 以降: **1 台加速 soak**（2 台 soak が当面不可のため #40 の代替ゲートとする・ユーザ確定 2026-07-18）→
+  **FP-only 稼働モード実装**（FSEvents コードは温存・モード可逆）→ 切替。
+  コード撤去（真の一本化）は FP-only 無事故実績 + 2 台 soak 後の将来段階。詳細は `docs/09` の #40 節・M5 節
 
 ## 技術スタック
 
