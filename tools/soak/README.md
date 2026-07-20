@@ -84,8 +84,13 @@ python3 tools/soak/churn.py --dry-run
   `.conflictThenDownload` を意図的に発火。台帳共有で一方が作ったファイルを他方が編集/削除する。
   `--no-cross-write` で無効化可）。
 - **操作ミックス**: create / edit（上書き・追記）/ delete（30% で即再作成 = 削除→復元の交錯）/
-  rename / dir 越し move / mkdir / **dir ごと move**（#67 実地回帰）/ read（FP 側 dataless の
-  materialize 誘発）。`--multipart-every N`（既定 200）で 20MB（16 MiB 閾値超）を投入。
+  rename / dir 越し move / mkdir / **dir ごと move**（#67 実地回帰）/ **dir ごと削除**
+  （FP 側は deleteItem(dir) 再帰 = `removeFileEntries` シャードバッチの soak カバレッジ・
+  台帳既知 dir かつ配下 10 件以下限定・mkdir による dirs 成長の抑えも兼ねる）/
+  read（FP 側 dataless の materialize 誘発）。`--multipart-every N`（既定 200）で
+  20MB（16 MiB 閾値超）を投入。
+- **台帳は `{相対パス: 概算サイズ}` の dict**（共有面はエイリアス共有 = **再代入禁止・
+  インプレース更新のみ**）。`--max-total-mb` は生存ファイルの合計から算出＝ delete で正しく減る。
 - **安全ガード**: 書込は専用サブツリー内限定（realpath 検証）・`--max-files`（500）・
   `--max-total-mb`（512）で有界・dotfile / `.syncignore` 名は生成しない・symlink 非生成非追従。
   competing 書込が作る競合コピーは台帳外（触らないが上限の概算外になる点は許容）。

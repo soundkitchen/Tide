@@ -52,8 +52,10 @@ OP_WEIGHTS = [
     ("rename", 10),
     ("move", 10),
     ("mkdir", 5),
-    ("dir_move", 5),   # #67 実地回帰（dir move = 全削除 + 全追加として伝播）
-    ("read", 5),       # FP 側のみ意味を持つ（app 側に当たったら create に読み替え）
+    ("dir_move", 5),    # #67 実地回帰（dir move = 全削除 + 全追加として伝播）
+    ("dir_delete", 3),  # dir ごと削除（FP 側は deleteItem 再帰 = removeFileEntries シャードバッチを
+                        # 踏む・PR #73 レビュー提案）。mkdir による dirs 無制限成長の抑えも兼ねる。
+    ("read", 5),        # FP 側のみ意味を持つ（app 側に当たったら create に読み替え）
 ]
 
 
@@ -84,9 +86,10 @@ class Side:
         self.root = root              # 同期ルート（syncRoot or FP レプリカ）
         self.subtree = subtree        # ルートからの相対サブツリー名
         self.base = os.path.join(root, subtree)
-        self.files = []               # 台帳: base からの相対パス（ファイル）
-        self.dirs = [""]              # 台帳: base からの相対パス（ディレクトリ。"" = base 直下）
-        self.live_bytes = 0
+        # 台帳。共有サブツリーは 2 サイドがエイリアス共有するため、**再代入禁止**
+        # （インプレース更新のみ = dict は del/update・list はスライス代入。PR #73 レビュー高 1）。
+        self.files = {}               # {base からの相対パス: 概算サイズ bytes}（PR #73 レビュー高 2 = dict 化）
+        self.dirs = [""]              # base からの相対パス（ディレクトリ。"" = base 直下）
 
     def validate(self):
         real_root = os.path.realpath(self.root)
@@ -135,14 +138,17 @@ class Churn:
         return sum(seen.values())
 
     def total_mb(self):
-        return sum(s.live_bytes for s in self.sides) / (1024 * 1024)
+        # 生存ファイルの概算サイズ合計（台帳 dict の値）から算出＝ delete で正しく減る
+        # （PR #73 レビュー高 2: 旧 live_bytes は単調増加で数時間後に create が恒久停止していた）。
+        seen = {id(s.files): sum(s.files.values()) for s in self.sides}
+        return sum(seen.values()) / (1024 * 1024)
 
     def prune_missing(self, side, rel):
         """ENOENT の台帳整理。専用サブツリー（app/fp）は外的消失 = 台帳から除去。
         共有サブツリーは「他サイドの書込がこの root へ未伝播」が主因なので**保持**して後で再試行する
         （除去すると伝播後のファイルが誰にも触られない残骸として無限に積み上がる）。"""
-        if side.label in ("app", "fp") and rel in side.files:
-            side.files.remove(rel)
+        if side.label in ("app", "fp"):
+            side.files.pop(rel, None)
 
     # ---- 個別操作（すべて base 配下の台帳パスのみを触る） ----
 
@@ -163,14 +169,13 @@ class Churn:
         os.makedirs(os.path.dirname(full), exist_ok=True)
         with open(full, "wb") as f:
             f.write(self.rng.randbytes(size))
-        side.files.append(rel)
-        side.live_bytes += size
+        side.files[rel] = size
         return {"op": "create", "path": rel, "bytes": size}
 
     def op_edit(self, side):
         if not side.files:
             return self.op_create(side)
-        rel = self.rng.choice(side.files)
+        rel = self.rng.choice(list(side.files))
         full = side.abs_file(rel)
         size = self.rng.randrange(1024, 128 * 1024)
         mode = self.rng.choice(["overwrite", "append"])
@@ -180,19 +185,22 @@ class Churn:
         except FileNotFoundError:
             self.prune_missing(side, rel)
             return {"op": "edit", "path": rel, "stale": True}
-        side.live_bytes += size  # 概算（overwrite の旧サイズ分は無視 = 安全側の過大見積り）
+        if mode == "overwrite":
+            side.files[rel] = size
+        else:
+            side.files[rel] = side.files.get(rel, 0) + size
         return {"op": "edit", "path": rel, "bytes": size, "mode": mode}
 
     def op_delete(self, side):
         if not side.files:
             return self.op_create(side)
-        rel = self.rng.choice(side.files)
+        rel = self.rng.choice(list(side.files))
         try:
             os.remove(side.abs_file(rel))
         except FileNotFoundError:
             self.prune_missing(side, rel)
-            return {"op": "delete", "path": rel, "stale": True}
-        side.files.remove(rel)
+            return {"op": "delete", "path": rel, "side": side.label, "stale": True}
+        del side.files[rel]
         # 「編集 → 削除 → 復元」の反復: 一定確率で同 path をすぐ再作成（削除伝播と作成の交錯）。
         recreated = False
         if self.rng.random() < 0.3:
@@ -200,28 +208,29 @@ class Churn:
             size = self.rng.randrange(1024, 64 * 1024)
             with open(side.abs_file(rel), "wb") as f:
                 f.write(self.rng.randbytes(size))
-            side.files.append(rel)
+            side.files[rel] = size
             recreated = True
-        return {"op": "delete", "path": rel, "recreated": recreated}
+        # record に side を含める: op_create の上限振り替え（victim = 別サイド）でも JSONL に
+        # **実行サイド**が記録されるように（log() は **record が後勝ち・PR #73 レビュー中 1）。
+        return {"op": "delete", "path": rel, "side": side.label, "recreated": recreated}
 
     def op_rename(self, side):
         if not side.files:
             return self.op_create(side)
-        rel = self.rng.choice(side.files)
+        rel = self.rng.choice(list(side.files))
         new_rel = os.path.join(os.path.dirname(rel), self.new_name())
         try:
             os.rename(side.abs_file(rel), side.abs_file(new_rel))
         except FileNotFoundError:
             self.prune_missing(side, rel)
             return {"op": "rename", "path": rel, "stale": True}
-        side.files.remove(rel)
-        side.files.append(new_rel)
+        side.files[new_rel] = side.files.pop(rel)
         return {"op": "rename", "path": rel, "dst": new_rel}
 
     def op_move(self, side):
         if not side.files or len(side.dirs) < 2:
             return self.op_mkdir(side)
-        rel = self.rng.choice(side.files)
+        rel = self.rng.choice(list(side.files))
         dst_dir = self.rng.choice([d for d in side.dirs if d != os.path.dirname(rel)] or side.dirs)
         new_rel = os.path.join(dst_dir, os.path.basename(rel))
         if new_rel == rel or new_rel in side.files:
@@ -231,8 +240,7 @@ class Churn:
         except FileNotFoundError:
             self.prune_missing(side, rel)
             return {"op": "move", "path": rel, "stale": True}
-        side.files.remove(rel)
-        side.files.append(new_rel)
+        side.files[new_rel] = side.files.pop(rel)
         return {"op": "move", "path": rel, "dst": new_rel}
 
     def op_mkdir(self, side):
@@ -252,19 +260,53 @@ class Churn:
             os.rename(side.abs_file(src), side.abs_file(dst))
         except FileNotFoundError:
             return {"op": "dir_move", "path": src, "stale": True}
-        # 台帳の付け替え（src 配下すべて）
-        side.dirs = [dst if d == src else
-                     (dst + d[len(src):] if d.startswith(src + os.sep) else d)
-                     for d in side.dirs]
-        side.files = [dst + f[len(src):] if f.startswith(src + os.sep) else f
-                      for f in side.files]
+        # 台帳の付け替え（src 配下すべて）。**インプレース更新のみ** — 再代入すると
+        # shared@app / shared@fp のエイリアスが切れて交錯書込が黙って死ぬ（PR #73 レビュー高 1）。
+        side.dirs[:] = [dst if d == src else
+                        (dst + d[len(src):] if d.startswith(src + os.sep) else d)
+                        for d in side.dirs]
+        moved = {(dst + f[len(src):] if f.startswith(src + os.sep) else f): sz
+                 for f, sz in side.files.items()}
+        side.files.clear()
+        side.files.update(moved)
         return {"op": "dir_move", "path": src, "dst": dst}
+
+    def op_dir_delete(self, side):
+        """dir ごと削除（PR #73 レビュー提案）: FP 側では deleteItem(dir) 再帰 =
+        `ManifestUpdater.removeFileEntries` のシャード単位バッチ RMW（Phase 5-3 で最も複雑な
+        書込経路）を soak の対象に含める。app 側は削除イベント群 + 他レプリカでの殻掃除（#67）の
+        実地回帰になる。対象は台帳既知 dir かつ配下の台帳ファイル 10 件以下（blast radius 抑制）。
+        mkdir による dirs 無制限成長の抑えも兼ねる。"""
+        candidates = []
+        for d in side.dirs:
+            if not d:
+                continue  # base 直下（""）自体は消さない
+            under = [f for f in side.files if f.startswith(d + os.sep)]
+            if len(under) <= 10:
+                candidates.append((d, under))
+        if not candidates:
+            return self.op_mkdir(side)
+        src, under = self.rng.choice(candidates)
+        try:
+            shutil.rmtree(side.abs_file(src))
+        except FileNotFoundError:
+            if side.label in ("app", "fp"):
+                self.drop_dir_from_ledger(side, src)
+            return {"op": "dir_delete", "path": src, "stale": True}
+        self.drop_dir_from_ledger(side, src)
+        return {"op": "dir_delete", "path": src, "files": len(under)}
+
+    def drop_dir_from_ledger(self, side, src):
+        """src とその配下すべてを台帳から除去（インプレース = エイリアス維持）。"""
+        for f in [f for f in side.files if f.startswith(src + os.sep)]:
+            del side.files[f]
+        side.dirs[:] = [d for d in side.dirs if d != src and not d.startswith(src + os.sep)]
 
     def op_read(self, side):
         """FP 側: dataless の可能性があるファイルを読んで materialize を誘発する。"""
         if side.label.endswith("app") or not side.files:
             return self.op_create(side)
-        rel = self.rng.choice(side.files)
+        rel = self.rng.choice(list(side.files))
         n = 0
         try:
             with open(side.abs_file(rel), "rb") as f:
@@ -283,7 +325,11 @@ class Churn:
             time.sleep(self.rng.uniform(2, 5))
             subprocess.run(["open", self.args.app_path], capture_output=True)
             return {"op": "kill_app", "path": self.args.app_path}
-        subprocess.run(["pkill", "-f", "TideFileProvider.appex"], capture_output=True)
+        # プロセスパス側でマッチさせる: 素の "TideFileProvider.appex" だと -f がコマンドライン全体
+        # マッチのため、併走中の `log stream --predicate '... TideFileProvider.appex ...'` や
+        # tail まで巻き込んで kill する（PR #73 レビュー低 2）。
+        subprocess.run(["pkill", "-f", r"TideFileProvider\.appex/Contents/MacOS"],
+                       capture_output=True)
         return {"op": "kill_ext", "path": "(fileproviderd がオンデマンド再起動)"}
 
     def inject_net_blip(self):
@@ -334,21 +380,23 @@ class Churn:
 
         side = self.rng.choice(self.sides)
 
-        # マルチパート閾値（16 MiB）超の大物を定期投入 → 直後スロットに kill を優先予約
+        # マルチパート閾値（16 MiB）超の大物を定期投入 → 直後スロットに kill を優先予約。
+        # kill 予約は実際に create できたときだけ（上限到達で delete へ振り替わった場合に予約すると
+        # 「転送中 kill」のはずが転送なしの kill になる・PR #73 レビュー低 1）。
         if self.args.multipart_every and self.op_index % self.args.multipart_every == 0:
             try:
                 rec = self.op_create(side, size=20 * 1024 * 1024)
-                if rec["op"] == "create":   # 上限到達で delete へ振り替わった場合は素の記録のまま
+                if rec["op"] == "create":
                     rec["multipart"] = True
                     self.counters["multipart"] = self.counters.get("multipart", 0) + 1
+                    if self.args.kill_app_every:
+                        self.pending_kills.append("app")
+                    elif self.args.kill_ext_every:
+                        self.pending_kills.append("ext")
                 self.log(side.label, rec, True)
             except OSError as e:
                 self.errors += 1
                 self.log(side.label, {"op": "create", "multipart": True}, False, e)
-            if self.args.kill_app_every:
-                self.pending_kills.append("app")
-            elif self.args.kill_ext_every:
-                self.pending_kills.append("ext")
             return
 
         name = self.rng.choices([n for n, _ in OP_WEIGHTS],
@@ -415,6 +463,8 @@ def main():
     if not m or int(m.group(1)) > int(m.group(2)):
         config_error(f"--interval-ms は 'MIN-MAX' 形式で指定してください: {args.interval_ms}")
     interval = (int(m.group(1)) / 1000, int(m.group(2)) / 1000)
+    if args.burst < 1:
+        config_error(f"--burst は 1 以上を指定してください: {args.burst}")
 
     sync_root = args.sync_root or defaults_read("tide.syncRootPath")
     if not sync_root:
