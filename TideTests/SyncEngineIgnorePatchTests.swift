@@ -4,7 +4,7 @@ import TideCore
 @testable import Tide
 
 /// Issue #64: `.syncignore` インプレース patch（`patchIgnoreLayer`）と scan 完了時 publish
-/// （`publishScanIgnoreMatcher` の世代ガード）のエンジン側配線テスト。
+/// （`publishRebuiltIgnoreMatcher` の世代ガード）のエンジン側配線テスト。
 ///
 /// patch は「保存直後〜scan 完了までの後続イベントが旧 matcher で評価される窓」を閉じる
 /// （例: ビルド中に `build/` を追記 → 窓中の生成物が upload され恒久追跡化する事故の防止）。

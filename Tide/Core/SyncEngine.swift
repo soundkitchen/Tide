@@ -403,7 +403,7 @@ final class SyncEngine {
     /// publish する。pull reload は自身が完全な辞書を publish 済み）。
     private var ignoreGeneration = 0
 
-    /// テスト用の現在世代の読み出し（`publishScanIgnoreMatcher` の世代ガード配線を直接駆動する）。
+    /// テスト用の現在世代の読み出し（`publishRebuiltIgnoreMatcher` の世代ガード配線を直接駆動する）。
     var currentIgnoreGeneration: Int { ignoreGeneration }
 
     /// 層状マッチャと Settings 表示用パターンを更新する唯一の書込点（世代も進める）。
