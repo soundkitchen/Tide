@@ -18,6 +18,12 @@ import TideCore
 /// あわせて「dir-symlink へ再帰しない」という load-bearing なプラットフォーム挙動も固定する
 /// （レビュー ③・これが崩れると C2 のサンドボックス回避が回帰する）。
 /// SyncEngine は実物を構築する（init は S3 へ出ない。スキャンも S3 非接触＝ダミー資格情報で安全）。
+///
+/// #64 補足: `performFullScan` は再帰下降（`singlePassScan`）へ書き換えられ enumerator /
+/// `skipDescendants()` を使わなくなったが、本スイートは「symlink が何本あっても全ファイルが
+/// 走査に載る・dir-symlink に降りない」という**終端不変条件**の回帰網としてそのまま維持する。
+/// `loadLayeredIgnore`（pull 用に残置）は引き続き enumerator ベース＝skipDescendants 規約と
+/// 列挙順の前提条件アサートがそちらで生きる。
 @MainActor
 final class FullScanSymlinkTests: XCTestCase {
 

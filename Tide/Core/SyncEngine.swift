@@ -171,7 +171,8 @@ final class SyncEngine {
         }
 
         Task { [weak self] in
-            await self?.reloadIgnoreMatcher()
+            // .syncignore の初期ロードはフルスキャンへ畳み込み済み（#64: 走査副産物として層辞書を
+            // 構築し scan 完了時に publish する。先行 discovery 走査＝ツリー二重走査はしない）。
             await self?.triggerFullScan()
             // 起動時 pull も他経路（poll/wake/network/手動）と同じ単一ゲートを通す
             // （triggerRemotePull 内の isRemotePulling で排他＝並行 DL を防止）。
@@ -396,12 +397,74 @@ final class SyncEngine {
 
     // MARK: - .syncignore
 
-    /// 同期ルート配下の全 `.syncignore`（ルート + ネスト）を読み直して層状マッチャと
-    /// Settings 表示用パターンを更新する。
-    func reloadIgnoreMatcher() async {
-        let matcher = await Self.loadLayeredIgnore(syncRoot: syncRoot)
+    /// matcher 世代カウンタ（#64）: scan 完了時 publish の stale ガード。走査中にイベント patch /
+    /// pull reload が matcher を進めていたら、走査開始時点の世代で作った副産物辞書は publish しない
+    /// （patch 側は triggerFullScan を coalesce しているので、続く scan が新世代の完全な辞書を
+    /// publish する。pull reload は自身が完全な辞書を publish 済み）。
+    private var ignoreGeneration = 0
+
+    /// テスト用の現在世代の読み出し（`publishRebuiltIgnoreMatcher` の世代ガード配線を直接駆動する）。
+    var currentIgnoreGeneration: Int { ignoreGeneration }
+
+    /// 層状マッチャと Settings 表示用パターンを更新する唯一の書込点（世代も進める）。
+    private func publishIgnoreMatcher(_ matcher: LayeredSyncIgnore) {
+        ignoreGeneration += 1
         ignoreMatcher = matcher
         activeIgnorePatterns = matcher.directoryGroups
+    }
+
+    /// 再構築済み層辞書の publish（世代ガード付き・#64）。走査 / リロード開始時点から世代が
+    /// 進んでいたら stale として捨て false を返す（scan 経路は patch 側が coalesce した次の scan が
+    /// 回収・pull reload 経路は呼び元がフルスキャンへフォールバックする。PR #74 レビュー低 4）。
+    @discardableResult
+    func publishRebuiltIgnoreMatcher(_ matcher: LayeredSyncIgnore, ifGenerationStillEquals generation: Int) -> Bool {
+        guard generation == ignoreGeneration else {
+            AppLogger.sync.info("Skipped stale ignore-matcher publish (concurrent .syncignore update)")
+            return false
+        }
+        publishIgnoreMatcher(matcher)
+        return true
+    }
+
+    /// FSEvents で届いた 1 枚の `.syncignore` 変更を、ツリー走査なしで層差し替えする（#64）。
+    /// 全体再構築は後続 `triggerFullScan` の走査副産物 publish が担い、ここは「保存直後〜scan 完了
+    /// までの後続イベントが旧 matcher で評価される窓」を閉じるためのインプレース patch
+    /// （例: ビルド実行中に `build/` を `.syncignore` へ追記 → 窓中の生成物イベントが upload され
+    /// 恒久追跡化する事故を防ぐ。除外は未追跡ファイル限定なので一度追跡されると外れない）。
+    func patchIgnoreLayer(forSyncignoreAt relativePath: String) async {
+        // 機密網配下の `.syncignore` は読まない（loadLayeredIgnore / 走査と同じゲート）。
+        guard !HardcodedIgnoreRules.shouldIgnore(relativePath: relativePath) else { return }
+        let root = syncRoot
+        let dir = (relativePath as NSString).deletingLastPathComponent
+        let layer = await Task.detached(priority: .utility) {
+            Self.readSyncignoreLayer(relativePath: relativePath, syncRoot: root)
+        }.value
+        // 新規層の追加が maxFiles を超えるなら見送る（防御的上限は走査側と共通。既存層の
+        // 更新 / 除去は常に通す）。
+        if layer != nil, !ignoreMatcher.hasLayer(directory: dir),
+           ignoreMatcher.fileCount >= LayeredSyncIgnore.maxFiles {
+            AppLogger.sync.error("Too many .syncignore files (>\(LayeredSyncIgnore.maxFiles)); patch skipped")
+            return
+        }
+        publishIgnoreMatcher(ignoreMatcher.updatingLayer(directory: dir, matcher: layer))
+        AppLogger.sync.info("Patched .syncignore layer: \(dir.isEmpty ? "(root)" : dir, privacy: .private)")
+    }
+
+    /// 同期ルート配下の全 `.syncignore`（ルート + ネスト）を読み直して層状マッチャと
+    /// Settings 表示用パターンを更新する。#64 以降、起動時とローカル `.syncignore` 変更時は
+    /// フルスキャンの走査副産物 + インプレース patch に畳まれたため、discovery 走査の呼び元は
+    /// pull 末尾（リモート由来 `.syncignore` 変化時）のみ。
+    func reloadIgnoreMatcher() async {
+        let generationAtStart = ignoreGeneration
+        let matcher = await Self.loadLayeredIgnore(syncRoot: syncRoot)
+        // 走査中にイベント patch が挟まっていたら（世代前進）、walk 開始前の内容を含む辞書で
+        // patch 済みの層を巻き戻さない。publish せずフルスキャンへフォールバックし、その走査
+        // フェーズの副産物が新世代の完全な辞書を publish して収束する（PR #74 レビュー低 4:
+        // 無条件 publish だと stale 層が残留し、世代ガードが訂正 scan の副産物まで捨てていた）。
+        guard publishRebuiltIgnoreMatcher(matcher, ifGenerationStillEquals: generationAtStart) else {
+            Task { [weak self] in await self?.triggerFullScan() }
+            return
+        }
         AppLogger.sync.info("Reloaded .syncignore: \(matcher.fileCount) file(s)")
     }
 
@@ -409,7 +472,8 @@ final class SyncEngine {
     /// 各ファイルは symlink 非追従 / `PathValidator` で root エスケープ拒否 / 256KB 上限。
     /// 機密網ディレクトリ（`.tide` / `.aws` 等）と symlink ディレクトリは丸ごとスキップ（配下を走査しない）。
     /// `.syncignore` 数は `LayeredSyncIgnore.maxFiles` で防御的に有界化する。
-    /// 「変更時フル再構築」戦略（`docs/08`）: 起動時と実際の `.syncignore` 変更時にのみ呼ぶ。
+    /// #64 以降の用途はリモート由来の変化検知（pull 末尾の `reloadIgnoreMatcher`）専用。
+    /// 起動時・ローカル変更時の再構築はフルスキャンの走査副産物（`singlePassScan`）が担う。
     private static func loadLayeredIgnore(syncRoot: URL) async -> LayeredSyncIgnore {
         await Task.detached(priority: .utility) { () -> LayeredSyncIgnore in
             let fm = FileManager.default
@@ -557,104 +621,42 @@ final class SyncEngine {
     private func performFullScan() async throws {
         let root = self.syncRoot
         let db = self.db
-        let matcher = self.ignoreMatcher
         let now = Date().timeIntervalSince1970
+        // #64 世代ガード: 走査中にイベント patch / pull reload が matcher を進めたら、この走査の
+        // 副産物辞書は publish しない（publishRebuiltIgnoreMatcher のコメント参照）。
+        let generationAtStart = ignoreGeneration
 
-        let result: (newEnqueued: Int, deletedEnqueued: Int, mtimesRepaired: Int) = try await Task.detached(priority: .utility) { () -> (Int, Int, Int) in
-            var foundPaths: Set<String> = []
-            // 走査中は upload 候補をバッファし、削除検出（enqueueScanDeletions）を先に enqueue して
-            // から一括投入する（PR #53 レビュー #6）: 走査中に逐次 enqueue すると、キューループが
-            // 並行稼働しているため「アプリ停止中に起きた file→dir 置換」を起動時スキャンが検出する
-            // ケースで子 upload が旧ファイルの delete より先に処理され、#52 型の両立状態を一時的に
-            // S3 へ押し出し得る。削除先行でも同一バッチ内の並列処理までは順序保証しない
-            // （残る伝播窓は pull 側の再 arm＝修正 C が受ける）。
-            var uploadCandidates: [String] = []
-            var deletedEnqueued = 0
-            var mtimesRepaired = 0
-
-            let fm = FileManager.default
-            // hidden files (e.g. .git) はデフォルトで含める。skipsHiddenFiles を指定しない。
-            let walker = fm.enumerator(
-                at: root,
-                includingPropertiesForKeys: [
-                    .isRegularFileKey, .isSymbolicLinkKey,
-                    .fileSizeKey, .contentModificationDateKey
-                ],
-                options: []
-            )
-
-            while let next = walker?.nextObject() as? URL {
-                let values = try next.resourceValues(forKeys: [
-                    .isRegularFileKey, .isSymbolicLinkKey,
-                    .fileSizeKey, .contentModificationDateKey
-                ])
-                // C2: シンボリックリンクは絶対に追従しない。deep enumeration は symlink
-                // （ディレクトリリンク含む）へそもそも再帰しないため continue だけで足りる。
-                // ここで skipDescendants() を呼んではならない（Issue #54）: 現在 item がファイル
-                // （symlink）のとき呼ぶと**無関係な隣接ディレクトリ**への再帰がスキップされ、
-                // 実在する追跡ファイルが foundPaths から欠落 → 削除検出に乗って S3 へ誤 delete
-                // される（同期ルート直下の symlink 1 本で実機発現・M1 からの潜在バグ）。
-                if values.isSymbolicLink == true {
-                    continue
-                }
-                guard values.isRegularFile == true else { continue }
-
-                let relative = Self.relativePath(of: next, root: root)
-                // ハードコード除外は DB を読む前に弾く（大きな除外ツリーでの無駄な DB 読みを避ける）
-                if HardcodedIgnoreRules.shouldIgnore(relativePath: relative) { continue }
-                // C1: 念のため相対パスを検証（root エスケープを防ぐ）
-                do {
-                    try PathValidator.validateRelativePath(relative)
-                } catch {
-                    continue
-                }
-
-                let size = Int64(values.fileSize ?? 0)
-                let mtime = values.contentModificationDate?.timeIntervalSince1970 ?? 0
-
-                let existing = try await db.pool.read { db in
-                    try FileRecord.fetchOne(db, key: relative)
-                }
-
-                // .syncignore のユーザパターン除外（既存追跡は触らない＝新規のみスキップ）。
-                // スキップしたファイルは foundPaths に入れない（未追跡なので削除検出にも乗らない）。
-                let tracked = (existing?.lastSyncedAt != nil)
-                if IgnoreDecision.shouldSkip(relativePath: relative, isAlreadyTracked: tracked, matcher: matcher) {
-                    continue
-                }
-
-                foundPaths.insert(relative)
-
-                // 変更判定（preDecision → verifyHash → postHash → mtime CAS）は classifyLocalChange に集約。
-                // scan / event 両経路が同一ロジックを共有し、判定 → 実 I/O の配線を結合テストで固定する（#30 / D1）。
-                switch try await Self.classifyLocalChange(
-                    existing: existing, fileURL: next, size: size, mtime: mtime,
-                    relativePath: relative, db: db
-                ) {
-                case .skip, .mtimeCASNoop:
-                    break
-                case .mtimeRepaired:
-                    // カウントは実際に修復した行のみ（ログ "repaired N mtimes" は自己修復の観測点なので
-                    // CAS no-op を数えない。PR #12 レビュー Low-1）。
-                    mtimesRepaired += 1
-                case .enqueue:
-                    uploadCandidates.append(relative)
-                }
-            }
-
-            // DB にあって実体走査で見つからなかった path を delete キューへ（集合差分 → enqueue の配線）。
-            // upload より先に enqueue する（レビュー #6・上記コメント参照）。
-            deletedEnqueued = try await Self.enqueueScanDeletions(db: db, foundPaths: foundPaths, now: now)
-
-            // scan は onConflict: .ignore（リトライ中の attempts を巻き戻さない）。
-            for relative in uploadCandidates {
-                try await Self.enqueueUpload(db: db, path: relative, now: now, onConflict: .ignore)
-            }
-
-            return (uploadCandidates.count, deletedEnqueued, mtimesRepaired)
+        // 走査本体は SyncEngine+FullScan.swift（#64: 再帰下降で `.syncignore` 層辞書も同時構築＝
+        // 起動時 / `.syncignore` 変更時の discovery 走査を畳み込み、ツリー走査を 1 回にする）。
+        // フェーズ 1: FS 走査のみ（stat + 層辞書 + 対象収集・DB 非接触）。
+        let walk = try await Task.detached(priority: .utility) {
+            try Self.walkSyncTree(root: root)
         }.value
 
-        AppLogger.sync.info("Full scan: enqueued \(result.newEnqueued) uploads, \(result.deletedEnqueued) deletes, repaired \(result.mtimesRepaired) mtimes")
+        // 層辞書は分類フェーズ（per-file DB read / 変更時 hash を含む＝大きなツリーでは分オーダー）を
+        // 待たずに publish する。起動時の先行 reloadIgnoreMatcher() 撤去で「matcher 空のまま event が
+        // 評価される窓」が scan 完了時間まで拡大するのを、旧 discovery 走査相当へ戻す（レビュー中 3）。
+        publishRebuiltIgnoreMatcher(walk.ignoreMatcher, ifGenerationStillEquals: generationAtStart)
+
+        // 列挙不能 dir を skip した走査は可視化する（削除検出は分類フェーズが抑止・レビュー高 2）。
+        if walk.scanIncomplete {
+            await recordIssue(
+                SyncIssue(
+                    id: UUID(), date: Date(), path: walk.unreadableDirs.first,
+                    category: .localIO,
+                    rawDetail: "Scan skipped unreadable directories: \(walk.unreadableDirs.joined(separator: ", ")). "
+                        + "Deletion detection is suppressed until all directories are readable."
+                ),
+                logAs: "Scan skipped unreadable directories"
+            )
+        }
+
+        // フェーズ 2: 分類 + enqueue（削除 → upload）。
+        let result = try await Task.detached(priority: .utility) {
+            try await Self.classifyAndEnqueue(walk: walk, db: db, now: now)
+        }.value
+
+        AppLogger.sync.info("Full scan: enqueued \(result.newEnqueued) uploads, \(result.deletedEnqueued) deletes, repaired \(result.mtimesRepaired) mtimes (\(result.ignoreMatcher.fileCount) .syncignore layer(s))")
         await refreshQueueDepth()
     }
 
@@ -1066,10 +1068,11 @@ final class SyncEngine {
         let path = event.relativePath
         let now = Date().timeIntervalSince1970
 
-        // .syncignore（ルート/ネスト）の変更/削除はルールを再読込し、フルスキャンで全体を再評価する。
+        // .syncignore（ルート/ネスト）の変更/削除は、変更された 1 枚だけをインプレース patch して
+        // （ツリー走査なし・#64）、フルスキャンで全体を再評価 + 層辞書を再構築する。
         // .syncignore 自身は同期対象（Q2）なので、この後の通常処理（アップロード/削除）も継続する。
         if IgnoreDecision.isSyncignoreFile(path) {
-            await reloadIgnoreMatcher()
+            await patchIgnoreLayer(forSyncignoreAt: path)
             Task { [weak self] in await self?.triggerFullScan() }
         }
 

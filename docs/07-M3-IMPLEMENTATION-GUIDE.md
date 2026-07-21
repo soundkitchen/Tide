@@ -100,6 +100,8 @@ M1 で導入した「100 MB を超えたら `sync_log` にエラーを残して�
 - `SyncEngine`: `ignoreMatcher` を保持。`reloadIgnoreMatcher()` で `<syncRoot>/.syncignore` を安全に読込
   （symlink 追従しない / `PathValidator.resolveSafely`）。`start()` / リモート pull 末尾 / `.syncignore` 変更検知で再読込。
   統合点は `performFullScan` / `processEventToQueue` / `reconcileRemoteEntry` の 3 経路。
+  **（#64・2026-07-21 更新: `reloadIgnoreMatcher()` の呼び元はリモート pull 末尾のみに縮小。起動時・ローカル
+  変更時はフルスキャンの走査副産物 + 変更 1 枚のインプレース patch へ移行 — `docs/08`「フルスキャンの単一走査化」節）**
 - `.syncignore` 変更は FSEvents で拾い、再読込 + フルスキャン再評価。`.syncignore` 自身もアップロード（同期）。
 - `SettingsWindow`: 現行 `.syncignore` パターンを閲覧表示（編集は将来）。
 - 既定テンプレート: `SyncIgnoreMatcher.defaultTemplate`（`node_modules/` 等）を **新規バケットのセットアップ時のみ** `AppEnvironment.completeSetup` で `<syncRoot>/.syncignore` に自動生成。既存バケット参加時は競合回避のため作らない。`.git/` は含めない（同期対象のまま）。
@@ -108,7 +110,7 @@ M1 で導入した「100 MB を超えたら `sync_log` にエラーを残して�
 ### ネスト `.syncignore`（[#27] / C1・✅ 2026-06-25 追加）
 - **ディレクトリごとの `.syncignore`（git 風の階層的オーバーライド）に対応**。同期ルート配下の全 `.syncignore` を収集し、対象パスの祖先ディレクトリの `.syncignore` を**浅い→深い順**に合成して判定する（深い層が浅い層を上書き＝単一ファイル内の last-match-wins を階層へ拡張。マッチ無しの層は上位層の判定を維持）。各層には「その層のディレクトリからの相対パス」を渡すので、パターンはそのディレクトリにアンカーされる（先頭 `/` も当該ディレクトリ基準）。
 - 実装: `SyncIgnoreMatcher.evaluate` を三状態（`unmatched`/`ignored`/`included`）化し、新 `LayeredSyncIgnore`（`[dir 相対パス: SyncIgnoreMatcher]` を束ねる `Sendable` 値型・`SyncIgnoreMatcher.swift` 内）が層合成を担う。`IgnoreDecision.shouldSkip` は `LayeredSyncIgnore` を受け取る。自己保護はネスト `.syncignore`（末尾 `/.syncignore`）へ拡張（共有判定 `IgnoreDecision.isSyncignoreFile`）。
-- **キャッシュ戦略 = 変更時フル再構築**: in-memory の dir→matcher 辞書がキャッシュ本体で**評価ホットパスは I/O ゼロ**（祖先 dir を辞書引きするだけ）。辞書の再構築（`SyncEngine.loadLayeredIgnore` のツリー走査）は起動時と実際の `.syncignore` 変更時のみ — ローカルは FSEvents（`isSyncignoreFile`）、リモートは pull が `.syncignore` を触ったときだけ（過大近似で取りこぼし防止）。定常 pull / 通常ファイル編集ではツリーを再走査しない。走査は symlink 非追従・機密網ディレクトリ丸ごとスキップ・`LayeredSyncIgnore.maxFiles`(1000) で有界。
+- **キャッシュ戦略 = 変更時フル再構築**: in-memory の dir→matcher 辞書がキャッシュ本体で**評価ホットパスは I/O ゼロ**（祖先 dir を辞書引きするだけ）。辞書の再構築（`SyncEngine.loadLayeredIgnore` のツリー走査）は起動時と実際の `.syncignore` 変更時のみ — ローカルは FSEvents（`isSyncignoreFile`）、リモートは pull が `.syncignore` を触ったときだけ（過大近似で取りこぼし防止）。定常 pull / 通常ファイル編集ではツリーを再走査しない。走査は symlink 非追従・機密網ディレクトリ丸ごとスキップ・`LayeredSyncIgnore.maxFiles`(1000) で有界。**（#64・2026-07-21 更新: 起動時・ローカル変更時の再構築はフルスキャンの走査副産物（単一走査）+ 変更 1 枚のインプレース patch へ移行。`loadLayeredIgnore` は pull 末尾専用に残置 — `docs/08`「フルスキャンの単一走査化」節）**
 - Settings はディレクトリ単位にグルーピング表示（`LayeredSyncIgnore.directoryGroups`）。
 - テスト: `SyncIgnoreMatcherTests`（三状態 + ネスト/オーバーライド/否定再包含/相対アンカー/グループ並び）/ `IgnoreDecisionTests`（ネスト自己保護・機密網優先・深い層再包含）。
 
