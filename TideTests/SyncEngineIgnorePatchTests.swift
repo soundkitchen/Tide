@@ -59,9 +59,9 @@ final class SyncEngineIgnorePatchTests: XCTestCase {
         XCTAssertEqual(engine.activeIgnorePatterns.map(\.directory), ["d"])
     }
 
-    /// patch の安全ゲート: symlink の `.syncignore` は読まない（層に載らない・既存層は除去）。
-    /// 機密網配下の `.syncignore` も読まない（ゲートで no-op）。
-    func testPatchIgnoreLayerRejectsSymlinkAndSecretNet() async throws {
+    /// patch の安全ゲート: symlink / FIFO（非 regular file・PR #74 レビュー高 1）の `.syncignore` は
+    /// open 前に拒否する（層に載らない・既存層は除去）。機密網配下も読まない（ゲートで no-op）。
+    func testPatchIgnoreLayerRejectsSymlinkFifoAndSecretNet() async throws {
         let env = try makeTideTestEnv(prefix: "tide-64-patchgate")
         let engine = try makeEngine(root: env.root, db: env.db)
 
@@ -74,22 +74,32 @@ final class SyncEngineIgnorePatchTests: XCTestCase {
         await engine.patchIgnoreLayer(forSyncignoreAt: ".syncignore")
         XCTAssertTrue(engine.activeIgnorePatterns.isEmpty, "symlink の .syncignore が読まれた")
 
+        // FIFO: open すると書き手待ちで永久ブロックするため、regular file 確認で読む前に拒否する
+        //（回帰時はこのテストがハングして検出される）。
+        try FileManager.default.removeItem(at: env.root.appendingPathComponent(".syncignore"))
+        guard mkfifo(env.root.appendingPathComponent(".syncignore").path, 0o644) == 0 else {
+            return XCTFail("mkfifo failed: errno=\(errno)")
+        }
+        await engine.patchIgnoreLayer(forSyncignoreAt: ".syncignore")
+        XCTAssertTrue(engine.activeIgnorePatterns.isEmpty, "FIFO の .syncignore が読まれた")
+
         // 機密網配下: ゲートで no-op（層に載らない）。
         try writeFile(env.root, ".aws/.syncignore", Data("secret-pat\n".utf8))
         await engine.patchIgnoreLayer(forSyncignoreAt: ".aws/.syncignore")
         XCTAssertTrue(engine.activeIgnorePatterns.isEmpty, "機密網配下の .syncignore が読まれた")
     }
 
-    /// scan 完了時 publish の世代ガード: 走査開始時点から世代が進んでいたら（＝走査中に patch /
-    /// reload が挟まったら）走査副産物は stale として捨て、matcher を巻き戻さない。
-    func testScanPublishSkippedWhenGenerationAdvanced() async throws {
+    /// 再構築 publish の世代ガード: 走査 / リロード開始時点から世代が進んでいたら（＝その間に
+    /// patch が挟まったら）再構築辞書は stale として捨て（返値 false）、matcher を巻き戻さない。
+    /// pull reload 経路はこの false を受けてフルスキャンへフォールバックする（PR #74 レビュー低 4）。
+    func testRebuiltPublishSkippedWhenGenerationAdvanced() async throws {
         let env = try makeTideTestEnv(prefix: "tide-64-generation")
         let engine = try makeEngine(root: env.root, db: env.db)
-        let scanProduct = LayeredSyncIgnore(matchers: ["": SyncIgnoreMatcher.parse("*.from-scan")])
+        let rebuilt = LayeredSyncIgnore(matchers: ["": SyncIgnoreMatcher.parse("*.from-scan")])
 
         // 世代が進んでいなければ publish される（正常系）。
         let g0 = engine.currentIgnoreGeneration
-        engine.publishScanIgnoreMatcher(scanProduct, ifGenerationStillEquals: g0)
+        XCTAssertTrue(engine.publishRebuiltIgnoreMatcher(rebuilt, ifGenerationStillEquals: g0))
         XCTAssertEqual(engine.activeIgnorePatterns.first?.patterns, ["*.from-scan"])
 
         // 「走査中」に patch が挟まったら（世代が進んだら）、その走査の副産物は捨てられる。
@@ -97,14 +107,14 @@ final class SyncEngineIgnorePatchTests: XCTestCase {
         try writeFile(env.root, ".syncignore", Data("*.from-patch\n".utf8))
         await engine.patchIgnoreLayer(forSyncignoreAt: ".syncignore")
         XCTAssertEqual(engine.activeIgnorePatterns.first?.patterns, ["*.from-patch"])
-        engine.publishScanIgnoreMatcher(scanProduct, ifGenerationStillEquals: g1)
+        XCTAssertFalse(engine.publishRebuiltIgnoreMatcher(rebuilt, ifGenerationStillEquals: g1))
         XCTAssertEqual(
             engine.activeIgnorePatterns.first?.patterns, ["*.from-patch"],
-            "stale な走査副産物が patch 済み matcher を巻き戻した"
+            "stale な再構築辞書が patch 済み matcher を巻き戻した"
         )
 
         // 現在世代を渡せば publish される（後続 scan の再構築に相当）。
-        engine.publishScanIgnoreMatcher(scanProduct, ifGenerationStillEquals: engine.currentIgnoreGeneration)
+        XCTAssertTrue(engine.publishRebuiltIgnoreMatcher(rebuilt, ifGenerationStillEquals: engine.currentIgnoreGeneration))
         XCTAssertEqual(engine.activeIgnorePatterns.first?.patterns, ["*.from-scan"])
     }
 }

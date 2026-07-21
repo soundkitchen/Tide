@@ -413,14 +413,17 @@ final class SyncEngine {
         activeIgnorePatterns = matcher.directoryGroups
     }
 
-    /// scan 完了時の走査副産物 publish（世代ガード付き・#64）。走査開始時点から世代が進んで
-    /// いたら stale として捨てる（新しい層はイベント patch / pull reload / 後続 scan が持っている）。
-    func publishScanIgnoreMatcher(_ matcher: LayeredSyncIgnore, ifGenerationStillEquals generation: Int) {
+    /// 再構築済み層辞書の publish（世代ガード付き・#64）。走査 / リロード開始時点から世代が
+    /// 進んでいたら stale として捨て false を返す（scan 経路は patch 側が coalesce した次の scan が
+    /// 回収・pull reload 経路は呼び元がフルスキャンへフォールバックする。PR #74 レビュー低 4）。
+    @discardableResult
+    func publishRebuiltIgnoreMatcher(_ matcher: LayeredSyncIgnore, ifGenerationStillEquals generation: Int) -> Bool {
         guard generation == ignoreGeneration else {
-            AppLogger.sync.info("Skipped stale scan ignore-matcher publish (concurrent .syncignore update)")
-            return
+            AppLogger.sync.info("Skipped stale ignore-matcher publish (concurrent .syncignore update)")
+            return false
         }
         publishIgnoreMatcher(matcher)
+        return true
     }
 
     /// FSEvents で届いた 1 枚の `.syncignore` 変更を、ツリー走査なしで層差し替えする（#64）。
@@ -452,8 +455,16 @@ final class SyncEngine {
     /// フルスキャンの走査副産物 + インプレース patch に畳まれたため、discovery 走査の呼び元は
     /// pull 末尾（リモート由来 `.syncignore` 変化時）のみ。
     func reloadIgnoreMatcher() async {
+        let generationAtStart = ignoreGeneration
         let matcher = await Self.loadLayeredIgnore(syncRoot: syncRoot)
-        publishIgnoreMatcher(matcher)
+        // 走査中にイベント patch が挟まっていたら（世代前進）、walk 開始前の内容を含む辞書で
+        // patch 済みの層を巻き戻さない。publish せずフルスキャンへフォールバックし、その走査
+        // フェーズの副産物が新世代の完全な辞書を publish して収束する（PR #74 レビュー低 4:
+        // 無条件 publish だと stale 層が残留し、世代ガードが訂正 scan の副産物まで捨てていた）。
+        guard publishRebuiltIgnoreMatcher(matcher, ifGenerationStillEquals: generationAtStart) else {
+            Task { [weak self] in await self?.triggerFullScan() }
+            return
+        }
         AppLogger.sync.info("Reloaded .syncignore: \(matcher.fileCount) file(s)")
     }
 
@@ -612,16 +623,39 @@ final class SyncEngine {
         let db = self.db
         let now = Date().timeIntervalSince1970
         // #64 世代ガード: 走査中にイベント patch / pull reload が matcher を進めたら、この走査の
-        // 副産物辞書は publish しない（publishScanIgnoreMatcher のコメント参照）。
+        // 副産物辞書は publish しない（publishRebuiltIgnoreMatcher のコメント参照）。
         let generationAtStart = ignoreGeneration
 
-        // 走査本体は SyncEngine+FullScan.swift の singlePassScan（#64: 再帰下降で `.syncignore` 層辞書も
-        // 同時構築＝起動時 / `.syncignore` 変更時の discovery 走査を畳み込み、ツリー走査を 1 回にする）。
-        let result = try await Task.detached(priority: .utility) {
-            try await Self.singlePassScan(root: root, db: db, now: now)
+        // 走査本体は SyncEngine+FullScan.swift（#64: 再帰下降で `.syncignore` 層辞書も同時構築＝
+        // 起動時 / `.syncignore` 変更時の discovery 走査を畳み込み、ツリー走査を 1 回にする）。
+        // フェーズ 1: FS 走査のみ（stat + 層辞書 + 対象収集・DB 非接触）。
+        let walk = try await Task.detached(priority: .utility) {
+            try Self.walkSyncTree(root: root)
         }.value
 
-        publishScanIgnoreMatcher(result.ignoreMatcher, ifGenerationStillEquals: generationAtStart)
+        // 層辞書は分類フェーズ（per-file DB read / 変更時 hash を含む＝大きなツリーでは分オーダー）を
+        // 待たずに publish する。起動時の先行 reloadIgnoreMatcher() 撤去で「matcher 空のまま event が
+        // 評価される窓」が scan 完了時間まで拡大するのを、旧 discovery 走査相当へ戻す（レビュー中 3）。
+        publishRebuiltIgnoreMatcher(walk.ignoreMatcher, ifGenerationStillEquals: generationAtStart)
+
+        // 列挙不能 dir を skip した走査は可視化する（削除検出は分類フェーズが抑止・レビュー高 2）。
+        if walk.scanIncomplete {
+            await recordIssue(
+                SyncIssue(
+                    id: UUID(), date: Date(), path: walk.unreadableDirs.first,
+                    category: .localIO,
+                    rawDetail: "Scan skipped unreadable directories: \(walk.unreadableDirs.joined(separator: ", ")). "
+                        + "Deletion detection is suppressed until all directories are readable."
+                ),
+                logAs: "Scan skipped unreadable directories"
+            )
+        }
+
+        // フェーズ 2: 分類 + enqueue（削除 → upload）。
+        let result = try await Task.detached(priority: .utility) {
+            try await Self.classifyAndEnqueue(walk: walk, db: db, now: now)
+        }.value
+
         AppLogger.sync.info("Full scan: enqueued \(result.newEnqueued) uploads, \(result.deletedEnqueued) deletes, repaired \(result.mtimesRepaired) mtimes (\(result.ignoreMatcher.fileCount) .syncignore layer(s))")
         await refreshQueueDepth()
     }
