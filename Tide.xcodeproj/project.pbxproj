@@ -89,6 +89,7 @@
 		828EBD9EFC5BF9E0DB2276DC /* TransferStateStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B1FCEBC900F68780C8C5561 /* TransferStateStoreTests.swift */; };
 		83C13DF97081A32AB79B39AB /* TideTmpDirectory.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D36284B0C5C600CD58102B9 /* TideTmpDirectory.swift */; };
 		8459D413B21B7A2F84C679E0 /* ChangeDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7041FFAA1F9DFD04F9230C4 /* ChangeDetector.swift */; };
+		85384F630F73249C7784D230 /* RemoteChangeSignalerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1EAA82C4F3043D27BBEC2F61 /* RemoteChangeSignalerTests.swift */; };
 		865CD91F057ABA7320778FCF /* SyncIgnoreMatcherTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E0C66E505C9788FC626A5F38 /* SyncIgnoreMatcherTests.swift */; };
 		876DE341084A9646C3DE440E /* PartPlan.swift in Sources */ = {isa = PBXBuildFile; fileRef = 247AD143645CCEE156530544 /* PartPlan.swift */; };
 		8A2492FBD381EC905AC4AC87 /* MenuBarContent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 026AC3AAA816DBF9DF595080 /* MenuBarContent.swift */; };
@@ -132,6 +133,7 @@
 		BF61474E3646636658F001DE /* ManifestSharding.swift in Sources */ = {isa = PBXBuildFile; fileRef = 768FFB4507784287C979E47D /* ManifestSharding.swift */; };
 		C2472472D07094FEC97C9177 /* ManifestIgnoreCacheTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 531D2ECE72EDCA95F598AAE6 /* ManifestIgnoreCacheTests.swift */; };
 		C5031FFC043FF9929A518931 /* NoFollowFileReaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00F21E2E210A7F9BC778BC5D /* NoFollowFileReaderTests.swift */; };
+		C7048AD5EBDE2C3ECAA31A20 /* RemoteChangeSignaler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1CD4D6AEC058769C22EA5E74 /* RemoteChangeSignaler.swift */; };
 		C7A40BA450419C132982B828 /* FileProviderController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D267182BF4D5A067BA32C6D /* FileProviderController.swift */; };
 		C89C4AA65987A0D84B009C08 /* AboutWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 304004BC24DB5BEA9B3BE68F /* AboutWindow.swift */; };
 		C9D776D5C99A6EB00C498CCD /* MaterializedBadge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1E107EBBD4359FF734A4E032 /* MaterializedBadge.swift */; };
@@ -260,10 +262,12 @@
 		1A9CB8EA6B406E2E0BB8E34C /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
 		1AFDD6DC6B26F6450EF4A09D /* ManifestGenerationLogTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManifestGenerationLogTests.swift; sourceTree = "<group>"; };
 		1BD4B605839107E1638A0D11 /* HardcodedIgnoreRulesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HardcodedIgnoreRulesTests.swift; sourceTree = "<group>"; };
+		1CD4D6AEC058769C22EA5E74 /* RemoteChangeSignaler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteChangeSignaler.swift; sourceTree = "<group>"; };
 		1D326FF459D50EF387EBD5E8 /* ThreeWayMergeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreeWayMergeTests.swift; sourceTree = "<group>"; };
 		1D6159D935D2BCDF5F10B9BA /* SettingsTransfer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsTransfer.swift; sourceTree = "<group>"; };
 		1DB7CAFD9534FF6A0268F3A1 /* TideFileProvider.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = TideFileProvider.entitlements; sourceTree = "<group>"; };
 		1E107EBBD4359FF734A4E032 /* MaterializedBadge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MaterializedBadge.swift; sourceTree = "<group>"; };
+		1EAA82C4F3043D27BBEC2F61 /* RemoteChangeSignalerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteChangeSignalerTests.swift; sourceTree = "<group>"; };
 		20F5F66DB9903E0F42061DAA /* StabilityCheckTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StabilityCheckTests.swift; sourceTree = "<group>"; };
 		218BF6C59F9429D95309C74F /* ObjectVersionHistoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ObjectVersionHistoryTests.swift; sourceTree = "<group>"; };
 		247AD143645CCEE156530544 /* PartPlan.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PartPlan.swift; sourceTree = "<group>"; };
@@ -549,6 +553,7 @@
 				07469A1E1298444CBCE94849 /* PersistedPathSetTests.swift */,
 				55A63530A904BB8A91710C73 /* RateLimiterTests.swift */,
 				6BC290FF01368C3B9C4056E2 /* ReconcileWiringTests.swift */,
+				1EAA82C4F3043D27BBEC2F61 /* RemoteChangeSignalerTests.swift */,
 				B0D68AB09D02E462ACB191F1 /* RemoteDeletionTests.swift */,
 				9FD545711AF3F55FD805DD20 /* RemoteOpGateTests.swift */,
 				99DE7A484340CA1A25A27706 /* RestoreServiceTests.swift */,
@@ -614,6 +619,7 @@
 				5D267182BF4D5A067BA32C6D /* FileProviderController.swift */,
 				DDB67AE63D5670BED8543EBA /* FileWatcher.swift */,
 				0D95DADDA96CB84EE0944646 /* NotificationPolicy.swift */,
+				1CD4D6AEC058769C22EA5E74 /* RemoteChangeSignaler.swift */,
 				4B51C567451A4C1C023697EF /* RemoteOpGate.swift */,
 				1D6159D935D2BCDF5F10B9BA /* SettingsTransfer.swift */,
 				075300181A2D09025E384D3B /* SyncEngine.swift */,
@@ -877,6 +883,7 @@
 				930A359FB106EB7AF0FDF9D9 /* MenuBarPresentation.swift in Sources */,
 				274736C1DFBC4F29E2A8D2D7 /* NotificationManager.swift in Sources */,
 				0100C52E0E62D194F27F30CD /* NotificationPolicy.swift in Sources */,
+				C7048AD5EBDE2C3ECAA31A20 /* RemoteChangeSignaler.swift in Sources */,
 				2F7BD8C37D51AF732E20C74A /* RemoteOpGate.swift in Sources */,
 				A19456E45B5E3A10A3233CE2 /* SettingsTransfer.swift in Sources */,
 				34C9CD59AD38354487CAE58D /* SettingsWindow.swift in Sources */,
@@ -1006,6 +1013,7 @@
 				692F349F7821D46EF4E6ECE1 /* PersistedPathSetTests.swift in Sources */,
 				54582D1A90D493B8A49F7392 /* RateLimiterTests.swift in Sources */,
 				2A7293E041FA3050D24D52C9 /* ReconcileWiringTests.swift in Sources */,
+				85384F630F73249C7784D230 /* RemoteChangeSignalerTests.swift in Sources */,
 				621CB09BF0E22C06E10EE7ED /* RemoteDeletionTests.swift in Sources */,
 				9779D5E5CF6A521C2FB6B58C /* RemoteOpGateTests.swift in Sources */,
 				FD35F8C47AB1658EC0890532 /* RestoreServiceTests.swift in Sources */,

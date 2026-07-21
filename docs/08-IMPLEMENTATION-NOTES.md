@@ -133,6 +133,52 @@ FP ドメイン内のファイル編集（`modifyItem` の .contents）と削除
 - **既知の注意**: ① metadataVersion 形式 + Decorations 追加のため**既存レプリカはドメイン作り直し必須**（capabilities と同じ）。② **個々のファイルの materialize/evict とも OS の実体化セットに現れることを実機確認済み（2026-07-15 受け入れ）** — 設計前提成立（観測数の notice ログで判定）。③ バッジの Label（hover/VoiceOver）は Info.plist 値のため未ローカライズ = en「Downloaded」固定。
 - **実機受け入れ（2026-07-15・全項目パス）で確定した挙動**: dir move は配下の実体化が失われる（dataless 化 = Phase 5-4 パスベース id の帰結）ためバッジも消灯する — 実状態の正しい反映で誤点灯・チャーンなし（単一ファイル rename は id rebind で実体化ごと維持 = バッジも維持）。ドメイン作り直し直後の stale reported（`fileprovider-materialized.json` 残置分）は新レプリカ初回 insert に deco 付きで載る**約 0.3 秒の過渡**の後、badge-only update が deco を除去して自己修復（固着なし）。Finder プレビューペイン表示中の evict は EBUSY で失敗（OS 挙動）。知見一覧は `docs/09` M5 バッジ節。
 
+#### FP-only 稼働モード B-0 = モード基盤 + RemoteChangeSignaler（M5 Track B・2026-07-22）
+
+FP 一本化（切替前 soak ゲート撤廃 = `docs/09` #40 節・2026-07-22 ユーザ確定）の Track B 第 1 段。
+
+- **`ConfigStore.syncMode`**（`folderSync` / `fpOnly`・既定 `folderSync`）: 未知の保存値も
+  `folderSync` へフォールバック（常に実績のある安全側で起動）。**適用は次回起動から**
+  （稼働中の動的切替はしない = 転送中断・キュー残行ありの停止遷移を構造的に回避。ユーザ確定
+  2026-07-22）。`migratableKeys` 掲載 = `reset()`（再セットアップ）でクリアされ folderSync へ戻る。
+  `SettingsTransfer` にはフィールドが無く構造的に含まれない（マシン固有の運用選択）。
+- **bootstrap 分岐**（`AppEnvironment.launchEngineFromCurrentConfig` 冒頭）: `fpOnly` なら
+  `launchFPOnlySignalerFromCurrentConfig` へ — SyncEngine（FSEvents 監視・pull・アップロード
+  キュー）を起動せず `RemoteChangeSignaler` だけを立ち上げる。**DB / syncRoot / bookmark には
+  一切触れない**（DB は開かない = `pruneOldLogs` 等の書込も走らない。凍結温存 = `folderSync`
+  復帰時に SyncEngine の pull が shard_state の etag 差分で FP-only 期間中の変化を増分検出できる
+  = モード可逆性の要）。必須設定は bucket / region / 資格情報のみ（syncRootPath は検証しない）。
+  TLS 強制バケットポリシーの自己修復は両モード共通で適用。bootstrap の再入ガードは
+  `engine != nil || signaler != nil`（モードごとにどちらか一方だけが立つ）。`factoryReset` は
+  signaler も停止・破棄する。
+- **`RemoteChangeSignaler`**（`Tide/Core/RemoteChangeSignaler.swift`・@MainActor）:
+  `.tide/index.json` の **HEAD ETag** をポーリング間隔（`pollingIntervalSeconds` 流用・既定 180 秒）
+  + wake / ネットワーク復帰の即時契機（SyncEngine の pull トリガと同型の配線・`LastSatisfiedHolder`
+  共用）で比較し、変化時のみ `FileProviderController.signalRemoteChanges()`（coalesce は向こう側）。
+  増分取り込み本体は拡張の `enumerateChanges` が担うため、アプリの仕事は通知だけ（HEAD 1 発 ≒
+  数十バイト/周期）。**不変条件**: ① DB / shard_state 非接触（構造的に依存を持たない）。
+  ② index 不在（未セットアップ / 空バケット）は無反応・ベースラインも作らない（初出現を変化として
+  拾う）。③ HEAD 失敗は保持 ETag を進めない（一過性エラーで変化を取りこぼさない・次契機で回収）。
+  ④ 初回チェックはベースライン確立 + 無条件 1 回 signal（アプリ停止中に溜まった変化の取り込み保険。
+  変化が無ければ拡張側の世代キャッシュで no-op）。依存注入（HEAD / signal クロージャ）で
+  `RemoteChangeSignalerTests` が直接駆動。多重チェックは `isChecking` で coalesce（@MainActor の
+  check-and-set・進行中に届いた契機はドロップ = 定期契機が必ず後続する）。
+- **レビュー反映（PR #75）**: `pollingIntervalSeconds` getter に下限 30 のクランプ（負値/極小値の
+  保存で pull / HEAD が密ループ化する既存の穴を両モードまとめて閉鎖・任意 2）・`RemoteChangeSignaler`
+  の `start()` 再入安全（先に stop）+ `deinit` でのタスク / NWPathMonitor 破棄（任意 3）・観測ログの
+  forensics 強化（契機ラベルは `.public`・ベースライン signal も info 1 行 = 切替後ライブ soak の
+  主観測点。Info ログは 10〜15 分で消える運用実態のため・任意 4）・index キーを
+  `TideS3Client.indexKey` へ定数化（リテラル drift = HEAD 404 → nil → 無反応で**無エラーの検出沈黙**
+  になるのを防ぐ・任意 5）。**記録（レビュー 6）**: `LegacyStateMigrator.migrateIfNeeded()` はモード
+  分岐より前に走るため、旧ロケーションからの一度きりファイル移動だけは fpOnly でも起こりうる
+  （内容を変えず場所を移すだけ・既移行環境では no-op = shard_state 凍結の不変条件は破らない）。
+- **残（Track B の続き）**: B-1 = 設定画面のモード切替 UI（再起動適用の案内）+ fpOnly 時の
+  メニューバー表示縮退、B-2 = S3 内復元（`S3RestoreService`）、B-3 = `soak-check --fp-only`、
+  B-4 = 切替ランブック。fpOnly への導線は B-1 まで UI に無い（defaults 直書きのみ = 露出前）。
+  **B-1 の受け入れ項目に「fpOnly 時にポップオーバーが『Starting…』恒久表示にならない」を含める**
+  （PR #75 レビュー低 1: 現状 fpOnly は `engine == nil` × `setupCompleted` × `bootstrapFailure == nil`
+  のため `MenuBarContent.fallbackHeader` の Starting… 分岐に落ちたまま固定される）。
+
 ### ダウンロード一時ディレクトリ
 - **`TideTmpDirectory.resolve(for:)` で同一ボリュームの tmp を返す**。第一選択は `~/Library/Caches/Tide/tmp/`。同期ルートと別ボリュームになる時のみ `<syncRoot>/.tide/tmp/` にフォールバック。`moveItem` の atomic 性を保つため。
 

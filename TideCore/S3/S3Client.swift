@@ -639,6 +639,12 @@ public final class TideS3Client: @unchecked Sendable {
 
     // MARK: - Manifest
 
+    /// マニフェスト index の S3 キー（`docs/03` の配置）。get/put に加えて FP-only モードの
+    /// `RemoteChangeSignaler`（HEAD ETag 比較）もモジュール境界を跨いで参照するため定数化
+    /// （PR #75 レビュー任意 5: リテラルの drift は HEAD 404 → nil → 無反応が正常系と区別できず
+    /// **無エラーで**変化検出が沈黙する）。
+    public static let indexKey = ".tide/index.json"
+
     public struct ManifestFetch<T> {
         public let value: T
         public let etag: String
@@ -651,7 +657,7 @@ public final class TideS3Client: @unchecked Sendable {
 
     public func getIndex() async throws -> ManifestFetch<ManifestIndex>? {
         // index.json は数百 KiB 程度のはず。16 MiB を上限に。
-        guard let raw = try await getObject(key: ".tide/index.json", maxBytes: 16 * 1024 * 1024) else { return nil }
+        guard let raw = try await getObject(key: Self.indexKey, maxBytes: 16 * 1024 * 1024) else { return nil }
         let index = try ManifestJSON.decode(ManifestIndex.self, from: raw.data)
         return ManifestFetch(value: index, etag: raw.etag)
     }
@@ -660,7 +666,7 @@ public final class TideS3Client: @unchecked Sendable {
     public func putIndex(_ index: ManifestIndex, ifMatch: String?) async throws -> String {
         let data = try ManifestJSON.encode(index)
         let result = try await putObject(
-            key: ".tide/index.json",
+            key: Self.indexKey,
             data: data,
             contentType: "application/json",
             ifMatch: ifMatch,
