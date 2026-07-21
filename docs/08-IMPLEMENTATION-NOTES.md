@@ -163,9 +163,21 @@ FP 一本化（切替前 soak ゲート撤廃 = `docs/09` #40 節・2026-07-22 �
   変化が無ければ拡張側の世代キャッシュで no-op）。依存注入（HEAD / signal クロージャ）で
   `RemoteChangeSignalerTests` が直接駆動。多重チェックは `isChecking` で coalesce（@MainActor の
   check-and-set・進行中に届いた契機はドロップ = 定期契機が必ず後続する）。
+- **レビュー反映（PR #75）**: `pollingIntervalSeconds` getter に下限 30 のクランプ（負値/極小値の
+  保存で pull / HEAD が密ループ化する既存の穴を両モードまとめて閉鎖・任意 2）・`RemoteChangeSignaler`
+  の `start()` 再入安全（先に stop）+ `deinit` でのタスク / NWPathMonitor 破棄（任意 3）・観測ログの
+  forensics 強化（契機ラベルは `.public`・ベースライン signal も info 1 行 = 切替後ライブ soak の
+  主観測点。Info ログは 10〜15 分で消える運用実態のため・任意 4）・index キーを
+  `TideS3Client.indexKey` へ定数化（リテラル drift = HEAD 404 → nil → 無反応で**無エラーの検出沈黙**
+  になるのを防ぐ・任意 5）。**記録（レビュー 6）**: `LegacyStateMigrator.migrateIfNeeded()` はモード
+  分岐より前に走るため、旧ロケーションからの一度きりファイル移動だけは fpOnly でも起こりうる
+  （内容を変えず場所を移すだけ・既移行環境では no-op = shard_state 凍結の不変条件は破らない）。
 - **残（Track B の続き）**: B-1 = 設定画面のモード切替 UI（再起動適用の案内）+ fpOnly 時の
   メニューバー表示縮退、B-2 = S3 内復元（`S3RestoreService`）、B-3 = `soak-check --fp-only`、
   B-4 = 切替ランブック。fpOnly への導線は B-1 まで UI に無い（defaults 直書きのみ = 露出前）。
+  **B-1 の受け入れ項目に「fpOnly 時にポップオーバーが『Starting…』恒久表示にならない」を含める**
+  （PR #75 レビュー低 1: 現状 fpOnly は `engine == nil` × `setupCompleted` × `bootstrapFailure == nil`
+  のため `MenuBarContent.fallbackHeader` の Starting… 分岐に落ちたまま固定される）。
 
 ### ダウンロード一時ディレクトリ
 - **`TideTmpDirectory.resolve(for:)` で同一ボリュームの tmp を返す**。第一選択は `~/Library/Caches/Tide/tmp/`。同期ルートと別ボリュームになる時のみ `<syncRoot>/.tide/tmp/` にフォールバック。`moveItem` の atomic 性を保つため。

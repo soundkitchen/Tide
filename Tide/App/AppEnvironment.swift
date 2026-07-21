@@ -184,8 +184,7 @@ final class AppEnvironment {
 
         let signaler = RemoteChangeSignaler(
             intervalSeconds: config.pollingIntervalSeconds,
-            // index キーは S3Client.getIndex と同一のマニフェスト配置（docs/03）。
-            headIndexETag: { [s3] in try await s3.headObject(key: ".tide/index.json")?.etag },
+            headIndexETag: { [s3] in try await s3.headObject(key: TideS3Client.indexKey)?.etag },
             signal: { FileProviderController.signalRemoteChanges() }
         )
         self.signaler = signaler

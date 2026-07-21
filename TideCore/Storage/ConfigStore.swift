@@ -79,7 +79,10 @@ public final class ConfigStore: @unchecked Sendable {
     public var pollingIntervalSeconds: Int {
         get {
             let v = defaults.integer(forKey: Key.pollingIntervalSeconds)
-            return v == 0 ? 180 : v
+            // 0 = 未設定 → 既定 180。明示値は下限 30 へクランプ: 負値/極小値が保存されていると
+            // `Task.sleep(for: .seconds(負))` が即時 return し、SyncEngine の pull /
+            // RemoteChangeSignaler の HEAD が密ループ化する（PR #75 レビュー任意 2）。
+            return v == 0 ? 180 : max(30, v)
         }
         set { defaults.set(newValue, forKey: Key.pollingIntervalSeconds) }
     }

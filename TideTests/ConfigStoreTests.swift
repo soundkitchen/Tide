@@ -41,6 +41,20 @@ final class ConfigStoreTests: XCTestCase {
         XCTAssertEqual(config.uploadSizeLimitBytes, ConfigStore.defaultUploadSizeLimitBytes)
     }
 
+    /// pollingIntervalSeconds: 0 = 未設定 → 既定 180、明示値は下限 30 へクランプ
+    /// （負値/極小値の保存で pull / RemoteChangeSignaler の HEAD が密ループ化するのを防ぐ・
+    /// PR #75 レビュー任意 2）。
+    func testPollingIntervalClampsToSafeRange() {
+        let config = makeStore()
+        XCTAssertEqual(config.pollingIntervalSeconds, 180)   // 未設定 → 既定
+        config.pollingIntervalSeconds = 60
+        XCTAssertEqual(config.pollingIntervalSeconds, 60)    // 通常値はそのまま
+        config.pollingIntervalSeconds = 5
+        XCTAssertEqual(config.pollingIntervalSeconds, 30)    // 極小値は下限へ
+        config.pollingIntervalSeconds = -1
+        XCTAssertEqual(config.pollingIntervalSeconds, 30)    // 負値も下限へ
+    }
+
     // MARK: - syncMode（M5 Track B・FP-only 稼働モード）
 
     func testSyncModeDefaultsToFolderSync() {

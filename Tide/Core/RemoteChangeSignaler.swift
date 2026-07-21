@@ -47,6 +47,9 @@ final class RemoteChangeSignaler {
     }
 
     func start() {
+        // 再入安全（PR #75 レビュー任意 3）: 呼び直しで旧タスクへの参照を失うと
+        // キャンセル不能な永久ループが残るため、先に止めてから張り直す。
+        stop()
         // 初回チェック: ベースライン確立 + 1 回 signal（下記 checkOnce 参照）。
         Task { [weak self] in await self?.checkOnce(reason: "startup") }
         startPollingTimer()
@@ -62,6 +65,14 @@ final class RemoteChangeSignaler {
         pathMonitor = nil
     }
 
+    deinit {
+        // stop() を経ない破棄でもループタスク / NWPathMonitor を残さない（PR #75 レビュー任意 3。
+        // ループは [weak self] なので self は解放されるが、タスク自体は次の sleep 満了まで生きる）。
+        pollTask?.cancel()
+        wakeObserverTask?.cancel()
+        pathMonitor?.cancel()
+    }
+
     /// 1 回分のチェック本体（テストから直接駆動する）。
     func checkOnce(reason: String) async {
         if isChecking { return }
@@ -73,7 +84,9 @@ final class RemoteChangeSignaler {
             etag = try await headIndexETag()
         } catch {
             // 保持 ETag は進めない＝復旧後の次契機で必ず差分検出できる。
-            AppLogger.sync.error("RemoteChangeSignaler: HEAD index failed (\(reason)): \(String(describing: error), privacy: .private)")
+            // reason は固定ラベル（startup/poll/wake/networkUp）なので .public（PR #75 レビュー任意 4:
+            // 切替後ライブ soak の主観測点 = どの契機で何が起きたかを Info ログ消滅前に追えるようにする）。
+            AppLogger.sync.error("RemoteChangeSignaler: HEAD index failed (\(reason, privacy: .public)): \(String(describing: error), privacy: .private)")
             return
         }
         // index 不在 = 未セットアップ / 空バケット。ベースラインも作らない（初出現を変化として拾う）。
@@ -85,12 +98,13 @@ final class RemoteChangeSignaler {
             hasBaseline = true
             lastETag = etag
             signal()
+            AppLogger.sync.info("RemoteChangeSignaler: baseline established (\(reason, privacy: .public)); signaled FP domain")
             return
         }
         guard etag != lastETag else { return }
         lastETag = etag
         signal()
-        AppLogger.sync.info("RemoteChangeSignaler: index changed (\(reason)); signaled FP domain")
+        AppLogger.sync.info("RemoteChangeSignaler: index changed (\(reason, privacy: .public)); signaled FP domain")
     }
 
     // MARK: - Triggers（SyncEngine の poll / wake / network 配線と同型）
