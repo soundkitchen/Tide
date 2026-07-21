@@ -315,7 +315,10 @@ struct MenuBarContent: View {
             Image(systemName: fileProviderEnabled == false
                   ? "exclamationmark.circle.fill" : "externaldrive.fill.badge.icloud")
                 .font(.title2)
-                .foregroundStyle(fileProviderEnabled == false ? .red : .green)
+                // nil = 有効状態の取得中（XPC 往復のサブ秒）。無効かもしれない間は緑を
+                // 出さず中立色にする（PR #76 レビュー任意 3）。
+                .foregroundStyle(fileProviderEnabled == false ? Color.red
+                                 : fileProviderEnabled == true ? Color.green : Color.secondary)
             VStack(alignment: .leading, spacing: 1) {
                 Text("File Provider Sync")
                     .font(.headline)
@@ -437,8 +440,11 @@ struct MenuBarContent: View {
         VStack(alignment: .leading, spacing: 2) {
             if env.signaler != nil {
                 // fpOnly: 同期の実体は FP レプリカ。同期フォルダは凍結温存中なので導線を出さない
-                // （開けると「同期されないフォルダ」を同期先と誤認しやすい）。
+                // （開けると「同期されないフォルダ」を同期先と誤認しやすい）。FP 無効時は
+                // userVisibleURL が nil = 無音の no-op になるため disable（「Open Sync Folder」の
+                // syncRootPath == nil ガードと対称・PR #76 レビュー任意 2）。
                 menuRow("Open Tide in Finder", systemImage: "folder") { openFileProviderFolder() }
+                    .disabled(fileProviderEnabled == false)
             } else {
                 menuRow("Open Sync Folder", systemImage: "folder") { openSyncFolder() }
                     .disabled(env.config.syncRootPath == nil)
