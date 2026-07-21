@@ -9,6 +9,9 @@ struct MenuBarContent: View {
     /// SyncEngine にメモリ状態を増やさず、ポップオーバー表示時と同期完了ごとに読み直す。
     @State private var recentActivity: [SyncLogRecord] = []
 
+    /// fpOnly 表示用: FP ドメインの有効状態（nil = 未取得）。無効なら「何も同期されない」警告を出す。
+    @State private var fileProviderEnabled: Bool?
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             if let engine = env.engine {
@@ -25,6 +28,10 @@ struct MenuBarContent: View {
                 }
                 Divider()
                 primaryActions(engine)
+            } else if let signaler = env.signaler {
+                // FP-only 稼働モード（Track B-1）: engine == nil でも「Starting…」に落とさない
+                // （PR #75 レビュー低 1）。同期の実体は FP 拡張なので、状態カードと Finder 導線だけ出す。
+                fpOnlyHeader(signaler)
             } else {
                 fallbackHeader
             }
@@ -41,6 +48,10 @@ struct MenuBarContent: View {
             }
             if !env.isSetupCompleted || env.bootstrapFailure != nil {
                 activateAndOpen("setup")
+            }
+            // fpOnly 表示のときだけ FP 有効状態を取得（folderSync では余計な XPC を出さない）。
+            if env.signaler != nil {
+                fileProviderEnabled = await FileProviderController.isEnabled()
             }
         }
         // lastSyncedAt は upload 周回完了でしか前進しないため、pull 由来の download / 削除反映も
@@ -296,6 +307,50 @@ struct MenuBarContent: View {
         }
     }
 
+    // MARK: - FP-only 稼働モード（Track B-1）
+
+    @ViewBuilder
+    private func fpOnlyHeader(_ signaler: RemoteChangeSignaler) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: fileProviderEnabled == false
+                  ? "exclamationmark.circle.fill" : "externaldrive.fill.badge.icloud")
+                .font(.title2)
+                .foregroundStyle(fileProviderEnabled == false ? .red : .green)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("File Provider Sync")
+                    .font(.headline)
+                    .lineLimit(1)
+                Text("Files sync via the Tide location in Finder.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+        }
+        if fileProviderEnabled == false {
+            Text("File Provider is not enabled — nothing is syncing. Enable it in Settings.")
+                .font(.caption)
+                .foregroundStyle(.red)
+        }
+        VStack(alignment: .leading, spacing: 3) {
+            if let checked = signaler.lastCheckedAt {
+                Text("Last remote check: \(checked.formatted(date: .omitted, time: .standard))")
+            }
+            if let signaled = signaler.lastSignaledAt {
+                Text("Last change signaled: \(signaled.formatted(date: .omitted, time: .standard))")
+            }
+            if signaler.lastCheckFailed {
+                Text("Remote check failed — will retry.")
+                    .foregroundStyle(.orange)
+            }
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(8)
+        .cardBackground()
+        Divider()
+    }
+
     // MARK: - 未起動時のフォールバック
 
     @ViewBuilder
@@ -380,8 +435,14 @@ struct MenuBarContent: View {
 
     private var secondaryActions: some View {
         VStack(alignment: .leading, spacing: 2) {
-            menuRow("Open Sync Folder", systemImage: "folder") { openSyncFolder() }
-                .disabled(env.config.syncRootPath == nil)
+            if env.signaler != nil {
+                // fpOnly: 同期の実体は FP レプリカ。同期フォルダは凍結温存中なので導線を出さない
+                // （開けると「同期されないフォルダ」を同期先と誤認しやすい）。
+                menuRow("Open Tide in Finder", systemImage: "folder") { openFileProviderFolder() }
+            } else {
+                menuRow("Open Sync Folder", systemImage: "folder") { openSyncFolder() }
+                    .disabled(env.config.syncRootPath == nil)
+            }
             if env.engine != nil {
                 menuRow("Sync Activity…", systemImage: "list.bullet.rectangle") { activateAndOpen("activity") }
                 menuRow("Version History…", systemImage: "clock.arrow.circlepath") { activateAndOpen("versions") }
@@ -412,5 +473,13 @@ struct MenuBarContent: View {
         guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir),
               isDir.boolValue else { return }
         NSWorkspace.shared.open(URL(fileURLWithPath: path, isDirectory: true))
+    }
+
+    /// fpOnly: FP レプリカ（Finder の「場所 → Tide」）を開く。URL 取得は XPC 越しなので非同期。
+    private func openFileProviderFolder() {
+        Task {
+            guard let url = await FileProviderController.userVisibleURL() else { return }
+            NSWorkspace.shared.open(url)
+        }
     }
 }

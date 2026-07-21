@@ -2238,6 +2238,138 @@
           }
         }
       }
+    },
+    "Sync mode" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "同期モード"
+          }
+        }
+      }
+    },
+    "Folder sync" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "フォルダ同期"
+          }
+        }
+      }
+    },
+    "File Provider only" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "File Provider のみ"
+          }
+        }
+      }
+    },
+    "File Provider is not enabled. Enable it above first, or nothing will sync in File Provider–only mode." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "File Provider が有効になっていません。先に上の「Enable File Provider」を実行してください。無効のまま File Provider のみモードにすると何も同期されません。"
+          }
+        }
+      }
+    },
+    "Quit and reopen Tide to apply the new mode." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "新しいモードは Tide を終了して開き直すと適用されます。"
+          }
+        }
+      }
+    },
+    "Folder sync watches your sync folder with the built-in engine. File Provider only stops that engine and syncs solely through the Tide location in Finder — the sync folder and local database are left untouched, so you can switch back anytime." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "「フォルダ同期」は内蔵エンジンが同期フォルダを監視します。「File Provider のみ」はそのエンジンを止め、Finder の「Tide」の場所だけで同期します — 同期フォルダとローカル DB には触れないため、いつでも元のモードへ戻せます。"
+          }
+        }
+      }
+    },
+    "File Provider Sync" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "File Provider 同期"
+          }
+        }
+      }
+    },
+    "Files sync via the Tide location in Finder." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ファイルは Finder の「Tide」の場所を通じて同期されます。"
+          }
+        }
+      }
+    },
+    "File Provider is not enabled — nothing is syncing. Enable it in Settings." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "File Provider が無効のため、何も同期されていません。設定から有効化してください。"
+          }
+        }
+      }
+    },
+    "Last change signaled: %@" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "前回変更検知: %@"
+          }
+        }
+      }
+    },
+    "Remote check failed — will retry." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "リモート確認に失敗しました — 再試行します。"
+          }
+        }
+      }
+    },
+    "Open Tide in Finder" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Finder で Tide を開く"
+          }
+        }
+      }
     }
   },
   "version" : "1.1"

@@ -1,6 +1,7 @@
 import TideCore
 import Foundation
 import Network
+import Observation
 #if canImport(AppKit)
 import AppKit
 #endif
@@ -18,23 +19,32 @@ import AppKit
 /// - index 不在（未セットアップ / 空バケット）の間は何もしない。
 /// - HEAD 失敗は保持 ETag を進めず次契機に任せる（一過性エラーで変化を取りこぼさない）。
 @MainActor
+@Observable
 final class RemoteChangeSignaler {
     /// `.tide/index.json` の現行 ETag を返す（不在なら nil）。プロダクションは
     /// `S3Client.headObject` を配線し、テストはフェイクを注入する（依存注入の直接駆動面）。
-    private let headIndexETag: @Sendable () async throws -> String?
+    @ObservationIgnored private let headIndexETag: @Sendable () async throws -> String?
     /// 変化時の通知先。プロダクションは `FileProviderController.signalRemoteChanges()`
     /// （coalesce は向こう側が持つ）。
-    private let signal: () -> Void
-    private let intervalSeconds: Int
+    @ObservationIgnored private let signal: () -> Void
+    @ObservationIgnored private let intervalSeconds: Int
 
-    private var lastETag: String?
-    private var hasBaseline = false
-    private var pollTask: Task<Void, Never>?
-    private var wakeObserverTask: Task<Void, Never>?
-    private var pathMonitor: NWPathMonitor?
+    // UI 表示用の観測状態（B-1・fpOnly ポップオーバー）。判定ロジックは一切持たない読み出し専用。
+    /// 最後に HEAD が成功した時刻（index 不在でも成功扱い = 到達性の観測）。
+    private(set) var lastCheckedAt: Date?
+    /// 最後に FP ドメインへ signal した時刻（ベースライン / 変化の両方）。
+    private(set) var lastSignaledAt: Date?
+    /// 直近の HEAD が失敗していれば true（成功で自動クリア。一過性か持続かは UI 側が時刻と併読）。
+    private(set) var lastCheckFailed = false
+
+    @ObservationIgnored private var lastETag: String?
+    @ObservationIgnored private var hasBaseline = false
+    @ObservationIgnored private var pollTask: Task<Void, Never>?
+    @ObservationIgnored private var wakeObserverTask: Task<Void, Never>?
+    @ObservationIgnored private var pathMonitor: NWPathMonitor?
     /// 多重チェックの coalesce（poll と wake の重なり等）。@MainActor なので check-and-set は
     /// 割り込まれない。進行中に届いた契機はドロップでよい（定期契機が必ず後続する）。
-    private var isChecking = false
+    @ObservationIgnored private var isChecking = false
 
     init(
         intervalSeconds: Int,
@@ -86,9 +96,12 @@ final class RemoteChangeSignaler {
             // 保持 ETag は進めない＝復旧後の次契機で必ず差分検出できる。
             // reason は固定ラベル（startup/poll/wake/networkUp）なので .public（PR #75 レビュー任意 4:
             // 切替後ライブ soak の主観測点 = どの契機で何が起きたかを Info ログ消滅前に追えるようにする）。
+            lastCheckFailed = true
             AppLogger.sync.error("RemoteChangeSignaler: HEAD index failed (\(reason, privacy: .public)): \(String(describing: error), privacy: .private)")
             return
         }
+        lastCheckFailed = false
+        lastCheckedAt = Date()
         // index 不在 = 未セットアップ / 空バケット。ベースラインも作らない（初出現を変化として拾う）。
         guard let etag else { return }
 
@@ -98,12 +111,14 @@ final class RemoteChangeSignaler {
             hasBaseline = true
             lastETag = etag
             signal()
+            lastSignaledAt = Date()
             AppLogger.sync.info("RemoteChangeSignaler: baseline established (\(reason, privacy: .public)); signaled FP domain")
             return
         }
         guard etag != lastETag else { return }
         lastETag = etag
         signal()
+        lastSignaledAt = Date()
         AppLogger.sync.info("RemoteChangeSignaler: index changed (\(reason, privacy: .public)); signaled FP domain")
     }
 

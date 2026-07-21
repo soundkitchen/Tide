@@ -100,6 +100,13 @@ enum FileProviderController {
     /// replicated 拡張への signal は `.workingSet` のみ有効（他コンテナは無視される）。
     /// 拡張側は enumerateChanges 応答で TTL を待たず増分ロードするため、この signal が
     /// 実質のリモート追従トリガになる。
+    /// FP ドメインのルート（`~/Library/CloudStorage/Tide-Tide`）の Finder 表示 URL を返す
+    /// （未登録 / 取得失敗は nil）。fpOnly ポップオーバーの「Open Tide in Finder」用（B-1）。
+    static func userVisibleURL() async -> URL? {
+        guard let manager = NSFileProviderManager(for: domain) else { return nil }
+        return try? await manager.getUserVisibleURL(for: .rootContainer)
+    }
+
     static func signalRemoteChanges() {
         // コアレス（PR #56 レビュー ③）: 確定点発火（M5 Phase 5-0）はアップロード 1 件ごとに
         // 呼ばれるため、大量アップロード時に signal（XPC 2 回/呼）が件数分に増幅する。

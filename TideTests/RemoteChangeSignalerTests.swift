@@ -109,6 +109,43 @@ final class RemoteChangeSignalerTests: XCTestCase {
         XCTAssertEqual(counter.count, 1, "復旧後の不変 ETag で余計な signal が出た")
     }
 
+    /// UI 用の観測状態（B-1・fpOnly ポップオーバー）: 成功で lastCheckedAt 前進 + 失敗フラグ解除、
+    /// signal 発火（ベースライン/変化）で lastSignaledAt 前進、失敗で lastCheckFailed のみ立つ
+    /// （時刻は前進しない = 「最後に成功した観測」の意味を保つ）。
+    func testObservableStateTransitions() async {
+        let head = FakeHead([
+            .success("etag-1"),      // baseline → checked + signaled
+            .failure(HeadError()),   // 失敗 → failed 立つ・時刻は不変
+            .success("etag-1"),      // 復旧・不変 → checked 前進・failed 解除・signaled 不変
+            .success("etag-2")       // 変化 → signaled 前進
+        ])
+        let counter = SignalCounter()
+        let signaler = makeSignaler(head: head, counter: counter)
+        XCTAssertNil(signaler.lastCheckedAt)
+        XCTAssertNil(signaler.lastSignaledAt)
+        XCTAssertFalse(signaler.lastCheckFailed)
+
+        await signaler.checkOnce(reason: "test")  // baseline
+        let checked1 = signaler.lastCheckedAt
+        let signaled1 = signaler.lastSignaledAt
+        XCTAssertNotNil(checked1)
+        XCTAssertNotNil(signaled1)
+        XCTAssertFalse(signaler.lastCheckFailed)
+
+        await signaler.checkOnce(reason: "test")  // 失敗
+        XCTAssertTrue(signaler.lastCheckFailed)
+        XCTAssertEqual(signaler.lastCheckedAt, checked1, "失敗で lastCheckedAt が動いた")
+        XCTAssertEqual(signaler.lastSignaledAt, signaled1)
+
+        await signaler.checkOnce(reason: "test")  // 復旧・不変
+        XCTAssertFalse(signaler.lastCheckFailed, "成功で失敗フラグが解除されていない")
+        XCTAssertNotEqual(signaler.lastCheckedAt, checked1, "成功で lastCheckedAt が前進していない")
+        XCTAssertEqual(signaler.lastSignaledAt, signaled1, "signal なしで lastSignaledAt が動いた")
+
+        await signaler.checkOnce(reason: "test")  // 変化
+        XCTAssertNotEqual(signaler.lastSignaledAt, signaled1, "変化 signal で lastSignaledAt が前進していない")
+    }
+
     /// start() は初回チェックを発火する（起動時のベースライン確立の配線）。stop() は冪等。
     func testStartFiresInitialCheck() async throws {
         let head = FakeHead([.success("etag-1")])
