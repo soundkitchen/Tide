@@ -40,4 +40,38 @@ final class ConfigStoreTests: XCTestCase {
         config.reset()
         XCTAssertEqual(config.uploadSizeLimitBytes, ConfigStore.defaultUploadSizeLimitBytes)
     }
+
+    // MARK: - syncMode（M5 Track B・FP-only 稼働モード）
+
+    func testSyncModeDefaultsToFolderSync() {
+        let config = makeStore()
+        XCTAssertEqual(config.syncMode, .folderSync)
+    }
+
+    func testSyncModeRoundTrip() {
+        let config = makeStore()
+        config.syncMode = .fpOnly
+        XCTAssertEqual(config.syncMode, .fpOnly)
+        config.syncMode = .folderSync
+        XCTAssertEqual(config.syncMode, .folderSync)
+    }
+
+    /// 未知の保存値（将来モードからのダウングレード等）は folderSync へフォールバック =
+    /// 常に実績のある安全側で起動する。
+    func testSyncModeUnknownRawValueFallsBackToFolderSync() {
+        let suite = "tide-tests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        addTeardownBlock { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        defaults.set("someFutureMode", forKey: "tide.syncMode")
+        let config = ConfigStore(defaults: defaults)
+        XCTAssertEqual(config.syncMode, .folderSync)
+    }
+
+    /// reset（再セットアップ）でモードもクリアされ folderSync へ戻る（migratableKeys 経由）。
+    func testResetClearsSyncMode() {
+        let config = makeStore()
+        config.syncMode = .fpOnly
+        config.reset()
+        XCTAssertEqual(config.syncMode, .folderSync)
+    }
 }

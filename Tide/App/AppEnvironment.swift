@@ -16,6 +16,9 @@ final class AppEnvironment {
     var database: LocalDatabase?
     var s3: TideS3Client?
     var engine: SyncEngine?
+    /// FP-only 稼働モード（Track B）のリモート変更検知。`fpOnly` 起動時のみ非 nil
+    /// （`engine` とは相互排他 = モードごとにどちらか一方だけが立つ）。
+    var signaler: RemoteChangeSignaler?
 
     var isSetupCompleted: Bool { config.setupCompleted }
 
@@ -57,10 +60,11 @@ final class AppEnvironment {
             AppLogger.ui.info("Skipping bootstrap under XCTest.")
             return
         }
-        if engine != nil {
-            // 既に動いている＝失敗状態は解消済み。早期 return でも bootstrapFailure をクリアして
-            // 旧来の「毎回先頭でクリア」自己修復を温存する。さもないと「失敗→ウィザードで復旧→正常稼働」後も
-            // bootstrapFailure が残り、ポップオーバーを開くたびにウィザードが再表示され続ける（PR #7 レビュー Medium）。
+        if engine != nil || signaler != nil {
+            // 既に動いている＝失敗状態は解消済み（fpOnly は engine の代わりに signaler が立つ）。
+            // 早期 return でも bootstrapFailure をクリアして旧来の「毎回先頭でクリア」自己修復を温存する。
+            // さもないと「失敗→ウィザードで復旧→正常稼働」後も bootstrapFailure が残り、
+            // ポップオーバーを開くたびにウィザードが再表示され続ける（PR #7 レビュー Medium）。
             bootstrapFailure = nil
             return
         }
@@ -96,6 +100,12 @@ final class AppEnvironment {
     private static func isBlank(_ s: String?) -> Bool { s?.isEmpty ?? true }
 
     func launchEngineFromCurrentConfig() async throws {
+        // FP-only 稼働モード（Track B・#40 方針 2026-07-22）: SyncEngine を起動せず
+        // RemoteChangeSignaler だけを立ち上げる。モードの適用は起動時のみ（動的切替はしない）。
+        if config.syncMode == .fpOnly {
+            try await launchFPOnlySignalerFromCurrentConfig()
+            return
+        }
         var missing: [String] = []
         if Self.isBlank(config.bucketName) { missing.append("bucket name") }
         if Self.isBlank(config.region) { missing.append("region") }
@@ -107,17 +117,7 @@ final class AppEnvironment {
         let region = config.region!
         let rootPath = config.syncRootPath!
 
-        let credentials: AWSCredentials
-        do {
-            guard let loaded = try keychain.load() else {
-                throw SyncError.notConfigured(reason: "AWS credentials not found in Keychain")
-            }
-            credentials = loaded
-        } catch let e as SyncError {
-            throw e
-        } catch {
-            throw SyncError.notConfigured(reason: "Keychain read failed: \(error)")
-        }
+        let credentials = try loadCredentialsOrThrow()
         let dbURL = try LocalDatabase.defaultURL()
         let db = try LocalDatabase(at: dbURL)
         try db.pruneOldLogs()
@@ -152,9 +152,68 @@ final class AppEnvironment {
         self.engine = engine
         await engine.start()
 
-        // 既存バケット / ドリフトの自己修復（C3 後半・Issue #26 / B）: 起動ごとに TLS 強制バケットポリシーを
-        // 冪等・非致命で適用する。既に同内容なら GET だけで put しない。起動を遅らせないよう detached、失敗は
-        // ログのみ（多層防御＝Tide 自身の通信は SDK が常に HTTPS。守るのは他ツールの HTTP アクセス）。
+        Self.enforceTLSBucketPolicyDetached(s3: s3)
+    }
+
+    /// FP-only 稼働モード（Track B）の起動: SyncEngine（FSEvents 監視・pull・アップロードキュー）を
+    /// 起動せず、`RemoteChangeSignaler` だけを立ち上げる。**DB / syncRoot / bookmark には一切
+    /// 触れない**（凍結温存 = `folderSync` 復帰時に SyncEngine の pull が shard_state の etag 差分で
+    /// FP-only 期間中の変化を増分検出できる。DB を開かないので `pruneOldLogs` 等の書込も走らない）。
+    /// syncRootPath / bookmark は必須設定から外れる（ローカル面が無いモードのため検証しない）。
+    private func launchFPOnlySignalerFromCurrentConfig() async throws {
+        var missing: [String] = []
+        if Self.isBlank(config.bucketName) { missing.append("bucket name") }
+        if Self.isBlank(config.region) { missing.append("region") }
+        if !missing.isEmpty {
+            throw SyncError.notConfigured(reason: "Missing: \(missing.joined(separator: ", "))")
+        }
+        let credentials = try loadCredentialsOrThrow()
+        let s3 = try TideS3Client(
+            credentials: credentials,
+            region: config.region!,
+            bucket: config.bucketName!,
+            deviceId: config.deviceId
+        )
+        self.s3 = s3
+
+        // FP ドメイン未登録なら signal は向こうの isEnabled ガードで no-op になる（起動自体は
+        // 続行 = 設定画面から Enable すれば次の契機から効き始める）。気づけるようログだけ残す。
+        if await !FileProviderController.isEnabled() {
+            AppLogger.ui.info("FP-only mode: File Provider domain is not enabled yet; enable it in Settings")
+        }
+
+        let signaler = RemoteChangeSignaler(
+            intervalSeconds: config.pollingIntervalSeconds,
+            // index キーは S3Client.getIndex と同一のマニフェスト配置（docs/03）。
+            headIndexETag: { [s3] in try await s3.headObject(key: ".tide/index.json")?.etag },
+            signal: { FileProviderController.signalRemoteChanges() }
+        )
+        self.signaler = signaler
+        signaler.start()
+        AppLogger.ui.info("Launched in FP-only mode (RemoteChangeSignaler active)")
+
+        Self.enforceTLSBucketPolicyDetached(s3: s3)
+    }
+
+    /// Keychain から AWS 資格情報を読む（folderSync / fpOnly 両起動パス共通）。
+    private func loadCredentialsOrThrow() throws -> AWSCredentials {
+        do {
+            guard let loaded = try keychain.load() else {
+                throw SyncError.notConfigured(reason: "AWS credentials not found in Keychain")
+            }
+            return loaded
+        } catch let e as SyncError {
+            throw e
+        } catch {
+            throw SyncError.notConfigured(reason: "Keychain read failed: \(error)")
+        }
+    }
+
+    /// 既存バケット / ドリフトの自己修復（C3 後半・Issue #26 / B）: 起動ごとに TLS 強制バケットポリシーを
+    /// 冪等・非致命で適用する。既に同内容なら GET だけで put しない。起動を遅らせないよう detached、失敗は
+    /// ログのみ（多層防御＝Tide 自身の通信は SDK が常に HTTPS。守るのは他ツールの HTTP アクセス）。
+    /// folderSync / fpOnly 両起動パスから呼ぶ。
+    private static func enforceTLSBucketPolicyDetached(s3: TideS3Client) {
         Task.detached { [s3] in
             do {
                 if try await s3.enforceTLSBucketPolicy() == .updated {
@@ -334,6 +393,8 @@ final class AppEnvironment {
     func factoryReset() async {
         await engine?.stop()
         engine = nil
+        signaler?.stop()
+        signaler = nil
         s3 = nil
         database = nil
 

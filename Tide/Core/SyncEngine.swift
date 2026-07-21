@@ -1709,7 +1709,9 @@ struct UploadConflictResolution: Equatable, Sendable {
 }
 
 /// NWPathMonitor のクロージャから @MainActor へ値を渡すための単純なロック付きホルダ。
-private final class LastSatisfiedHolder: @unchecked Sendable {
+// internal: ネットワーク復帰検出の前回値保持。SyncEngine（folderSync）と
+// RemoteChangeSignaler（FP-only・Track B）が同じ NWPathMonitor 配線で共用する。
+final class LastSatisfiedHolder: @unchecked Sendable {
     private var value: Bool = false
     private let lock = NSLock()
     func swap(_ new: Bool) -> Bool {

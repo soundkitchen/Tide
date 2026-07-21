@@ -16,6 +16,18 @@ public final class ConfigStore: @unchecked Sendable {
         static let downloadBandwidthBytesPerSec = "tide.downloadBandwidthBytesPerSec"
         static let notificationsEnabled = "tide.notificationsEnabled"
         static let syncRootBookmark = "tide.syncRootBookmark"
+        static let syncMode = "tide.syncMode"
+    }
+
+    /// 稼働モード（M5 Track B・FP 一本化）。
+    /// - `folderSync`: 従来の FSEvents モード（`SyncEngine` = 同期フォルダ監視 + pull + アップロード）。
+    ///   FP ドメインが有効なら並走する。
+    /// - `fpOnly`: File Provider のみで稼働。アプリは `SyncEngine` を起動せず
+    ///   `RemoteChangeSignaler`（index HEAD ETag 比較）だけを立ち上げる。
+    ///   DB / syncRoot / bookmark は凍結温存（`folderSync` 復帰時に通常 pull が差分を取り込む）。
+    public enum SyncMode: String, Sendable, CaseIterable {
+        case folderSync
+        case fpOnly
     }
 
     /// 1 ファイルあたりのアップロードサイズ上限の既定値（1 GiB）。
@@ -31,7 +43,8 @@ public final class ConfigStore: @unchecked Sendable {
         Key.pollingIntervalSeconds, Key.setupCompleted,
         Key.uploadSizeLimitBytes,
         Key.uploadBandwidthBytesPerSec, Key.downloadBandwidthBytesPerSec,
-        Key.notificationsEnabled, Key.syncRootBookmark
+        Key.notificationsEnabled, Key.syncRootBookmark,
+        Key.syncMode
     ]
 
     /// セットアップ完了フラグの defaults キー（`LegacyStateMigrator` の移行要否判定用）。
@@ -128,6 +141,16 @@ public final class ConfigStore: @unchecked Sendable {
     public var syncRootBookmark: Data? {
         get { defaults.data(forKey: Key.syncRootBookmark) }
         set { defaults.set(newValue, forKey: Key.syncRootBookmark) }
+    }
+
+    /// 稼働モード（既定 `folderSync`・未知の保存値も `folderSync` へフォールバック = 常に安全側）。
+    /// **適用は次回起動から**（`AppEnvironment.bootstrap` が起動時に分岐する。稼働中の動的切替は
+    /// しない = 転送中断・キュー残行ありの停止遷移を構造的に回避。ユーザ確定 2026-07-22）。
+    /// `reset()`（再セットアップ）ではクリアされ folderSync へ戻る。`SettingsTransfer` には
+    /// フィールドが無く構造的に含まれない（マシン固有の運用選択のため持ち出さない）。
+    public var syncMode: SyncMode {
+        get { SyncMode(rawValue: defaults.string(forKey: Key.syncMode) ?? "") ?? .folderSync }
+        set { defaults.set(newValue.rawValue, forKey: Key.syncMode) }
     }
 
     /// 初回アクセス時に UUID を自動生成して保存する。以降不変。
