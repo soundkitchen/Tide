@@ -249,9 +249,10 @@ S3 の新しい現行版として書き直す**（方式はユーザ確定 2026-
   現在 file をマニフェスト全景で判定・`VersionHistoryKindConflictTests`）。**ベストエフォート**:
   一覧未ロード / stale は素通しだが、発生してもデータ損失は無く FP ツリーの directory-wins と
   folderSync pull の #52 系処理で回収できる。ガードの材料になる `loadSyncedPaths` はウィンドウ
-  オープン時ロードへ移動（Deleted タブ直行でも武装）。記録のみ 2 件 = クラッシュ時の
-  `s3restore-*.part` 残骸は次回同一復元まで残る（Caches 配下 = システム purge 対象・現状維持）/
-  `errorMessage` の生エラー文字列は既存パス踏襲。
+  オープン時ロードへ移動（Deleted タブ直行でも武装。再レビュー任意 1 = 直列ロードが fpOnly の
+  削除一覧キャッシュ即表示 #29 (b) を遅らせるため `.task` 2 本の並行ロードへ）。記録のみ 2 件 =
+  クラッシュ時の `s3restore-*.part` 残骸は次回同一復元まで残る（Caches 配下 = システム purge
+  対象・現状維持）/ `errorMessage` の生エラー文字列は既存パス踏襲。
 
 ### ダウンロード一時ディレクトリ
 - **`TideTmpDirectory.resolve(for:)` で同一ボリュームの tmp を返す**。第一選択は `~/Library/Caches/Tide/tmp/`。同期ルートと別ボリュームになる時のみ `<syncRoot>/.tide/tmp/` にフォールバック。`moveItem` の atomic 性を保つため。
