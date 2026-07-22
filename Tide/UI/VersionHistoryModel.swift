@@ -127,8 +127,9 @@ final class VersionHistoryModel {
         guard let path = loadedPath else { return }
         if env.engine == nil, let service = env.makeS3RestoreService() {
             await restoreInS3(path: path, versionId: version.versionId, service: service)
-            // 復元で新しい現行版が増えるので履歴を更新（no-op でもエラーでも表示は最新に揃える）。
-            await loadVersions(for: path, env: env)
+            // 復元で新しい現行版が増えるので履歴を更新（エラー時も一覧は最新リモート状態に揃える =
+            // uploadConflict なら相手版が見える）。結果表示は退避して残す（PR #77 レビュー中 1）。
+            await reloadVersionsPreservingOutcome(for: path, env: env)
             return
         }
         guard let engine = env.engine else {
@@ -152,11 +153,42 @@ final class VersionHistoryModel {
                 deletedFiles.removeAll { $0.relativePath == path }
                 persistDeletedCacheAfterRemoval()
             }
-            // 復元で新しい現行版が増えるので履歴を更新。
-            await loadVersions(for: path, env: env)
+            // 復元で新しい現行版が増えるので履歴を更新。成功 note は退避して残す
+            // （M4 以来 loadVersions の入口リセットに消されていた既存事象 = PR #77 レビュー中 1 補足）。
+            await reloadVersionsPreservingOutcome(for: path, env: env)
         } catch {
             errorMessage = String(describing: error)
         }
+    }
+
+    /// 復元直後の一覧再読込。`loadVersions` は入口で `restoreNote` / `errorMessage` をリセットする
+    /// ため、そのまま呼ぶと復元の結果表示（成功 note / uploadConflict 等の失敗）が描画前に消える
+    /// （PR #77 レビュー中 1）。復元結果を退避 → 再読込 → 非 nil のものだけ再適用する
+    /// （復元がエラーのときは再読込側のエラーより復元エラーを優先して見せる）。
+    private func reloadVersionsPreservingOutcome(for path: String, env: AppEnvironment) async {
+        let note = restoreNote
+        let error = errorMessage
+        await loadVersions(for: path, env: env)
+        if note != nil { restoreNote = note }
+        if error != nil { errorMessage = error }
+    }
+
+    /// fpOnly の S3 内復元前の kind 衝突チェック（PR #77 レビュー低 1・ベストエフォート）。
+    /// folderSync の復元はローカル書込が file/dir 同名衝突を構造的に防ぐが、S3 内復元には
+    /// ローカル面が無いため、マニフェスト全景（`syncedPaths`）で「path が現在ディレクトリ
+    /// （配下に同期済みファイルがある）」「祖先が現在ファイル」を検出したら事前拒否する。
+    /// 一覧が未ロード（空）/ stale の取りこぼしは許容 = 発生してもデータ損失は無く、
+    /// FP ツリーの directory-wins と folderSync pull の #52 系処理で回収できる。
+    nonisolated static func hasKindConflict(path: String, syncedPaths: [String]) -> Bool {
+        guard !syncedPaths.isEmpty else { return false }
+        let dirPrefix = path + "/"
+        if syncedPaths.contains(where: { $0.hasPrefix(dirPrefix) }) { return true }
+        var ancestor = ""
+        for component in path.split(separator: "/").dropLast() {
+            ancestor = ancestor.isEmpty ? String(component) : "\(ancestor)/\(component)"
+            if syncedPaths.contains(ancestor) { return true }
+        }
+        return false
     }
 
     /// fpOnly の S3 内復元（Versions / Deleted 両タブ共用）。成功したら削除一覧からも外す
@@ -164,6 +196,11 @@ final class VersionHistoryModel {
     /// 並行書き手が同一内容を確定済みの場合も同じ帰結）。
     private func restoreInS3(path: String, versionId: String?, service: S3RestoreService) async {
         if isRestoring { return }
+        if Self.hasKindConflict(path: path, syncedPaths: syncedPaths) {
+            restoreNote = nil
+            errorMessage = String(localized: "Cannot restore this path: it conflicts with a currently synced folder or file of the same name.")
+            return
+        }
         isRestoring = true
         errorMessage = nil
         restoreNote = nil
