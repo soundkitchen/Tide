@@ -2370,6 +2370,28 @@
           }
         }
       }
+    },
+    "Restored as the new current version:" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "新しい現行バージョンとして復元しました:"
+          }
+        }
+      }
+    },
+    "This version already matches the current content." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このバージョンは既に現在の内容と同一です。"
+          }
+        }
+      }
     }
   },
   "version" : "1.1"

@@ -55,14 +55,21 @@ final class VersionHistoryModel {
     @ObservationIgnored private var cacheSaveTask: Task<Void, Never>?
 
     /// ローカル DB の `files` から同期済み相対パスを取り込み、自然順にソートして保持する。
+    /// fpOnly（DB を開かない）はマニフェスト読みで代替する（M5 Track B-2・ユーザ確定 2026-07-23。
+    /// `ManifestSnapshotLoader` = 拡張と同じ DB 非接触の読み取り専用ローダ・FP レプリカが見ている
+    /// 真実と同一ソース。ウィンドウを開いたときだけの読みなのでコストは許容）。
     /// 失敗しても致命ではない（一覧が空のまま手入力で代替できる）ので握りつぶす。
     func loadSyncedPaths(env: AppEnvironment) async {
-        guard let db = env.database else { return }
         do {
-            let paths = try await db.pool.read { db in
-                try FileRecord.fetchAll(db).map(\.path)
+            if let db = env.database {
+                let paths = try await db.pool.read { db in
+                    try FileRecord.fetchAll(db).map(\.path)
+                }
+                syncedPaths = paths.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+            } else if let s3 = env.s3 {
+                let files = try await ManifestSnapshotLoader(source: s3).load()
+                syncedPaths = files.keys.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
             }
-            syncedPaths = paths.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
         } catch {
             AppLogger.ui.error("Failed to load synced paths: \(String(describing: error), privacy: .private)")
         }
@@ -115,8 +122,15 @@ final class VersionHistoryModel {
     }
 
     /// 選んだ版をローカルへ復元する（`SyncEngine.restore` 経由 → 再アップロード）。
+    /// fpOnly は S3 内復元（`S3RestoreService` = 過去版を新しい現行版として書き直す・M5 Track B-2）。
     func restore(_ version: FileVersion, env: AppEnvironment) async {
         guard let path = loadedPath else { return }
+        if env.engine == nil, let service = env.makeS3RestoreService() {
+            await restoreInS3(path: path, versionId: version.versionId, service: service)
+            // 復元で新しい現行版が増えるので履歴を更新（no-op でもエラーでも表示は最新に揃える）。
+            await loadVersions(for: path, env: env)
+            return
+        }
         guard let engine = env.engine else {
             errorMessage = String(localized: "Not configured")
             return
@@ -140,6 +154,33 @@ final class VersionHistoryModel {
             }
             // 復元で新しい現行版が増えるので履歴を更新。
             await loadVersions(for: path, env: env)
+        } catch {
+            errorMessage = String(describing: error)
+        }
+    }
+
+    /// fpOnly の S3 内復元（Versions / Deleted 両タブ共用）。成功したら削除一覧からも外す
+    /// （原 key に新しい現行版が乗る = もはや「現在削除済み」ではない。`.alreadyCurrent` =
+    /// 並行書き手が同一内容を確定済みの場合も同じ帰結）。
+    private func restoreInS3(path: String, versionId: String?, service: S3RestoreService) async {
+        if isRestoring { return }
+        isRestoring = true
+        errorMessage = nil
+        restoreNote = nil
+        defer { isRestoring = false }
+
+        do {
+            let outcome = try await service.restore(relativePath: path, versionId: versionId)
+            switch outcome {
+            case .restored:
+                restoreNote = "\(String(localized: "Restored as the new current version:")) \(path)"
+            case .alreadyCurrent:
+                restoreNote = String(localized: "This version already matches the current content.")
+            }
+            if deletedFiles.contains(where: { $0.relativePath == path }) {
+                deletedFiles.removeAll { $0.relativePath == path }
+                persistDeletedCacheAfterRemoval()
+            }
         } catch {
             errorMessage = String(describing: error)
         }
@@ -274,12 +315,19 @@ final class VersionHistoryModel {
     }
 
     /// 削除済みファイルを、delete marker 直前の実体版で復元する。
+    /// fpOnly は S3 内復元（原 key へ新しい現行版として書き直す・M5 Track B-2）。
     func restoreDeleted(_ history: FileVersionHistory, env: AppEnvironment) async {
+        guard let version = history.latestRestorableVersion else { return }
+        if env.engine == nil, let service = env.makeS3RestoreService() {
+            await restoreInS3(
+                path: history.relativePath, versionId: version.versionId, service: service
+            )
+            return
+        }
         guard let engine = env.engine else {
             errorMessage = String(localized: "Not configured")
             return
         }
-        guard let version = history.latestRestorableVersion else { return }
         isRestoring = true
         errorMessage = nil
         restoreNote = nil
