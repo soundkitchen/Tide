@@ -164,6 +164,8 @@ final class FakeVersionedObjectClient: VersionedObjectClient, @unchecked Sendabl
     let etag: String
     let chunkSize: Int
     private(set) var lastVersionId: String?
+    /// GET（stream）が呼ばれた回数。上限ガード等で「DL 前に弾いた」ことの検証用（B-2）。
+    private(set) var streamCallCount = 0
 
     init(streamData: Data, headSize: Int64? = nil, notFoundHead: Bool = false, etag: String = "e1", chunkSize: Int = 1024) {
         self.streamData = streamData
@@ -187,6 +189,7 @@ final class FakeVersionedObjectClient: VersionedObjectClient, @unchecked Sendabl
         sink: (Data) throws -> Void
     ) async throws -> TideS3Client.StreamObjectResult? {
         lastVersionId = versionId
+        streamCallCount += 1
         var idx = 0
         while idx < streamData.count {
             let end = min(idx + chunkSize, streamData.count)

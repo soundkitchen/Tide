@@ -450,7 +450,11 @@ struct MenuBarContent: View {
                     .disabled(env.config.syncRootPath == nil)
             }
             if env.engine != nil {
+                // Sync Activity は DB（sync_log）由来のため engine 稼働時のみ。
                 menuRow("Sync Activity…", systemImage: "list.bullet.rectangle") { activateAndOpen("activity") }
+            }
+            if env.engine != nil || env.signaler != nil {
+                // Version History は S3 直参照で列挙し、fpOnly でも S3 内復元（B-2）で復元できる。
                 menuRow("Version History…", systemImage: "clock.arrow.circlepath") { activateAndOpen("versions") }
             }
             menuRow("Settings…", systemImage: "gearshape") { activateAndOpen("settings") }

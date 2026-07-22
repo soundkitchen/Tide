@@ -194,6 +194,30 @@ final class AppEnvironment {
         Self.enforceTLSBucketPolicyDetached(s3: s3)
     }
 
+    /// fpOnly 稼働中の「S3 内復元」サービス（M5 Track B-2）。folderSync（engine 稼働）では
+    /// 既存のローカル書き戻し復元（`SyncEngine.restore`）を使うため nil を返す。
+    /// tmp は Caches 側のみ（DB / syncRoot / bookmark 非接触 = fpOnly の凍結温存を維持）。
+    func makeS3RestoreService() -> S3RestoreService? {
+        guard engine == nil, signaler != nil, let s3 else { return nil }
+        guard let tmpDir = try? TideTmpDirectory.cacheTmp() else { return nil }
+        let updater = ManifestUpdater(
+            store: s3,
+            deviceId: config.deviceId,
+            // 復元の書込確定点で FP レプリカへ即時 signal（アプリ Uploader の onManifestWrite と
+            // 同じ配線・coalesce は FileProviderController 側）。定期 HEAD の次周期を待たず反映される。
+            onManifestDidWrite: { Task { @MainActor in FileProviderController.signalRemoteChanges() } }
+        )
+        return S3RestoreService(
+            client: s3,
+            put: s3,
+            updater: updater,
+            tmpDir: tmpDir,
+            uploadSizeLimitBytes: config.uploadSizeLimitBytes,
+            downloadLimiter: RateLimiter(ratePerSec: Double(config.downloadBandwidthBytesPerSec)),
+            uploadLimiter: RateLimiter(ratePerSec: Double(config.uploadBandwidthBytesPerSec))
+        )
+    }
+
     /// Keychain から AWS 資格情報を読む（folderSync / fpOnly 両起動パス共通）。
     private func loadCredentialsOrThrow() throws -> AWSCredentials {
         do {

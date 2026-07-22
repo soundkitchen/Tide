@@ -38,7 +38,13 @@ struct VersionHistoryWindow: View {
         }
         .padding(16)
         .frame(minWidth: 540, minHeight: 460)
-        // 削除一覧の軽量キャッシュ（#29 (b)）をオープン時に 1 回読み、Deleted タブを即表示できるようにする。
+        // オープン時に 1 回ずつ・並行に読む（.task 2 本 = それぞれ構造化・直列だと fpOnly の
+        // マニフェスト全景ロードが削除一覧キャッシュの即表示 #29 (b) を遅らせる —
+        // PR #77 再レビュー任意 1）。
+        // 同期済みパス一覧: 検索導線 + fpOnly 復元の kind 衝突ガードの材料（Deleted タブ直行でも
+        // ガードが効くようタブ表示ではなくここで読む — PR #77 レビュー低 1）。
+        .task { await model.loadSyncedPaths(env: env) }
+        // 削除一覧の軽量キャッシュ（#29 (b)・Deleted タブの即表示用）。
         .task { await model.loadDeletedCache(env: env) }
     }
 
@@ -56,7 +62,6 @@ struct VersionHistoryWindow: View {
             }
             syncedFileList
         }
-        .task { await model.loadSyncedPaths(env: env) }
     }
 
     /// 同期済みファイル（ローカル DB の `files`）のインライン一覧。`pathInput` で絞り込み、

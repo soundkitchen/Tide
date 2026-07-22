@@ -7,6 +7,13 @@ import Darwin
 /// 同期フォルダと別ボリュームになる場合は同期フォルダ配下の `.tide/tmp/` にフォールバックする
 /// （`moveItem` を atomic な rename に保つため）。
 public enum TideTmpDirectory {
+    /// fpOnly（同期ルート無し = フォールバック先が無い）用: Caches 側 tmp をそのまま返す
+    /// （M5 Track B-2）。S3 内復元の tmp は最後に S3 へ PUT して消すだけ（ローカルへの
+    /// atomic move が無い）ので、同一ボリューム要件も無い。
+    public static func cacheTmp() throws -> URL {
+        try preferredCacheTmp()
+    }
+
     public static func resolve(for syncRoot: URL) -> (tmpDir: URL, usedFallback: Bool) {
         let preferred: URL
         do {

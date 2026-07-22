@@ -46,6 +46,8 @@ F4 の是正内容（2026-06-11・M4 Sync Activity 対応に同梱）: `recentEr
 
 回帰テスト: `ObjectVersionHistoryTests`（不正キー除外含む全分岐）/ `RestoreTargetTests` / `RestoreServiceTests`（symlink 非追従・サイズ超過 abort・サイズ不一致・別名退避を実 DB + フェイク S3 で固定）。
 
+**追記（2026-07-23・M5 Track B-2）:** fpOnly 用の第 2 の復元入口 `S3RestoreService`（S3 内復元 = tmp DL → 現行版 PUT → `ManifestUpdater` 合流）を追加。上表のゲートとの対応: key 検証は入口の `validateRelativePath` で同一 / **ローカル FS 書込ゼロ**（syncRoot・DB 非接触。tmp は Caches 側の自己管理ファイルのみ = ルート脱出・symlink 追従の面が構造的に無い。tmp 読みも規約どおり `NoFollowFileReader`）/ DL サイズ DoS ガードは M7 と同一（HEAD 真実サイズ + streaming 超過破棄 + 実サイズ突合）/ 上書き保護はローカル面が無いため 3-way 側へ移る = 共有チョークポイント `updateFileEntry` の `decideUpload`（並行更新は `uploadConflict` で安全中断・無音上書きなし）。PUT レグは SSE-S3 常時付与 + アップロード上限を DL 前に適用。回帰は `S3RestoreServiceTests`。
+
 ## M4 通知（UserNotifications）のレビュー（2026-06-15）
 
 `NotificationManager` / `NotificationPolicy` を追加。新規の未対応脆弱性は無し。観点 2 点のみ記録:

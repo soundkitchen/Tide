@@ -173,8 +173,11 @@ FP 一本化（切替前 soak ゲート撤廃 = `docs/09` #40 節・2026-07-22 �
   分岐より前に走るため、旧ロケーションからの一度きりファイル移動だけは fpOnly でも起こりうる
   （内容を変えず場所を移すだけ・既移行環境では no-op = shard_state 凍結の不変条件は破らない）。
 - **残（Track B の続き）**: ~~B-1 = 設定画面のモード切替 UI + fpOnly 時のメニューバー表示縮退~~
-  （✅ 2026-07-22 実装・下記 B-1 節）、B-2 = S3 内復元（`S3RestoreService`）、
-  B-3 = `soak-check --fp-only`、B-4 = 切替ランブック。
+  （✅ 2026-07-22 実装・下記 B-1 節）、~~B-2 = S3 内復元（`S3RestoreService`）~~（✅ 2026-07-23
+  実装・下記 B-2 節）、B-3 = `soak-check --fp-only`、B-4 = 切替ランブック
+  （**Keep Downloaded 運用を 1 行入れる**: 重要ファイル投入後はルートを「ダウンロードを保持」に
+  してローカル完全コピーを維持する。非ピン実体化分がディスク圧迫時に OS に自動 evict されるかは
+  未検証 = 切替後ライブ soak の観察項目）。
 
 #### FP-only 稼働モード B-1 = モード切替 UI + 表示縮退（M5 Track B・2026-07-22）
 
@@ -198,6 +201,58 @@ FP 一本化（切替前 soak ゲート撤廃 = `docs/09` #40 節・2026-07-22 �
   開かないため sync_log / files が読めない = 表示できないのが正しい）。
 - **文言**: 新規 12 キーを `Localizable.xcstrings` へ追加（`extractionState: manual`・ja 翻訳済み。
   「Last remote check: %@」は engine カードと共用の既存キー）。
+
+#### FP-only 稼働モード B-2 = S3 内復元（M5 Track B・2026-07-23）
+
+fpOnly は DB / syncRoot に触れないため、既存のローカル書き戻し復元（`SyncEngine.restore` →
+`RestoreService`）が使えない。代替は **`S3RestoreService`（`TideCore/S3/`）= 選んだ過去版を
+S3 の新しい現行版として書き直す**（方式はユーザ確定 2026-07-22: tmp DL → 現行版 PUT →
+`ManifestUpdater` 合流）。FP レプリカへの反映は書込確定点の signal → `enumerateChanges` に乗る。
+
+- **手順**: `validateRelativePath` → `headObject(versionId:)` で真実サイズ（履歴版に sha/size は
+  無い = M7 と同じ担保）→ **アップロード上限を DL 前に適用**（復元は再アップロードを伴うため
+  `PartPlan.isWithinUploadLimit`。超過は `fileTooLarge`）→ 3-way ベース = 復元開始時点の現行
+  entry sha（`updater.store.getShard`。無ければ base nil = 削除済み/未追跡の新規作成側）→
+  Caches tmp へストリーム DL（走りながら sha256・超過即破棄・実サイズ突合）→ **現行と同一 sha
+  なら PUT もマニフェスト書込もしない no-op**（`.alreadyCurrent`・版チャーン防止）→ 本体 PUT
+  （`NoFollowFileReader` 単一 FD・16 MiB 超は `MultipartUploader`・SSE-S3 は実装側で常時付与）→
+  `updateFileEntry(base:)`。競合は RMW 内 `decideUpload` が `uploadConflict` で安全中断
+  （ローカル書込ゼロなので退避不要・PUT 済みの版は「マニフェスト外の不可視 live 版」として
+  残る = アプリのアップロード競合と同じ特性・版履歴で回収可）。
+- **entry の mtime = 復元時刻（now）**（ユーザ確定 2026-07-23）: folderSync 復元（ローカル書き
+  戻し → 再アップロードが stat 実値 = 復元時刻を記録）と観測挙動が対称。
+- **配線**: `AppEnvironment.makeS3RestoreService()`（fpOnly 稼働中 = `engine == nil` ×
+  `signaler != nil` のときだけ非 nil）。`ManifestUpdater` の `onManifestDidWrite` に
+  `FileProviderController.signalRemoteChanges()` を配線（アプリ Uploader の `onManifestWrite` と
+  同型）。帯域制御は config の up/down 値から都度 `RateLimiter` を構築。tmp は
+  `TideTmpDirectory.cacheTmp()`（新設 = Caches 側固定。復元 tmp は PUT 後に消すだけで
+  ローカルへの atomic move が無いため同一ボリューム要件も無い）。
+- **UI**: ポップオーバーの「Version History…」を fpOnly でも表示（`engine != nil || signaler !=
+  nil`。Sync Activity は DB 由来のため engine のみ維持）。`VersionHistoryModel` は engine 不在 ×
+  `makeS3RestoreService()` 非 nil で S3 内復元へ分岐（Versions / Deleted 両タブ共用の
+  `restoreInS3`。成功時は削除一覧からも除去 = 原 key に現行版が乗る）。**Versions タブの
+  パス一覧は fpOnly ではマニフェスト読み**（ユーザ確定 2026-07-23: `ManifestSnapshotLoader` =
+  拡張と同じ DB 非接触読み取り専用ローダ・FP レプリカが見ている真実と同一ソース。ウィンドウを
+  開いたときだけの読みでコスト許容）。版列挙・削除済み一覧は元々 S3 直参照（`listObjectVersions` +
+  `DeletedFilesCache`）のため fpOnly でそのまま動く。
+- **回帰**: `S3RestoreServiceTests`（新現行版書込 + signal 発火 / 削除済み復元 = base nil /
+  no-op 短絡 / 並行更新の `uploadConflict` 中断・無音上書きなし / サイズ不一致・超過・上限の
+  各ガード / 不正パス入口拒否 / マルチパート経路のパート結合一致 / tmp 後始末）。
+  セキュリティ面の対応記録は `security/README.md` M4 復元レビュー節の追記（2026-07-23）。
+- **レビュー反映（PR #77）**: ① 中 1 = 復元直後の一覧再読込（`loadVersions`）が入口リセットで
+  結果表示（成功 note / `uploadConflict` 等の失敗）を描画前に消す → `reloadVersionsPreservingOutcome`
+  （退避 → 再読込 → 非 nil のみ再適用・復元エラーを再読込エラーより優先）。folderSync 側の
+  成功 note が M4 以来消えていた既存事象も同修正で解消。② 低 1 = 現在ディレクトリ化している
+  パスへの S3 内復元が file/dir 同名衝突をマニフェストへ注入できる（folderSync はローカル書込が
+  構造的に防ぐ・S3 内復元にはローカル面が無い）→ **UI 層の事前拒否**（ユーザ確定 2026-07-23）=
+  `VersionHistoryModel.hasKindConflict`（path が現在 dir = 配下に同期済みファイルあり / 祖先が
+  現在 file をマニフェスト全景で判定・`VersionHistoryKindConflictTests`）。**ベストエフォート**:
+  一覧未ロード / stale は素通しだが、発生してもデータ損失は無く FP ツリーの directory-wins と
+  folderSync pull の #52 系処理で回収できる。ガードの材料になる `loadSyncedPaths` はウィンドウ
+  オープン時ロードへ移動（Deleted タブ直行でも武装。再レビュー任意 1 = 直列ロードが fpOnly の
+  削除一覧キャッシュ即表示 #29 (b) を遅らせるため `.task` 2 本の並行ロードへ）。記録のみ 2 件 =
+  クラッシュ時の `s3restore-*.part` 残骸は次回同一復元まで残る（Caches 配下 = システム purge
+  対象・現状維持）/ `errorMessage` の生エラー文字列は既存パス踏襲。
 
 ### ダウンロード一時ディレクトリ
 - **`TideTmpDirectory.resolve(for:)` で同一ボリュームの tmp を返す**。第一選択は `~/Library/Caches/Tide/tmp/`。同期ルートと別ボリュームになる時のみ `<syncRoot>/.tide/tmp/` にフォールバック。`moveItem` の atomic 性を保つため。

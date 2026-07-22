@@ -2370,6 +2370,39 @@
           }
         }
       }
+    },
+    "Restored as the new current version:" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "新しい現行バージョンとして復元しました:"
+          }
+        }
+      }
+    },
+    "This version already matches the current content." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このバージョンは既に現在の内容と同一です。"
+          }
+        }
+      }
+    },
+    "Cannot restore this path: it conflicts with a currently synced folder or file of the same name." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このパスは復元できません: 現在同期中の同名フォルダ / ファイルと衝突しています。"
+          }
+        }
+      }
     }
   },
   "version" : "1.1"
