@@ -95,6 +95,13 @@ enum FileProviderController {
         }
     }
 
+    /// FP ドメインのルート（`~/Library/CloudStorage/Tide-Tide`）の Finder 表示 URL を返す
+    /// （未登録 / 取得失敗は nil）。fpOnly ポップオーバーの「Open Tide in Finder」用（B-1）。
+    static func userVisibleURL() async -> URL? {
+        guard let manager = NSFileProviderManager(for: domain) else { return nil }
+        return try? await manager.getUserVisibleURL(for: .rootContainer)
+    }
+
     /// リモート変化（pull がシャード変化を取り込んだ / アップロードがマニフェストを書いた）を
     /// FP ドメインへ通知する（M5 Phase 4・アプリ側が主経路）。fire-and-forget・未登録なら no-op。
     /// replicated 拡張への signal は `.workingSet` のみ有効（他コンテナは無視される）。

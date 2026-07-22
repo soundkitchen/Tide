@@ -41,6 +41,18 @@ struct SettingsWindow: View {
     @State private var fileProviderEnabled: Bool?
     @State private var fileProviderMessage: String?
 
+    /// 稼働モード（Track B-1）。ConfigStore は @Observable でないので他設定と同じ @State write-through。
+    /// 適用は次回起動から（ユーザ確定・B-0）＝ここでの変更は保存のみで稼働中モードは変えない。
+    @State private var syncMode: ConfigStore.SyncMode = .folderSync
+
+    /// いま実際に稼働しているモード（bootstrap 結果から判定。未起動 = nil）。
+    /// 保存値と食い違うときだけ「再起動で適用」の案内を出す。
+    private var runningSyncMode: ConfigStore.SyncMode? {
+        if env.signaler != nil { return .fpOnly }
+        if env.engine != nil { return .folderSync }
+        return nil
+    }
+
     private static let bytesPerMBps: Int64 = 1_000_000
     private static let maxBwMBps: Double = 100
 
@@ -193,6 +205,26 @@ struct SettingsWindow: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            Section("Sync mode") {
+                Picker("Sync mode", selection: $syncMode) {
+                    Text("Folder sync").tag(ConfigStore.SyncMode.folderSync)
+                    Text("File Provider only").tag(ConfigStore.SyncMode.fpOnly)
+                }
+                .pickerStyle(.radioGroup)
+                if syncMode == .fpOnly, fileProviderEnabled == false {
+                    Text("File Provider is not enabled. Enable it above first, or nothing will sync in File Provider–only mode.")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+                if let running = runningSyncMode, running != syncMode {
+                    Text("Quit and reopen Tide to apply the new mode.")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+                Text("Folder sync watches your sync folder with the built-in engine. File Provider only stops that engine and syncs solely through the Tide location in Finder — the sync folder and local database are left untouched, so you can switch back anytime.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Section {
                 Button("Open Setup Wizard") {
                     NSApp.activate(ignoringOtherApps: true)
@@ -212,6 +244,9 @@ struct SettingsWindow: View {
         .task { fileProviderEnabled = await FileProviderController.isEnabled() }
         .onChange(of: notificationsEnabled) { _, newValue in
             env.config.notificationsEnabled = newValue
+        }
+        .onChange(of: syncMode) { _, newValue in
+            env.config.syncMode = newValue
         }
         .onChange(of: noLimit) { _, _ in persistLimit() }
         .onChange(of: limitGB) { _, _ in persistLimit() }
@@ -248,6 +283,7 @@ struct SettingsWindow: View {
         }
         loadBandwidth()
         notificationsEnabled = env.config.notificationsEnabled
+        syncMode = env.config.syncMode
     }
 
     /// config のバイト/秒値を (無制限フラグ, MB/s クランプ値) に変換する（`<= 0` = 無制限）。

@@ -172,12 +172,32 @@ FP 一本化（切替前 soak ゲート撤廃 = `docs/09` #40 節・2026-07-22 �
   になるのを防ぐ・任意 5）。**記録（レビュー 6）**: `LegacyStateMigrator.migrateIfNeeded()` はモード
   分岐より前に走るため、旧ロケーションからの一度きりファイル移動だけは fpOnly でも起こりうる
   （内容を変えず場所を移すだけ・既移行環境では no-op = shard_state 凍結の不変条件は破らない）。
-- **残（Track B の続き）**: B-1 = 設定画面のモード切替 UI（再起動適用の案内）+ fpOnly 時の
-  メニューバー表示縮退、B-2 = S3 内復元（`S3RestoreService`）、B-3 = `soak-check --fp-only`、
-  B-4 = 切替ランブック。fpOnly への導線は B-1 まで UI に無い（defaults 直書きのみ = 露出前）。
-  **B-1 の受け入れ項目に「fpOnly 時にポップオーバーが『Starting…』恒久表示にならない」を含める**
-  （PR #75 レビュー低 1: 現状 fpOnly は `engine == nil` × `setupCompleted` × `bootstrapFailure == nil`
-  のため `MenuBarContent.fallbackHeader` の Starting… 分岐に落ちたまま固定される）。
+- **残（Track B の続き）**: ~~B-1 = 設定画面のモード切替 UI + fpOnly 時のメニューバー表示縮退~~
+  （✅ 2026-07-22 実装・下記 B-1 節）、B-2 = S3 内復元（`S3RestoreService`）、
+  B-3 = `soak-check --fp-only`、B-4 = 切替ランブック。
+
+#### FP-only 稼働モード B-1 = モード切替 UI + 表示縮退（M5 Track B・2026-07-22）
+
+- **設定画面「Sync mode」セクション**: radioGroup の Picker（Folder sync / File Provider only）。
+  他設定と同じ @State write-through（`ConfigStore.syncMode` へ即保存）だが**適用は次回起動から**
+  （B-0 の確定方式）— いま稼働しているモード（`runningSyncMode` = `env.signaler != nil ? fpOnly :
+  engine != nil ? folderSync : nil`）と保存値が食い違うときだけ「Quit and reopen Tide to apply」を
+  表示する。fpOnly 選択時に FP ドメインが無効なら橙警告（**ハードブロックはしない**: 有効化は同じ
+  設定画面の Enable ボタンで即できるし、無効のまま fpOnly で起動しても signaler の isEnabled ガードで
+  no-op + ポップオーバー側の赤警告で気づける = 単純さ優先）。
+- **ポップオーバーの fpOnly 分岐**: `engine == nil` × `signaler != nil` で `fpOnlyHeader` を表示
+  （**「Starting…」恒久表示の解消 = PR #75 レビュー低 1**）。ヘッダ（File Provider Sync）+ 状態カード
+  （最終リモート確認 / 最終変化 signal / 失敗中の橙表示）+ FP ドメイン無効時の赤警告（何も同期されて
+  いない旨）。状態は `RemoteChangeSignaler` を **@Observable 化**した読み出し専用プロパティ
+  （`lastCheckedAt` / `lastSignaledAt` / `lastCheckFailed`・判定ロジックへの影響ゼロ・遷移は
+  `RemoteChangeSignalerTests.testObservableStateTransitions` で固定）。
+- **secondary アクションの縮退**: fpOnly では「Open Sync Folder」を「Open Tide in Finder」
+  （`FileProviderController.userVisibleURL()` = `getUserVisibleURL(.rootContainer)` 新設）へ差し替え
+  （凍結温存中の同期フォルダを開かせると「同期されないフォルダ」を同期先と誤認するため）。
+  Sync Activity / Version History は既存の `engine != nil` ゲートで自然に非表示（fpOnly は DB を
+  開かないため sync_log / files が読めない = 表示できないのが正しい）。
+- **文言**: 新規 12 キーを `Localizable.xcstrings` へ追加（`extractionState: manual`・ja 翻訳済み。
+  「Last remote check: %@」は engine カードと共用の既存キー）。
 
 ### ダウンロード一時ディレクトリ
 - **`TideTmpDirectory.resolve(for:)` で同一ボリュームの tmp を返す**。第一選択は `~/Library/Caches/Tide/tmp/`。同期ルートと別ボリュームになる時のみ `<syncRoot>/.tide/tmp/` にフォールバック。`moveItem` の atomic 性を保つため。
