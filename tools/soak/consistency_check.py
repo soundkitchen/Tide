@@ -9,6 +9,12 @@
 読み取り専用: S3 へは GET/LIST のみ、DB は mode=ro、同期フォルダは stat のみ。
 S3 認証はアプリの Keychain ではなく aws CLI の資格情報（profile）を使う。
 
+FP-only 稼働モード用スコープ（--fp-only・M5 Track B / B-3）: fpOnly はアプリが
+DB / 同期フォルダに触れない（凍結温存）ため、通常スコープの突合は「凍結 DB vs
+生きたマニフェスト」の比較になり偽 DRIFT を量産する。--fp-only は突合面を S3 側
+（index↔shards 構造整合 + マニフェスト↔実体）だけに縮退し、DB 凍結の見張り
+（mtime 前進 WARN・stat のみで DB は開かない）を足す。
+
 一過性ノイズの抑制: 同期進行中のズレを誤検出しないため、疑いが出たら
 --recheck-delay 秒後にもう一度だけ全パスを取り直し、両方に現れた所見だけを DRIFT として報告する。
 
@@ -72,19 +78,33 @@ def polling_interval_seconds():
 def resolve_config(args):
     bucket = args.bucket or defaults_read("tide.bucketName")
     region = args.region or defaults_read("tide.region")
-    sync_root = args.sync_root or defaults_read("tide.syncRootPath")
     db_path = args.db or DEFAULT_DB
-    missing = [n for n, v in
-               [("bucket", bucket), ("region", region), ("sync-root", sync_root)] if not v]
+    saved_mode = defaults_read("tide.syncMode") or "folderSync"
+    # 突合ガード: 保存モードが fpOnly なのに通常スコープで走らせると、凍結中の
+    # DB / 同期フォルダを生きたマニフェストと比較して偽 DRIFT（exit 1 誤発報）になる。
+    if saved_mode == "fpOnly" and not args.fp_only:
+        config_error(
+            "保存モードが fpOnly です — 通常スコープは凍結中の DB / 同期フォルダを"
+            "生きたマニフェストと突合して偽 DRIFT になります。--fp-only を付けて"
+            "ください（make soak-check-fp / soak-watch-fp）")
+    missing = [n for n, v in [("bucket", bucket), ("region", region)] if not v]
+    if args.fp_only:
+        sync_root = None  # fpOnly では同期フォルダ・DB を必須にしない（凍結面は突合しない）
+    else:
+        sync_root = args.sync_root or defaults_read("tide.syncRootPath")
+        if not sync_root:
+            missing.append("sync-root")
     if missing:
         config_error(f"解決できない設定があります（group defaults 未設定 or 引数不足）: {missing}")
-    if not os.path.isdir(sync_root):
-        config_error(f"同期フォルダが存在しません: {sync_root}")
-    if not os.path.isfile(db_path):
-        config_error(f"DB が存在しません: {db_path}")
+    if not args.fp_only:
+        if not os.path.isdir(sync_root):
+            config_error(f"同期フォルダが存在しません: {sync_root}")
+        if not os.path.isfile(db_path):
+            config_error(f"DB が存在しません: {db_path}")
     return {
         "bucket": bucket, "region": region, "sync_root": sync_root,
         "db": db_path, "profile": args.profile,
+        "fp_only": args.fp_only, "saved_mode": saved_mode,
     }
 
 
@@ -230,6 +250,42 @@ def sha256_of(path):
     return h.hexdigest()
 
 
+# ---------------------------------------------------------------- fpOnly 凍結見張り
+
+class DBFreezeWatch:
+    """fpOnly の不変条件「アプリは DB を開かない = 書かない」の見張り（B-3）。
+
+    db.sqlite / -wal の mtime を stat だけで観測し、プロセス内の前回観測から
+    前進していたら WARN（DB は開かない = 読み取り専用の維持）。単発実行では
+    観測窓が実行中しか無いため、実効性があるのは --watch 常駐運用。
+    保存モードが fpOnly のときだけ武装する（folderSync 中の --fp-only 予行で
+    正当な DB 書込を誤報しない）。DB 不在（クリーン環境）は無反応。
+    """
+
+    def __init__(self, db_path):
+        self.db_path = db_path
+        self.last = self.sample()
+
+    def sample(self):
+        latest = None
+        for suffix in ("", "-wal"):
+            try:
+                m = os.lstat(self.db_path + suffix).st_mtime
+            except FileNotFoundError:
+                continue
+            latest = m if latest is None else max(latest, m)
+        return latest
+
+    def check(self, findings):
+        cur = self.sample()
+        if self.last is not None and cur is not None and cur > self.last + 0.001:
+            findings.add(WARN, "fp-freeze:db-advanced",
+                         "fpOnly 凍結中のはずの DB（db.sqlite / -wal）の mtime が前進"
+                         "（bootstrap 分岐のバグ = モード可逆性の要が壊れている疑い）")
+        self.last = cur
+        return cur
+
+
 # ---------------------------------------------------------------- 所見の集約
 
 class Findings:
@@ -260,13 +316,63 @@ class Findings:
 
 # ---------------------------------------------------------------- 突合パス
 
+def check_tmp_remnants(tmp_dirs, findings, now):
+    """tmp 残骸（1h 超の *.part）。s3restore- は B-2 の S3 内復元のクラッシュ残骸クラス。"""
+    for tmp_dir in tmp_dirs:
+        if not os.path.isdir(tmp_dir):
+            continue
+        for name in os.listdir(tmp_dir):
+            if not name.startswith(("dl-", "restore-", "s3restore-")) \
+               or not name.endswith(".part"):
+                continue
+            age = now - os.lstat(os.path.join(tmp_dir, name)).st_mtime
+            if age > 3600:
+                findings.add(WARN, f"tmp:remnant:{name}",
+                             f"tmp 残骸（{age/3600:.1f}h 経過）: {tmp_dir}/{name}")
+
+
 def run_pass(cfg, deep=False):
     findings = Findings()
     manifest, shard_objects = load_manifest(cfg, findings)
-    db_files, transfers, queue, shard_cache = load_db(cfg)
-    local = scan_folder(cfg["sync_root"])
     s3_objects = aws_list(cfg, "files/")
     now = time.time()
+
+    if cfg["fp_only"] and cfg["saved_mode"] != "fpOnly":
+        findings.add(WARN, "mode:config-mismatch",
+                     f"--fp-only 指定だが保存モードは {cfg['saved_mode']}"
+                     "（切替前の予行なら想定どおり・DB / ローカル面は突合していない）")
+
+    # --- マニフェスト ↔ S3 実体（現行バージョン）: 両モード共通 ---
+    for path, entry in manifest.items():
+        obj = s3_objects.get(f"files/{path}")
+        if obj is None:
+            findings.add(DRIFT, f"manifest-s3:missing:{path}",
+                         f"マニフェスト宣言の実体が S3 に無い（現行 = 削除 or 不在）: {path}")
+            continue
+        if obj["size"] != entry.get("size"):
+            findings.add(DRIFT, f"manifest-s3:size:{path}",
+                         f"size 不一致（マニフェスト ↔ S3 現行）: {path}")
+        elif entry.get("etag", "").strip('"') and obj["etag"] != entry["etag"].strip('"'):
+            findings.add(DRIFT, f"manifest-s3:etag:{path}",
+                         f"etag 不一致（S3 現行がマニフェストの版でない）: {path}")
+    for key in s3_objects:
+        path = key.removeprefix("files/")
+        if path not in manifest:
+            findings.add(WARN, f"s3-manifest:orphan:{path}",
+                         f"S3 実体はあるがマニフェスト未宣言（孤児）: {path}")
+
+    stats = {"manifest": len(manifest), "s3_objects": len(s3_objects)}
+    tmp_dirs = [CACHES_TMP]
+
+    if cfg["fp_only"]:
+        # DB / 同期フォルダは凍結温存中 = 比較相手が生きていないため突合しない
+        # （DB↔マニフェスト・ローカル↔DB・shard_state・transfer_state・upload_queue）。
+        check_tmp_remnants(tmp_dirs, findings, now)
+        return findings, stats
+
+    db_files, transfers, queue, shard_cache = load_db(cfg)
+    local = scan_folder(cfg["sync_root"])
+    tmp_dirs.append(os.path.join(cfg["sync_root"], ".tide", "tmp"))
 
     pending_paths = {q[0] for q in queue}
 
@@ -291,25 +397,6 @@ def run_pass(cfg, deep=False):
             # リモート先行（pull 未着）は正常な過渡状態 → 2 パス持続なら DRIFT
             findings.add(DRIFT, f"manifest-db:missing:{path}",
                          f"マニフェストにあるが DB に無い（pull 未反映が持続）: {path}")
-
-    # --- マニフェスト ↔ S3 実体（現行バージョン） ---
-    for path, entry in manifest.items():
-        obj = s3_objects.get(f"files/{path}")
-        if obj is None:
-            findings.add(DRIFT, f"manifest-s3:missing:{path}",
-                         f"マニフェスト宣言の実体が S3 に無い（現行 = 削除 or 不在）: {path}")
-            continue
-        if obj["size"] != entry.get("size"):
-            findings.add(DRIFT, f"manifest-s3:size:{path}",
-                         f"size 不一致（マニフェスト ↔ S3 現行）: {path}")
-        elif entry.get("etag", "").strip('"') and obj["etag"] != entry["etag"].strip('"'):
-            findings.add(DRIFT, f"manifest-s3:etag:{path}",
-                         f"etag 不一致（S3 現行がマニフェストの版でない）: {path}")
-    for key in s3_objects:
-        path = key.removeprefix("files/")
-        if path not in manifest:
-            findings.add(WARN, f"s3-manifest:orphan:{path}",
-                         f"S3 実体はあるがマニフェスト未宣言（孤児）: {path}")
 
     # --- ローカル ↔ DB ---
     for path, rec in db_files.items():
@@ -355,17 +442,7 @@ def run_pass(cfg, deep=False):
                          "pull 1 周期以内なら正常・持続すれば pull 停滞の兆候）")
 
     # --- 残骸・宙ぶらりん ---
-    for tmp_dir in [CACHES_TMP, os.path.join(cfg["sync_root"], ".tide", "tmp")]:
-        if not os.path.isdir(tmp_dir):
-            continue
-        for name in os.listdir(tmp_dir):
-            if not (name.startswith("dl-") or name.startswith("restore-")) \
-               or not name.endswith(".part"):
-                continue
-            age = now - os.lstat(os.path.join(tmp_dir, name)).st_mtime
-            if age > 3600:
-                findings.add(WARN, f"tmp:remnant:{name}",
-                             f"tmp 残骸（{age/3600:.1f}h 経過）: {tmp_dir}/{name}")
+    check_tmp_remnants(tmp_dirs, findings, now)
     for path, direction, updated_at in transfers:
         age = now - updated_at
         if age > 3600:
@@ -377,9 +454,8 @@ def run_pass(cfg, deep=False):
                          f"upload_queue 滞留（{op}・attempts={attempts}・"
                          f"{(now - enqueued_at)/3600:.1f}h）: {path}")
 
-    stats = {"manifest": len(manifest), "db": len(db_files), "local": len(local),
-             "s3_objects": len(s3_objects), "queue": len(queue),
-             "transfers": len(transfers)}
+    stats.update({"db": len(db_files), "local": len(local),
+                  "queue": len(queue), "transfers": len(transfers)})
     return findings, stats
 
 
@@ -416,15 +492,18 @@ def sample_resources():
 
 # ---------------------------------------------------------------- 実行・出力
 
-def format_report(findings, stats, resources):
+def format_report(findings, stats, resources, fp_only=False):
     lines = []
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     counts = {s: findings.count(s) for s in (DRIFT, WARN, INFO)}
     verdict = "整合 OK" if counts[DRIFT] == 0 else f"DRIFT {counts[DRIFT]} 件"
+    if fp_only:
+        verdict = f"fp-only {verdict}"
+    seg = " / ".join(f"{label} {stats[key]}" for key, label in
+                     [("manifest", "manifest"), ("db", "db"),
+                      ("local", "local"), ("s3_objects", "s3")] if key in stats)
     lines.append(f"[{ts}] {verdict}  "
-                 f"(warn {counts[WARN]} / info {counts[INFO]})  "
-                 f"manifest {stats['manifest']} / db {stats['db']} / "
-                 f"local {stats['local']} / s3 {stats['s3_objects']} 件")
+                 f"(warn {counts[WARN]} / info {counts[INFO]})  {seg} 件")
     for label in ("app", "extension"):
         samples = resources.get(label)
         if not samples:
@@ -450,6 +529,11 @@ def main():
     ap.add_argument("--profile", help="aws CLI プロファイル")
     ap.add_argument("--deep", action="store_true",
                     help="ローカル全ファイルを SHA-256 再計算して DB と突合（重い）")
+    ap.add_argument("--fp-only", action="store_true",
+                    help="FP-only 稼働モード用スコープ（Track B / B-3）: S3 面"
+                         "（index↔shards / マニフェスト↔実体）のみ突合し、凍結中の"
+                         " DB / 同期フォルダには触れない。DB 凍結見張り"
+                         "（mtime 前進 WARN）付き")
     ap.add_argument("--recheck-delay", type=int, default=None,
                     help="DRIFT 検出時の再確認までの秒数。デフォルトは poll 間隔 + 30"
                          "（group defaults の tide.pollingIntervalSeconds・未設定なら 180+30=210）。"
@@ -460,9 +544,14 @@ def main():
     ap.add_argument("--log", default=os.path.expanduser(
         "~/Library/Logs/TideSoak/soak.jsonl"), help="watch モードの JSONL 出力先")
     args = ap.parse_args()
+    if args.fp_only and args.deep:
+        config_error("--deep は --fp-only と併用できません（fpOnly はローカル実体を突合しない）")
     cfg = resolve_config(args)
     if args.recheck_delay is None:
         args.recheck_delay = polling_interval_seconds() + 30
+    # 凍結見張りは実モードが fpOnly のときだけ武装（予行 = folderSync 中は正当な DB 書込がある）
+    freeze = DBFreezeWatch(cfg["db"]) \
+        if cfg["fp_only"] and cfg["saved_mode"] == "fpOnly" else None
 
     def one_round():
         findings, stats = run_pass(cfg, deep=args.deep)
@@ -472,8 +561,10 @@ def main():
             time.sleep(args.recheck_delay)
             second, stats = run_pass(cfg, deep=args.deep)
             findings = findings.merge_persistent(second)
+        if freeze:
+            freeze.check(findings)
         resources = sample_resources()
-        print(format_report(findings, stats, resources))
+        print(format_report(findings, stats, resources, fp_only=cfg["fp_only"]))
         return findings, stats, resources
 
     if not args.watch:
@@ -487,9 +578,11 @@ def main():
             findings, stats, resources = one_round()
             record = {
                 "ts": datetime.datetime.now().isoformat(timespec="seconds"),
+                "fp_only": cfg["fp_only"],
                 "drift": findings.count(DRIFT), "warn": findings.count(WARN),
                 "info": findings.count(INFO), "stats": stats,
                 "resources": resources,
+                **({"db_mtime": freeze.last} if freeze else {}),
                 "findings": [
                     {"severity": sev, "key": key, "message": msg}
                     for key, (sev, msg) in findings.items.items() if sev != INFO

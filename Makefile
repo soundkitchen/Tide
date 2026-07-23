@@ -104,6 +104,14 @@ soak-check: ## soak 整合性突合: 同期フォルダ ↔ DB ↔ S3 マニフ�
 soak-watch: ## soak 常時観測: consistency_check を 300 秒間隔で回し JSONL 追記（#40）
 	python3 tools/soak/consistency_check.py --watch 300
 
+.PHONY: soak-check-fp
+soak-check-fp: ## soak 整合性突合（FP-only スコープ: S3 面のみ・凍結 DB/フォルダ非突合）（#40）
+	python3 tools/soak/consistency_check.py --fp-only
+
+.PHONY: soak-watch-fp
+soak-watch-fp: ## soak 常時観測（FP-only スコープ）: 300 秒間隔で JSONL 追記（#40）
+	python3 tools/soak/consistency_check.py --fp-only --watch 300
+
 .PHONY: soak-churn
 soak-churn: ## soak 負荷注入: FSEvents/FP 両サイドへ create/edit/rename/delete 等を交錯注入（#40）
 	python3 tools/soak/churn.py

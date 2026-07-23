@@ -22,6 +22,10 @@ python3 tools/soak/consistency_check.py --deep
 
 # 5 分間隔で回しっぱなし（JSONL を ~/Library/Logs/TideSoak/soak.jsonl に追記）
 python3 tools/soak/consistency_check.py --watch 300
+
+# FP-only 稼働モード用スコープ（後述）
+python3 tools/soak/consistency_check.py --fp-only              # または make soak-check-fp
+python3 tools/soak/consistency_check.py --fp-only --watch 300  # または make soak-watch-fp
 ```
 
 ### チェック内容
@@ -33,7 +37,7 @@ python3 tools/soak/consistency_check.py --watch 300
 | マニフェスト ↔ S3 実体 | 宣言実体の不在（現行 = 削除）/ size・etag 不一致 / 孤児オブジェクト |
 | ローカル ↔ DB | 追跡ファイル不在 / size 不一致 / mtime 乖離（再アップロードループ因子・WARN）/ `--deep` で sha256 |
 | shard_state ↔ shards | DB の etag キャッシュとシャード実体の不一致（pull 1 周期以内の stale は正常・持続すれば pull 停滞の兆候・WARN）/ 実在しないシャードのキャッシュ残存 |
-| 残骸 | tmp の `dl-*.part` / `restore-*.part`（1h 超）/ `transfer_state` 宙ぶらりん / `upload_queue` 滞留 |
+| 残骸 | tmp の `dl-*.part` / `restore-*.part` / `s3restore-*.part`（1h 超）/ `transfer_state` 宙ぶらりん / `upload_queue` 滞留 |
 | リソース | 本体・FP 拡張の RSS / FD 数（watch モードで時系列 JSONL・複数プロセス並存時は全 PID を記録） |
 
 ### 誤検出の抑制
@@ -45,6 +49,28 @@ python3 tools/soak/consistency_check.py --watch 300
   それより短いと正常な伝播遅延を DRIFT と誤検出する。
 - `upload_queue` に載っている path の片側欠落・不一致はアップロード待ちとして INFO に落とす。
 - DB 未追跡のローカルファイル（除外対象・未同期）は INFO（`.DS_Store` 等）。
+
+### --fp-only — FP-only 稼働モード用スコープ（M5 Track B / B-3）
+
+fpOnly（`ConfigStore.syncMode`）ではアプリが DB / 同期フォルダに触れない（凍結温存）ため、
+通常スコープの突合は「凍結 DB vs 生きたマニフェスト」の比較になり偽 DRIFT を量産する。
+`--fp-only` は突合面を S3 側だけに縮退する。切替後ライブ soak（#40 事後ゲート =
+persistent DRIFT ゼロの実績）の観測係として `--watch` / cron で定期実行する。
+
+- **残す**: index ↔ shards 構造整合 / マニフェスト ↔ S3 実体（孤児含む）/
+  Caches tmp 残骸 / リソース観測（本体 + FP 拡張）。
+- **落とす**: DB 系すべて（DB↔マニフェスト・ローカル↔DB・shard_state・`transfer_state`・
+  `upload_queue`）と同期フォルダ走査。設定解決も sync-root / DB を必須にしない。
+- **足す**: **DB 凍結見張り** — `db.sqlite` / `-wal` の mtime を stat だけで観測し、
+  プロセス内の前回観測から前進したら WARN（fpOnly 中に DB が書かれる = bootstrap 分岐の
+  バグ = モード可逆性の要が壊れている疑い）。DB は開かない = 読み取り専用の維持。
+  単発実行では観測窓が実行中しか無いため実効性があるのは `--watch` 常駐。保存モードが
+  fpOnly のときだけ武装（folderSync 中の予行で正当な DB 書込を誤報しない）。
+- **突合ガード**: 保存モード（group defaults の `tide.syncMode`）が fpOnly なのに
+  `--fp-only` 無しで実行したら **exit 2**（偽 DRIFT の cron 誤発報を構造的に防ぐ）。
+  逆（`--fp-only` × folderSync 設定）は切替前の予行として WARN + 続行。
+  `--deep` とは併用不可（fpOnly はハッシュすべきローカル実体を持たない）= exit 2。
+- watch の JSONL には `fp_only` フラグと（凍結見張り武装時）`db_mtime` が載る。
 
 ### 終了コード
 
