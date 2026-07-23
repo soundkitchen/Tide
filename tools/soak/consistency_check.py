@@ -75,11 +75,16 @@ def polling_interval_seconds():
     return v if v > 0 else 180
 
 
+def current_saved_mode():
+    """保存中の同期モード。ConfigStore と同じく未知/未設定は folderSync 扱い。"""
+    return defaults_read("tide.syncMode") or "folderSync"
+
+
 def resolve_config(args):
     bucket = args.bucket or defaults_read("tide.bucketName")
     region = args.region or defaults_read("tide.region")
     db_path = args.db or DEFAULT_DB
-    saved_mode = defaults_read("tide.syncMode") or "folderSync"
+    saved_mode = current_saved_mode()
     # 突合ガード: 保存モードが fpOnly なのに通常スコープで走らせると、凍結中の
     # DB / 同期フォルダを生きたマニフェストと比較して偽 DRIFT（exit 1 誤発報）になる。
     if saved_mode == "fpOnly" and not args.fp_only:
@@ -90,6 +95,9 @@ def resolve_config(args):
     missing = [n for n, v in [("bucket", bucket), ("region", region)] if not v]
     if args.fp_only:
         sync_root = None  # fpOnly では同期フォルダ・DB を必須にしない（凍結面は突合しない）
+        if args.sync_root:
+            print("注意: --fp-only では --sync-root は使いません（同期フォルダは突合しない）",
+                  file=sys.stderr)
     else:
         sync_root = args.sync_root or defaults_read("tide.syncRootPath")
         if not sync_root:
@@ -259,7 +267,8 @@ class DBFreezeWatch:
     前進していたら WARN（DB は開かない = 読み取り専用の維持）。単発実行では
     観測窓が実行中しか無いため、実効性があるのは --watch 常駐運用。
     保存モードが fpOnly のときだけ武装する（folderSync 中の --fp-only 予行で
-    正当な DB 書込を誤報しない）。DB 不在（クリーン環境）は無反応。
+    正当な DB 書込を誤報しない）。DB 不在の継続（クリーン環境）は無反応だが、
+    不在 → 出現も「fpOnly 中に DB が書かれた」の一形態なので WARN（PR #79 低 1）。
     """
 
     def __init__(self, db_path):
@@ -278,12 +287,18 @@ class DBFreezeWatch:
 
     def check(self, findings):
         cur = self.sample()
-        if self.last is not None and cur is not None and cur > self.last + 0.001:
+        if cur is not None and (self.last is None or cur > self.last + 0.001):
             findings.add(WARN, "fp-freeze:db-advanced",
                          "fpOnly 凍結中のはずの DB（db.sqlite / -wal）の mtime が前進"
-                         "（bootstrap 分岐のバグ = モード可逆性の要が壊れている疑い）")
+                         "（不在 → 新規出現を含む・bootstrap 分岐のバグ = "
+                         "モード可逆性の要が壊れている疑い）")
         self.last = cur
         return cur
+
+    def resync(self):
+        """武装解除中（モード切替検出後）の基準追従。folderSync 期間の正当な
+        DB 書込を WARN せず、fpOnly 復帰後の初回比較で偽 WARN しないようにする。"""
+        self.last = self.sample()
 
 
 # ---------------------------------------------------------------- 所見の集約
@@ -331,15 +346,17 @@ def check_tmp_remnants(tmp_dirs, findings, now):
                              f"tmp 残骸（{age/3600:.1f}h 経過）: {tmp_dir}/{name}")
 
 
-def run_pass(cfg, deep=False):
+def run_pass(cfg, deep=False, actual_mode=None):
     findings = Findings()
     manifest, shard_objects = load_manifest(cfg, findings)
     s3_objects = aws_list(cfg, "files/")
     now = time.time()
 
-    if cfg["fp_only"] and cfg["saved_mode"] != "fpOnly":
+    # 突合は毎周回の実モード（watch 常駐がモード切替を跨いでも stale にしない・PR #79 中 1）
+    mode = actual_mode if actual_mode is not None else cfg["saved_mode"]
+    if cfg["fp_only"] and mode != "fpOnly":
         findings.add(WARN, "mode:config-mismatch",
-                     f"--fp-only 指定だが保存モードは {cfg['saved_mode']}"
+                     f"--fp-only 指定だが保存モードは {mode}"
                      "（切替前の予行なら想定どおり・DB / ローカル面は突合していない）")
 
     # --- マニフェスト ↔ S3 実体（現行バージョン）: 両モード共通 ---
@@ -554,15 +571,25 @@ def main():
         if cfg["fp_only"] and cfg["saved_mode"] == "fpOnly" else None
 
     def one_round():
-        findings, stats = run_pass(cfg, deep=args.deep)
+        # 実モードは毎周回再読する — watch 常駐がモード切替（ランブック実施等）を
+        # 跨いだとき、起動時スコープのまま偽 DRIFT / 偽 WARN を積み続けない（PR #79 中 1）。
+        actual_mode = current_saved_mode()
+        findings, stats = run_pass(cfg, deep=args.deep, actual_mode=actual_mode)
         if findings.count(DRIFT) > 0:
             print(f"  … DRIFT 候補 {findings.count(DRIFT)} 件 → "
                   f"{args.recheck_delay}s 後に再確認（一過性除外）", file=sys.stderr)
             time.sleep(args.recheck_delay)
-            second, stats = run_pass(cfg, deep=args.deep)
+            second, stats = run_pass(cfg, deep=args.deep, actual_mode=actual_mode)
             findings = findings.merge_persistent(second)
+        if actual_mode != cfg["saved_mode"]:
+            findings.add(WARN, "mode:switched",
+                         f"モード切替を検出（起動時 {cfg['saved_mode']} → 現在 {actual_mode}）"
+                         "— スコープ / 凍結見張りが実態とずれています。watch を再起動してください")
         if freeze:
-            freeze.check(findings)
+            if actual_mode == "fpOnly":
+                freeze.check(findings)
+            else:
+                freeze.resync()  # 切替検出中は基準だけ追従（folderSync の正当な書込を誤報しない）
         resources = sample_resources()
         print(format_report(findings, stats, resources, fp_only=cfg["fp_only"]))
         return findings, stats, resources

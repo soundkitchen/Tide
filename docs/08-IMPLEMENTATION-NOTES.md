@@ -310,6 +310,14 @@ fpOnly ではアプリが DB / syncRoot に触れない（凍結温存）ため�
   クラッシュ残骸クラス・PR #77 記録）を追加。watch JSONL に `fp_only` / `db_mtime` を追加。
 - スモーク確認（2026-07-24・実 S3 327 件）: `--fp-only` = fp-only 整合 OK + 予行 WARN /
   通常スコープ = 整合 OK（回帰なし）/ `--deep` 併用 = exit 2。
+- **レビュー反映（PR #79）**: ① 中 1 = watch 常駐がモード切替（ランブック実施）を跨ぐと
+  起動時スコープのまま偽 DRIFT / 偽 WARN を積み続ける → **実モードを毎周回再読**し、起動時と
+  食い違ったら `mode:switched` WARN（watch 再起動の案内）。凍結見張りは切替検出中 `resync()`
+  で基準だけ追従（folderSync 期間の正当な書込を誤報せず・fpOnly 復帰後の初回比較でも
+  偽 WARN しない）。**B-4 ランブックにも「切替の前後で soak-watch を停止 / 再起動する」を
+  明記する**（WARN は保険・正規手順は再起動）。② 低 1 = DB **不在 → 新規出現**も mtime 前進
+  として WARN（fpOnly 中に DB が生える = bootstrap 分岐バグの一形態・見逃していた）。
+  ③ nit = `--fp-only` × `--sync-root` 明示指定は stderr で「使わない」ことを通知。
 
 ### ダウンロード一時ディレクトリ
 - **`TideTmpDirectory.resolve(for:)` で同一ボリュームの tmp を返す**。第一選択は `~/Library/Caches/Tide/tmp/`。同期ルートと別ボリュームになる時のみ `<syncRoot>/.tide/tmp/` にフォールバック。`moveItem` の atomic 性を保つため。

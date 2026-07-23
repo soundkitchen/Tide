@@ -62,10 +62,15 @@ persistent DRIFT ゼロの実績）の観測係として `--watch` / cron で定
 - **落とす**: DB 系すべて（DB↔マニフェスト・ローカル↔DB・shard_state・`transfer_state`・
   `upload_queue`）と同期フォルダ走査。設定解決も sync-root / DB を必須にしない。
 - **足す**: **DB 凍結見張り** — `db.sqlite` / `-wal` の mtime を stat だけで観測し、
-  プロセス内の前回観測から前進したら WARN（fpOnly 中に DB が書かれる = bootstrap 分岐の
-  バグ = モード可逆性の要が壊れている疑い）。DB は開かない = 読み取り専用の維持。
-  単発実行では観測窓が実行中しか無いため実効性があるのは `--watch` 常駐。保存モードが
-  fpOnly のときだけ武装（folderSync 中の予行で正当な DB 書込を誤報しない）。
+  プロセス内の前回観測から前進したら WARN（DB 不在 → **新規出現**も含む。fpOnly 中に
+  DB が書かれる = bootstrap 分岐のバグ = モード可逆性の要が壊れている疑い）。DB は
+  開かない = 読み取り専用の維持。単発実行では観測窓が実行中しか無いため実効性があるのは
+  `--watch` 常駐。保存モードが fpOnly のときだけ武装（folderSync 中の予行で正当な DB
+  書込を誤報しない）。
+- **モード切替の検出**: 実モード（`tide.syncMode`）は**毎周回再読**する。watch 常駐が
+  モード切替を跨いだら `mode:switched` WARN で watch の再起動を案内（起動時スコープの
+  まま偽 DRIFT / 偽 WARN を積み続けない）。凍結見張りは切替検出中は基準追従のみ。
+  **正規手順は「切替の前後で soak-watch を停止 / 再起動」**（B-4 ランブックに明記）。
 - **突合ガード**: 保存モード（group defaults の `tide.syncMode`）が fpOnly なのに
   `--fp-only` 無しで実行したら **exit 2**（偽 DRIFT の cron 誤発報を構造的に防ぐ）。
   逆（`--fp-only` × folderSync 設定）は切替前の予行として WARN + 続行。
