@@ -34,6 +34,15 @@ enum MenuBarPresentation: Equatable {
         }
     }
 
+    /// fpOnly（engine 無し・`RemoteChangeSignaler` 稼働）のメニューバー表示（B-2 受け入れで
+    /// 発見した B-1 縮退の取りこぼし: engine nil を `.notConfigured` に落とすと fpOnly が
+    /// 恒久「？＋波」になる）。増分取り込みの実体は FP 拡張側にあり進行状態は見えないため、
+    /// 「正常 = 通常の波 / 直近のリモート確認が失敗中 = 荒れた海」の 2 値にする。
+    /// `.error` の summary はアイコン用途では未使用（ポップオーバーは fpOnly 専用ヘッダが担う）。
+    static func fpOnlyHeadline(lastCheckFailed: Bool) -> MenuBarPresentation {
+        lastCheckFailed ? .error(summary: "") : .allSynced
+    }
+
     // MARK: - メニューバー status item アイコン
 
     /// 非 syncing 時の「固定グリフ」アセット名（各 1:1 で imageset が実在する）。

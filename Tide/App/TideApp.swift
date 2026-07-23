@@ -70,8 +70,13 @@ private struct MenuBarLabel: View {
     @State private var animationFrame = 0
 
     /// 現在の同期状態を、ポップオーバー見出しと同じ純粋関数で算出する（表示ロジックの単一管理）。
+    /// fpOnly（engine 無し × signaler 稼働）は専用マッピング（さもないと engine nil が
+    /// `.notConfigured` に落ちて恒久「？＋波」アイコンになる — B-2 実機受け入れで発見）。
     private var presentation: MenuBarPresentation {
-        MenuBarPresentation.headline(
+        if env.engine == nil, let signaler = env.signaler {
+            return MenuBarPresentation.fpOnlyHeadline(lastCheckFailed: signaler.lastCheckFailed)
+        }
+        return MenuBarPresentation.headline(
             status: env.engine?.status ?? .notConfigured,
             queueDepth: env.engine?.queueDepth ?? 0,
             activeTransferCount: env.engine?.activeTransfers.count ?? 0

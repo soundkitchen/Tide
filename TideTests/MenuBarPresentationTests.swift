@@ -116,6 +116,22 @@ final class MenuBarPresentationTests: XCTestCase {
         }
     }
 
+    /// fpOnly（engine 無し・signaler 稼働）のマッピングを固定（B-2 実機受け入れで発見した
+    /// B-1 縮退取りこぼし: engine nil → .notConfigured で恒久「？＋波」になる回帰の防止）。
+    func testFPOnlyHeadline() {
+        XCTAssertEqual(MenuBarPresentation.fpOnlyHeadline(lastCheckFailed: false), .allSynced)
+        XCTAssertEqual(
+            MenuBarPresentation.fpOnlyHeadline(lastCheckFailed: true), .error(summary: "")
+        )
+        // アイコンは「通常の波 / 荒れた海」の 2 値（? グリフに落ちない）。
+        XCTAssertEqual(
+            MenuBarPresentation.fpOnlyHeadline(lastCheckFailed: false).menuBarIconName, "MenuBarWave"
+        )
+        XCTAssertEqual(
+            MenuBarPresentation.fpOnlyHeadline(lastCheckFailed: true).menuBarIconName, "MenuBarError"
+        )
+    }
+
     /// frame 番号 → アセット名の生成規則を固定（View と共有する単一の規則）。
     func testSyncFrameNameFormat() {
         XCTAssertEqual(MenuBarPresentation.syncFrameName(0), "MenuBarSync0")
