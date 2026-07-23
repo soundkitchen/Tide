@@ -286,6 +286,39 @@ S3 の新しい現行版として書き直す**（方式はユーザ確定 2026-
   罠（現状はアイコン用途に閉じている旨のコメント + テストでガード済み。必要になったら専用
   case（例: `.remoteCheckFailed`）化が構造的）。
 
+#### FP-only 稼働モード B-3 = soak-check --fp-only（M5 Track B・2026-07-24）
+
+切替後ライブ soak（`docs/09` #40 節 = persistent DRIFT ゼロの事後ゲート）の観測係。
+fpOnly ではアプリが DB / syncRoot に触れない（凍結温存）ため、通常スコープの
+`consistency_check.py` は「凍結 DB vs 生きたマニフェスト」の比較で偽 DRIFT を量産する —
+突合面を S3 側へ縮退した `--fp-only` を追加した（`make soak-check-fp` / `soak-watch-fp`）。
+実装は `tools/soak/consistency_check.py`（アプリと独立・読み取り専用は維持）。
+
+- **残す**: index ↔ shards 構造整合（B-2 受け入れ中にシャード 79 の実 DRIFT を検出した
+  実績面）/ マニフェスト ↔ S3 実体（孤児含む）/ Caches tmp 残骸 / リソース観測（本体 +
+  FP 拡張）。**落とす**: DB 系すべてと同期フォルダ走査（比較相手が生きていない）。
+  設定解決も sync-root / DB を必須にしない。
+- **DB 凍結見張り**（`DBFreezeWatch`）: `db.sqlite` / `-wal` の mtime を stat のみで観測し、
+  プロセス内の前回観測から前進したら WARN = 「fpOnly なのに DB が書かれた」（bootstrap
+  分岐のバグ = モード可逆性の要が壊れている疑い）を無エラーのまま見逃さない。DB は
+  開かない。実効性は `--watch` 常駐時（単発は実行中の窓のみ）。**保存モードが fpOnly の
+  ときだけ武装**（folderSync 中の `--fp-only` 予行で正当な DB 書込を誤報しない）。
+- **突合ガード**: 保存 `tide.syncMode` = fpOnly なのに `--fp-only` 無しは exit 2 で案内
+  （偽 DRIFT の cron 誤発報を構造的に防ぐ・exit 1 と区別）。逆は予行として WARN + 続行。
+  `--deep` との併用は exit 2（fpOnly はローカル実体を突合しない）。
+- **ついでの穴埋め（両モード共通）**: tmp 残骸検出へ `s3restore-*.part`（B-2 の S3 内復元の
+  クラッシュ残骸クラス・PR #77 記録）を追加。watch JSONL に `fp_only` / `db_mtime` を追加。
+- スモーク確認（2026-07-24・実 S3 327 件）: `--fp-only` = fp-only 整合 OK + 予行 WARN /
+  通常スコープ = 整合 OK（回帰なし）/ `--deep` 併用 = exit 2。
+- **レビュー反映（PR #79）**: ① 中 1 = watch 常駐がモード切替（ランブック実施）を跨ぐと
+  起動時スコープのまま偽 DRIFT / 偽 WARN を積み続ける → **実モードを毎周回再読**し、起動時と
+  食い違ったら `mode:switched` WARN（watch 再起動の案内）。凍結見張りは切替検出中 `resync()`
+  で基準だけ追従（folderSync 期間の正当な書込を誤報せず・fpOnly 復帰後の初回比較でも
+  偽 WARN しない）。**B-4 ランブックにも「切替の前後で soak-watch を停止 / 再起動する」を
+  明記する**（WARN は保険・正規手順は再起動）。② 低 1 = DB **不在 → 新規出現**も mtime 前進
+  として WARN（fpOnly 中に DB が生える = bootstrap 分岐バグの一形態・見逃していた）。
+  ③ nit = `--fp-only` × `--sync-root` 明示指定は stderr で「使わない」ことを通知。
+
 ### ダウンロード一時ディレクトリ
 - **`TideTmpDirectory.resolve(for:)` で同一ボリュームの tmp を返す**。第一選択は `~/Library/Caches/Tide/tmp/`。同期ルートと別ボリュームになる時のみ `<syncRoot>/.tide/tmp/` にフォールバック。`moveItem` の atomic 性を保つため。
 
