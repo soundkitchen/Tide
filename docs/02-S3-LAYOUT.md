@@ -196,7 +196,8 @@ let request = PutBucketVersioningInput(
 - **遡及窓**: ライフサイクル `tide-expire-old-versions`（NoncurrentDays=90）/ `tide-expire-delete-markers` により、復元できるのは概ね**直近 90 日**ぶん。
 - **取得**: `getObject` / `headObject` / `streamObject` は `versionId` を受けられる。復元は特定 `versionId` を `streamObject(versionId:)` でストリーミング DL する。
 - **整合性**: マニフェスト（`index.json` / shards）は**現行状態のみ**を表し、過去版・削除済みは含まない。よって**過去版には sha256 が無い**。履歴 DL では SHA 突合せず、`headObject(versionId:)` の真実サイズ（`Content-Length`）を上限ガード（ローカルディスク枯渇 DoS = M7 を復元でも維持）＆実サイズ突合に使う。復元後は通常 upload 経路で新マニフェストに sha256 が載り、以後の整合性は既存保証へ合流する。
-- **方式**: 「ローカルへ書き戻し → 再アップロード」（`RestoreService`）。選んだ版を一時ファイルへ DL → `PathValidator.resolveForWrite` + symlink 非追従で原パス（または別名退避）へ atomic move → FileWatcher が拾って新しい**現行版**として上げ直す（DB は触らない）。S3 内 CopyObject 方式は採らない（マニフェスト整合の設計コストが高い・据え置き）。
+- **方式**: 「ローカルへ書き戻し → 再アップロード」（`RestoreService`・folderSync モード）。選んだ版を一時ファイルへ DL → `PathValidator.resolveForWrite` + symlink 非追従で原パス（または別名退避）へ atomic move → FileWatcher が拾って新しい**現行版**として上げ直す（DB は触らない）。S3 内 CopyObject 方式は採らない（マニフェスト整合の設計コストが高い・据え置き。過去版に sha256 が無いため CopyObject では新マニフェスト entry を作れない）。
+- **fpOnly モードの復元（M5 Track B-2）**: ローカル面（syncRoot / DB）が無いため「**S3 内復元**」= `S3RestoreService`（tmp DL → sha256 計算 → 新しい現行版として PUT → `ManifestUpdater` 合流）。DL→PUT なので「過去版に sha が無い」制約と整合（sha は復元時に計算してマニフェストへ載る）。整合性モデル・遡及窓は上記と同一。バージョン履歴上は「復元 = 新しい現行版が 1 つ積まれる」で folderSync と同じ見え方。詳細は `docs/08`「FP-only 稼働モード B-2」節。
 - **復元先（ハイブリッド）**: 原パスへ書き戻す。ただしローカルに既存ファイルがあり現在 SHA が DB 記録（最後に同期した SHA）と食い違う＝未同期編集なら、`(restored YYYY-MM-DD HH-MM-SS)` の別名へ退避して上書きを避ける（純粋関数 `RestoreTarget.decide`）。
 - **rename / reparent（M5 Phase 5-4・FP 拡張の move）の版履歴上の見え方**: move は `CopyObject`（versionId 固定・サーバサイド）+ 旧キーへの delete marker で実現するため、**旧 path** には「それまでの版履歴 + delete marker」が残り（= 削除済み一覧に出る・90 日窓で回復可）、**新 path** はコピー結果を初版とする新しい履歴が始まる。**版履歴は path を跨いで繋がらない**（改名前の版を見るには旧 path 側を辿る）。move を繰り返すたびに旧 path 側へ孤児版が積まれるが、ライフサイクル失効（NoncurrentDays=90）で回収される — アップロード競合の orphan version と同じ扱い。
 

@@ -172,7 +172,7 @@ M1 の 100MiB ハード上限（`maxSizeM1`）は M3 で撤廃した。`Uploader
 - **シングルパート**（`≤ 16 MiB`、`PartPlan.shouldUseMultipart` が false）: O_NOFOLLOW の単一 FD から 1 回読んだバッファでハッシュも本体も賄い（M5: 2 回 open を畳む）、`putObject` で送る。
 - **マルチパート**（`> 16 MiB`）: `MultipartUploader` が単一 FD から順次読込しつつ SHA-256 を逐次更新し、読み終えたパートを**有界並列（最大 3）で UploadPart**。アダプティブパートサイズ（`PartPlan`）: 目標パート数 9,000 基準値を `[5MiB, 64MiB]` にクランプ（常駐メモリ抑制）、10,000 パートに収まらない超巨大ファイルのみ必要分まで partSize を上げる（MiB 境界切り上げで `partCount ≤ 10,000`）。瞬断は**パート単位リトライ**で吸収し、恒久失敗は best-effort `abort` → throw（ファイル単位リトライへ）。`UploadId` の永続化・再起動またぎ再開はサブタスク D（別チャンク）。**再開時の stale UploadId**（前回 complete 済みでクラッシュ／7 日ライフサイクル失効）は `NoSuchUpload` で空振りするので、complete 時は `headObject` で本体を確認し存在 & サイズ一致なら identity を回収して成功扱い、回収不能なら checkpoint を破棄してフル再開に委ねる（Issue #33。`docs/09` 据え置き (a) / `docs/08`）。
 
-**1 ファイルあたりのアップロード上限**は `ConfigStore.uploadSizeLimitBytes`（Settings で変更、既定 1GiB、`-1` = 無制限）。上限はアップロード方向のみに適用し、ダウンロード（復元）は常に許可する。上限超過は**黙ってスキップせず** `SyncError.fileTooLarge` を投げ、`SyncEngine.handleProcessingFailure` がリトライせずに `recentIssues` へ明示（分類サマリ + 行動指針）+ `sync_log` の `error` 記録 + キュー除去する（「このファイルはバックアップされていない」を可視化）。
+**1 ファイルあたりのアップロード上限**は `ConfigStore.uploadSizeLimitBytes`（Settings で変更、既定 1GiB、`-1` = 無制限）。上限はアップロード方向のみに適用し、ダウンロード（復元のローカル書き戻し）は常に許可する（例外: fpOnly の **S3 内復元**は再アップロードを本質的に伴うため、上限を **DL 前**に適用して `fileTooLarge` で拒否する — M5 Track B-2・`docs/08` B-2 節）。上限超過は**黙ってスキップせず** `SyncError.fileTooLarge` を投げ、`SyncEngine.handleProcessingFailure` がリトライせずに `recentIssues` へ明示（分類サマリ + 行動指針）+ `sync_log` の `error` 記録 + キュー除去する（「このファイルはバックアップされていない」を可視化）。
 
 ```swift
 let limit = config.uploadSizeLimitBytes   // 既定 1GiB、-1 = 無制限
@@ -605,7 +605,7 @@ M3 サブ C で **ベース / ローカル / リモートの 3 SHA による 3-w
 ## セキュリティゲート
 
 - マニフェスト由来の `relativePath` / `shardId` は **すべて** `PathValidator` を通す（`..` / 絶対パス / NUL / バックスラッシュ等を拒否し、解決後 URL が syncRoot 配下にあることまで確認）
-- マニフェスト系の `getObject` は `maxBytes` 16 MiB（OOM 自己防衛）。通常ファイルの DL は `streamObject` でチャンク・ストリーミング書込（メモリ有界）。旧 200MiB インメモリ cap は撤廃。**復元の DoS ガード（M7）は `Downloader` 側**: streaming の sink で受信累積長を**マニフェストの真実サイズ `entry.size`** と突合し、超過は破棄して仕切り直す（巨大本文によるローカルディスク枯渇を復元経路でも防ぐ＝M4 を復元でも維持）。アップロード上限とは別物（復元方向はユーザ上限を適用しない）
+- マニフェスト系の `getObject` は `maxBytes` 16 MiB（OOM 自己防衛）。通常ファイルの DL は `streamObject` でチャンク・ストリーミング書込（メモリ有界）。旧 200MiB インメモリ cap は撤廃。**復元の DoS ガード（M7）は `Downloader` 側**: streaming の sink で受信累積長を**マニフェストの真実サイズ `entry.size`** と突合し、超過は破棄して仕切り直す（巨大本文によるローカルディスク枯渇を復元経路でも防ぐ＝M4 を復元でも維持）。アップロード上限とは別物（復元のローカル書き戻し方向はユーザ上限を適用しない。fpOnly の S3 内復元だけは再アップロードを伴うため上限を DL 前に適用 — M5 Track B-2）
 - フルスキャンはシンボリックリンクを追従しない。走査は再帰下降（`walkSyncTree`・#64）で symlink（dir リンク含む）を**スタックへ push しない**＝構造的に降りない。`.syncignore` の discovery 走査（`loadLayeredIgnore`・pull 末尾専用）は enumerator ベースのままで、symlink item は `continue` のみ（deep enumeration は symlink へそもそも再帰しない。**symlink item で `skipDescendants()` を呼んではならない** — 無関係な隣接ディレクトリへの再帰がスキップされ、実在する追跡ファイルが削除検出に乗って S3 へ誤 delete される。Issue #54）
 - Downloader の書き込み先（最終コンポーネント）がシンボリックリンクなら拒否
 - 書込・削除経路（Downloader の `download` / `applyRemoteDeletion` / `renameLocalForConflict`）は `PathValidator.resolveForWrite` を通し、**祖先ディレクトリの symlink 経由のルート脱出**も拒否する（F2 / M6）

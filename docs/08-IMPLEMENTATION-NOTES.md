@@ -197,8 +197,10 @@ FP 一本化（切替前 soak ゲート撤廃 = `docs/09` #40 節・2026-07-22 �
 - **secondary アクションの縮退**: fpOnly では「Open Sync Folder」を「Open Tide in Finder」
   （`FileProviderController.userVisibleURL()` = `getUserVisibleURL(.rootContainer)` 新設）へ差し替え
   （凍結温存中の同期フォルダを開かせると「同期されないフォルダ」を同期先と誤認するため）。
-  Sync Activity / Version History は既存の `engine != nil` ゲートで自然に非表示（fpOnly は DB を
-  開かないため sync_log / files が読めない = 表示できないのが正しい）。
+  Sync Activity は既存の `engine != nil` ゲートで自然に非表示（fpOnly は DB を開かないため
+  sync_log が読めない = 表示できないのが正しい）。~~Version History も同ゲートで非表示~~
+  （B-1 当時の判断 → **B-2 で復権**: 列挙は元々 S3 直参照・パス一覧はマニフェスト読みで代替・
+  復元は S3 内復元へ分岐。下記 B-2 節）。
 - **文言**: 新規 12 キーを `Localizable.xcstrings` へ追加（`extractionState: manual`・ja 翻訳済み。
   「Last remote check: %@」は engine カードと共用の既存キー）。
 
