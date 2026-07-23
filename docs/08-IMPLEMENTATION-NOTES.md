@@ -276,6 +276,13 @@ S3 の新しい現行版として書き直す**（方式はユーザ確定 2026-
   作成 → アップロードの `commitShardWrite` が宣言を実 etag へ更新 → ファイル削除で原状復帰
   （シャード ID は `sha1(path)[0]` で総当たり選定）。B-2 とは無関係の既存事象で、切替後
   ライブ soak がこのクラスを検出できることの実地実証になった（`docs/09` #40 節）。
+- **PR #78 レビューの記録 2 件（対応不要）**: (a) fpOnly × FP 拡張無効（システム設定で OFF =
+  何も同期されない）でもメニューバーアイコンは「通常の波」のまま — signaler は index HEAD の
+  到達性しか見ない。ポップオーバーの赤警告で気づける。将来やるなら signaler 側で低頻度に
+  `isEnabled()` を併観測して合成。(b) `fpOnlyHeadline` の `.error(summary: "")` は空文字
+  センチネル — 将来 fpOnly の presentation を `headlineText` 系へ流すと「Error: 」表示になる
+  罠（現状はアイコン用途に閉じている旨のコメント + テストでガード済み。必要になったら専用
+  case（例: `.remoteCheckFailed`）化が構造的）。
 
 ### ダウンロード一時ディレクトリ
 - **`TideTmpDirectory.resolve(for:)` で同一ボリュームの tmp を返す**。第一選択は `~/Library/Caches/Tide/tmp/`。同期ルートと別ボリュームになる時のみ `<syncRoot>/.tide/tmp/` にフォールバック。`moveItem` の atomic 性を保つため。
