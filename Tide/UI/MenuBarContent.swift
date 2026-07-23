@@ -489,6 +489,11 @@ struct MenuBarContent: View {
     private func openFileProviderFolder() {
         Task {
             guard let url = await FileProviderController.userVisibleURL() else { return }
+            // getUserVisibleURL の返す URL は security-scoped。scope を開始せずに NSWorkspace へ
+            // 渡すと、sandbox 下では LS が「"Tide-Tide" を開くアクセス権がありません」で拒否する
+            // （B-2 実機受け入れで発見・Apple Developer Forums thread 724398 と同事例）。
+            let accessed = url.startAccessingSecurityScopedResource()
+            defer { if accessed { url.stopAccessingSecurityScopedResource() } }
             NSWorkspace.shared.open(url)
         }
     }

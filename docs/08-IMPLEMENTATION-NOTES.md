@@ -253,6 +253,29 @@ S3 の新しい現行版として書き直す**（方式はユーザ確定 2026-
   削除一覧キャッシュ即表示 #29 (b) を遅らせるため `.task` 2 本の並行ロードへ）。記録のみ 2 件 =
   クラッシュ時の `s3restore-*.part` 残骸は次回同一復元まで残る（Caches 配下 = システム purge
   対象・現状維持）/ `errorMessage` の生エラー文字列は既存パス踏襲。
+- **実機受け入れ（2026-07-24・dev バケット・全項目パス）**: fpOnly 切替往復（適用は次回起動
+  から / `Launched in FP-only mode` / ベースライン signal）・fpOnly ポップオーバーと縮退
+  メニュー・S3 内復元の全経路（通常 = note 残留 + レプリカ 0.5 秒反映 / no-op = 版数不変 /
+  削除済み = marker 越し復活 / kind 衝突 = UI 事前拒否で PUT ゼロ / 20MB マルチパート = sha
+  完全一致）・`RemoteChangeSignaler` の 180 秒 poll が index 変化を 4 回検知 signal・folderSync
+  復帰の増分 pull（fpOnly 期間の変化 3 件だけを DL = shard_state 凍結温存の実証）・folderSync
+  復元 note 残留（中 1 補足の回帰）・`make soak-check` 整合 OK。
+- **受け入れで発見・修正したバグ 2 件（B-1 起源・fpOnly 初実稼働で顕在化）**: ①
+  `getUserVisibleURL` の返す URL は **security-scoped** — scope を開始せず `NSWorkspace.open`
+  へ渡すと sandbox 下で LS が「"Tide-Tide" を開くアクセス権がありません」と拒否する →
+  `startAccessingSecurityScopedResource` で挟んで修正。② メニューバーアイコンが fpOnly で
+  恒久「？＋波」（`MenuBarLabel` が engine nil を `.notConfigured` に落とす）→
+  `MenuBarPresentation.fpOnlyHeadline`（正常 = 通常の波 / 直近リモート確認失敗中 = 荒れた海・
+  `MenuBarPresentationTests` で固定）へ。
+- **受け入れ中のインシデント記録: `soak-check` が実 DRIFT（stale index 宣言）を初検出**:
+  シャード 79 の index 宣言 etag/count が実体より古いまま残存（発生 = 2026-07-22 02:39 JST の
+  churn 期・同一秒の 2 連続シャード書込の 2 本目の updateIndex 未反映 = PR #56 記録の既知
+  残余クラス。自己治癒条件「次の同シャード書込」が対象シャード無変化のため 2 日間不発）。
+  実害 = 宣言 etag をキャッシュ済みの読者に exr 1 件が不可視（S3 実体・本機 DB は健全 =
+  データ損失なし）。**治癒手順** = 対象シャードへ落ちるパス名の小ファイルを同期フォルダに
+  作成 → アップロードの `commitShardWrite` が宣言を実 etag へ更新 → ファイル削除で原状復帰
+  （シャード ID は `sha1(path)[0]` で総当たり選定）。B-2 とは無関係の既存事象で、切替後
+  ライブ soak がこのクラスを検出できることの実地実証になった（`docs/09` #40 節）。
 
 ### ダウンロード一時ディレクトリ
 - **`TideTmpDirectory.resolve(for:)` で同一ボリュームの tmp を返す**。第一選択は `~/Library/Caches/Tide/tmp/`。同期ルートと別ボリュームになる時のみ `<syncRoot>/.tide/tmp/` にフォールバック。`moveItem` の atomic 性を保つため。
