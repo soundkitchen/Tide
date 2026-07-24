@@ -10,6 +10,10 @@ enum MenuBarPresentation: Equatable {
     case syncing(pending: Int)
     case paused
     case error(summary: String)
+    /// fpOnly: FP ドメインが無効（システム設定 OFF / 未登録）= 全同期停止（Issue #82）。
+    case fpDomainDisabled
+    /// fpOnly: 直近のリモート確認（index HEAD）が失敗中（一過性か持続かは時刻と併読）。
+    case fpRemoteCheckFailed
 
     /// 「すべて同期済み」は **`.idle` かつ queue 0 かつ転送中 0** のときだけ。
     /// `.idle` でも queue > 0 / 転送中 > 0 なら syncing 扱いにする（キュー処理周回の谷間で
@@ -37,10 +41,13 @@ enum MenuBarPresentation: Equatable {
     /// fpOnly（engine 無し・`RemoteChangeSignaler` 稼働）のメニューバー表示（B-2 受け入れで
     /// 発見した B-1 縮退の取りこぼし: engine nil を `.notConfigured` に落とすと fpOnly が
     /// 恒久「？＋波」になる）。増分取り込みの実体は FP 拡張側にあり進行状態は見えないため、
-    /// 「正常 = 通常の波 / 直近のリモート確認が失敗中 = 荒れた海」の 2 値にする。
-    /// `.error` の summary はアイコン用途では未使用（ポップオーバーは fpOnly 専用ヘッダが担う）。
-    static func fpOnlyHeadline(lastCheckFailed: Bool) -> MenuBarPresentation {
-        lastCheckFailed ? .error(summary: "") : .allSynced
+    /// 「正常 = 通常の波 / 異常 = 荒れた海」に落とす。異常は専用 case で区別する
+    /// （旧 `.error(summary: "")` 空文字センチネルは廃止 = PR #78 記録 (b) の構造的解消）:
+    /// - FP ドメイン無効 = 全同期停止（Issue #82）。一過性の確認失敗より常に優先。
+    /// - リモート確認失敗 = 一過性の可能性あり（HEAD 到達性のみの観測）。
+    static func fpOnlyHeadline(lastCheckFailed: Bool, fpDomainDisabled: Bool) -> MenuBarPresentation {
+        if fpDomainDisabled { return .fpDomainDisabled }
+        return lastCheckFailed ? .fpRemoteCheckFailed : .allSynced
     }
 
     // MARK: - メニューバー status item アイコン
@@ -56,6 +63,8 @@ enum MenuBarPresentation: Equatable {
         case .error:         return "MenuBarError"         // 月＋荒れた海
         case .notConfigured: return "MenuBarNotConfigured" // ？＋波
         case .syncing:       return "MenuBarWave"          // 実際は frame アニメに差し替わる
+        case .fpDomainDisabled:    return "MenuBarError"   // 全同期停止 = エラー系（Issue #82）
+        case .fpRemoteCheckFailed: return "MenuBarError"   // 旧 .error(summary: "") と同表示
         }
     }
 

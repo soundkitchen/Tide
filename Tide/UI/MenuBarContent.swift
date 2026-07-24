@@ -109,6 +109,8 @@ struct MenuBarContent: View {
                 : String(localized: "Syncing…")
         case .paused:           return String(localized: "Paused")
         case .error(let s):     return String(localized: "Error: \(s)")
+        case .fpDomainDisabled:    return String(localized: "File Provider disabled")
+        case .fpRemoteCheckFailed: return String(localized: "Remote check failed — will retry.")
         }
     }
 
@@ -118,7 +120,8 @@ struct MenuBarContent: View {
         case .allSynced:     return "checkmark.circle.fill"
         case .syncing:       return "arrow.triangle.2.circlepath.circle.fill"
         case .paused:        return "pause.circle.fill"
-        case .error:         return "exclamationmark.circle.fill"
+        case .error, .fpDomainDisabled, .fpRemoteCheckFailed:
+            return "exclamationmark.circle.fill"
         }
     }
 
@@ -128,7 +131,9 @@ struct MenuBarContent: View {
         case .allSynced:     return .green
         case .syncing:       return .blue
         case .paused:        return .yellow
-        case .error:         return .red
+        case .error, .fpDomainDisabled: return .red
+        // 一過性の可能性がある確認失敗はポップオーバーの警告文と同じ橙（全停止の赤と区別）。
+        case .fpRemoteCheckFailed:      return .orange
         }
     }
 

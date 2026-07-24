@@ -74,7 +74,10 @@ private struct MenuBarLabel: View {
     /// `.notConfigured` に落ちて恒久「？＋波」アイコンになる — B-2 実機受け入れで発見）。
     private var presentation: MenuBarPresentation {
         if env.engine == nil, let signaler = env.signaler {
-            return MenuBarPresentation.fpOnlyHeadline(lastCheckFailed: signaler.lastCheckFailed)
+            return MenuBarPresentation.fpOnlyHeadline(
+                lastCheckFailed: signaler.lastCheckFailed,
+                fpDomainDisabled: signaler.fpDomainDisabled
+            )
         }
         return MenuBarPresentation.headline(
             status: env.engine?.status ?? .notConfigured,

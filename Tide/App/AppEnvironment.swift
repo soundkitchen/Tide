@@ -185,7 +185,9 @@ final class AppEnvironment {
         let signaler = RemoteChangeSignaler(
             intervalSeconds: config.pollingIntervalSeconds,
             headIndexETag: { [s3] in try await s3.headObject(key: TideS3Client.indexKey)?.etag },
-            signal: { FileProviderController.signalRemoteChanges() }
+            signal: { FileProviderController.signalRemoteChanges() },
+            // 拡張 OFF = 全同期停止の検出（Issue #82）。メニューバーアイコンへ反映される。
+            isFPDomainEnabled: { await FileProviderController.isEnabled() }
         )
         self.signaler = signaler
         signaler.start()
