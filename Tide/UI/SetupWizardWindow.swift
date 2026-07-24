@@ -329,10 +329,16 @@ struct SetupWizardWindow: View {
             // （SDK 既定 HTTPS の多層防御。s3:PutBucketPolicy 権限が無い構成でも止めない）。Block Public Access の
             // 後でよい（Deny statement は public 判定にならず弾かれない）。
             do {
-                let tls = try await probe.enforceTLSBucketPolicy()
-                bucketSetupLog.append(tls == .alreadyEnforced
-                    ? String(localized: "✓ HTTPS-only bucket policy already enforced")
-                    : String(localized: "✓ HTTPS-only bucket policy enforced"))
+                switch try await probe.enforceTLSBucketPolicy() {
+                case .alreadyEnforced:
+                    bucketSetupLog.append(String(localized: "✓ HTTPS-only bucket policy already enforced"))
+                case .updated:
+                    bucketSetupLog.append(String(localized: "✓ HTTPS-only bucket policy enforced"))
+                case .checkDenied:
+                    // IAM に s3:GetBucketPolicy が無い構成。適用状態は検証できないが非致命（多層防御・Issue #81）。
+                    AppLogger.s3.notice("enforceTLSBucketPolicy check skipped: access denied (likely missing s3:GetBucketPolicy; non-fatal)")
+                    bucketSetupLog.append(String(localized: "⚠ Could not verify HTTPS-only policy (no permission; continuing)"))
+                }
             } catch {
                 AppLogger.s3.error("enforceTLSBucketPolicy failed (non-fatal): \(String(describing: error), privacy: .private)")
                 bucketSetupLog.append(String(localized: "⚠ Could not set HTTPS-only policy (continuing)"))

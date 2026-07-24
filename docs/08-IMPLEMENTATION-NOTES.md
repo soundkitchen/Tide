@@ -349,7 +349,11 @@ soak 開始**。以後この Mac の同期は FP レプリカ（`~/Library/Cloud
 - **既存事象の記録（切替起因でない）**: 毎起動の `enforceTLSBucketPolicy on launch failed
   (non-fatal)` は、dev-tide に TLS 強制ポリシー（`TideDenyInsecureTransport`）が**適用済み**の
   まま、アプリの IAM 資格情報にポリシー読取権限が無いための自己修復チェック失敗（aws CLI で
-  適用済みを確認・切替前 2026-07-24 から毎起動発生・実害なし）。
+  適用済みを確認・切替前 2026-07-24 から毎起動発生・実害なし）。→ **Issue #81 で解消
+  （2026-07-25）**: `getBucketPolicy` の AccessDenied（`S3ErrorClassifier.isForbidden`）を
+  `TLSPolicyStatus.checkDenied` として返し、呼び出し側（起動時 = `AppEnvironment` / セットアップ時 =
+  ウィザード）は `.notice` へ降格。`putBucketPolicy` 到達後の AccessDenied（= ポリシー不在を確認した
+  のに直せない実ドリフト）は従来どおり throw → `.error` 維持。
 
 ### ダウンロード一時ディレクトリ
 - **`TideTmpDirectory.resolve(for:)` で同一ボリュームの tmp を返す**。第一選択は `~/Library/Caches/Tide/tmp/`。同期ルートと別ボリュームになる時のみ `<syncRoot>/.tide/tmp/` にフォールバック。`moveItem` の atomic 性を保つため。

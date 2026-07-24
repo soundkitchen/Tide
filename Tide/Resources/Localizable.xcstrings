@@ -1091,6 +1091,17 @@
         }
       }
     },
+    "⚠ Could not verify HTTPS-only policy (no permission; continuing)" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "⚠ HTTPS 強制ポリシーを確認できませんでした（読取権限なし・続行します）"
+          }
+        }
+      }
+    },
     "✓ Public access block enforced" : {
       "extractionState" : "manual",
       "localizations" : {
