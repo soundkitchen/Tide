@@ -24,11 +24,27 @@ final class RemoteChangeSignalerTests: XCTestCase {
 
     private struct HeadError: Error {}
 
-    private func makeSignaler(head: FakeHead, counter: SignalCounter) -> RemoteChangeSignaler {
+    /// フェイク FP ドメイン有効性（Issue #82）: 呼び出しごとに `values` を先頭から消費し、
+    /// 尽きたら最後の値を返し続ける（FakeHead と同型）。
+    private final class FakeEnabled: @unchecked Sendable {
+        private let lock = NSLock()
+        private var values: [Bool]
+        init(_ values: [Bool]) { self.values = values }
+        func next() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return values.count > 1 ? values.removeFirst() : values[0]
+        }
+    }
+
+    private func makeSignaler(
+        head: FakeHead, counter: SignalCounter, enabled: FakeEnabled = FakeEnabled([true])
+    ) -> RemoteChangeSignaler {
         RemoteChangeSignaler(
             intervalSeconds: 3600,  // タイマーはテストでは実質発火しない（checkOnce を直接駆動）
             headIndexETag: { try head.next() },
-            signal: { counter.fire() }
+            signal: { counter.fire() },
+            isFPDomainEnabled: { enabled.next() }
         )
     }
 
@@ -144,6 +160,57 @@ final class RemoteChangeSignalerTests: XCTestCase {
 
         await signaler.checkOnce(reason: "test")  // 変化
         XCTAssertNotEqual(signaler.lastSignaledAt, signaled1, "変化 signal で lastSignaledAt が前進していない")
+    }
+
+    /// FP ドメイン有効性の併観測（Issue #82）: 無効の観測で `fpDomainDisabled` が立ち、
+    /// 有効へ戻る観測で解除される（エッジ検出）。既定値は false（未観測 = 無効扱いしない）。
+    func testFPDomainDisabledEdgeDetection() async {
+        let head = FakeHead([.success("etag-1")])
+        let counter = SignalCounter()
+        let enabled = FakeEnabled([true, false, false, true])
+        let signaler = makeSignaler(head: head, counter: counter, enabled: enabled)
+        XCTAssertFalse(signaler.fpDomainDisabled, "未観測なのに無効扱いになっている")
+
+        await signaler.checkOnce(reason: "test")  // 有効
+        XCTAssertFalse(signaler.fpDomainDisabled)
+        await signaler.checkOnce(reason: "test")  // 無効を観測 → 立つ
+        XCTAssertTrue(signaler.fpDomainDisabled, "無効の観測でフラグが立っていない")
+        await signaler.checkOnce(reason: "test")  // 無効のまま → 維持
+        XCTAssertTrue(signaler.fpDomainDisabled)
+        await signaler.checkOnce(reason: "test")  // 有効へ復帰 → 解除
+        XCTAssertFalse(signaler.fpDomainDisabled, "復帰でフラグが解除されていない")
+    }
+
+    /// 復帰エッジは ETag 不変でも必ず 1 回 signal する（見逃し窓の閉鎖）: 無効期間中の
+    /// ETag 変化は観測だけ進み（プロダクションでは下流の isEnabled ガードで signal が no-op）、
+    /// 次の変化まで取り込み契機が来ないため、復帰時に catch-up を強制する。
+    func testReEnableEdgeForcesCatchUpSignal() async {
+        let head = FakeHead([.success("etag-1")])
+        let counter = SignalCounter()
+        let enabled = FakeEnabled([true, false, true])
+        let signaler = makeSignaler(head: head, counter: counter, enabled: enabled)
+
+        await signaler.checkOnce(reason: "test")  // baseline → signal 1
+        XCTAssertEqual(counter.count, 1)
+        await signaler.checkOnce(reason: "test")  // 無効・ETag 不変 → 沈黙
+        XCTAssertEqual(counter.count, 1)
+        let signaledBefore = signaler.lastSignaledAt
+        await signaler.checkOnce(reason: "test")  // 復帰・ETag 不変 → catch-up signal
+        XCTAssertEqual(counter.count, 2, "復帰エッジの catch-up signal が出ていない")
+        XCTAssertNotEqual(signaler.lastSignaledAt, signaledBefore, "catch-up で lastSignaledAt が前進していない")
+    }
+
+    /// 併観測は HEAD より先に走る = HEAD 失敗（オフライン等）でも拡張 OFF に気づける。
+    func testDisabledDetectionSurvivesHeadFailure() async {
+        let head = FakeHead([.failure(HeadError())])
+        let counter = SignalCounter()
+        let enabled = FakeEnabled([false])
+        let signaler = makeSignaler(head: head, counter: counter, enabled: enabled)
+
+        await signaler.checkOnce(reason: "test")
+        XCTAssertTrue(signaler.fpDomainDisabled, "HEAD 失敗時に無効検出が動いていない")
+        XCTAssertTrue(signaler.lastCheckFailed)
+        XCTAssertEqual(counter.count, 0)
     }
 
     /// start() は初回チェックを発火する（起動時のベースライン確立の配線）。stop() は冪等。

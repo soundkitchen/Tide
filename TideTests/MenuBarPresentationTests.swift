@@ -110,26 +110,44 @@ final class MenuBarPresentationTests: XCTestCase {
     /// `isSyncing` は `.syncing` のときだけ true。
     func testIsSyncingFlag() {
         XCTAssertTrue(MenuBarPresentation.syncing(pending: 0).isSyncing)
-        let nonSyncing: [MenuBarPresentation] = [.notConfigured, .allSynced, .paused, .error(summary: "x")]
+        let nonSyncing: [MenuBarPresentation] = [
+            .notConfigured, .allSynced, .paused, .error(summary: "x"),
+            .fpDomainDisabled, .fpRemoteCheckFailed
+        ]
         for p in nonSyncing {
             XCTAssertFalse(p.isSyncing, "\(p) は syncing でない")
         }
     }
 
     /// fpOnly（engine 無し・signaler 稼働）のマッピングを固定（B-2 実機受け入れで発見した
-    /// B-1 縮退取りこぼし: engine nil → .notConfigured で恒久「？＋波」になる回帰の防止）。
+    /// B-1 縮退取りこぼし: engine nil → .notConfigured で恒久「？＋波」になる回帰の防止。
+    /// 異常は専用 case = 旧 `.error(summary: "")` 空文字センチネル廃止・Issue #82）。
     func testFPOnlyHeadline() {
-        XCTAssertEqual(MenuBarPresentation.fpOnlyHeadline(lastCheckFailed: false), .allSynced)
         XCTAssertEqual(
-            MenuBarPresentation.fpOnlyHeadline(lastCheckFailed: true), .error(summary: "")
+            MenuBarPresentation.fpOnlyHeadline(lastCheckFailed: false, fpDomainDisabled: false),
+            .allSynced
+        )
+        XCTAssertEqual(
+            MenuBarPresentation.fpOnlyHeadline(lastCheckFailed: true, fpDomainDisabled: false),
+            .fpRemoteCheckFailed
+        )
+        // FP ドメイン無効 = 全同期停止は、一過性の確認失敗より常に優先（Issue #82）。
+        XCTAssertEqual(
+            MenuBarPresentation.fpOnlyHeadline(lastCheckFailed: false, fpDomainDisabled: true),
+            .fpDomainDisabled
+        )
+        XCTAssertEqual(
+            MenuBarPresentation.fpOnlyHeadline(lastCheckFailed: true, fpDomainDisabled: true),
+            .fpDomainDisabled
         )
         // アイコンは「通常の波 / 荒れた海」の 2 値（? グリフに落ちない）。
         XCTAssertEqual(
-            MenuBarPresentation.fpOnlyHeadline(lastCheckFailed: false).menuBarIconName, "MenuBarWave"
+            MenuBarPresentation.fpOnlyHeadline(lastCheckFailed: false, fpDomainDisabled: false)
+                .menuBarIconName,
+            "MenuBarWave"
         )
-        XCTAssertEqual(
-            MenuBarPresentation.fpOnlyHeadline(lastCheckFailed: true).menuBarIconName, "MenuBarError"
-        )
+        XCTAssertEqual(MenuBarPresentation.fpRemoteCheckFailed.menuBarIconName, "MenuBarError")
+        XCTAssertEqual(MenuBarPresentation.fpDomainDisabled.menuBarIconName, "MenuBarError")
     }
 
     /// frame 番号 → アセット名の生成規則を固定（View と共有する単一の規則）。
@@ -142,7 +160,10 @@ final class MenuBarPresentationTests: XCTestCase {
     /// アセット追加漏れで「無言の空画像」になる事故を防ぐ）。テストホストが Tide.app なので
     /// `NSImage(named:)` は本番表示と同じ main bundle の asset catalog を引く。
     func testMenuBarIconAssetsExist() {
-        let glyphs: [MenuBarPresentation] = [.notConfigured, .allSynced, .paused, .error(summary: "x")]
+        let glyphs: [MenuBarPresentation] = [
+            .notConfigured, .allSynced, .paused, .error(summary: "x"),
+            .fpDomainDisabled, .fpRemoteCheckFailed
+        ]
         for p in glyphs {
             XCTAssertNotNil(NSImage(named: p.menuBarIconName), "固定グリフのアセット欠落: \(p.menuBarIconName)")
         }

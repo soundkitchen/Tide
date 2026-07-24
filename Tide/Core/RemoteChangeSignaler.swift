@@ -27,6 +27,9 @@ final class RemoteChangeSignaler {
     /// 変化時の通知先。プロダクションは `FileProviderController.signalRemoteChanges()`
     /// （coalesce は向こう側が持つ）。
     @ObservationIgnored private let signal: () -> Void
+    /// FP ドメインの有効性（Issue #82）。プロダクションは `FileProviderController.isEnabled()`
+    /// （fileproviderd へのローカル XPC 1 発）を配線し、テストはフェイクを注入する。
+    @ObservationIgnored private let isFPDomainEnabled: @Sendable () async -> Bool
     @ObservationIgnored private let intervalSeconds: Int
 
     // UI 表示用の観測状態（B-1・fpOnly ポップオーバー）。判定ロジックは一切持たない読み出し専用。
@@ -36,6 +39,11 @@ final class RemoteChangeSignaler {
     private(set) var lastSignaledAt: Date?
     /// 直近の HEAD が失敗していれば true（成功で自動クリア。一過性か持続かは UI 側が時刻と併読）。
     private(set) var lastCheckFailed = false
+    /// 直近の観測で FP ドメインが無効（システム設定 OFF / 未登録）なら true。false = 無効が
+    /// 観測されていない（有効 or 未観測。起動直後に誤ってエラー系アイコンを出さない側に倒す）。
+    /// fpOnly では拡張が唯一の同期実体のため、無効 = 全同期停止なのに HEAD 到達性は正常のまま
+    /// = 無エラー乖離の盲点（Issue #82）。メニューバーアイコンへ `fpOnlyHeadline` 経由で反映する。
+    private(set) var fpDomainDisabled = false
 
     @ObservationIgnored private var lastETag: String?
     @ObservationIgnored private var hasBaseline = false
@@ -49,11 +57,13 @@ final class RemoteChangeSignaler {
     init(
         intervalSeconds: Int,
         headIndexETag: @escaping @Sendable () async throws -> String?,
-        signal: @escaping () -> Void
+        signal: @escaping () -> Void,
+        isFPDomainEnabled: @escaping @Sendable () async -> Bool
     ) {
         self.intervalSeconds = intervalSeconds
         self.headIndexETag = headIndexETag
         self.signal = signal
+        self.isFPDomainEnabled = isFPDomainEnabled
     }
 
     func start() {
@@ -89,6 +99,8 @@ final class RemoteChangeSignaler {
         isChecking = true
         defer { isChecking = false }
 
+        await observeFPDomainEnabled(reason: reason)
+
         let etag: String?
         do {
             etag = try await headIndexETag()
@@ -120,6 +132,28 @@ final class RemoteChangeSignaler {
         signal()
         lastSignaledAt = Date()
         AppLogger.sync.info("RemoteChangeSignaler: index changed (\(reason, privacy: .public)); signaled FP domain")
+    }
+
+    /// FP ドメイン有効性の併観測（Issue #82）: HEAD と同契機・ローカル XPC 1 発。ログは
+    /// エッジ検出時のみ（毎周回出すとノイズ床を上げる = #81 と同方針）。HEAD より先に観測する
+    /// （拡張 OFF の検出は S3 到達性と独立 = オフラインでも気づける）。
+    private func observeFPDomainEnabled(reason: String) async {
+        let enabled = await isFPDomainEnabled()
+        if fpDomainDisabled && enabled {
+            // 復帰エッジでは必ず 1 回 signal する: 無効期間中も HEAD は ETag を進めており
+            // （その間の signal は FileProviderController 側の isEnabled ガードで no-op）、
+            // 次の ETag 変化まで取り込み契機が来ない「見逃し窓」をここで閉じる。
+            // 変化が無ければ拡張側の世代キャッシュで no-op（XPC 2 回だけ）。
+            fpDomainDisabled = false
+            signal()
+            lastSignaledAt = Date()
+            AppLogger.sync.notice("RemoteChangeSignaler: FP domain re-enabled (\(reason, privacy: .public)); signaled FP domain to catch up")
+        } else if !fpDomainDisabled && !enabled {
+            // fpOnly では拡張 OFF = 全同期停止。エラーがどこにも出ない盲点なので、ここだけは
+            // .error で 1 回残す（エッジ検出 = 恒常ノイズにはならない）。
+            fpDomainDisabled = true
+            AppLogger.sync.error("RemoteChangeSignaler: FP domain is disabled (\(reason, privacy: .public)) — nothing is syncing until it is re-enabled")
+        }
     }
 
     // MARK: - Triggers（SyncEngine の poll / wake / network 配線と同型）

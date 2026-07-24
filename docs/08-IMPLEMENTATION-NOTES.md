@@ -278,7 +278,7 @@ S3 の新しい現行版として書き直す**（方式はユーザ確定 2026-
   作成 → アップロードの `commitShardWrite` が宣言を実 etag へ更新 → ファイル削除で原状復帰
   （シャード ID は `sha1(path)[0]` で総当たり選定）。B-2 とは無関係の既存事象で、切替後
   ライブ soak がこのクラスを検出できることの実地実証になった（`docs/09` #40 節）。
-- **PR #78 レビューの記録 2 件（(a) は 2026-07-25 Issue #82 へ格上げ・(b) は対応不要）**: (a) fpOnly × FP 拡張無効（システム設定で OFF =
+- **PR #78 レビューの記録 2 件（✅ いずれも Issue #82 実装で解消 2026-07-25）**: (a) fpOnly × FP 拡張無効（システム設定で OFF =
   何も同期されない）でもメニューバーアイコンは「通常の波」のまま — signaler は index HEAD の
   到達性しか見ない。ポップオーバーの赤警告で気づける。将来やるなら signaler 側で低頻度に
   `isEnabled()` を併観測して合成（2026-07-25 **Issue #82 へ格上げ** = fpOnly 常用化で
@@ -286,6 +286,19 @@ S3 の新しい現行版として書き直す**（方式はユーザ確定 2026-
   センチネル — 将来 fpOnly の presentation を `headlineText` 系へ流すと「Error: 」表示になる
   罠（現状はアイコン用途に閉じている旨のコメント + テストでガード済み。必要になったら専用
   case（例: `.remoteCheckFailed`）化が構造的）。
+  **解消の実装（Issue #82・2026-07-25）**: `RemoteChangeSignaler` が HEAD と同契機
+  （startup / poll / wake / networkUp・ユーザ確定）で `FileProviderController.isEnabled()`
+  （ローカル XPC 1 発）を併観測し、観測状態 `fpDomainDisabled` を公開。HEAD より先に観測する
+  （拡張 OFF の検出は S3 到達性と独立 = オフラインでも気づける）。ログはエッジ検出時のみ
+  （無効化 = `.error` 1 回・恒常ノイズにしない #81 と同方針 / 復帰 = `.notice`）。**復帰エッジは
+  ETag 不変でも必ず 1 回 signal** — 無効期間中も HEAD は ETag を進めており（その間の signal は
+  `FileProviderController` 側 isEnabled ガードで no-op）、次の変化まで取り込み契機が来ない
+  「見逃し窓」を catch-up で閉じる。表示は `MenuBarPresentation` の専用 case 化
+  （`.fpDomainDisabled` = 赤・確認失敗より常に優先 / `.fpRemoteCheckFailed` = 橙。
+  ともにアイコンは荒れた海）で、(b) の空文字センチネルも同時に廃止。回帰は
+  `RemoteChangeSignalerTests`（エッジ検出 / catch-up / HEAD 失敗と独立）+
+  `MenuBarPresentationTests` で固定。ポップオーバー開時の `isEnabled()` 直接取得（B-1）は
+  より新鮮なため従来どおり並存。
 
 #### FP-only 稼働モード B-3 = soak-check --fp-only（M5 Track B・2026-07-24）
 
