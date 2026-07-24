@@ -336,7 +336,7 @@ struct SetupWizardWindow: View {
                     bucketSetupLog.append(String(localized: "✓ HTTPS-only bucket policy enforced"))
                 case .checkDenied:
                     // IAM に s3:GetBucketPolicy が無い構成。適用状態は検証できないが非致命（多層防御・Issue #81）。
-                    AppLogger.s3.notice("enforceTLSBucketPolicy check skipped: s3:GetBucketPolicy denied (non-fatal)")
+                    AppLogger.s3.notice("enforceTLSBucketPolicy check skipped: access denied (likely missing s3:GetBucketPolicy; non-fatal)")
                     bucketSetupLog.append(String(localized: "⚠ Could not verify HTTPS-only policy (no permission; continuing)"))
                 }
             } catch {
