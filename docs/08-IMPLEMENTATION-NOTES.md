@@ -281,7 +281,8 @@ S3 の新しい現行版として書き直す**（方式はユーザ確定 2026-
 - **PR #78 レビューの記録 2 件（対応不要）**: (a) fpOnly × FP 拡張無効（システム設定で OFF =
   何も同期されない）でもメニューバーアイコンは「通常の波」のまま — signaler は index HEAD の
   到達性しか見ない。ポップオーバーの赤警告で気づける。将来やるなら signaler 側で低頻度に
-  `isEnabled()` を併観測して合成。(b) `fpOnlyHeadline` の `.error(summary: "")` は空文字
+  `isEnabled()` を併観測して合成（2026-07-25 **Issue #82 へ格上げ** = fpOnly 常用化で
+  「拡張 OFF = 全同期停止が soak-check にも映らない」盲点が実利用リスクになったため）。(b) `fpOnlyHeadline` の `.error(summary: "")` は空文字
   センチネル — 将来 fpOnly の presentation を `headlineText` 系へ流すと「Error: 」表示になる
   罠（現状はアイコン用途に閉じている旨のコメント + テストでガード済み。必要になったら専用
   case（例: `.remoteCheckFailed`）化が構造的）。
