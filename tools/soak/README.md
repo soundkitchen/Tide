@@ -70,7 +70,7 @@ persistent DRIFT ゼロの実績）の観測係として `--watch` / cron で定
 - **モード切替の検出**: 実モード（`tide.syncMode`）は**毎周回再読**する。watch 常駐が
   モード切替を跨いだら `mode:switched` WARN で watch の再起動を案内（起動時スコープの
   まま偽 DRIFT / 偽 WARN を積み続けない）。凍結見張りは切替検出中は基準追従のみ。
-  **正規手順は「切替の前後で soak-watch を停止 / 再起動」**（B-4 ランブックに明記）。
+  **正規手順は「切替の前後で soak-watch を停止 / 再起動」**（`docs/08` B-4 節の運用ルール）。
 - **突合ガード**: 保存モード（group defaults の `tide.syncMode`）が fpOnly なのに
   `--fp-only` 無しで実行したら **exit 2**（偽 DRIFT の cron 誤発報を構造的に防ぐ）。
   逆（`--fp-only` × folderSync 設定）は切替前の予行として WARN + 続行。
