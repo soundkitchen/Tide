@@ -91,6 +91,51 @@ DB ロック・JSON 破損等、すべての実行時例外）。cron / loop で
 - mtime WARN はマニフェストではなく **ローカル stat ↔ DB** の突合（[mtime 不変条件]）。
   編集直後の一過性は正常、恒常的に出るなら毎起動再アップロードループの兆候。
 
+### launchd 常駐化 — 標準運用（Issue #84）
+
+`--fp-only --watch` の駆動は **LaunchAgent 常駐が標準**（2026-07-25〜）。マシン再起動後の
+「手動再開忘れ = 観測空白」（DB 凍結見張りも止まる）を構造的に防ぐ。ターミナル常駐
+（`make soak-watch-fp`）は launchd を使わない環境・出力をリアルタイム目視したいデバッグ用の代替。
+
+```sh
+make soak-agent-install     # LaunchAgent 導入 + 開始（既定 300 秒間隔・再実行 = 再インストール）
+make soak-agent-status      # state / PID / 直近 JSONL 1 行
+make soak-agent-restart     # 再起動（モード切替ランブックの「watch 再起動」の正規手段）
+make soak-agent-uninstall   # 解除（bootout + plist 削除）
+```
+
+- 実体は `tools/soak/soak_watch_agent.sh`。plist = `~/Library/LaunchAgents/org.izukawa.tide.soak-watch.plist`
+  （`KeepAlive` + `RunAtLoad`・異常終了時は 60 秒スロットルで自動再起動）。
+- **python3 / aws の実パス・PATH・`AWS_PROFILE` はインストール時のシェルから plist へ焼き込む**
+  （launchd の既定 PATH に homebrew が無く aws CLI が見つからないため）。python3 / aws / リポジトリの
+  パスを変えたら `make soak-agent-install` で再インストール。
+- **インストールは既存の watch プロセス（ターミナル常駐）を検出すると中断する** — 併走すると
+  同じ JSONL に二重追記され soak 実績の集計を汚すため。先にターミナル側を Ctrl-C で止める。
+- ログ: JSONL は従来どおり `~/Library/Logs/TideSoak/soak.jsonl`。整形レポート（stdout）と
+  実行エラー（stderr）は同ディレクトリの `agent.out.log` / `agent.err.log` へ（5 分間隔で
+  月あたり十数 MB 程度・肥大したら手で消してよい。python は `-u` で起動 = 行バッファ相当・
+  レポートが即書きされる）。
+- **モード切替ランブックとの整合**: 切替時は「`make soak-agent-restart` で watch 再起動」が
+  停止 → 再起動に相当（`mode:switched` WARN の案内どおりスコープ / 凍結見張りの基準を取り直す）。
+  切替作業中に観測を完全に止めたい場合は `uninstall` → 作業 → `install`。
+
+#### launchd 固有の TCC（初回導入時・実踏 2026-07-25）
+
+- **初回スポーンで「"python3" が他のアプリケーションのデータへのアクセスを求めています」の
+  ダイアログが出る → 「許可」する**。launchd 直下では python3（homebrew）自身が TCC の
+  責任プロセスになり、group defaults / DB stat の読み取りが **Group Container 保護
+  （`kTCCServiceSystemPolicyAppData`・macOS 15+）** に掛かるため。ターミナル実行
+  （`make soak-watch-fp`）で通っていたのは Terminal.app への既存許可で、launchd には効かない。
+- 拒否した / プロンプト未応答の間は、設定解決が
+  `設定エラー: 解決できない設定があります … ['bucket', 'region']`（exit 2）で失敗し続け、
+  launchd が 60 秒スロットルで再スポーンを繰り返す（`agent.err.log` で分かる）。誤って拒否したら
+  システム設定 → プライバシーとセキュリティで python の許可を直すか、`tccutil reset` 後に再起動。
+- **homebrew の python アップグレード後は再許可が要る場合がある**（許可はバイナリに紐づく）。
+  `make soak-agent-status` で exit 2 ループに気づける。
+- 既知の一過性: 並列 shard GET で aws CLI の SSO トークン更新が `Rate exceeded`（429）に
+  なることがある。周回単位のエラーとして `agent.err.log` に `[ERROR]` 1 行が残り、
+  次周回で自己回復する（watch ループは落ちない）。
+
 ## churn.py — 負荷注入（1 台加速 soak）
 
 FSEvents 側同期フォルダと FP レプリカの両方へファイル操作を乱数注入し、

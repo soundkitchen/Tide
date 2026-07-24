@@ -360,10 +360,29 @@ soak 開始**。以後この Mac の同期は FP レプリカ（`~/Library/Cloud
 - **ライブ soak 開始（2026-07-25・#40 事後ゲート）**: `make soak-watch-fp` を専用ターミナルで
   常駐（300 秒間隔・JSONL = `~/Library/Logs/TideSoak/soak.jsonl`）。運用ルール = ファイル作業は
   FP レプリカ側のみ / モード変更時は watch 停止 → 切替 → 再起動 / マシン再起動後は watch 手動
-  再開 / persistent DRIFT は #40 へ記録・即調査（Info ログ揮発のため一次証跡は即採取）。
+  再開（**watch 駆動は同日 launchd 常駐へ更新 = 下記 #84 項。手動再開は不要になった**）/
+  persistent DRIFT は #40 へ記録・即調査（Info ログ揮発のため一次証跡は即採取）。
   観察項目 = 非ピン実体化ファイルのディスク圧迫時自動 evict（Keep Downloaded 運用の要否根拠）。
   ゲート通過後に重要ファイル投入 + ルート「ダウンロードを保持」（Keep Downloaded 運用）。
   「Tide を唯一のバックアップにしない」は継続。
+- **soak-watch の launchd 常駐化（2026-07-25・Issue #84 = 標準運用へ格上げ・ユーザ確定）**:
+  マシン再起動後の「手動再開忘れ = 観測空白」（DB 凍結見張りも停止）を構造的に防ぐため、
+  `make soak-agent-install` で LaunchAgent（`org.izukawa.tide.soak-watch`・
+  `consistency_check.py --fp-only --watch 300`・KeepAlive + RunAtLoad・異常終了 60 秒スロットル）
+  常駐へ移行 = watch 駆動の標準。**運用ルールの読み替え**: マシン再起動後の手動再開 → 不要
+  （自動）/ モード切替時の「watch 停止 → 切替 → 再起動」→ 切替後に `make soak-agent-restart`
+  （kickstart -k・スコープ / 凍結見張りの基準取り直し）。python3 / aws の実パス・PATH・
+  `AWS_PROFILE` はインストール時のシェルから plist へ焼き込む（launchd 既定 PATH に homebrew が
+  無いため。パスを変えたら再インストール）。インストールは既存のターミナル watch を検出すると
+  中断（同一 JSONL への二重追記 = soak 実績の汚染防止）。ターミナル常駐（`make soak-watch-fp`）
+  は代替/デバッグ用に温存。ログ = JSONL 従来どおり + `agent.out.log` / `agent.err.log`
+  （`~/Library/Logs/TideSoak/`）。**導入実踏の知見（2026-07-25）**: launchd 直下では python3
+  （homebrew）自身が TCC の責任プロセスになり、group defaults / DB stat が **Group Container
+  保護（`kTCCServiceSystemPolicyAppData`・macOS 15+）** で拒否される — 初回スポーンの
+  許可ダイアログを「許可」する（Terminal.app の既存許可は launchd には効かない・拒否すると
+  設定解決 exit 2 → 60 秒スロットルの再スポーンループ・brew python 更新後は再許可の可能性）。
+  aws CLI の SSO トークン更新 429 は周回単位で自己回復（watch ループは落ちない）。
+  詳細 = `tools/soak/README.md`「launchd 常駐化」節。
 - **既存事象の記録（切替起因でない）**: 毎起動の `enforceTLSBucketPolicy on launch failed
   (non-fatal)` は、dev-tide に TLS 強制ポリシー（`TideDenyInsecureTransport`）が**適用済み**の
   まま、アプリの IAM 資格情報にポリシー読取権限が無いための自己修復チェック失敗（aws CLI で

@@ -109,8 +109,24 @@ soak-check-fp: ## soak 整合性突合（FP-only スコープ: S3 面のみ・�
 	python3 tools/soak/consistency_check.py --fp-only
 
 .PHONY: soak-watch-fp
-soak-watch-fp: ## soak 常時観測（FP-only スコープ）: 300 秒間隔で JSONL 追記（#40）
+soak-watch-fp: ## soak 常時観測（FP-only スコープ・ターミナル常駐 = 代替/デバッグ用）（#40）
 	python3 tools/soak/consistency_check.py --fp-only --watch 300
+
+.PHONY: soak-agent-install
+soak-agent-install: ## soak 常時観測を launchd 常駐化（標準運用・再起動後も自動再開）（#84）
+	bash tools/soak/soak_watch_agent.sh install
+
+.PHONY: soak-agent-uninstall
+soak-agent-uninstall: ## soak launchd 常駐を解除（bootout + plist 削除）（#84）
+	bash tools/soak/soak_watch_agent.sh uninstall
+
+.PHONY: soak-agent-restart
+soak-agent-restart: ## soak launchd 常駐を再起動（モード切替後の正規手順）（#84）
+	bash tools/soak/soak_watch_agent.sh restart
+
+.PHONY: soak-agent-status
+soak-agent-status: ## soak launchd 常駐の状態表示（state / PID / 直近 JSONL）（#84）
+	bash tools/soak/soak_watch_agent.sh status
 
 .PHONY: soak-churn
 soak-churn: ## soak 負荷注入: FSEvents/FP 両サイドへ create/edit/rename/delete 等を交錯注入（#40）
