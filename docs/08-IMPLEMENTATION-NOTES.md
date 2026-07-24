@@ -319,6 +319,37 @@ fpOnly ではアプリが DB / syncRoot に触れない（凍結温存）ため�
   として WARN（fpOnly 中に DB が生える = bootstrap 分岐バグの一形態・見逃していた）。
   ③ nit = `--fp-only` × `--sync-root` 明示指定は stderr で「使わない」ことを通知。
 
+#### FP-only 稼働モード B-4 = 切替ランブック実施（M5 Track B・2026-07-25 全項目パス）
+
+切替ランブック（tmp 使い捨て・実施後削除）を実施し、**FP-only 稼働モードへ切替済み・ライブ
+soak 開始**。以後この Mac の同期は FP レプリカ（`~/Library/CloudStorage/Tide`・実体
+`Tide-Tide`）が唯一の作業面で、旧同期フォルダは凍結温存。
+
+- **事前整備**: soak-watch 非稼働確認・切替前ベースライン `make soak-check` 整合 OK
+  （manifest/db/s3 = 327・local 329・INFO は `.DS_Store` 2 件のみ）。
+- **B-1 持ち越し 2 項目を機会実施（これで B-1 も受け入れ完了）**: ① ja / en 文言
+  （`make run-ja` / `run-en`・Sync mode セクション・再起動案内の表示 / 戻すと消滅）
+  ② FP ドメイン無効時の橙警告（Disable → fpOnly 選択 → 橙警告 → Folder sync へ戻して
+  Enable → レプリカ再構築。Disable 前にベースライン整合 OK = 保留書込破棄の安全確認）。
+- **切替**: Sync mode = File Provider only → 再起動 → ログで `Launched in FP-only mode` +
+  `RemoteChangeSignaler started (interval: 180s)` + `baseline established; signaled FP domain`
+  を確認。UI = メニューバー通常の波（`MenuBarWave` = 月＋ゆるい波）・fpOnly ポップオーバー・
+  「Open Tide in Finder」。
+- **書込スモーク往復**: FP レプリカへターミナルからファイル作成 → 約 40 秒で manifest / s3
+  328 件・`soak-check-fp` = fp-only 整合 OK・**warn 0**（予行 WARN 消滅 = 保存モード一致の
+  実証・凍結見張り武装下で DB 書込なし）→ 削除 → 327 件へ復帰・整合 OK。
+- **ライブ soak 開始（2026-07-25・#40 事後ゲート）**: `make soak-watch-fp` を専用ターミナルで
+  常駐（300 秒間隔・JSONL = `~/Library/Logs/TideSoak/soak.jsonl`）。運用ルール = ファイル作業は
+  FP レプリカ側のみ / モード変更時は watch 停止 → 切替 → 再起動 / マシン再起動後は watch 手動
+  再開 / persistent DRIFT は #40 へ記録・即調査（Info ログ揮発のため一次証跡は即採取）。
+  観察項目 = 非ピン実体化ファイルのディスク圧迫時自動 evict（Keep Downloaded 運用の要否根拠）。
+  ゲート通過後に重要ファイル投入 + ルート「ダウンロードを保持」（Keep Downloaded 運用）。
+  「Tide を唯一のバックアップにしない」は継続。
+- **既存事象の記録（切替起因でない）**: 毎起動の `enforceTLSBucketPolicy on launch failed
+  (non-fatal)` は、dev-tide に TLS 強制ポリシー（`TideDenyInsecureTransport`）が**適用済み**の
+  まま、アプリの IAM 資格情報にポリシー読取権限が無いための自己修復チェック失敗（aws CLI で
+  適用済みを確認・切替前 2026-07-24 から毎起動発生・実害なし）。
+
 ### ダウンロード一時ディレクトリ
 - **`TideTmpDirectory.resolve(for:)` で同一ボリュームの tmp を返す**。第一選択は `~/Library/Caches/Tide/tmp/`。同期ルートと別ボリュームになる時のみ `<syncRoot>/.tide/tmp/` にフォールバック。`moveItem` の atomic 性を保つため。
 
