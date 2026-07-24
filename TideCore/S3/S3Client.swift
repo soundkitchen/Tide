@@ -94,6 +94,11 @@ public final class TideS3Client: @unchecked Sendable {
     public enum TLSPolicyStatus: Sendable {
         case alreadyEnforced
         case updated
+        /// `getBucketPolicy` が AccessDenied（IAM に `s3:GetBucketPolicy` が無い）で、自己修復チェック
+        /// 自体を実行できなかった。恒常的な IAM 構成由来で毎起動再発するため、呼び出し側は error では
+        /// なく notice 級で扱う（恒常 ERROR によるノイズ床上昇 = 実障害ログの埋没を防ぐ・Issue #81）。
+        /// put 到達後の AccessDenied は「ポリシー不在を確認したのに直せない」実ドリフトなので throw のまま。
+        case checkDenied
     }
 
     /// TLS 非使用リクエストを拒否する Deny ポリシー（C3 後半・Issue #26 / B）を冪等にマージして投入する。
@@ -111,6 +116,8 @@ public final class TideS3Client: @unchecked Sendable {
             if String(describing: error).contains("NoSuchBucketPolicy")
                 || S3ErrorClassifier.isNotFound(error) {
                 current = nil
+            } else if S3ErrorClassifier.isForbidden(error) {
+                return .checkDenied
             } else {
                 throw error
             }

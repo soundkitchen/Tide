@@ -239,8 +239,15 @@ final class AppEnvironment {
     private static func enforceTLSBucketPolicyDetached(s3: TideS3Client) {
         Task.detached { [s3] in
             do {
-                if try await s3.enforceTLSBucketPolicy() == .updated {
+                switch try await s3.enforceTLSBucketPolicy() {
+                case .updated:
                     AppLogger.s3.info("Enforced HTTPS-only bucket policy on launch")
+                case .checkDenied:
+                    // 恒常的な IAM 構成（s3:GetBucketPolicy なし）由来で毎起動再発するため error に
+                    // しない（ノイズ床対策・Issue #81）。適用状態は検証不能だが多層防御なので非致命。
+                    AppLogger.s3.notice("enforceTLSBucketPolicy check skipped on launch: s3:GetBucketPolicy denied (non-fatal; policy state unverified)")
+                case .alreadyEnforced:
+                    break
                 }
             } catch {
                 AppLogger.s3.error("enforceTLSBucketPolicy on launch failed (non-fatal): \(String(describing: error), privacy: .private)")
