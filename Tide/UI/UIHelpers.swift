@@ -13,6 +13,7 @@ extension SyncLogEventType {
         case .upload:   return "arrow.up.circle"
         case .download: return "arrow.down.circle"
         case .delete:   return "trash"
+        case .move:     return "arrow.turn.up.right"
         case .conflict: return "exclamationmark.triangle"
         case .error:    return "xmark.octagon"
         case .info:     return "info.circle"
@@ -22,10 +23,10 @@ extension SyncLogEventType {
     /// イベント種別アイコンの色。
     var iconColor: Color {
         switch self {
-        case .upload, .download: return .blue
-        case .conflict:          return .orange
-        case .error:             return .red
-        case .delete, .info:     return .secondary
+        case .upload, .download, .move: return .blue
+        case .conflict:                 return .orange
+        case .error:                    return .red
+        case .delete, .info:            return .secondary
         }
     }
 }

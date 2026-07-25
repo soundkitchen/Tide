@@ -392,6 +392,52 @@ soak 開始**。以後この Mac の同期は FP レプリカ（`~/Library/Cloud
   ウィザード）は `.notice` へ降格。`putBucketPolicy` 到達後の AccessDenied（= ポリシー不在を確認した
   のに直せない実ドリフト）は従来どおり throw → `.error` 維持。
 
+#### FP 版 Sync Activity = 拡張イベントの共有ストア軽量ログ（Issue #83・2026-07-26）
+
+fpOnly はアプリが DB を開かない（凍結温存）ため DB 由来の Sync Activity / エラー履歴が縮退する
+（B-1 当時の判断）。FP 拡張のイベントを App Group 共有ストアへ軽量ログし、既存の Sync Activity
+ウィンドウで表示して可視性を復権した。設計判断 4 点（2026-07-26 ユーザ確定）: ① ストア形式 =
+追記型 JSONL + サイズローテーション ② 記録範囲 = 書込系 + エラー + materialize 成功（evict 検出は
+見送り）③ UI = 既存ウィンドウのソース差替 ④ 書き手 = 拡張プロセスのみ。
+
+- **`FPEventLog`**（`TideCore/Storage/FPEventLog.swift`・actor）: 1 行 1 イベント JSON を
+  `<App Group>/Library/Caches/Tide/fp-events-ext.jsonl` へ追記（best-effort = 失敗しても
+  FP 操作は失敗させない）。2MB 到達で現行 → `.1` 退避（保持 = 現行 + 1 世代 ≒ 数千〜1 万件）。
+  ファイル名の `-ext` は書き手識別子 — 将来アプリ側イベントを足す場合は**別ファイル**を増やし
+  読み時マージする（同一ファイルへの多プロセス追記はしない・2026-07-26 ユーザ確定）。
+  レコードは `timestamp` / `bucket` / `eventType`（`SyncLogEventType` の rawValue）/ `path` /
+  `message` / `details`。拡張の DB 非接触は維持（GRDB 非依存の素のファイル）。security L19。
+- **記録点**（`FileProviderExtension` の各コールバック + `completeCreate`）: 書込系成功 =
+  created / uploaded / moved（dir move は件数付き）/ deleted（file / dir）→ upload / move /
+  delete、materialize 成功 → download、競合（conflict copy 作成・正規パスはリモート勝ち）→
+  conflict、除外（機密網 / symlink / `.syncignore` / 検証不能名・rename 除外含む）と削除拒否
+  （remote changed / base unknown）→ info、catch 経路 → error（`CancellationError` は正常系な
+  ので記録しない）。`SyncLogEventType` に `.move` を追加 — folderSync は move を一次イベントと
+  して持たない（delete + upload に分解）ため DB 側には現れない。
+- **UI（ソース差替）**: `SyncActivitySource` プロトコル（`SyncActivityModel.swift`）を挟み、
+  folderSync = `DatabaseActivitySource`（従来どおり sync_log）/ fpOnly =
+  `FPEventLogActivitySource`（`FPEventLog` 読み・DB / syncRoot 非接触 = 凍結温存を維持）。
+  生成は `AppEnvironment.makeSyncActivitySource()`。ページング契約は `LocalDatabase.fetchLogs`
+  と同一（id 降順・beforeId カーソル・limit 超過分で hasMore）。FP 側の id は時系列 index の
+  合成で、reload（beforeId nil）時のスナップショットからページングする（読込の合間の追記で
+  カーソルがずれない・追記の反映は Refresh）。ポップオーバーの「Sync Activity…」導線は fpOnly
+  でも表示（`engine != nil || signaler != nil`）。フッタ注記はソースごとに差替
+  （DB = 30 日自動削除 / FP = サイズ上限で古い順破棄）。**PR #90 レビュー対応 3 点**: ①
+  フィルタチップの列挙はソースの `displayedEventTypes`（folderSync は move を一次イベントと
+  して持たないため Moves チップを出さない）② FP 合成 id は reload を跨いで安定しない
+  （ローテーション世代破棄で前詰め）ため、`hasStableIds = false` のソースは reload で選択を
+  無条件解除（同値 id が別レコードを指したまま詳細ペインに出るのを防ぐ。DB は id 安定 =
+  選択維持のまま）③ fpOnly の `FPEventLog.defaultURL()` 構築失敗（group container 不達の
+  エッジ）は nil ソースにせず fileURL nil の縮退ソース = 空表示（「Run setup first…」の
+  誤誘導にしない）。
+- **読込時再検証**（L16 と同じ規約。表示専用 = path を FS 操作に使わないため**行単位破棄**で
+  足りる）: 壊れ行（書き手が追記中の書きかけ末尾行を含む）スキップ・bucket 不一致 / 未知
+  eventType / 不正 path（`validateRelativePath`）は行破棄・message / details は長さ上限で
+  切る・肥大ファイル（> 2×maxBytes・改ざん前提）は読込ごと拒否。表示は従来どおり
+  `Text(verbatim:)`（ローカライズ解決に流さない）。
+- **回帰**: `FPEventLogTests`（往復 / ローテーション / 読込時再検証）・`SyncActivityModelTests`
+  （DB / FP 両ソースのページング・フィルタ・reload スナップショット固定）。
+
 ### ダウンロード一時ディレクトリ
 - **`TideTmpDirectory.resolve(for:)` で同一ボリュームの tmp を返す**。第一選択は `~/Library/Caches/Tide/tmp/`。同期ルートと別ボリュームになる時のみ `<syncRoot>/.tide/tmp/` にフォールバック。`moveItem` の atomic 性を保つため。
 

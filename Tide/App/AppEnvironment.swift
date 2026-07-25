@@ -220,6 +220,23 @@ final class AppEnvironment {
         )
     }
 
+    /// Sync Activity のログソース（Issue #83）。folderSync = DB（sync_log）/ fpOnly = FP 拡張の
+    /// 共有イベントログ（`FPEventLog` を読むだけ・DB / syncRoot 非接触 = 凍結温存を維持）。
+    /// 未セットアップ（どちらも無し）は nil = ウィンドウはセットアップ誘導表示。
+    /// fpOnly の URL 構築失敗（group container 不達のエッジ）は nil にせず fileURL nil の
+    /// 縮退ソースを返す — nil だと「Run setup first…」表示になりセットアップ済みユーザへの
+    /// 誤誘導になる（PR #90 レビュー nit 4）。縮退時は空表示（No activity yet.）に落ちる。
+    func makeSyncActivitySource() -> (any SyncActivitySource)? {
+        if let database {
+            return DatabaseActivitySource(db: database)
+        }
+        if signaler != nil, let bucket = config.bucketName, !bucket.isEmpty {
+            return FPEventLogActivitySource(
+                log: FPEventLog(bucket: bucket, fileURL: try? FPEventLog.defaultURL()))
+        }
+        return nil
+    }
+
     /// Keychain から AWS 資格情報を読む（folderSync / fpOnly 両起動パス共通）。
     private func loadCredentialsOrThrow() throws -> AWSCredentials {
         do {

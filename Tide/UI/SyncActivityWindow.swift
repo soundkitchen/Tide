@@ -2,29 +2,31 @@ import TideCore
 import SwiftUI
 import AppKit
 
-/// 同期アクティビティ（sync_log）の閲覧ウィンドウ（M4）。
+/// 同期アクティビティの閲覧ウィンドウ（M4）。
 /// 種別フィルタ + 新しい順リスト + 選択行の詳細ペイン（details のオンデマンド表示/コピー）。
-/// DB 内の path / message / details は英語の生文字列なので必ず `Text(verbatim:)` で出す
-/// （ローカライズ解決に流さない）。
+/// ソースは `SyncActivitySource`（Issue #83）: folderSync = DB（sync_log）/ fpOnly = FP 拡張の
+/// 共有イベントログ。どちらも path / message / details は英語の生文字列なので必ず
+/// `Text(verbatim:)` で出す（ローカライズ解決に流さない）。
 struct SyncActivityWindow: View {
     @Environment(AppEnvironment.self) private var env
     @State private var model = SyncActivityModel()
+    /// 開時に env から確定するログソース（fpOnly では FP スナップショットのページング整合の
+    /// ため、ウィンドウ生存中は同一インスタンスを使い続ける）。
+    @State private var source: (any SyncActivitySource)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Sync Activity")
                 .font(.title2).bold()
 
-            if let db = env.database {
-                filterBar(db: db)
+            if let source {
+                filterBar(source: source)
                 Divider()
-                content(db: db)
+                content(source: source)
                 if let entry = model.selectedEntry {
                     detailPane(entry)
                 }
-                Text("Logs older than 30 days are removed automatically.")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
+                retentionFootnote(source.retentionNote)
             } else {
                 Text("Run setup first to view sync activity.")
                     .foregroundStyle(.secondary)
@@ -34,33 +36,51 @@ struct SyncActivityWindow: View {
         .padding(16)
         .frame(minWidth: 620, minHeight: 460)
         .task {
-            if let db = env.database {
-                await model.reload(db: db)
+            let source = env.makeSyncActivitySource()
+            self.source = source
+            if let source {
+                await model.reload(source: source)
             }
+        }
+    }
+
+    /// 保持ポリシーの注記（ソースごとに文言差替・Issue #83）。
+    @ViewBuilder
+    private func retentionFootnote(_ note: SyncActivityRetentionNote) -> some View {
+        switch note {
+        case .databaseThirtyDays:
+            Text("Logs older than 30 days are removed automatically.")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+        case .fpSizeCapped:
+            Text("Recent File Provider activity. Oldest entries are trimmed automatically.")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
         }
     }
 
     // MARK: - フィルタ
 
-    private func filterBar(db: LocalDatabase) -> some View {
+    private func filterBar(source: any SyncActivitySource) -> some View {
         HStack(spacing: 6) {
-            ForEach(SyncLogEventType.allCases, id: \.rawValue) { type in
-                filterChip(type, db: db)
+            // チップの列挙はソース依存（folderSync は Moves を出さない・PR #90 レビュー nit 3）
+            ForEach(source.displayedEventTypes, id: \.rawValue) { type in
+                filterChip(type, source: source)
             }
             Spacer()
             if model.isLoading {
                 ProgressView().controlSize(.small)
             }
             Button("Refresh") {
-                Task { await model.reload(db: db) }
+                Task { await model.reload(source: source) }
             }
         }
     }
 
-    private func filterChip(_ type: SyncLogEventType, db: LocalDatabase) -> some View {
+    private func filterChip(_ type: SyncLogEventType, source: any SyncActivitySource) -> some View {
         let isOn = model.selectedTypes.contains(type)
         return Button {
-            Task { await model.toggleFilter(type, db: db) }
+            Task { await model.toggleFilter(type, source: source) }
         } label: {
             HStack(spacing: 3) {
                 Image(systemName: type.iconSymbol)
@@ -81,7 +101,7 @@ struct SyncActivityWindow: View {
     // MARK: - 一覧
 
     @ViewBuilder
-    private func content(db: LocalDatabase) -> some View {
+    private func content(source: any SyncActivitySource) -> some View {
         if let err = model.errorMessage {
             Text(verbatim: err)
                 .font(.caption).foregroundStyle(.red).textSelection(.enabled)
@@ -101,7 +121,7 @@ struct SyncActivityWindow: View {
             Spacer()
         } else {
             // List(selection:) でキーボード上下 / VoiceOver の行選択を効かせる（PR #17 レビュー nit-3）。
-            // fetch 済み行の id は常に非 nil（AUTOINCREMENT）なので `?? -1` は実質到達しない。
+            // fetch 済み行の id は常に非 nil（AUTOINCREMENT / FP は合成 id）なので `?? -1` は実質到達しない。
             List(selection: $model.selectedEntryId) {
                 ForEach(model.entries, id: \.id) { entry in
                     row(entry)
@@ -111,7 +131,7 @@ struct SyncActivityWindow: View {
                     HStack {
                         Spacer()
                         Button("Load more") {
-                            Task { await model.loadMore(db: db) }
+                            Task { await model.loadMore(source: source) }
                         }
                         .disabled(model.isLoading)
                         Spacer()
@@ -197,6 +217,7 @@ struct SyncActivityWindow: View {
         case .upload:   return String(localized: "Uploads")
         case .download: return String(localized: "Downloads")
         case .delete:   return String(localized: "Deletions")
+        case .move:     return String(localized: "Moves")
         case .conflict: return String(localized: "Conflicts")
         case .error:    return String(localized: "Errors")
         case .info:     return String(localized: "Info")

@@ -45,6 +45,10 @@ struct ExtensionServices: Sendable {
     let materializedReported: PersistedPathSet
     /// 実体化バッジ（Issue #65）: fileproviderd から最後に観測した live 集合（メモリのみ）。
     let materializedObserver: MaterializedObserver
+    /// FP 拡張イベントの共有ログ（Issue #83・fpOnly の Sync Activity 復権）。書込・materialize・
+    /// エラー等を App Group Caches の JSONL へ best-effort 追記し、アプリ UI が読んで表示する。
+    /// DB 非接触は維持（GRDB 非依存の素のファイル）。書き手はこの拡張プロセスのみ。
+    let events: FPEventLog
     /// 実体化バッジ（Issue #65）: live 集合の全量問い合わせ（`MaterializedSetQuery.filePaths`）。
     /// domain を閉じ込めた closure で、`materializedItemsDidChange` と enumerateChanges の
     /// 初回リフレッシュが共用する。失敗は nil（バッジ更新を見送るだけ・安全側）。
@@ -169,6 +173,10 @@ struct ExtensionServices: Sendable {
             if virtualDirsURL == nil || cleanupsURL == nil || materializedURL == nil {
                 AppLogger.fileProvider.error("Extension: path-set registry URL unavailable (persisting disabled)")
             }
+            let eventsURL = try? FPEventLog.defaultURL()
+            if eventsURL == nil {
+                AppLogger.fileProvider.error("Extension: event log URL unavailable (activity logging disabled)")
+            }
             return ExtensionServices(
                 s3: s3, cache: cache, writer: writer, ignore: ignore,
                 virtualDirs: PersistedPathSet(bucket: bucket, fileURL: virtualDirsURL),
@@ -177,6 +185,7 @@ struct ExtensionServices: Sendable {
                     bucket: bucket, fileURL: materializedURL,
                     maxEntries: Self.materializedBadgeCap),
                 materializedObserver: MaterializedObserver(),
+                events: FPEventLog(bucket: bucket, fileURL: eventsURL),
                 queryMaterializedFilePaths: {
                     await MaterializedSetQuery.filePaths(domain: boxedDomain.value)
                 },

@@ -94,6 +94,7 @@ F4 の是正内容（2026-06-11・M4 Sync Activity 対応に同梱）: `recentEr
 | L16 | File Provider 世代ログの at-rest 内容（プライバシー境界） | ✅ Reviewed（2026-07-04・M5 Phase 4。group Caches にマニフェスト由来メタデータ + bucket のみ・認証情報なし・派生データで factoryReset/make reset 消去・bucket キー・PathValidator ゲートを書込み時 + 読込時の両方で適用） |
 | L17 | File Provider 書込経路のゲート | ✅ Mitigated（2026-07-06・M5 Phase 5-2 / 2026-07-09・Phase 5-3 で createItem・dir 再帰削除へ拡大 / 2026-07-11・Phase 5-4 で rename/reparent へ拡大。PathValidator + `childPath` 構造検証・サイズ上限・SSE-S3・NoFollowFileReader・RMW 内ベースガード・copyObject は versionId 固定 + 最新版フォールバック禁止。**機密網/symlink/`.syncignore` の除外を FP の作成・改名でも強制** = `ExcludedFromSync` でローカル温存・S3 非汚染） |
 | L18 | File Provider 実体化バッジレジストリの at-rest 内容（プライバシー境界） | ✅ Reviewed（2026-07-14・Issue #65。group Caches に相対パス + bucket のみ・認証情報/メタデータなし・派生データ = fileproviderd から再観測可能・`PersistedPathSet` 共通の読込ゲート） |
+| L19 | File Provider イベントログの at-rest 内容（プライバシー境界） | ✅ Reviewed（2026-07-26・Issue #83。group Caches に相対パス + bucket + 英語定型 message/details のみ・認証情報なし・診断ログ = サイズローテーションで有界・行単位の読込時再検証） |
 
 凡例: ✅ Fixed / 🟡 Partial / ⏸ Deferred / 🔴 未対応
 
@@ -104,7 +105,7 @@ F4 の是正内容（2026-06-11・M4 Sync Activity 対応に同梱）: `recentEr
 | 🔴 Critical | [critical.md](critical.md) | 3 |
 | 🟠 High | [high.md](high.md) | 3 |
 | 🟡 Medium | [medium.md](medium.md) | 7（M6/M7 とも Fixed。M7 は 2026-06-02 検出・同日修正） |
-| 🟢 Low / Hardening | [low.md](low.md) | 18（L16 = FP 世代ログの at-rest 内容・2026-07-04 / L17 = FP 書込経路のゲート・2026-07-11 Phase 5-4 まで拡大 / L18 = FP 実体化バッジレジストリの at-rest 内容・2026-07-14） |
+| 🟢 Low / Hardening | [low.md](low.md) | 19（L16 = FP 世代ログの at-rest 内容・2026-07-04 / L17 = FP 書込経路のゲート・2026-07-11 Phase 5-4 まで拡大 / L18 = FP 実体化バッジレジストリの at-rest 内容・2026-07-14 / L19 = FP イベントログの at-rest 内容・2026-07-26） |
 
 ## 当初の推奨対応順（参考）
 

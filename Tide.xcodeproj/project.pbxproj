@@ -36,6 +36,7 @@
 		2F63A4955D81343BB2DB6113 /* Uploader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85F1BD599EF87DA6A06796B7 /* Uploader.swift */; };
 		2F7BD8C37D51AF732E20C74A /* RemoteOpGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B51C567451A4C1C023697EF /* RemoteOpGate.swift */; };
 		30021E4A68B5166DFBF1DD9E /* LegacyStateMigrator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 364602D183686B20C05D5EFE /* LegacyStateMigrator.swift */; };
+		315782CA13D2126395951D88 /* FPEventLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF26AE0EF6D3C980EFE59EDF /* FPEventLog.swift */; };
 		348D9E70C7268F6FBBE617F3 /* ManifestTreeDiffTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 268B6DB362449129207086A7 /* ManifestTreeDiffTests.swift */; };
 		34C9CD59AD38354487CAE58D /* SettingsWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC8E5DD109E48D0F8ABF0455 /* SettingsWindow.swift */; };
 		35C303CEB9F985D8F8418061 /* FileProviderItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF8E7684D0B1A5D8C577F7E8 /* FileProviderItem.swift */; };
@@ -107,6 +108,7 @@
 		99F9EE4A6DC9EC6905F09A21 /* SyncIssueClassifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8815BF2DB0DE7101D71508D5 /* SyncIssueClassifier.swift */; };
 		9B42F81B45D3BF526B70570B /* FullScanSinglePassTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F2555C9F91FD02C04A002D7 /* FullScanSinglePassTests.swift */; };
 		9B793A724C6B1B17CE22B11F /* HashCalculatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 16ED0B8D39615582C0CD3596 /* HashCalculatorTests.swift */; };
+		9E1D2DCF1D31132539923B49 /* FPEventLogTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85E7AEBB1325822C20880EF5 /* FPEventLogTests.swift */; };
 		9F2CB4C73CB4901DA44770EC /* TideAppGroup.swift in Sources */ = {isa = PBXBuildFile; fileRef = F04B07DC0E849CB713B2A06F /* TideAppGroup.swift */; };
 		9FF79ED9D02C034D4A29C8CB /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = 868B594F3D527CF261BDC653 /* GRDB */; };
 		A0A6842C3174E04871F6B9E5 /* ExtensionWriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87A3E4AE53717CC760C5B888 /* ExtensionWriter.swift */; };
@@ -326,6 +328,7 @@
 		721CD940D3929EFD005575FF /* TideTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = TideTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		768FFB4507784287C979E47D /* ManifestSharding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManifestSharding.swift; sourceTree = "<group>"; };
 		7D575C0984B4BABFC8234BB1 /* Manifest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Manifest.swift; sourceTree = "<group>"; };
+		85E7AEBB1325822C20880EF5 /* FPEventLogTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FPEventLogTests.swift; sourceTree = "<group>"; };
 		85F1BD599EF87DA6A06796B7 /* Uploader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Uploader.swift; sourceTree = "<group>"; };
 		863B37F925AB5A36B3362386 /* TideFileProvider.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = TideFileProvider.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		87A3E4AE53717CC760C5B888 /* ExtensionWriter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExtensionWriter.swift; sourceTree = "<group>"; };
@@ -358,6 +361,7 @@
 		B8665F814F4338316C32E779 /* ManifestTreeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManifestTreeTests.swift; sourceTree = "<group>"; };
 		BB49CA8EE27D9D29147275FE /* ChangeDetectorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChangeDetectorTests.swift; sourceTree = "<group>"; };
 		BC8E5DD109E48D0F8ABF0455 /* SettingsWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsWindow.swift; sourceTree = "<group>"; };
+		BF26AE0EF6D3C980EFE59EDF /* FPEventLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FPEventLog.swift; sourceTree = "<group>"; };
 		BF88A6EE0AAE77A740A190A9 /* LocalDatabaseTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalDatabaseTests.swift; sourceTree = "<group>"; };
 		C03D88F728230F27E9AF7EC0 /* TestSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestSupport.swift; sourceTree = "<group>"; };
 		C30A8166AAE342D39ECF3D6F /* ConflictNamerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConflictNamerTests.swift; sourceTree = "<group>"; };
@@ -532,6 +536,7 @@
 				B74CDACF3FB8B7119A278A9C /* DiagnosticsExporterTests.swift */,
 				349319C7D3078F35B4467348 /* DownloaderTests.swift */,
 				F56B1604CEDCF384057355A4 /* FileProviderWritePolicyTests.swift */,
+				85E7AEBB1325822C20880EF5 /* FPEventLogTests.swift */,
 				3F2555C9F91FD02C04A002D7 /* FullScanSinglePassTests.swift */,
 				C58B84C406BAE522A8E1E5D8 /* FullScanSymlinkTests.swift */,
 				1BD4B605839107E1638A0D11 /* HardcodedIgnoreRulesTests.swift */,
@@ -641,6 +646,7 @@
 			isa = PBXGroup;
 			children = (
 				EF18F96672340265B0CAE32E /* ConfigStore.swift */,
+				BF26AE0EF6D3C980EFE59EDF /* FPEventLog.swift */,
 				91049E9B9B1476D00B397815 /* KeychainStore.swift */,
 				364602D183686B20C05D5EFE /* LegacyStateMigrator.swift */,
 				A93EF4ED6C9F4E8CA263E1FB /* LocalDatabase.swift */,
@@ -921,6 +927,7 @@
 				2ADD28F5A093205D7226FD0B /* ConflictNamer.swift in Sources */,
 				5164A10DF8FD6E2A98435906 /* DeletedFilesCache.swift in Sources */,
 				6A5CDE1754221B96636E9313 /* Downloader.swift in Sources */,
+				315782CA13D2126395951D88 /* FPEventLog.swift in Sources */,
 				126761A58F68052F91BC6A84 /* FileEntry.swift in Sources */,
 				6F1728DA029468D493B3B022 /* FileProviderWritePolicy.swift in Sources */,
 				11E50A79B475E1293F6DC43F /* HashCalculator.swift in Sources */,
@@ -995,6 +1002,7 @@
 				1307F8BC5996B2061E1BFA30 /* DeletedFilesCacheTests.swift in Sources */,
 				4AFB3F5C991FF9D6ED1AA8AA /* DiagnosticsExporterTests.swift in Sources */,
 				3D7D492E3A9ACC73D09BA71F /* DownloaderTests.swift in Sources */,
+				9E1D2DCF1D31132539923B49 /* FPEventLogTests.swift in Sources */,
 				EDCFEA1B530614F67D973244 /* FileProviderWritePolicyTests.swift in Sources */,
 				9B42F81B45D3BF526B70570B /* FullScanSinglePassTests.swift in Sources */,
 				0BEC55FBA93D4E4AC6559F94 /* FullScanSymlinkTests.swift in Sources */,
