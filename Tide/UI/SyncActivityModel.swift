@@ -2,11 +2,92 @@ import TideCore
 import Foundation
 import Observation
 
-/// 「Sync Activity」ウィンドウの状態（M4）。sync_log を新しい順にページングしながら表示する。
+// MARK: - ログソース抽象（Issue #83）
+
+/// Sync Activity のログソース差替点（Issue #83）。folderSync = DB（sync_log）/ fpOnly = FP 拡張の
+/// 共有イベントログ（`FPEventLog`）を同一ウィンドウで表示する。ページング契約は
+/// `LocalDatabase.fetchLogs` と同じ（id 降順・`beforeId` カーソル・limit 超過分で hasMore 判定）。
+@MainActor
+protocol SyncActivitySource {
+    /// フッタ注記の種別（保持ポリシーがソースごとに違うため文言を差し替える）。
+    var retentionNote: SyncActivityRetentionNote { get }
+    func fetchLogs(
+        eventTypes: Set<SyncLogEventType>, beforeId: Int64?, limit: Int
+    ) async throws -> LocalDatabase.SyncLogPage
+}
+
+/// 保持ポリシー注記の種別（DB = 30 日で自動削除 / FP = サイズ上限で古い順に破棄）。
+enum SyncActivityRetentionNote {
+    case databaseThirtyDays
+    case fpSizeCapped
+}
+
+/// folderSync: 既存の DB（sync_log）をそのまま読む。
+struct DatabaseActivitySource: SyncActivitySource {
+    let db: LocalDatabase
+
+    var retentionNote: SyncActivityRetentionNote { .databaseThirtyDays }
+
+    func fetchLogs(
+        eventTypes: Set<SyncLogEventType>, beforeId: Int64?, limit: Int
+    ) async throws -> LocalDatabase.SyncLogPage {
+        try await db.fetchLogs(eventTypes: eventTypes, beforeId: beforeId, limit: limit)
+    }
+}
+
+/// fpOnly: FP 拡張の共有イベントログ（`FPEventLog`）を読み、`SyncLogRecord` へ写像して返す
+/// （Issue #83）。id は時系列 index からの合成（最古 = 1 … 最新 = N）。reload（beforeId nil）で
+/// ファイルを読み直してスナップショットを取り、loadMore はそのスナップショットからページング
+/// する（読込の合間に拡張が追記してもカーソルがずれない）。ローテーション横断の絶対 id 安定性は
+/// 持たない（診断ビュー・Refresh で再整列される）。
+@MainActor
+final class FPEventLogActivitySource: SyncActivitySource {
+    private let log: FPEventLog
+    /// 直近 reload 時点のスナップショット（新しい順・合成 id 付き）。
+    private var snapshotDesc: [SyncLogRecord] = []
+
+    init(log: FPEventLog) {
+        self.log = log
+    }
+
+    var retentionNote: SyncActivityRetentionNote { .fpSizeCapped }
+
+    func fetchLogs(
+        eventTypes: Set<SyncLogEventType>, beforeId: Int64?, limit: Int
+    ) async throws -> LocalDatabase.SyncLogPage {
+        if beforeId == nil {
+            let chronological = await log.loadRecords()
+            snapshotDesc = Array(chronological.enumerated().map { index, record in
+                SyncLogRecord(
+                    id: Int64(index + 1),
+                    timestamp: record.timestamp,
+                    eventType: record.eventType,
+                    path: record.path,
+                    message: record.message,
+                    details: record.details
+                )
+            }.reversed())
+        }
+        let selectedRaws = Set(eventTypes.map(\.rawValue))
+        var filtered = snapshotDesc.filter { selectedRaws.contains($0.eventType) }
+        if let beforeId {
+            filtered = filtered.filter { ($0.id ?? 0) < beforeId }
+        }
+        return LocalDatabase.SyncLogPage(
+            records: Array(filtered.prefix(limit)),
+            hasMore: filtered.count > limit
+        )
+    }
+}
+
+// MARK: - モデル
+
+/// 「Sync Activity」ウィンドウの状態（M4）。ログを新しい順にページングしながら表示する。
 /// **ライブ更新はしない**（開時ロード + 手動 Refresh）: 診断面でリアルタイム性の要求が薄く、
 /// ValueObservation はフィルタ × ページングカーソルとの整合（observation 中の append 位置）が
 /// 複雑化するため。Version History と同じ手動更新モデルに揃える。
-/// DB は引数で受ける（env 非依存 = temp DB だけで `SyncActivityModelTests` が完結する）。
+/// ソースは引数で受ける（env 非依存 = temp DB / temp ファイルだけでテストが完結する）。
+/// folderSync = DB / fpOnly = FP 共有イベントログの差替は `SyncActivitySource`（Issue #83）。
 @MainActor
 @Observable
 final class SyncActivityModel {
@@ -30,13 +111,15 @@ final class SyncActivityModel {
     }
 
     /// 初回 `.task` / Refresh / フィルタ変更時。カーソルをリセットして先頭ページを読み直す。
-    func reload(db: LocalDatabase) async {
+    func reload(source: any SyncActivitySource) async {
         generation += 1
         let gen = generation
         isLoading = true
         errorMessage = nil
         do {
-            let page = try await db.fetchLogs(eventTypes: selectedTypes, limit: Self.pageSize)
+            let page = try await source.fetchLogs(
+                eventTypes: selectedTypes, beforeId: nil, limit: Self.pageSize
+            )
             guard gen == generation else { return }
             entries = page.records
             hasMore = page.hasMore
@@ -52,12 +135,12 @@ final class SyncActivityModel {
     }
 
     /// 末尾の id を beforeId カーソルに次ページを追記する。
-    func loadMore(db: LocalDatabase) async {
+    func loadMore(source: any SyncActivitySource) async {
         guard !isLoading, hasMore, let lastId = entries.last?.id else { return }
         let gen = generation
         isLoading = true
         do {
-            let page = try await db.fetchLogs(
+            let page = try await source.fetchLogs(
                 eventTypes: selectedTypes, beforeId: lastId, limit: Self.pageSize
             )
             // 進行中に reload が走っていたら（世代前進）この続きページは stale なので捨てる。
@@ -71,12 +154,12 @@ final class SyncActivityModel {
         if gen == generation { isLoading = false }
     }
 
-    func toggleFilter(_ type: SyncLogEventType, db: LocalDatabase) async {
+    func toggleFilter(_ type: SyncLogEventType, source: any SyncActivitySource) async {
         if selectedTypes.contains(type) {
             selectedTypes.remove(type)
         } else {
             selectedTypes.insert(type)
         }
-        await reload(db: db)
+        await reload(source: source)
     }
 }

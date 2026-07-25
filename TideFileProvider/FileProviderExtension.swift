@@ -195,6 +195,9 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 // 不一致は noSuchItem では**なく** I/O エラー（item を消させず後で再試行可能に）。
                 guard written == entry.size, sha == entry.sha256 else {
                     AppLogger.fileProvider.error("fetchContents verification failed for \(path, privacy: .private) (size \(written)/\(entry.size))")
+                    await services.events.append(
+                        type: .error, path: path,
+                        message: "Materialize failed: integrity verification (size \(written)/\(entry.size))")
                     completion.value(nil, nil, NSError(
                         domain: NSCocoaErrorDomain, code: NSFileReadCorruptFileError,
                         userInfo: [
@@ -211,12 +214,21 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 // enumerateChanges が単一の報告点（先に足すと祖先 dir のチェック反転差分が
                 // 消えてしまう）。didChange → 自己 signal → 差分配信で dir 側も追従する。
                 cleanupURL = nil
+                // FP 版 Sync Activity（Issue #83）: materialize 成功 = folderSync の download 相当。
+                await services.events.append(
+                    type: .download, path: path, message: "Materialized (\(written) bytes)")
                 completion.value(
                     tmpURL,
                     FileProviderItem(node: .file(path: path, entry: entry), materialized: true),
                     nil)
             } catch {
                 AppLogger.fileProvider.error("fetchContents failed: \(String(describing: error), privacy: .private)")
+                // キャンセル（ユーザ操作 / システム都合の中断）は正常系なのでイベントにしない。
+                if !(error is CancellationError) {
+                    await services.events.append(
+                        type: .error, path: path, message: "Materialize failed",
+                        details: String(describing: error))
+                }
                 completion.value(nil, nil, Self.wrapForCompletion(error))
             }
         }
@@ -275,6 +287,13 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             (try? PathValidator.validateRelativePath(path)) != nil
         else {
             AppLogger.fileProvider.notice("createItem: unsyncable name (excludedFromSync): \(itemTemplate.filename, privacy: .private)")
+            // 同期文脈なので fire-and-forget（イベントは best-effort・path は検証不能なので details へ）
+            let filename = itemTemplate.filename
+            Task {
+                await services.events.append(
+                    type: .info, path: nil,
+                    message: "Excluded from sync: unsyncable name (kept local)", details: filename)
+            }
             progress.completedUnitCount = 1
             completionHandler(nil, [], false, NSFileProviderError(.excludedFromSync))
             return progress
@@ -283,6 +302,11 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         // symlink は絶対に同期しない（セキュリティゲート）— ローカルに残して同期対象外。
         if contentType?.conforms(to: .symbolicLink) == true {
             AppLogger.fileProvider.notice("createItem: symlink excluded from sync: \(path, privacy: .private)")
+            Task {
+                await services.events.append(
+                    type: .info, path: path,
+                    message: "Excluded from sync: symbolic link (kept local)")
+            }
             progress.completedUnitCount = 1
             completionHandler(nil, [], false, NSFileProviderError(.excludedFromSync))
             return progress
@@ -296,6 +320,10 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             //（スキャン側も dir prune はしない）。
             if HardcodedIgnoreRules.shouldIgnore(relativePath: path) {
                 AppLogger.fileProvider.notice("createItem: hardcoded-ignored directory excluded: \(path, privacy: .private)")
+                Task {
+                    await services.events.append(
+                        type: .info, path: path, message: "Excluded from sync (kept local)")
+                }
                 progress.completedUnitCount = 1
                 completionHandler(nil, [], false, NSFileProviderError(.excludedFromSync))
                 return progress
@@ -359,6 +387,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 if IgnoreDecision.shouldSkip(
                     relativePath: path, isAlreadyTracked: isTracked, matcher: layered) {
                     AppLogger.fileProvider.notice("createItem: excluded from sync: \(path, privacy: .private)")
+                    await services.events.append(
+                        type: .info, path: path, message: "Excluded from sync (kept local)")
                     completion.value(nil, [], false, NSFileProviderError(.excludedFromSync))
                     return
                 }
@@ -383,7 +413,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     // 同 path が除外後始末の予約中なら解除（再包含 = 除外の再評価で同期復帰）。
                     await services.virtualDirs.removeAncestors(of: path)
                     await services.exclusionCleanups.removeSubtree(at: path)
-                    Self.completeCreate(outcome, path: path, completion: completion)
+                    await Self.completeCreate(
+                        outcome, path: path, events: services.events, completion: completion)
                     return
                 }
                 // 新規作成 = base nil の書込。`decideUpload(base: nil)` が「リモート不在 = 作成 /
@@ -396,9 +427,15 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 )
                 await services.virtualDirs.removeAncestors(of: path)
                 await services.exclusionCleanups.removeSubtree(at: path)
-                Self.completeCreate(outcome, path: path, completion: completion)
+                await Self.completeCreate(
+                    outcome, path: path, events: services.events, completion: completion)
             } catch {
                 AppLogger.fileProvider.error("createItem failed: \(String(describing: error), privacy: .private)")
+                if !(error is CancellationError) {
+                    await services.events.append(
+                        type: .error, path: path, message: "Create failed",
+                        details: String(describing: error))
+                }
                 completion.value(nil, [], false, Self.wrapForCompletion(error))
             }
         }
@@ -407,15 +444,19 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
     }
 
     /// createItem の書込結果 → completion 変換（内容あり/なしの 2 経路で共用）。
+    /// FP 版 Sync Activity（Issue #83）のイベント記録もここに合流させる。
     private static func completeCreate(
         _ outcome: ExtensionWriter.ModifyOutcome,
         path: String,
+        events: FPEventLog,
         completion: UncheckedSendableBox<(NSFileProviderItem?, NSFileProviderItemFields, Bool, Error?) -> Void>
-    ) {
+    ) async {
         // 実体化バッジ（Issue #65）: いずれも内容がローカルにある（今書いたファイルそのもの）
         // ので実体化済みフラグ付きで返す。レジストリの前進は enumerateChanges（単一の報告点）。
         switch outcome {
         case .written(let entry):
+            await events.append(
+                type: .upload, path: path, message: "Created (\(entry.size) bytes)")
             completion.value(
                 FileProviderItem(node: .file(path: path, entry: entry), materialized: true),
                 [], false, nil)
@@ -425,6 +466,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             // 再取得不要）。正規パスのリモート版は次の enumerateChanges が新 item として配る
             //（modifyItem 競合と同じ「正規パスはリモート勝ち」・データ損失ゼロ）。
             AppLogger.fileProvider.notice("createItem: collision with remote — created as conflict copy: \(copyPath, privacy: .private)")
+            await events.append(
+                type: .conflict, path: path, message: "Created as conflict copy → \(copyPath)")
             completion.value(
                 FileProviderItem(node: .file(path: copyPath, entry: copyEntry), materialized: true),
                 [], false, nil)
@@ -545,6 +588,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     // 返却 item は必ずシャードへ書いた entry から生成（自世代 append と同一
                     // itemVersion = 直後の enumerateChanges が no-op・bounce しない）。
                     // 実体化バッジ（Issue #65）: 編集内容 = ローカル実体なので実体化済み。
+                    await services.events.append(
+                        type: .upload, path: path, message: "Uploaded (\(entry.size) bytes)")
                     completion.value(
                         FileProviderItem(node: .file(path: path, entry: entry), materialized: true),
                         [], false, nil)
@@ -553,12 +598,20 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     // システムにリモート内容を取り直させる。ローカル編集は conflict copy として
                     // 自世代に反映済み → 直後の enumerateChanges で新 item として出現する。
                     AppLogger.fileProvider.notice("modifyItem: upload conflict — local edit preserved as copy: \(copyPath, privacy: .private)")
+                    await services.events.append(
+                        type: .conflict, path: path,
+                        message: "Upload conflict — local edit preserved as copy → \(copyPath)")
                     completion.value(
                         FileProviderItem(node: .file(path: path, entry: remote), materialized: true),
                         [], true, nil)
                 }
             } catch {
                 AppLogger.fileProvider.error("modifyItem failed: \(String(describing: error), privacy: .private)")
+                if !(error is CancellationError) {
+                    await services.events.append(
+                        type: .error, path: path, message: "Upload failed",
+                        details: String(describing: error))
+                }
                 completion.value(nil, [], false, Self.wrapForCompletion(error))
             }
         }
@@ -643,12 +696,18 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                         case .written(let entry):
                             // 実体化バッジ（Issue #65）: 編集内容 = ローカル実体（.written/.conflict
                             // とも modifyItem の .contents 分岐と同じ帰結写像）。
+                            await services.events.append(
+                                type: .upload, path: oldPath,
+                                message: "Uploaded (\(entry.size) bytes)")
                             completion.value(
                                 FileProviderItem(
                                     node: .file(path: oldPath, entry: entry), materialized: true),
                                 [], false, nil)
                         case .conflict(let remote, let copyPath, _):
                             AppLogger.fileProvider.notice("modifyItem(move noop): upload conflict — local edit preserved as copy: \(copyPath, privacy: .private)")
+                            await services.events.append(
+                                type: .conflict, path: oldPath,
+                                message: "Upload conflict — local edit preserved as copy → \(copyPath)")
                             completion.value(
                                 FileProviderItem(
                                     node: .file(path: oldPath, entry: remote), materialized: true),
@@ -713,6 +772,9 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                         //（dir 再帰）は子のベースをツリー現行 sha で取るため追加の予約は不要 =
                         // そのまま受理される。
                         AppLogger.fileProvider.notice("modifyItem(move): dir excluded (excludedFromSync; cleanup via system deleteItem): \(oldPath, privacy: .private)")
+                        await services.events.append(
+                            type: .info, path: oldPath,
+                            message: "Excluded from sync by rename (kept local)")
                         await services.virtualDirs.removeSubtree(at: oldPath)
                         completion.value(nil, [], false, NSFileProviderError(.excludedFromSync))
                         return
@@ -745,6 +807,9 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     switch try await services.writer.moveDirectory(descendants: descendants) {
                     case .moved:
                         AppLogger.fileProvider.notice("modifyItem(move): dir moved (\(descendants.count) files): -> \(newPath, privacy: .private)")
+                        await services.events.append(
+                            type: .move, path: oldPath,
+                            message: "Moved → \(newPath) (\(descendants.count) files)")
                         // 実体化バッジ（Issue #65）: move は内容を動かさないので実体化状態は不変。
                         // 返却 dir のチェックは旧 path（移動前ツリー）の集計を引き継ぎ、報告済み
                         // レジストリは subtree ごと新 path へ追従させる（追従しないと移動直後の
@@ -790,6 +855,9 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     // deleteItem 側でツリー現行 sha をベースに受理する。
                     await services.exclusionCleanups.add(oldPath)
                     AppLogger.fileProvider.notice("modifyItem(move): excluded new name (excludedFromSync; cleanup reserved): \(oldPath, privacy: .private)")
+                    await services.events.append(
+                        type: .info, path: oldPath,
+                        message: "Excluded from sync by rename (kept local)")
                     completion.value(nil, [], false, NSFileProviderError(.excludedFromSync))
                     return
                 }
@@ -815,6 +883,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     // 実体化バッジ（Issue #65）: move は内容を動かさない = 実体化状態は旧 path を
                     // 引き継ぎ、報告済みレジストリも新 path へ追従（チャーン防止）。
                     let entry = newEntry ?? entry
+                    await services.events.append(
+                        type: .move, path: oldPath, message: "Moved → \(newPath)")
                     let wasMaterialized = await services.materializedReported.snapshot()
                         .contains(oldPath)
                     await services.materializedReported.renameSubtree(from: oldPath, to: newPath)
@@ -831,6 +901,11 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 }
             } catch {
                 AppLogger.fileProvider.error("modifyItem(move) failed: \(String(describing: error), privacy: .private)")
+                if !(error is CancellationError) {
+                    await services.events.append(
+                        type: .error, path: oldPath, message: "Move failed",
+                        details: String(describing: error))
+                }
                 completion.value(nil, [], false, Self.wrapForCompletion(error))
             }
         }
@@ -890,6 +965,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     switch try await services.writer.deleteDirectory(expecting: expected) {
                     case .removed(let count):
                         AppLogger.fileProvider.notice("deleteItem(dir): removed \(count) files under \(dirPath, privacy: .private)")
+                        await services.events.append(
+                            type: .delete, path: dirPath, message: "Deleted folder (\(count) files)")
                         await services.virtualDirs.removeSubtree(at: dirPath)
                         // 実体化バッジ（Issue #65）: 消えた subtree の報告済みエントリも掃除
                         await services.materializedReported.removeSubtree(at: dirPath)
@@ -900,10 +977,18 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                         // 子がいる場合も DirectoryNotEmpty — システムが dir を最新メタデータから
                         // 再作成し、除去済み分の削除は次の enumerateChanges の diff が配る。
                         AppLogger.fileProvider.notice("deleteItem(dir): rejected — remote changed under dir: \(path, privacy: .private)")
+                        await services.events.append(
+                            type: .info, path: dirPath,
+                            message: "Delete rejected (remote changed under folder)")
                         dirCompletion.value(NSFileProviderError(.directoryNotEmpty))
                     }
                 } catch {
                     AppLogger.fileProvider.error("deleteItem(dir) failed: \(String(describing: error), privacy: .private)")
+                    if !(error is CancellationError) {
+                        await services.events.append(
+                            type: .error, path: dirPath, message: "Delete failed",
+                            details: String(describing: error))
+                    }
                     dirCompletion.value(Self.wrapForCompletion(error))
                 }
             }
@@ -936,9 +1021,14 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     effectiveBase = entry.sha256
                 }
                 switch try await services.writer.deleteFile(path: ref.path, baseSha: effectiveBase) {
-                case .removed, .alreadyGone:
+                case .removed:
+                    await services.events.append(type: .delete, path: ref.path, message: "Deleted")
+                    fallthrough
+                case .alreadyGone:
                     // 予約の掃除は成功時に無条件（読み替え不発 = 有効 base で消えた後始末でも
                     // 残留させない。未予約 path への removeSubtree は no-op）。
+                    // イベント記録（Issue #83）は実削除（.removed）のみ — alreadyGone は冪等
+                    // no-op で活動が無い。
                     await services.exclusionCleanups.removeSubtree(at: ref.path)
                     // 実体化バッジ（Issue #65）: 消えた path の報告済みエントリも掃除
                     await services.materializedReported.removeSubtree(at: ref.path)
@@ -952,6 +1042,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     // 診断のため「ベース不明（nil）」と「sha 不一致」を区別してログする。
                     let reason = baseSha == nil ? "base unknown" : "remote changed since base"
                     AppLogger.fileProvider.notice("deleteItem: rejected (\(reason, privacy: .public)): \(ref.path, privacy: .private)")
+                    await services.events.append(
+                        type: .info, path: ref.path, message: "Delete rejected (\(reason))")
                     // 実体化バッジ（Issue #65）: 添える最新 item も報告済み基準のフラグを維持
                     let isMaterialized = await services.materializedReported.snapshot()
                         .contains(ref.path)
@@ -963,6 +1055,11 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 }
             } catch {
                 AppLogger.fileProvider.error("deleteItem failed: \(String(describing: error), privacy: .private)")
+                if !(error is CancellationError) {
+                    await services.events.append(
+                        type: .error, path: ref.path, message: "Delete failed",
+                        details: String(describing: error))
+                }
                 completion.value(Self.wrapForCompletion(error))
             }
         }

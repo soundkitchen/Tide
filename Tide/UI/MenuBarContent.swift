@@ -454,8 +454,9 @@ struct MenuBarContent: View {
                 menuRow("Open Sync Folder", systemImage: "folder") { openSyncFolder() }
                     .disabled(env.config.syncRootPath == nil)
             }
-            if env.engine != nil {
-                // Sync Activity は DB（sync_log）由来のため engine 稼働時のみ。
+            if env.engine != nil || env.signaler != nil {
+                // Sync Activity: folderSync = DB（sync_log）/ fpOnly = FP 拡張の共有イベントログ
+                // （`FPEventLog`・Issue #83）をソース差替で表示（DB 非接触 = 凍結温存を維持）。
                 menuRow("Sync Activity…", systemImage: "list.bullet.rectangle") { activateAndOpen("activity") }
             }
             if env.engine != nil || env.signaler != nil {

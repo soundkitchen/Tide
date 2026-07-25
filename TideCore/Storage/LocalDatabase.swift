@@ -100,6 +100,9 @@ public enum SyncLogEventType: String, CaseIterable, Sendable {
     case upload
     case download
     case delete
+    /// 改名 / 移動（Issue #83・FP 拡張イベント用）。folderSync（FSEvents モード）は move を
+    /// 一次イベントとして持たない（delete + upload に分解される）ため DB には現れない。
+    case move
     case conflict
     case error
     case info

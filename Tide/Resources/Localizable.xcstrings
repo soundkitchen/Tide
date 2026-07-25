@@ -2425,6 +2425,28 @@
           }
         }
       }
+    },
+    "Moves" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "移動"
+          }
+        }
+      }
+    },
+    "Recent File Provider activity. Oldest entries are trimmed automatically." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "File Provider の最近のアクティビティ。古い項目から自動的に削除されます。"
+          }
+        }
+      }
     }
   },
   "version" : "1.1"

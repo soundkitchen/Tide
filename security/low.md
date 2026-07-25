@@ -301,3 +301,17 @@ FP 拡張の書込（deleteItem / modifyItem / createItem / move）は `Extensio
 - **at-rest 場所と寿命**: App Group Caches。派生データ = fileproviderd の実体化セット（`enumeratorForMaterializedItems`）からいつでも再観測可能。消えてもバッジが一時的に消えるだけで同期の正しさに影響しない（cosmetic）。`factoryReset` / `make reset` の掃除範囲は L16 と同じ。
 - **読込ゲート**: `PersistedPathSet` 共通の規約（bucket キー・読込時 `validateRelativePath` 再適用・1 件でも不正なら全体破棄・上限 = 本用途は 10,000 に注入）。
 - **上限超過の安全側**: 溢れた分は報告されない = バッジが付かないだけ。切り詰めは昇順 prefix で決定的（`MaterializedBadge.cappedReport` と `replace(with:)` が同一規則 = 差分再送のチャーンを作らない）。
+
+## L19. File Provider イベントログの at-rest 内容（プライバシー境界）
+
+**Status:** ✅ Reviewed — FP 版 Sync Activity（Issue #83・2026-07-26）用に、FP 拡張の同期活動イベント（書込 / materialize / エラー等）を App Group コンテナ内 Caches へ追記型 JSONL でログする面を追加。**認証情報を含まず、保存するのは相対パス + bucket 名 + 英語の定型 message / details（エラー記述）のみ**で、露出は世代ログ（L16）と DB の sync_log が既に持つ内容と同等であることを確認した。
+
+**該当箇所:** `TideCore/Storage/FPEventLog.swift`（`<App Group>/Library/Caches/Tide/fp-events-ext.jsonl` + ローテーション世代 `.1`。書き手は File Provider 拡張プロセスのみ・アプリは読むだけ）。
+
+**重要度:** Low（攻撃者前提なし。本人の App Group コンテナ配下に診断ログを置くだけ。新規の機密露出は無し）。
+
+**境界と対策:**
+- **含まない**: AWS 認証情報・deviceId・ファイル内容。レコードは `timestamp` / `bucket` / `eventType`（`SyncLogEventType` の rawValue）/ 相対 `path` / `message`（英語定型文）/ `details`（エラー記述 = `String(describing:)`）のみ。DB の sync_log が folderSync で持つ内容と同等。
+- **at-rest 場所と寿命**: App Group Caches。診断ログ = 消えても同期の正しさに影響しない。サイズローテーション（2MB × 現行 + 1 世代）で有界。`factoryReset` / `make reset` の掃除範囲は L16 と同じ。
+- **読込ゲート**: 表示専用（path を FS 操作に使わない）のため**行単位破棄** — 壊れ行スキップ・bucket キー・未知 eventType 破棄・`validateRelativePath` 再適用・message / details の長さ上限・肥大ファイル（> 2×maxBytes・改ざん前提）は読込ごと拒否。UI 表示は `Text(verbatim:)`（ローカライズ解決に流さない）。
+- **書込は best-effort**: 追記失敗は os.Logger のみ（FP 操作を失敗させない）。単一書き手（拡張プロセス + actor 直列化）でローテーション競合なし。

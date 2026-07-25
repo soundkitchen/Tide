@@ -220,6 +220,20 @@ final class AppEnvironment {
         )
     }
 
+    /// Sync Activity のログソース（Issue #83）。folderSync = DB（sync_log）/ fpOnly = FP 拡張の
+    /// 共有イベントログ（`FPEventLog` を読むだけ・DB / syncRoot 非接触 = 凍結温存を維持）。
+    /// 未セットアップ（どちらも無し）は nil = ウィンドウはセットアップ誘導表示。
+    func makeSyncActivitySource() -> (any SyncActivitySource)? {
+        if let database {
+            return DatabaseActivitySource(db: database)
+        }
+        if signaler != nil, let bucket = config.bucketName, !bucket.isEmpty,
+           let url = try? FPEventLog.defaultURL() {
+            return FPEventLogActivitySource(log: FPEventLog(bucket: bucket, fileURL: url))
+        }
+        return nil
+    }
+
     /// Keychain から AWS 資格情報を読む（folderSync / fpOnly 両起動パス共通）。
     private func loadCredentialsOrThrow() throws -> AWSCredentials {
         do {
