@@ -39,18 +39,35 @@ terminal_watchers() {
 cmd_install() {
     local interval="${1:-300}"
     [[ "$interval" =~ ^[0-9]+$ ]] || die "間隔は秒数で指定してください: $interval"
+    # 0/極小は sleep なしで S3 を連打する自傷になるため下限を切る（PR #89 レビュー 3）。
+    [ "$interval" -ge 5 ] || die "間隔は 5 秒以上にしてください: $interval"
     [ -f "$CHECK_SCRIPT" ] || die "consistency_check.py が見つかりません: $CHECK_SCRIPT"
 
     local python3_bin aws_bin
     python3_bin="$(command -v python3)" || die "python3 が見つかりません"
     aws_bin="$(command -v aws)" || die "aws CLI が見つかりません（brew install awscli）"
 
+    # plist へは XML エスケープせず生埋め込みするため、壊す文字を含む値は事前拒否する
+    # （PR #89 レビュー 1。発生時に launchctl の分かりにくい失敗ではなく原因を明示する）。
+    local v
+    for v in "$python3_bin" "$aws_bin" "$CHECK_SCRIPT" "$LOG_DIR" "${AWS_PROFILE:-}"; do
+        if [[ "$v" == *['&<>']* ]]; then
+            die "XML 特殊文字（& < >）を含む値は plist へ埋め込めません: $v"
+        fi
+    done
+
     # 再インストールに備え、先に自分の常駐を外す（未登録なら無視）。
     launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
 
-    # ターミナル常駐が残っていたら中断（JSONL 二重追記の防止）。
-    local watchers
-    watchers="$(terminal_watchers)"
+    # ターミナル常駐が残っていたら中断（JSONL 二重追記の防止）。bootout は管理下プロセスの
+    # 終了完了前に返ることがあるため、少しだけ待って再確認する — 死にかけの自プロセスを
+    # ターミナル watch と誤認して中断しない（PR #89 レビュー 2）。
+    local watchers try
+    for try in 1 2 3; do
+        watchers="$(terminal_watchers)"
+        [ -z "$watchers" ] && break
+        sleep 1
+    done
     if [ -n "$watchers" ]; then
         echo "$watchers" >&2
         die "watch プロセスが実行中です。先に停止してください（ターミナルで Ctrl-C）"
