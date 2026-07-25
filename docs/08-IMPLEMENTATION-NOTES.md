@@ -422,7 +422,14 @@ fpOnly はアプリが DB を開かない（凍結温存）ため DB 由来の S
   合成で、reload（beforeId nil）時のスナップショットからページングする（読込の合間の追記で
   カーソルがずれない・追記の反映は Refresh）。ポップオーバーの「Sync Activity…」導線は fpOnly
   でも表示（`engine != nil || signaler != nil`）。フッタ注記はソースごとに差替
-  （DB = 30 日自動削除 / FP = サイズ上限で古い順破棄）。
+  （DB = 30 日自動削除 / FP = サイズ上限で古い順破棄）。**PR #90 レビュー対応 3 点**: ①
+  フィルタチップの列挙はソースの `displayedEventTypes`（folderSync は move を一次イベントと
+  して持たないため Moves チップを出さない）② FP 合成 id は reload を跨いで安定しない
+  （ローテーション世代破棄で前詰め）ため、`hasStableIds = false` のソースは reload で選択を
+  無条件解除（同値 id が別レコードを指したまま詳細ペインに出るのを防ぐ。DB は id 安定 =
+  選択維持のまま）③ fpOnly の `FPEventLog.defaultURL()` 構築失敗（group container 不達の
+  エッジ）は nil ソースにせず fileURL nil の縮退ソース = 空表示（「Run setup first…」の
+  誤誘導にしない）。
 - **読込時再検証**（L16 と同じ規約。表示専用 = path を FS 操作に使わないため**行単位破棄**で
   足りる）: 壊れ行（書き手が追記中の書きかけ末尾行を含む）スキップ・bucket 不一致 / 未知
   eventType / 不正 path（`validateRelativePath`）は行破棄・message / details は長さ上限で

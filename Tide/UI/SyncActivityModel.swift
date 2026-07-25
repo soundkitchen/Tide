@@ -11,6 +11,13 @@ import Observation
 protocol SyncActivitySource {
     /// フッタ注記の種別（保持ポリシーがソースごとに違うため文言を差し替える）。
     var retentionNote: SyncActivityRetentionNote { get }
+    /// フィルタチップに出すイベント種別（PR #90 レビュー nit 3）。folderSync は move を
+    /// 一次イベントとして持たない（DB に現れない）ため、常に空のチップを出さない。
+    var displayedEventTypes: [SyncLogEventType] { get }
+    /// reload を跨いで id が安定か（PR #90 レビュー nit 2）。DB = AUTOINCREMENT で安定 /
+    /// FP = 時系列 index の合成 id でローテーション世代破棄を跨ぐと前詰めされ、同値 id が
+    /// 別レコードを指しうる。不安定ソースは reload で選択を無条件解除する。
+    var hasStableIds: Bool { get }
     func fetchLogs(
         eventTypes: Set<SyncLogEventType>, beforeId: Int64?, limit: Int
     ) async throws -> LocalDatabase.SyncLogPage
@@ -27,6 +34,12 @@ struct DatabaseActivitySource: SyncActivitySource {
     let db: LocalDatabase
 
     var retentionNote: SyncActivityRetentionNote { .databaseThirtyDays }
+    /// folderSync は move を一次イベントとして持たない（delete + upload に分解）ため
+    /// Moves チップは出さない。
+    var displayedEventTypes: [SyncLogEventType] {
+        SyncLogEventType.allCases.filter { $0 != .move }
+    }
+    var hasStableIds: Bool { true }
 
     func fetchLogs(
         eventTypes: Set<SyncLogEventType>, beforeId: Int64?, limit: Int
@@ -51,6 +64,8 @@ final class FPEventLogActivitySource: SyncActivitySource {
     }
 
     var retentionNote: SyncActivityRetentionNote { .fpSizeCapped }
+    var displayedEventTypes: [SyncLogEventType] { SyncLogEventType.allCases }
+    var hasStableIds: Bool { false }
 
     func fetchLogs(
         eventTypes: Set<SyncLogEventType>, beforeId: Int64?, limit: Int
@@ -123,8 +138,12 @@ final class SyncActivityModel {
             guard gen == generation else { return }
             entries = page.records
             hasMore = page.hasMore
-            // 選択行がフィルタ後も残っていれば維持する（消えていたら解除）。
-            if let id = selectedEntryId, !page.records.contains(where: { $0.id == id }) {
+            // 選択行がフィルタ後も残っていれば維持する（消えていたら解除）。id が reload を
+            // 跨いで安定しないソース（FP 合成 id）は、同値 id が別レコードを指したまま詳細
+            // ペインに出るのを防ぐため無条件解除（PR #90 レビュー nit 2）。
+            if !source.hasStableIds {
+                selectedEntryId = nil
+            } else if let id = selectedEntryId, !page.records.contains(where: { $0.id == id }) {
                 selectedEntryId = nil
             }
         } catch {

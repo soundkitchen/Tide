@@ -141,6 +141,47 @@ final class SyncActivityModelTests: XCTestCase {
         XCTAssertEqual(model.entries.map(\.message), ["Moved → b.txt"])
     }
 
+    func testDBSourceKeepsSelectionAcrossReload() async throws {
+        // DB は AUTOINCREMENT id が reload を跨いで安定 → 選択維持（従来挙動の固定）。
+        let source = try makeSource()
+        try await seedLogs(source.db, count: 3)
+        let model = SyncActivityModel()
+        await model.reload(source: source)
+        model.selectedEntryId = model.entries.first?.id
+        await model.reload(source: source)
+        XCTAssertNotNil(model.selectedEntry)
+    }
+
+    func testFPSourceReloadClearsSelection() async throws {
+        // FP の合成 id はローテーション世代破棄を跨ぐと前詰めされ別レコードを指しうる →
+        // reload で無条件解除（PR #90 レビュー nit 2）。
+        let log = try makeFPLog()
+        await log.append(type: .upload, path: "a.txt", message: "m0")
+        await log.append(type: .upload, path: "b.txt", message: "m1")
+        let source = FPEventLogActivitySource(log: log)
+        let model = SyncActivityModel()
+        await model.reload(source: source)
+        model.selectedEntryId = model.entries.first?.id
+        XCTAssertNotNil(model.selectedEntry)
+
+        await model.reload(source: source)
+        XCTAssertNil(model.selectedEntryId)
+        XCTAssertNil(model.selectedEntry)
+    }
+
+    func testDisplayedEventTypesPerSource() async throws {
+        // folderSync は move を一次イベントとして持たない → Moves チップを出さない
+        // （PR #90 レビュー nit 3）。FP は全種別。
+        let dbSource = try makeSource()
+        XCTAssertFalse(dbSource.displayedEventTypes.contains(.move))
+        XCTAssertEqual(
+            dbSource.displayedEventTypes,
+            SyncLogEventType.allCases.filter { $0 != .move })
+
+        let fpSource = FPEventLogActivitySource(log: try makeFPLog())
+        XCTAssertEqual(fpSource.displayedEventTypes, SyncLogEventType.allCases)
+    }
+
     func testFPSourceLoadMorePagesFromReloadSnapshot() async throws {
         // loadMore は reload 時スナップショットからページングする（読込の合間の追記で
         // カーソルがずれない）。追記後も reload するまでは古いスナップショットが正。

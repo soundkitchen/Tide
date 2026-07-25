@@ -63,7 +63,8 @@ struct SyncActivityWindow: View {
 
     private func filterBar(source: any SyncActivitySource) -> some View {
         HStack(spacing: 6) {
-            ForEach(SyncLogEventType.allCases, id: \.rawValue) { type in
+            // チップの列挙はソース依存（folderSync は Moves を出さない・PR #90 レビュー nit 3）
+            ForEach(source.displayedEventTypes, id: \.rawValue) { type in
                 filterChip(type, source: source)
             }
             Spacer()

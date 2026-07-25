@@ -125,6 +125,9 @@ public actor FPEventLog {
 
     /// 全レコードを時系列（古い → 新しい）で返す。呼ぶたびにディスクを読み直す。
     /// 書き手（拡張）が追記中の書きかけ末尾行はデコード失敗 = スキップされ、次回読込で載る。
+    /// `.1` → 現行の 2 ファイル読取は非アトミック（クロスプロセス）— 読取の合間に拡張側の
+    /// rotate が挟まると、その 1 回だけ「旧現行だった世代」が欠落して見える（ディスク上は
+    /// 無傷・次回読込で復帰する transient。診断ビュー用途なので許容・PR #90 レビュー nit 1）。
     public func loadRecords() -> [FPEventRecord] {
         guard let fileURL, let rotatedURL else { return [] }
         var records: [FPEventRecord] = []
