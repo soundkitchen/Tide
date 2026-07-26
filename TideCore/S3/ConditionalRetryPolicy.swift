@@ -60,9 +60,13 @@ enum ConditionalRetry {
     ///   `manifestUpdateFailed` や path を含む `uploadConflict`（"file-412.txt" 等）が
     ///   「リトライ可能な 412」に誤分類されると、外側再実行が「index 未更新のまま静かな成功」に
     ///   化ける（恒久 stale の温床）。
+    /// `isolation` は呼び出し元の isolation を継承する（`#isolation`）: actor 内
+    /// （`IndexUpdateCoalescer.flush`）から非 Sendable な operation を渡しても isolation を
+    /// 跨がず、strict concurrency 下でそのまま実行できる。
     static func run<T>(
         _ label: String,
         policy: ConditionalRetryPolicy,
+        isolation: isolated (any Actor)? = #isolation,
         _ operation: () async throws -> T
     ) async throws -> T {
         var lastError: Error?

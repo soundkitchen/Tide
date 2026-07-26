@@ -376,6 +376,9 @@ public struct ManifestUpdater: Sendable {
     public let shardRetryPolicy: ConditionalRetryPolicy
     /// index.json CAS のリトライポリシー（同上）。
     public let indexRetryPolicy: ConditionalRetryPolicy
+    /// index 更新のプロセス内コアレッサ（Issue #91）。ManifestUpdater 1 個につき 1 個
+    /// （struct コピーは同一 actor を共有）。バーストの index CAS 競合を構造的に畳む。
+    private let indexCoalescer: IndexUpdateCoalescer
 
     /// `onManifestDidWrite` に既定値を置かない（PR #56 レビュー ④）: 将来の構築箇所
     /// （FP 拡張の書込経路等）が hook の配線を忘れると signal 漏れ窓が静かに再発するため、
@@ -392,6 +395,9 @@ public struct ManifestUpdater: Sendable {
         self.onManifestDidWrite = onManifestDidWrite
         self.shardRetryPolicy = shardRetryPolicy
         self.indexRetryPolicy = indexRetryPolicy
+        self.indexCoalescer = IndexUpdateCoalescer(
+            store: store, deviceId: deviceId, policy: indexRetryPolicy
+        )
     }
 
     /// アップロードの per-file entry を、並行更新を検出しながら書き込む（Issue #25 / A）。
@@ -704,8 +710,9 @@ public struct ManifestUpdater: Sendable {
         }
 
         let newEtag = try await store.putShard(shard, ifMatch: etag)
+        let fileCount = shard.files.count
         _ = try await updateIndex { idx in
-            idx.shards[shardId] = .init(etag: newEtag, count: shard.files.count)
+            idx.shards[shardId] = .init(etag: newEtag, count: fileCount)
             return true
         }
         onManifestDidWrite?()
@@ -759,21 +766,13 @@ public struct ManifestUpdater: Sendable {
         return repaired
     }
 
-    /// index の RMW。`transform` が false を返したら**書かずに** false（CAS 中止用）。
-    /// 412/409 リトライは index を再取得してから transform を再評価するので、CAS は毎試行
-    /// 新鮮な index に対して判定される。
-    /// - Returns: 実際に index を書いたか。
-    private func updateIndex(_ transform: (inout ManifestIndex) -> Bool) async throws -> Bool {
-        try await ConditionalRetry.run("index.json", policy: indexRetryPolicy) {
-            let fetched = try await store.getIndex()
-            var index = fetched?.value ?? ManifestIndex.empty(updatedBy: deviceId)
-            let etag = fetched?.etag
-            guard transform(&index) else { return false }
-            index.updatedAt = ISO8601.now()
-            index.updatedBy = deviceId
-            _ = try await store.putIndex(index, ifMatch: etag)
-            return true
-        }
+    /// index の RMW（`IndexUpdateCoalescer` へ委譲。Issue #91）。`transform` が false を
+    /// 返したら**書かずに** false（CAS 中止用）。412/409 リトライは flush 単位で index を
+    /// 再取得してから transform を再評価するので、CAS は毎試行新鮮な index に対して判定される。
+    /// 同一プロセス内の並行 RMW の index 反映は 1 回の putIndex に束ねられる。
+    /// - Returns: 実際に index を書いたか（自分の transform が変更を加えたか）。
+    private func updateIndex(_ transform: @escaping IndexUpdateCoalescer.Transform) async throws -> Bool {
+        try await indexCoalescer.submit(transform)
     }
 
     /// シャード CAS の楽観的ロック更新（`ConditionalRetry.run` へ委譲。Issue #91 で

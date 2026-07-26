@@ -174,6 +174,13 @@ index.json は単一オブジェクトで全書込の競合点になるため sh
 リトライ対象は 412 / 409 のみ・`SyncError` は素通し（誤分類 → 静かな成功への
 化けを防ぐ）。合計最悪遅延は File Provider `deleteItem` の「数秒以内」契約の範囲に収める。
 
+さらに index 更新は**プロセス内コアレス**する（`IndexUpdateCoalescer` actor・Issue #91）:
+flush の in-flight 中に届いた更新は次の flush に束ねられ「1 回の GET → 全更新適用 →
+PUT(CAS)」に畳まれる。バースト書込（per-file deleteItem × 100 等）のプロセス内
+CAS 競合は構造的に消え、リトライが受けるのはプロセス間 / デバイス間の残余競合のみ。
+呼び出し側は自分の更新を含む putIndex の確定を await してから戻るため、
+「shard + index 双方確定時のみ signal 発火」の確定点は変わらない。
+
 ### S3 の制約に注意
 
 S3 は `If-Match` を `PutObject` でサポートする。条件付き書き込み機能（2024年以降）を使う。

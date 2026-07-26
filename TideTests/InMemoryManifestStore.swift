@@ -16,9 +16,29 @@ actor InMemoryManifestStore: ManifestStore {
     private(set) var indexEtag: String?
     private(set) var shards: [String: ManifestShard] = [:]
     private(set) var shardEtags: [String: String] = [:]
+    /// putIndex の呼び出し回数（失敗注入分も含む試行数。コアレスの畳み検証用。Issue #91）。
+    private(set) var putIndexCount = 0
     private var etagCounter = 0
     private var putShardFailuresRemaining = 0
     private var putIndexFailuresRemaining = 0
+
+    private var holdNextGetIndexOnce = false
+    /// getIndex がゲートで停止中か（テストの同期観測用）。
+    private(set) var isGetIndexHeld = false
+    private var getIndexGate: CheckedContinuation<Void, Never>?
+
+    /// 次の getIndex 1 回を `releaseHeldGetIndex()` まで停止させる（Issue #91:
+    /// コアレッサの flush in-flight 中に後続 submit を pending へ積む状況を決定的に作る）。
+    func holdNextGetIndex() {
+        holdNextGetIndexOnce = true
+    }
+
+    /// `holdNextGetIndex()` で停止中の getIndex を再開する。
+    func releaseHeldGetIndex() {
+        getIndexGate?.resume()
+        getIndexGate = nil
+        isGetIndexHeld = false
+    }
 
     /// 次の putShard を `times` 回だけ 412 で失敗させる。
     func failNextPutShard(times: Int) {
@@ -80,7 +100,14 @@ actor InMemoryManifestStore: ManifestStore {
 
     // MARK: - ManifestStore
 
-    func getIndex() throws -> TideS3Client.ManifestFetch<ManifestIndex>? {
+    func getIndex() async throws -> TideS3Client.ManifestFetch<ManifestIndex>? {
+        if holdNextGetIndexOnce {
+            holdNextGetIndexOnce = false
+            isGetIndexHeld = true
+            await withCheckedContinuation { continuation in
+                getIndexGate = continuation
+            }
+        }
         let result: TideS3Client.ManifestFetch<ManifestIndex>?
         if let index, let indexEtag {
             result = .init(value: index, etag: indexEtag)
@@ -107,6 +134,7 @@ actor InMemoryManifestStore: ManifestStore {
     }
 
     func putIndex(_ newIndex: ManifestIndex, ifMatch: String?) throws -> String {
+        putIndexCount += 1
         if putIndexFailuresRemaining > 0 {
             putIndexFailuresRemaining -= 1
             throw SimulatedPreconditionFailure()
