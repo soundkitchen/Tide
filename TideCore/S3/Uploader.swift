@@ -311,6 +311,12 @@ public enum ShardUpdateOutcome: Equatable, Sendable {
 public enum ShardRemoveOutcome: Equatable, Sendable {
     /// entry を除去した。
     case removed
+    /// entry の除去（シャード書込）は確定したが index 反映に失敗した = 部分完了（Issue #91）。
+    /// マニフェスト真実としては除去済みなので、呼び出し側は delete marker を**発行してよい**
+    /// （発行しないと孤児オブジェクトが構造的に残る — #83 実測の削除側 44 件のクラス）。
+    /// その上でエラーとして呼び出し元へ返し、再試行（`.alreadyGone` 収束時の突合修復）に
+    /// stale index の治癒を委ねること。`detail` は下位エラーの記述。
+    case removedIndexStale(detail: String)
     /// entry が既に無い（冪等成功。consumed 済み削除の再試行 / 他デバイスが先に削除）。
     case alreadyGone
     /// 権威 entry がベースから進んでいた = 削除拒否（「データ損失 < 重複」）。
@@ -324,6 +330,11 @@ public enum ShardBatchRemoveOutcome: Equatable, Sendable {
     /// 全対象を除去した（不在分は冪等スキップ）。`paths` は実際にマニフェストから除去した
     /// パス（呼び出し側が delete marker を発行する対象）。
     case removed(paths: [String])
+    /// あるシャードで「除去（シャード書込）確定 × index 反映失敗」の部分完了が起きた =
+    /// そこで中断（Issue #91。index が失敗し続ける状況で後続シャードへ進んでも無駄打ちになる）。
+    /// `removedPaths` は先行シャード + 当該シャードで除去が**確定済み**のパス（呼び出し側は
+    /// marker を発行してよい）。後続シャードには触れていない = エラー返却後の再試行が続きを担う。
+    case removedIndexStale(removedPaths: [String], detail: String)
     /// `path` の権威 entry がベースから進んでいた = 中断（「拒否で即中断」方針）。
     /// `removedPaths` は中断より**前のシャードで既に除去済み**のパス（未変更ファイルのみなので
     /// 安全・呼び出し側は marker を発行してよい）。中断したシャードからは 1 件も除去していない。
@@ -358,6 +369,10 @@ public enum ShardMoveOutcome: Equatable, Sendable {
     /// remove フェーズで旧 entry がベースから進んでいた = 中断（新旧**両存**のまま返す。
     /// 自動 rollback はしない — rollback 自体が新たな競合窓を作るため。「データ損失 < 重複」）。
     case sourceChanged(path: String, remote: ManifestFileEntry, removedPaths: [String])
+    /// remove フェーズで「除去確定 × index 反映失敗」の部分完了（Issue #91）。add は全完了済み。
+    /// `removedPaths` は除去が確定済みの旧パス（呼び出し側は marker を発行してよい）。
+    /// 呼び出し側はエラーとして返し、再試行（add = 冪等再入・remove = 残分続行）に委ねる。
+    case movedIndexStale(removedPaths: [String], detail: String)
 }
 
 /// シャードと index.json を楽観的ロックで更新する。
@@ -500,7 +515,13 @@ public struct ManifestUpdater: Sendable {
                 return .rejectedRemoteChanged(existing)
             }
             shard.files.removeValue(forKey: path)
-            try await commitShardWrite(shardId: shardId, shard: shard, etag: etag)
+            do {
+                try await commitShardWrite(shardId: shardId, shard: shard, etag: etag)
+            } catch let SyncError.indexUpdateFailedAfterCommit(detail) {
+                // シャード書込は確定済み（entry 除去はマニフェスト真実）。呼び出し側が
+                // marker を発行できるよう outcome で返す（Issue #91・孤児根絶）。
+                return .removedIndexStale(detail: detail)
+            }
             return .removed
         }
     }
@@ -551,12 +572,22 @@ public struct ManifestUpdater: Sendable {
                     return .committed([])
                 }
                 for path in toRemove { shard.files.removeValue(forKey: path) }
-                try await commitShardWrite(shardId: shardId, shard: shard, etag: etag)
+                do {
+                    try await commitShardWrite(shardId: shardId, shard: shard, etag: etag)
+                } catch let SyncError.indexUpdateFailedAfterCommit(detail) {
+                    // このシャードの除去は確定済み・index のみ未反映（Issue #91）。
+                    return .committedIndexStale(toRemove, detail: detail)
+                }
                 return .committed(toRemove)
             }
             switch outcome {
             case .committed(let removed):
                 removedAll.append(contentsOf: removed)
+            case .committedIndexStale(let removed, let detail):
+                // index が失敗し続ける状況で後続シャードへ進んでも無駄打ちになるため中断。
+                // 除去確定分（先行 + 当該シャード）は marker 発行対象として返す。
+                removedAll.append(contentsOf: removed)
+                return .removedIndexStale(removedPaths: removedAll, detail: detail)
             case .rejected(let path, let remote):
                 return .rejected(path: path, remote: remote, removedPaths: removedAll)
             }
@@ -567,6 +598,7 @@ public struct ManifestUpdater: Sendable {
     /// `removeFileEntries` の 1 シャードぶんの RMW 結果（内部専用）。
     private enum BatchShardOutcome {
         case committed([String])
+        case committedIndexStale([String], detail: String)
         case rejected(path: String, remote: ManifestFileEntry)
     }
 
@@ -631,6 +663,8 @@ public struct ManifestUpdater: Sendable {
         switch try await removeFileEntries(expecting: expectedByPath) {
         case .removed(let paths):
             return .moved(removedPaths: paths)
+        case .removedIndexStale(let removedPaths, let detail):
+            return .movedIndexStale(removedPaths: removedPaths, detail: detail)
         case .rejected(let path, let remote, let removedPaths):
             return .sourceChanged(path: path, remote: remote, removedPaths: removedPaths)
         }
@@ -696,26 +730,48 @@ public struct ManifestUpdater: Sendable {
             if etag != nil {
                 try await store.deleteShard(shardId)
             }
-            let removed = try await updateIndex { idx in
-                guard idx.shards[shardId]?.etag == etag else { return false }
-                idx.shards.removeValue(forKey: shardId)
-                return true
-            }
-            if removed {
-                onManifestDidWrite?()
-            } else {
-                try await removeDanglingDeclarationIfShardAbsent(shardId: shardId)
+            // deleteShard 成功以降の index 反映失敗は「シャード確定 × index 未確定」の
+            // 部分完了（Issue #91）= `indexUpdateFailedAfterCommit` へ包んで伝播する
+            // （削除系呼び出し側が delete marker を発行してよい根拠になる）。
+            try await wrapIndexFailureAfterCommit {
+                let removed = try await updateIndex { idx in
+                    guard idx.shards[shardId]?.etag == etag else { return false }
+                    idx.shards.removeValue(forKey: shardId)
+                    return true
+                }
+                if removed {
+                    onManifestDidWrite?()
+                } else {
+                    try await removeDanglingDeclarationIfShardAbsent(shardId: shardId)
+                }
             }
             return
         }
 
         let newEtag = try await store.putShard(shard, ifMatch: etag)
         let fileCount = shard.files.count
-        _ = try await updateIndex { idx in
-            idx.shards[shardId] = .init(etag: newEtag, count: fileCount)
-            return true
+        // putShard 成功以降も同様（Issue #91）。発火は index 確定後のみ = 従来どおり。
+        try await wrapIndexFailureAfterCommit {
+            _ = try await updateIndex { idx in
+                idx.shards[shardId] = .init(etag: newEtag, count: fileCount)
+                return true
+            }
+            onManifestDidWrite?()
         }
-        onManifestDidWrite?()
+    }
+
+    /// シャードオブジェクトの書込（putShard / deleteShard）が**確定した後**の index 反映
+    /// 失敗を `SyncError.indexUpdateFailedAfterCommit` に統一する（Issue #91）。リトライ枯渇
+    /// （manifestUpdateFailed）だけでなく、putIndex の非 412 エラー等も同じ部分完了に至るため
+    /// 一括で包む。`uploadConflict` はこの区間では発生しない。
+    private func wrapIndexFailureAfterCommit(
+        _ body: () async throws -> Void
+    ) async throws {
+        do {
+            try await body()
+        } catch {
+            throw SyncError.indexUpdateFailedAfterCommit(String(describing: error))
+        }
     }
 
     /// シャード不在時の dangling 宣言除去（実在再確認 + CAS 付き。PR #56 再レビュー (1) /

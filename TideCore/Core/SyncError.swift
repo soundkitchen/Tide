@@ -5,6 +5,14 @@ public enum SyncError: Error, CustomStringConvertible {
     case bucketNotAccessible(reason: String)
     case versioningNotEnabled
     case manifestUpdateFailed(String)
+    /// シャード書込（putShard / deleteShard）は**確定した後で** index 更新に失敗した（Issue #91）。
+    /// `manifestUpdateFailed` と区別する理由: 削除系 RMW の呼び出し側（FP 拡張）はこの場合のみ
+    /// 「entry 除去はマニフェスト真実として確定済み」なので delete marker を発行してよい
+    /// （発行しないと孤児オブジェクトが構造的に残る）。シャード未確定の失敗と混同して marker を
+    /// 打つと「マニフェストが宣言する live オブジェクトへの marker」= 不整合になるため、
+    /// 確定済みのときだけこの case で伝播する。412/409 クラシファイアには他の SyncError と
+    /// 同じくマッチさせない（リトライに飲ませない）。
+    case indexUpdateFailedAfterCommit(String)
     case fileTooLarge(path: String, size: Int64)
     /// 読込中にローカルファイルが変化した（torn read を避けてコミットを見送った）。L6。
     /// リトライ扱いだが give-up カウントには載せず、安定するまで延期する。
@@ -31,6 +39,8 @@ public enum SyncError: Error, CustomStringConvertible {
             return "S3 bucket versioning is not enabled"
         case .manifestUpdateFailed(let msg):
             return "Manifest update failed: \(msg)"
+        case .indexUpdateFailedAfterCommit(let msg):
+            return "Manifest index update failed after shard commit: \(msg)"
         case .fileTooLarge(let path, let size):
             return "File exceeds the per-file upload size limit (\(size) bytes); not backed up. Adjust the limit in Settings: \(path)"
         case .fileChangedDuringUpload(let path):

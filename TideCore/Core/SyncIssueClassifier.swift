@@ -38,6 +38,10 @@ public enum SyncIssueClassifier {
             case .manifestUpdateFailed:
                 // 楽観ロック失敗 = 他デバイスとの並行書込。リトライで解消する一時的衝突。
                 return .remoteConflict
+            case .indexUpdateFailedAfterCommit:
+                // シャード確定後の index 更新失敗（Issue #91）。同じく一時的衝突 —
+                // 再試行の突合修復（repairIndexDeclarationIfStale）で自己治癒する。
+                return .remoteConflict
             case .awsError(let underlying):
                 return categoryForGenericError(underlying)
             }
