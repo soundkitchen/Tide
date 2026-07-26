@@ -437,6 +437,8 @@ fpOnly はアプリが DB を開かない（凍結温存）ため DB 由来の S
   `Text(verbatim:)`（ローカライズ解決に流さない）。
 - **回帰**: `FPEventLogTests`（往復 / ローテーション / 読込時再検証）・`SyncActivityModelTests`
   （DB / FP 両ソースのページング・フィルタ・reload スナップショット固定）。
+- **実機受け入れ 2026-07-26 全項目パス**（受け入れ中に発生したバースト RMW 競合インシデントと
+  治癒・知見 3 件の詳細記録 = `docs/09` M5 #83 節）。
 
 ### ダウンロード一時ディレクトリ
 - **`TideTmpDirectory.resolve(for:)` で同一ボリュームの tmp を返す**。第一選択は `~/Library/Caches/Tide/tmp/`。同期ルートと別ボリュームになる時のみ `<syncRoot>/.tide/tmp/` にフォールバック。`moveItem` の atomic 性を保つため。
