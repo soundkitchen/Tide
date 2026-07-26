@@ -138,7 +138,7 @@ func shardId(for path: String) -> String {
    
 2. shard_id = shardId(for: path)
 
-3. ループ開始（最大5回）:
+3. ループ開始（シャード用リトライポリシー = 最大 5 回・指数バックオフ + ジッタ）:
    a. S3 から shards/<shard_id>.json を GET
       ├─ 現在の ETag を保存
       ├─ JSON をパース
@@ -151,12 +151,28 @@ func shardId(for path: String) -> String {
       └─ 412 Precondition Failed / 409 ConditionalRequestConflict → ループ先頭に戻る
          （409 は同一キーへの並行条件付き PUT が同時実行された時の一時的衝突。再取得で解消する）
    
-4. index.json を更新（同じく楽観的ロック）:
+4. index.json を更新（同じく楽観的ロック。index 用リトライポリシー = 最大 8 回）:
    a. GET で現在の index.json を取得
    b. shards[<shard_id>].etag を新しい値に更新
    c. PUT で書き戻す（If-Match）
    d. 失敗したらリトライ
 ```
+
+### リトライポリシー（Issue #91）
+
+リトライは `ConditionalRetryPolicy`（`TideCore/S3/ConditionalRetryPolicy.swift`）で
+shard 用 / index 用を分離する。バックオフは**指数逓増 + ±25% ジッタ**
+（旧: 100–500ms 一様ランダム × 5 回固定の共用は、100 件規模のバースト書込で
+index.json の CAS が枯渇した — #83 実機受け入れで実測）。
+
+| 対象 | 試行回数 | 基準遅延 | 上限 |
+|---|---|---|---|
+| shards/XX.json（`.shard`） | 5 回 | 100ms ×2 逓増 | 1.6s |
+| index.json（`.index`） | 8 回 | 100ms ×2 逓増 | 2s |
+
+index.json は単一オブジェクトで全書込の競合点になるため shard より厚い。
+リトライ対象は 412 / 409 のみ・`SyncError` は素通し（誤分類 → 静かな成功への
+化けを防ぐ）。合計最悪遅延は File Provider `deleteItem` の「数秒以内」契約の範囲に収める。
 
 ### S3 の制約に注意
 

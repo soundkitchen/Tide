@@ -372,6 +372,10 @@ public struct ManifestUpdater: Sendable {
     /// 1 バッチ分 signal が漏れる窓があったが、確定点発火なら構造的に漏れない。
     /// `.alreadyUpToDate`（書いていない）/ `.conflict` / リトライ尽き失敗では発火しない。
     public var onManifestDidWrite: (@Sendable () -> Void)?
+    /// シャード CAS のリトライポリシー（Issue #91。既定 = 実運用値・テストは遅延ゼロを注入）。
+    public let shardRetryPolicy: ConditionalRetryPolicy
+    /// index.json CAS のリトライポリシー（同上）。
+    public let indexRetryPolicy: ConditionalRetryPolicy
 
     /// `onManifestDidWrite` に既定値を置かない（PR #56 レビュー ④）: 将来の構築箇所
     /// （FP 拡張の書込経路等）が hook の配線を忘れると signal 漏れ窓が静かに再発するため、
@@ -379,11 +383,15 @@ public struct ManifestUpdater: Sendable {
     public init(
         store: any ManifestStore,
         deviceId: String,
-        onManifestDidWrite: (@Sendable () -> Void)?
+        onManifestDidWrite: (@Sendable () -> Void)?,
+        shardRetryPolicy: ConditionalRetryPolicy = .shard,
+        indexRetryPolicy: ConditionalRetryPolicy = .index
     ) {
         self.store = store
         self.deviceId = deviceId
         self.onManifestDidWrite = onManifestDidWrite
+        self.shardRetryPolicy = shardRetryPolicy
+        self.indexRetryPolicy = indexRetryPolicy
     }
 
     /// アップロードの per-file entry を、並行更新を検出しながら書き込む（Issue #25 / A）。
@@ -756,7 +764,7 @@ public struct ManifestUpdater: Sendable {
     /// 新鮮な index に対して判定される。
     /// - Returns: 実際に index を書いたか。
     private func updateIndex(_ transform: (inout ManifestIndex) -> Bool) async throws -> Bool {
-        try await withConditionalRetry("index.json") {
+        try await ConditionalRetry.run("index.json", policy: indexRetryPolicy) {
             let fetched = try await store.getIndex()
             var index = fetched?.value ?? ManifestIndex.empty(updatedBy: deviceId)
             let etag = fetched?.etag
@@ -768,38 +776,12 @@ public struct ManifestUpdater: Sendable {
         }
     }
 
-    /// シャード / index.json の楽観的ロック更新を共通化したリトライ実行。
-    /// 412 PreconditionFailed / 409 ConditionalRequestConflict（同一オブジェクトへの並行更新による
-    /// 一時的失敗）は再取得して PUT し直せば解消するので、最大 5 回・100–500ms ランダムバックオフで
-    /// リトライする。それ以外のエラーは即時伝播。5 回尽きたら `manifestUpdateFailed(label …)`。
+    /// シャード CAS の楽観的ロック更新（`ConditionalRetry.run` へ委譲。Issue #91 で
+    /// ポリシー化 = 指数バックオフ + ジッタ・shard/index 別ポリシー）。
     private func withConditionalRetry<T>(
         _ label: String,
         _ operation: () async throws -> T
     ) async throws -> T {
-        var lastError: Error?
-        for _ in 0..<5 {
-            do {
-                return try await operation()
-            } catch {
-                // 自前の SyncError は素通しする（PR #56 レビュー ①）。クラシファイアは
-                // String(describing:) の部分文字列マッチなので、下位エラー文字列を埋め込む
-                // manifestUpdateFailed（内側 updateIndex のリトライ尽き）や path を含む
-                // uploadConflict（"file-412.txt" 等）が「リトライ可能な 412」に誤分類されると、
-                // 外側再実行が getShard → 自分の書いた entry → .alreadyUpToDate 短絡で
-                // 「index 未更新のまま静かな成功」に化ける（恒久 stale の温床）。
-                if error is SyncError { throw error }
-                if S3ErrorClassifier.isPreconditionFailed(error)
-                    || S3ErrorClassifier.isConditionalConflict(error) {
-                    lastError = error
-                    let nanos = UInt64.random(in: 100_000_000...500_000_000)
-                    try? await Task.sleep(nanoseconds: nanos)
-                    continue
-                }
-                throw error
-            }
-        }
-        throw SyncError.manifestUpdateFailed(
-            "\(label) conditional update failed 5 times: \(String(describing: lastError))"
-        )
+        try await ConditionalRetry.run(label, policy: shardRetryPolicy, operation)
     }
 }

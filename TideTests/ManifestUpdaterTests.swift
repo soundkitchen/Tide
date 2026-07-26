@@ -9,13 +9,25 @@ import TideCore
 ///   再試行の `.alreadyUpToDate` / no-op 再入が index を突合修復して発火する
 /// - ②: no-op 削除（マニフェスト不在パスの delete）は書かない・発火しない
 final class ManifestUpdaterTests: XCTestCase {
+    /// 実運用と同じ試行回数・遅延ゼロのポリシー（Issue #91 でポリシー注入化）。
+    /// 指数バックオフの実遅延を踏むと枯渇系テストが数秒単位で遅くなるため、
+    /// 回数の意味論だけ保って遅延を消す。
+    static let fastShardPolicy = ConditionalRetryPolicy(
+        attempts: ConditionalRetryPolicy.shard.attempts, baseDelayNanos: 0, maxDelayNanos: 0
+    )
+    static let fastIndexPolicy = ConditionalRetryPolicy(
+        attempts: ConditionalRetryPolicy.index.attempts, baseDelayNanos: 0, maxDelayNanos: 0
+    )
+
     private func makeUpdater(
         store: InMemoryManifestStore, counter: SignalCounter
     ) -> ManifestUpdater {
         ManifestUpdater(
             store: store,
             deviceId: "test-device",
-            onManifestDidWrite: { counter.fire() }
+            onManifestDidWrite: { counter.fire() },
+            shardRetryPolicy: Self.fastShardPolicy,
+            indexRetryPolicy: Self.fastIndexPolicy
         )
     }
 
@@ -145,7 +157,7 @@ final class ManifestUpdaterTests: XCTestCase {
         let store = InMemoryManifestStore()
         let counter = SignalCounter()
         let path = "docs/a.txt"
-        await store.failNextPutIndex(times: 5)
+        await store.failNextPutIndex(times: ConditionalRetryPolicy.index.attempts)
 
         do {
             _ = try await makeUpdater(store: store, counter: counter)
@@ -171,7 +183,7 @@ final class ManifestUpdaterTests: XCTestCase {
         let path = "docs/a.txt"
         let entry = makeManifestEntry(sha: "aaa")
         let shardId = ManifestSharding.shardId(for: path)
-        await store.failNextPutIndex(times: 5)
+        await store.failNextPutIndex(times: ConditionalRetryPolicy.index.attempts)
         do {
             _ = try await makeUpdater(store: store, counter: counter)
                 .updateFileEntry(for: path, base: nil, newEntry: entry)
@@ -262,7 +274,7 @@ final class ManifestUpdaterTests: XCTestCase {
         var shard = ManifestShard.empty(id: shardId)
         shard.files[path] = makeManifestEntry(sha: "aaa")
         await store.seed(shard: shard)
-        await store.failNextPutIndex(times: 5)
+        await store.failNextPutIndex(times: ConditionalRetryPolicy.index.attempts)
 
         do {
             try await makeUpdater(store: store, counter: counter).updateShard(for: path) {
@@ -350,7 +362,7 @@ final class ManifestUpdaterTests: XCTestCase {
         var shard = ManifestShard.empty(id: shardId)
         shard.files[path] = makeManifestEntry(sha: "aaa")
         await store.seed(shard: shard)
-        await store.failNextPutIndex(times: 5)
+        await store.failNextPutIndex(times: ConditionalRetryPolicy.index.attempts)
         do {
             try await makeUpdater(store: store, counter: counter).updateShard(for: path) {
                 $0.files.removeValue(forKey: path)
@@ -379,7 +391,7 @@ final class ManifestUpdaterTests: XCTestCase {
         let path = "docs/a.txt"
         let entry = makeManifestEntry(sha: "aaa")
         let shardId = ManifestSharding.shardId(for: path)
-        await store.failNextPutIndex(times: 5)
+        await store.failNextPutIndex(times: ConditionalRetryPolicy.index.attempts)
         do {
             _ = try await makeUpdater(store: store, counter: counter)
                 .updateFileEntry(for: path, base: nil, newEntry: entry)
@@ -409,7 +421,7 @@ final class ManifestUpdaterTests: XCTestCase {
         var shard = ManifestShard.empty(id: shardId)
         shard.files[path] = makeManifestEntry(sha: "aaa")
         await store.seed(shard: shard)
-        await store.failNextPutIndex(times: 5)
+        await store.failNextPutIndex(times: ConditionalRetryPolicy.index.attempts)
         do {
             try await makeUpdater(store: store, counter: counter).updateShard(for: path) {
                 $0.files.removeValue(forKey: path)
