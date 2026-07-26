@@ -16,7 +16,12 @@ import Foundation
 /// - transform が false（CAS 中止）を返した呼び出しには書かずに false を返す（per-caller）。
 /// - 412/409 リトライは flush 単位で、再取得した新鮮な index に全 transform を再評価する
 ///   （従来の per-call リトライと同じ「毎試行、新鮮な index に対して判定」の規約）。
-/// - リトライ枯渇はその flush に載った全呼び出しへ `manifestUpdateFailed` として伝播する。
+/// - リトライ枯渇はその flush に載った全呼び出しへ `manifestUpdateFailed` として伝播する
+///   （transform が false を返す no-op 呼び出しも連帯して受ける = 保守的側。
+///   再試行の突合修復が拾う。PR #92 レビュー観測 4）。
+/// - 呼び出し側のタスクキャンセルでは中断しない（continuation 待ち・drain は独立 Task）:
+///   flush は index 書込を中途で見捨てず完走してから結果を返す。確定点不変条件に沿う
+///   意図した挙動（PR #92 レビュー観測 3・`docs/08` #91 節に記録）。
 public actor IndexUpdateCoalescer {
     public typealias Transform = @Sendable (inout ManifestIndex) -> Bool
 

@@ -50,4 +50,16 @@ final class ConditionalRetryPolicyTests: XCTestCase {
         let delay = policy.delayNanos(forAttempt: 99)
         XCTAssertLessThanOrEqual(delay, policy.maxDelayNanos + policy.maxDelayNanos / 4)
     }
+
+    /// 極端な max（上振れ加算が UInt64 を超える域）でもトラップせずクランプされる
+    /// （PR #92 レビュー nit 1: 加算側の overflow 防御）。
+    func testExtremeMaxDelayClampsInsteadOfTrapping() {
+        let policy = ConditionalRetryPolicy(
+            attempts: 3, baseDelayNanos: UInt64.max, maxDelayNanos: UInt64.max
+        )
+        for attempt in 0..<policy.attempts {
+            let delay = policy.delayNanos(forAttempt: attempt)
+            XCTAssertGreaterThanOrEqual(delay, UInt64.max - UInt64.max / 4)
+        }
+    }
 }

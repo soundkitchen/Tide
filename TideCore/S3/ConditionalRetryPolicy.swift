@@ -39,13 +39,15 @@ public struct ConditionalRetryPolicy: Sendable {
 
     /// attempt（0 始まり）に対応する遅延。指数逓増を上限で刈り、±25% ジッタを掛ける
     /// （同時に枯れ始めた書き手が同位相で再衝突し続けるのを崩す）。
+    /// 乗算・加算とも overflow はクランプする総関数（PR #92 レビュー nit 1）。
     public func delayNanos(forAttempt attempt: Int) -> UInt64 {
         guard baseDelayNanos > 0, maxDelayNanos > 0 else { return 0 }
         let shift = min(max(attempt, 0), 16)
-        let (exponential, overflow) = baseDelayNanos.multipliedReportingOverflow(by: UInt64(1) << shift)
-        let capped = overflow ? maxDelayNanos : min(exponential, maxDelayNanos)
+        let (exponential, mulOverflow) = baseDelayNanos.multipliedReportingOverflow(by: UInt64(1) << shift)
+        let capped = mulOverflow ? maxDelayNanos : min(exponential, maxDelayNanos)
         let lower = capped - capped / 4
-        let upper = capped + capped / 4
+        let (upperRaw, addOverflow) = capped.addingReportingOverflow(capped / 4)
+        let upper = addOverflow ? UInt64.max : upperRaw
         return UInt64.random(in: lower...max(lower, upper))
     }
 }
