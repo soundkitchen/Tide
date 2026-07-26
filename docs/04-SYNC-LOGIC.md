@@ -187,10 +187,13 @@ guard PartPlan.isWithinUploadLimit(size: size, limitBytes: limit) else {
 
 ```swift
 func updateShard(shardId: String, transform: (inout ManifestShard) -> Void) async throws {
-    let maxRetries = 5
+    // リトライは ConditionalRetryPolicy（Issue #91 でポリシー化）:
+    //   shard 用 = 5 回・100ms 起点 ×2 逓増・上限 1.6s / index 用 = 8 回・上限 2s
+    //   バックオフには ±25% ジッタ（同位相の再衝突を崩す）
+    let policy = ConditionalRetryPolicy.shard
     var lastError: Error?
     
-    for attempt in 0..<maxRetries {
+    for attempt in 0..<policy.attempts {
         do {
             // 1. 現在のシャードを取得（実 API は getShard が ManifestFetch を返し .etag を含む）
             let fetched = try await s3Client.getShard(shardId)
@@ -208,7 +211,7 @@ func updateShard(shardId: String, transform: (inout ManifestShard) -> Void) asyn
                 ifMatch: currentETag  // nil の場合は If-None-Match: * を付ける
             )
             
-            // 4. index.json も更新
+            // 4. index.json も更新（index 用ポリシーで同様にリトライ）
             try await updateIndex(shardId: shardId, newETag: newETag, count: newShard.files.count)
             
             return  // 成功
@@ -217,7 +220,7 @@ func updateShard(shardId: String, transform: (inout ManifestShard) -> Void) asyn
             // 412 PreconditionFailed（他プロセスが更新済み）/ 409 ConditionalRequestConflict
             // （同一キーへの並行条件付き PUT 衝突）→ 再取得してリトライ
             lastError = error
-            try await Task.sleep(nanoseconds: UInt64.random(in: 100_000_000...500_000_000))
+            try await Task.sleep(nanoseconds: policy.delayNanos(forAttempt: attempt))
             continue
         }
     }

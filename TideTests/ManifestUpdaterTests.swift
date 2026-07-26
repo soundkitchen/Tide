@@ -9,13 +9,25 @@ import TideCore
 ///   再試行の `.alreadyUpToDate` / no-op 再入が index を突合修復して発火する
 /// - ②: no-op 削除（マニフェスト不在パスの delete）は書かない・発火しない
 final class ManifestUpdaterTests: XCTestCase {
+    /// 実運用と同じ試行回数・遅延ゼロのポリシー（Issue #91 でポリシー注入化）。
+    /// 指数バックオフの実遅延を踏むと枯渇系テストが数秒単位で遅くなるため、
+    /// 回数の意味論だけ保って遅延を消す。
+    static let fastShardPolicy = ConditionalRetryPolicy(
+        attempts: ConditionalRetryPolicy.shard.attempts, baseDelayNanos: 0, maxDelayNanos: 0
+    )
+    static let fastIndexPolicy = ConditionalRetryPolicy(
+        attempts: ConditionalRetryPolicy.index.attempts, baseDelayNanos: 0, maxDelayNanos: 0
+    )
+
     private func makeUpdater(
         store: InMemoryManifestStore, counter: SignalCounter
     ) -> ManifestUpdater {
         ManifestUpdater(
             store: store,
             deviceId: "test-device",
-            onManifestDidWrite: { counter.fire() }
+            onManifestDidWrite: { counter.fire() },
+            shardRetryPolicy: Self.fastShardPolicy,
+            indexRetryPolicy: Self.fastIndexPolicy
         )
     }
 
@@ -139,19 +151,20 @@ final class ManifestUpdaterTests: XCTestCase {
     }
 
     /// 【PR #56 レビュー ①】putShard 成功 → updateIndex リトライ尽き:
-    /// 「静かな成功」（外側リトライが manifestUpdateFailed を 412 と誤分類 → 再実行が
-    /// .alreadyUpToDate 短絡で index 未更新のまま成功 return）に化けず、失敗として伝播する。
+    /// 「静かな成功」（外側リトライが誤分類 → 再実行が .alreadyUpToDate 短絡で index 未更新の
+    /// まま成功 return）に化けず、失敗として伝播する。エラー型は「シャード確定後の index 失敗」を
+    /// 区別する `indexUpdateFailedAfterCommit`（Issue #91・削除系の marker 発行可否の根拠）。
     func testIndexUpdateExhaustionThrowsInsteadOfSilentSuccess() async throws {
         let store = InMemoryManifestStore()
         let counter = SignalCounter()
         let path = "docs/a.txt"
-        await store.failNextPutIndex(times: 5)
+        await store.failNextPutIndex(times: ConditionalRetryPolicy.index.attempts)
 
         do {
             _ = try await makeUpdater(store: store, counter: counter)
                 .updateFileEntry(for: path, base: nil, newEntry: makeManifestEntry(sha: "aaa"))
-            XCTFail("expected manifestUpdateFailed")
-        } catch let SyncError.manifestUpdateFailed(message) {
+            XCTFail("expected indexUpdateFailedAfterCommit")
+        } catch let SyncError.indexUpdateFailedAfterCommit(message) {
             XCTAssertTrue(message.contains("index.json"))
         }
         XCTAssertEqual(counter.count, 0)
@@ -171,12 +184,12 @@ final class ManifestUpdaterTests: XCTestCase {
         let path = "docs/a.txt"
         let entry = makeManifestEntry(sha: "aaa")
         let shardId = ManifestSharding.shardId(for: path)
-        await store.failNextPutIndex(times: 5)
+        await store.failNextPutIndex(times: ConditionalRetryPolicy.index.attempts)
         do {
             _ = try await makeUpdater(store: store, counter: counter)
                 .updateFileEntry(for: path, base: nil, newEntry: entry)
-            XCTFail("expected manifestUpdateFailed")
-        } catch SyncError.manifestUpdateFailed {}
+            XCTFail("expected indexUpdateFailedAfterCommit")
+        } catch SyncError.indexUpdateFailedAfterCommit {}
         XCTAssertEqual(counter.count, 0)
 
         // 再試行: remote == uploading → .alreadyUpToDate だが index がずれている → 修復 + 発火
@@ -262,14 +275,14 @@ final class ManifestUpdaterTests: XCTestCase {
         var shard = ManifestShard.empty(id: shardId)
         shard.files[path] = makeManifestEntry(sha: "aaa")
         await store.seed(shard: shard)
-        await store.failNextPutIndex(times: 5)
+        await store.failNextPutIndex(times: ConditionalRetryPolicy.index.attempts)
 
         do {
             try await makeUpdater(store: store, counter: counter).updateShard(for: path) {
                 $0.files.removeValue(forKey: path)
             }
-            XCTFail("expected manifestUpdateFailed")
-        } catch SyncError.manifestUpdateFailed {}
+            XCTFail("expected indexUpdateFailedAfterCommit")
+        } catch SyncError.indexUpdateFailedAfterCommit {}
         XCTAssertEqual(counter.count, 0)
         // 分断状態: シャードは削除済みだが index は宣言を残す
         let shardsAfterFail = await store.shards
@@ -350,13 +363,13 @@ final class ManifestUpdaterTests: XCTestCase {
         var shard = ManifestShard.empty(id: shardId)
         shard.files[path] = makeManifestEntry(sha: "aaa")
         await store.seed(shard: shard)
-        await store.failNextPutIndex(times: 5)
+        await store.failNextPutIndex(times: ConditionalRetryPolicy.index.attempts)
         do {
             try await makeUpdater(store: store, counter: counter).updateShard(for: path) {
                 $0.files.removeValue(forKey: path)
             }
-            XCTFail("expected manifestUpdateFailed")
-        } catch SyncError.manifestUpdateFailed {}
+            XCTFail("expected indexUpdateFailedAfterCommit")
+        } catch SyncError.indexUpdateFailedAfterCommit {}
         // dangling 状態: シャード消滅・宣言残存。ここで B が観測直後に再宣言する状況を注入
         let bInfo = ManifestIndex.ShardInfo(etag: "etag-B", count: 7)
         await store.simulateConcurrentIndexWriteAfterNextGetIndex(shardId: shardId, info: bInfo)
@@ -379,12 +392,12 @@ final class ManifestUpdaterTests: XCTestCase {
         let path = "docs/a.txt"
         let entry = makeManifestEntry(sha: "aaa")
         let shardId = ManifestSharding.shardId(for: path)
-        await store.failNextPutIndex(times: 5)
+        await store.failNextPutIndex(times: ConditionalRetryPolicy.index.attempts)
         do {
             _ = try await makeUpdater(store: store, counter: counter)
                 .updateFileEntry(for: path, base: nil, newEntry: entry)
-            XCTFail("expected manifestUpdateFailed")
-        } catch SyncError.manifestUpdateFailed {}
+            XCTFail("expected indexUpdateFailedAfterCommit")
+        } catch SyncError.indexUpdateFailedAfterCommit {}
         // 分断状態（シャードあり・宣言なし）。観測直後に B が宣言を書く状況を注入
         let bInfo = ManifestIndex.ShardInfo(etag: "etag-B", count: 1)
         await store.simulateConcurrentIndexWriteAfterNextGetIndex(shardId: shardId, info: bInfo)
@@ -409,13 +422,13 @@ final class ManifestUpdaterTests: XCTestCase {
         var shard = ManifestShard.empty(id: shardId)
         shard.files[path] = makeManifestEntry(sha: "aaa")
         await store.seed(shard: shard)
-        await store.failNextPutIndex(times: 5)
+        await store.failNextPutIndex(times: ConditionalRetryPolicy.index.attempts)
         do {
             try await makeUpdater(store: store, counter: counter).updateShard(for: path) {
                 $0.files.removeValue(forKey: path)
             }
-            XCTFail("expected manifestUpdateFailed")
-        } catch SyncError.manifestUpdateFailed {}
+            XCTFail("expected indexUpdateFailedAfterCommit")
+        } catch SyncError.indexUpdateFailedAfterCommit {}
         // dangling 状態。ここで「外側 getShard(404) の直後」に B の再作成（putShard + 宣言）が
         // 両方完了する状況を注入 → A は B の新鮮な宣言を dangling として観測してしまう
         var recreated = ManifestShard.empty(id: shardId)
@@ -1031,5 +1044,161 @@ final class ManifestUpdaterTests: XCTestCase {
         XCTAssertEqual(counter.count, 1)
         let stored = await store.shards[shardId]
         XCTAssertNil(stored?.files[path])
+    }
+
+    // MARK: - 部分完了（シャード確定 × index 失敗）の outcome 化（Issue #91）
+
+    /// removeFileEntry: putShard 成功 → index 枯渇 = `.removedIndexStale`（throw ではなく
+    /// outcome）。呼び出し側（FP 拡張）が delete marker を発行できる = 孤児根絶の要。
+    /// 再試行は `.alreadyGone` に収束しつつ突合修復で index を治癒 + 発火する。
+    func testRemoveFileEntryIndexStaleReturnsOutcomeAndRetryHeals() async throws {
+        let store = InMemoryManifestStore()
+        let counter = SignalCounter()
+        let path = "docs/a.txt"
+        let shardId = ManifestSharding.shardId(for: path)
+        var shard = ManifestShard.empty(id: shardId)
+        shard.files[path] = makeManifestEntry(sha: "aaa")
+        shard.files[path + ".keep"] = makeManifestEntry(sha: "keep")
+        await store.seed(shard: shard)
+        await store.failNextPutIndex(times: ConditionalRetryPolicy.index.attempts)
+
+        let outcome = try await makeUpdater(store: store, counter: counter)
+            .removeFileEntry(for: path, base: "aaa")
+
+        guard case .removedIndexStale(let detail) = outcome else {
+            return XCTFail("expected .removedIndexStale, got \(outcome)")
+        }
+        XCTAssertTrue(detail.contains("index.json"))
+        XCTAssertEqual(counter.count, 0)  // index 未確定 = 非発火
+        // 分断状態: シャードから entry は消えたが index 宣言は stale
+        let stored = await store.shards[shardId]
+        XCTAssertNil(stored?.files[path])
+        let declaredStale = await store.index?.shards[shardId]?.etag
+        let actualEtag = await store.shardEtags[shardId]
+        XCTAssertNotEqual(declaredStale, actualEtag)
+
+        // 再試行（fileproviderd のリトライに相当）: alreadyGone 収束 + 突合修復 + 発火
+        let retry = try await makeUpdater(store: store, counter: counter)
+            .removeFileEntry(for: path, base: "aaa")
+        guard case .alreadyGone = retry else {
+            return XCTFail("expected .alreadyGone, got \(retry)")
+        }
+        XCTAssertEqual(counter.count, 1)
+        let declared = await store.index?.shards[shardId]?.etag
+        XCTAssertEqual(declared, actualEtag)
+    }
+
+    /// removeFileEntry の空シャード削除経路: deleteShard 成功 → index 枯渇も `.removedIndexStale`。
+    /// 再試行は dangling 宣言除去で治癒 + 発火する。
+    func testRemoveFileEntryEmptyShardIndexStaleAndRetryHeals() async throws {
+        let store = InMemoryManifestStore()
+        let counter = SignalCounter()
+        let path = "docs/a.txt"
+        let shardId = ManifestSharding.shardId(for: path)
+        var shard = ManifestShard.empty(id: shardId)
+        shard.files[path] = makeManifestEntry(sha: "aaa")
+        await store.seed(shard: shard)
+        await store.failNextPutIndex(times: ConditionalRetryPolicy.index.attempts)
+
+        let outcome = try await makeUpdater(store: store, counter: counter)
+            .removeFileEntry(for: path, base: "aaa")
+
+        guard case .removedIndexStale = outcome else {
+            return XCTFail("expected .removedIndexStale, got \(outcome)")
+        }
+        XCTAssertEqual(counter.count, 0)
+        // 分断状態: シャードオブジェクトは消えたが index に dangling 宣言が残る
+        let shardsAfter = await store.shards
+        XCTAssertNil(shardsAfter[shardId])
+        let dangling = await store.index?.shards[shardId]
+        XCTAssertNotNil(dangling)
+
+        // 再試行: alreadyGone（シャード不在）→ dangling 宣言除去 + 発火
+        let retry = try await makeUpdater(store: store, counter: counter)
+            .removeFileEntry(for: path, base: "aaa")
+        guard case .alreadyGone = retry else {
+            return XCTFail("expected .alreadyGone, got \(retry)")
+        }
+        XCTAssertEqual(counter.count, 1)
+        let declared = await store.index?.shards[shardId]
+        XCTAssertNil(declared)
+    }
+
+    /// removeFileEntries: あるシャードで index 枯渇 = `.removedIndexStale` で中断。
+    /// `removedPaths` は当該シャードの除去確定分を含む（marker 発行対象）・後続シャードは非接触。
+    func testBatchRemoveIndexStaleAbortsAndReportsCommittedPaths() async throws {
+        let store = InMemoryManifestStore()
+        let counter = SignalCounter()
+        let (p1, p2) = findSameShardPair()
+        let shardA = ManifestSharding.shardId(for: p1)
+        // shard A より後に処理される（id 昇順）別シャードのパスを探す
+        var later: String?
+        for i in 0..<100_000 {
+            let q = "later/g\(i).txt"
+            let sq = ManifestSharding.shardId(for: q)
+            if sq > shardA { later = q; break }
+        }
+        guard let p3 = later else { return XCTFail("no later-shard path found") }
+        let shardB = ManifestSharding.shardId(for: p3)
+
+        var a = ManifestShard.empty(id: shardA)
+        a.files[p1] = makeManifestEntry(sha: "s1")
+        a.files[p2] = makeManifestEntry(sha: "s2")
+        a.files["keep-a"] = makeManifestEntry(sha: "keep")
+        await store.seed(shard: a)
+        var b = ManifestShard.empty(id: shardB)
+        b.files[p3] = makeManifestEntry(sha: "s3")
+        b.files["keep-b"] = makeManifestEntry(sha: "keep")
+        await store.seed(shard: b)
+        await store.failNextPutIndex(times: ConditionalRetryPolicy.index.attempts)
+
+        let outcome = try await makeUpdater(store: store, counter: counter)
+            .removeFileEntries(expecting: [p1: "s1", p2: "s2", p3: "s3"])
+
+        guard case .removedIndexStale(let removedPaths, let detail) = outcome else {
+            return XCTFail("expected .removedIndexStale, got \(outcome)")
+        }
+        XCTAssertEqual(Set(removedPaths), Set([p1, p2]))
+        XCTAssertTrue(detail.contains("index.json"))
+        XCTAssertEqual(counter.count, 0)
+        // shard A は除去確定・shard B は非接触（後続へ進まない）
+        let storedA = await store.shards[shardA]
+        XCTAssertNil(storedA?.files[p1])
+        XCTAssertNil(storedA?.files[p2])
+        let storedB = await store.shards[shardB]
+        XCTAssertEqual(storedB?.files[p3]?.sha256, "s3")
+    }
+
+    /// moveFileEntries: remove フェーズの index 枯渇 = `.movedIndexStale`（add は完了済み）。
+    /// 除去確定分の旧パスが marker 発行対象として返る。
+    /// （add フェーズを冪等再入 no-op にして index 失敗注入を remove フェーズだけに当てる。）
+    func testMoveIndexStaleOnRemovePhase() async throws {
+        let store = InMemoryManifestStore()
+        let counter = SignalCounter()
+        let (from, to) = findOrderedDifferentShardPair()
+        var src = ManifestShard.empty(id: ManifestSharding.shardId(for: from))
+        src.files[from] = makeManifestEntry(sha: "content")
+        src.files["keep-src"] = makeManifestEntry(sha: "keep")
+        await store.seed(shard: src)
+        // 移動先に同一 sha の entry を先置き = add フェーズは冪等再入 no-op（index 非接触）
+        var dst = ManifestShard.empty(id: ManifestSharding.shardId(for: to))
+        dst.files[to] = makeManifestEntry(sha: "content")
+        await store.seed(shard: dst)
+        await store.failNextPutIndex(times: ConditionalRetryPolicy.index.attempts)
+
+        let outcome = try await makeUpdater(store: store, counter: counter)
+            .moveFileEntries([makeMove(from: from, to: to, base: "content")])
+
+        guard case .movedIndexStale(let removedPaths, let detail) = outcome else {
+            return XCTFail("expected .movedIndexStale, got \(outcome)")
+        }
+        XCTAssertEqual(removedPaths, [from])
+        XCTAssertTrue(detail.contains("index.json"))
+        XCTAssertEqual(counter.count, 0)
+        // remove は確定済み（新旧両存にはならず to のみ残る）
+        let fromShard = await store.shards[ManifestSharding.shardId(for: from)]
+        XCTAssertNil(fromShard?.files[from])
+        let toShard = await store.shards[ManifestSharding.shardId(for: to)]
+        XCTAssertEqual(toShard?.files[to]?.sha256, "content")
     }
 }

@@ -138,7 +138,7 @@ func shardId(for path: String) -> String {
    
 2. shard_id = shardId(for: path)
 
-3. ループ開始（最大5回）:
+3. ループ開始（シャード用リトライポリシー = 最大 5 回・指数バックオフ + ジッタ）:
    a. S3 から shards/<shard_id>.json を GET
       ├─ 現在の ETag を保存
       ├─ JSON をパース
@@ -151,12 +151,42 @@ func shardId(for path: String) -> String {
       └─ 412 Precondition Failed / 409 ConditionalRequestConflict → ループ先頭に戻る
          （409 は同一キーへの並行条件付き PUT が同時実行された時の一時的衝突。再取得で解消する）
    
-4. index.json を更新（同じく楽観的ロック）:
+4. index.json を更新（同じく楽観的ロック。index 用リトライポリシー = 最大 8 回）:
    a. GET で現在の index.json を取得
    b. shards[<shard_id>].etag を新しい値に更新
    c. PUT で書き戻す（If-Match）
    d. 失敗したらリトライ
 ```
+
+### リトライポリシー（Issue #91）
+
+リトライは `ConditionalRetryPolicy`（`TideCore/S3/ConditionalRetryPolicy.swift`）で
+shard 用 / index 用を分離する。バックオフは**指数逓増 + ±25% ジッタ**
+（旧: 100–500ms 一様ランダム × 5 回固定の共用は、100 件規模のバースト書込で
+index.json の CAS が枯渇した — #83 実機受け入れで実測）。
+
+| 対象 | 試行回数 | 基準遅延 | 上限 |
+|---|---|---|---|
+| shards/XX.json（`.shard`） | 5 回 | 100ms ×2 逓増 | 1.6s |
+| index.json（`.index`） | 8 回 | 100ms ×2 逓増 | 2s |
+
+index.json は単一オブジェクトで全書込の競合点になるため shard より厚い。
+リトライ対象は 412 / 409 のみ・`SyncError` は素通し（誤分類 → 静かな成功への
+化けを防ぐ）。
+
+**枯渇時の最悪遅延**（PR #92 レビュー観測 2 の記録）: shard 側 ≈ 1.9s（4 スリープ・
+ジッタ上振れ込み）/ index 側 ≈ 8.9s（7 スリープ・素値 7.1s × 1.25）。両方が重なる
+単発 deleteItem の最悪は **≈ 10.8s + 往復** で、`deleteItem` の「数秒以内」契約を
+やや超える。ただしこれは**枯渇 = 最終的にエラー返却で fileproviderd が再試行を
+引き取る経路**（成功経路の遅延ではない）であり、実害はない判断。通常時はコアレスで
+プロセス内競合が消えるためリトライ自体がほぼ発生しない。
+
+さらに index 更新は**プロセス内コアレス**する（`IndexUpdateCoalescer` actor・Issue #91）:
+flush の in-flight 中に届いた更新は次の flush に束ねられ「1 回の GET → 全更新適用 →
+PUT(CAS)」に畳まれる。バースト書込（per-file deleteItem × 100 等）のプロセス内
+CAS 競合は構造的に消え、リトライが受けるのはプロセス間 / デバイス間の残余競合のみ。
+呼び出し側は自分の更新を含む putIndex の確定を await してから戻るため、
+「shard + index 双方確定時のみ signal 発火」の確定点は変わらない。
 
 ### S3 の制約に注意
 

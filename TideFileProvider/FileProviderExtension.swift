@@ -971,6 +971,17 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                         // 実体化バッジ（Issue #65）: 消えた subtree の報告済みエントリも掃除
                         await services.materializedReported.removeSubtree(at: dirPath)
                         dirCompletion.value(nil)
+                    case .removedIndexStale(let count, let detail):
+                        // 部分完了（Issue #91）: 除去確定分（count 件）の marker は発行済み =
+                        // 孤児なし。エラーで返して fileproviderd の再試行に残分削除 +
+                        // stale index 治癒（.alreadyGone 収束時の突合修復）を委ねる。
+                        // virtualDirs / バッジの subtree 掃除は完了時の再試行側に任せる。
+                        AppLogger.fileProvider.error("deleteItem(dir): partial completion (index update pending, \(count) files removed) under \(dirPath, privacy: .private): \(detail, privacy: .private)")
+                        await services.events.append(
+                            type: .delete, path: dirPath,
+                            message: "Deleted folder (\(count) files; index update pending)")
+                        dirCompletion.value(Self.wrapForCompletion(
+                            SyncError.indexUpdateFailedAfterCommit(detail)))
                     case .rejected(let path, _):
                         // 配下にベースより進んだファイル（リモート先行）→ 1 件目で中断済み
                         //（「拒否で即中断」・2026-07-09 ユーザ確定）。SDK 契約: 再帰削除で消せない
@@ -1021,6 +1032,15 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     effectiveBase = entry.sha256
                 }
                 switch try await services.writer.deleteFile(path: ref.path, baseSha: effectiveBase) {
+                case .removedIndexStale(let detail):
+                    // 部分完了（Issue #91）: 削除はマニフェスト真実として確定・marker 発行済み =
+                    // 孤児なし。イベントは実削除として記録し、エラーで返して fileproviderd の
+                    // 再試行（.alreadyGone 収束時の突合修復）に stale index の治癒を委ねる。
+                    AppLogger.fileProvider.error("deleteItem: partial completion (index update pending): \(ref.path, privacy: .private): \(detail, privacy: .private)")
+                    await services.events.append(
+                        type: .delete, path: ref.path, message: "Deleted (index update pending)")
+                    completion.value(Self.wrapForCompletion(
+                        SyncError.indexUpdateFailedAfterCommit(detail)))
                 case .removed:
                     await services.events.append(type: .delete, path: ref.path, message: "Deleted")
                     fallthrough

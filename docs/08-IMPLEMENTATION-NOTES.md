@@ -440,6 +440,54 @@ fpOnly はアプリが DB を開かない（凍結温存）ため DB 由来の S
 - **実機受け入れ 2026-07-26 全項目パス**（受け入れ中に発生したバースト RMW 競合インシデントと
   治癒・知見 3 件の詳細記録 = `docs/09` M5 #83 節）。
 
+### バースト RMW 競合の恒久対処（Issue #91・2026-07-26）
+
+#83 受け入れで実測した「100 件バーストで index.json CAS が枯渇 → 部分完了
+（孤児オブジェクト + stale index 宣言）」の恒久対処。3 層で潰す（方針 = ②+③+① 複合・
+2026-07-26 ユーザ確定）:
+
+- **① リトライポリシー化**（`ConditionalRetryPolicy`）: 旧「100–500ms 一様ランダム × 5 回
+  固定・shard/index 共用」を、指数バックオフ（×2 逓増・上限刈り）+ ±25% ジッタへ変更し
+  shard 用（5 回・上限 1.6s）/ index 用（8 回・上限 2s）に分離。`ConditionalRetry.run` に
+  共通化（**SyncError 素通し・412/409 のみ再試行の規約は不変**）。`ManifestUpdater` は
+  両ポリシーを注入可能（既定 = 実運用値・テストは遅延ゼロ注入で枯渇分岐を高速に固定）。
+  仕様表は `docs/02`「リトライポリシー」。
+- **② index 更新のプロセス内コアレス**（`IndexUpdateCoalescer` actor・本丸）:
+  `ManifestUpdater.updateIndex` を全経路コアレッサ経由にし、flush の in-flight 中に届いた
+  transform を次の flush へ束ねて「1 回の getIndex → 全 transform 適用 → putIndex(CAS)」に
+  畳む。プロセス内の CAS 競合は構造的に消え、リトライが受けるのはプロセス間 / デバイス間の
+  残余のみ。**意味論は不変（load-bearing）**: 呼び出し側は自分の transform を含む putIndex の
+  確定を await してから戻る =「shard + index 双方確定時のみ発火」の確定点維持・CAS 中止
+  （false）の per-caller 返値維持・枯渇はバッチ全員へ伝播。コアレッサは ManifestUpdater
+  1 個につき 1 個（struct コピーは同一 actor 共有）。
+- **③ 部分完了の孤児根絶**（`SyncError.indexUpdateFailedAfterCommit` + `.removedIndexStale`
+  系 outcome）: シャード書込（putShard / deleteShard）**確定後**の index 反映失敗を
+  `commitShardWrite` が専用エラーに包み、削除系 RMW（`removeFileEntry` / `removeFileEntries` /
+  `moveFileEntries` remove フェーズ）は throw ではなく outcome（`.removedIndexStale` /
+  `.movedIndexStale`・除去**確定済み**パスを運ぶ）で返す。FP 拡張はこの outcome でのみ
+  **delete marker を発行**（= マニフェスト真実と整合・#83 の削除側 44 件の孤児クラスを根絶）
+  した上で**エラー返却は維持**し、fileproviderd の再試行（`.alreadyGone` 収束時の
+  `repairIndexDeclarationIfStale` / dangling 除去）に stale index の治癒を委ねる
+  （2026-07-26 ユーザ確定 = 治癒ドライバを殺さない側）。**marker 発行は「シャード確定済み」の
+  場合のみ** — 未確定の失敗で発行すると「マニフェストが宣言する live オブジェクトへの
+  marker」= 不整合になるため、区別はエラー型で構造的に強制する。バッチ削除は index 失敗
+  シャードで中断（後続へ進んでも無駄打ち）・move の add フェーズ失敗は従来どおり throw
+  （add は孤児を作らない・冪等再入で自己回復）。
+- **回帰**: `ConditionalRetryPolicyTests`（遅延帯域）・`IndexUpdateCoalescerTests`（畳み込み /
+  per-caller CAS 中止 / バッチ枯渇伝播 / 並行バースト 20 件全数成功）・`ManifestUpdaterTests`
+  の #91 節（`.removedIndexStale` 各経路 + 再試行治癒の収束）。
+- 既知の残余（変更なし）: stale index の治癒は依然「次の同シャード書込 or 同一操作の再試行」
+  駆動（受動型）。②③ で発生源自体が細るため、能動的自己治癒（案④）は発生頻度を見て判断
+  （`docs/09` #91 節）。
+- **挙動差の記録（PR #92 レビュー観測・いずれも変更不要と判断）**: ① 枯渇時の最悪遅延は
+  単発 deleteItem で ≈ 10.8s + 往復（数字の内訳 = `docs/02`「リトライポリシー」。枯渇 =
+  エラー返却で fileproviderd が引き取る経路なので実害なし）。② コアレッサ待ちの呼び出しは
+  **タスクキャンセルで中断しない**（checked continuation 待ち・drain は独立 Task）: Progress
+  キャンセル後も当該 flush の完走まで戻らない。旧実装はキャンセルで `Task.sleep` が即抜けし
+  速く失敗していたが、index 書込を中途で見捨てない現挙動の方が確定点不変条件に沿う
+  （意図した側への変化）。③ transform が false を返す no-op 呼び出しも同バッチ枯渇時は
+  連帯してエラーを受ける（保守的側・再試行の突合修復が拾う）。
+
 ### ダウンロード一時ディレクトリ
 - **`TideTmpDirectory.resolve(for:)` で同一ボリュームの tmp を返す**。第一選択は `~/Library/Caches/Tide/tmp/`。同期ルートと別ボリュームになる時のみ `<syncRoot>/.tide/tmp/` にフォールバック。`moveItem` の atomic 性を保つため。
 

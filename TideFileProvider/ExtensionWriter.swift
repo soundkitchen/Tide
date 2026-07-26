@@ -29,6 +29,10 @@ struct ExtensionWriter: Sendable {
 
     enum DeleteOutcome {
         case removed
+        /// マニフェスト除去は確定・marker も発行済みだが index 反映が未完（Issue #91 の部分完了）。
+        /// 呼び出し側はエラーで返し、fileproviderd の再試行（`.alreadyGone` 収束時の突合修復）に
+        /// stale index の治癒を委ねる。孤児オブジェクトは生まれない（marker 発行済み）。
+        case removedIndexStale(detail: String)
         case alreadyGone
         /// リモートがベースより進んでいた = 削除拒否（呼び出し側が最新 item を添えて返す）。
         case rejected(ManifestFileEntry)
@@ -37,6 +41,9 @@ struct ExtensionWriter: Sendable {
     enum DirectoryDeleteOutcome {
         /// 配下の追跡ファイルをすべて除去した（`count` = マニフェストから除去した件数）。
         case removed(count: Int)
+        /// 除去確定分（`count` 件）の marker は発行済みだが index 反映が未完で中断（Issue #91）。
+        /// 呼び出し側はエラーで返し、再試行に残分の削除と stale index の治癒を委ねる。
+        case removedIndexStale(count: Int, detail: String)
         /// `path` の権威 entry がベースより進んでいた = 中断（「拒否で即中断」・M5 Phase 5-3）。
         /// 呼び出し側は `DirectoryNotEmpty` を返し、システムに dir と残存分を復元させる。
         case rejected(path: String, remote: ManifestFileEntry)
@@ -135,6 +142,10 @@ struct ExtensionWriter: Sendable {
         case .removed(let paths):
             removedPaths = paths
             result = .removed(count: paths.count)
+        case .removedIndexStale(let paths, let detail):
+            // 除去確定分は marker を発行する（下の共通ブロック）= 孤児を作らない（Issue #91）。
+            removedPaths = paths
+            result = .removedIndexStale(count: paths.count, detail: detail)
         case .rejected(let path, let remote, let partial):
             removedPaths = partial
             result = .rejected(path: path, remote: remote)
@@ -284,6 +295,12 @@ struct ExtensionWriter: Sendable {
             await emitDeleteMarkers(paths: removedPaths)
             await cache.invalidateAfterLocalWrite()
             return .sourceChanged(path: path, remote: remote)
+        case .movedIndexStale(let removedPaths, let detail):
+            // remove フェーズの部分完了（Issue #91）: add は全完了・除去確定分の marker を発行して
+            // 孤児を作らず、エラーで返して再試行（add 冪等再入 + remove 続行 + 突合修復）に委ねる。
+            await emitDeleteMarkers(paths: removedPaths)
+            await cache.invalidateAfterLocalWrite()
+            throw SyncError.indexUpdateFailedAfterCommit(detail)
         }
     }
 
@@ -318,6 +335,13 @@ struct ExtensionWriter: Sendable {
             }
             await cache.invalidateAfterLocalWrite()
             return .removed
+        case .removedIndexStale(let detail):
+            // entry 除去はマニフェスト真実として確定済み → marker を発行して孤児を作らない
+            //（Issue #91。#83 実測の削除側 44 件 = このケースで marker 未発行だった）。
+            // その上でエラー返却は維持し、fileproviderd の再試行に stale index 治癒を委ねる。
+            await Self.emitDeleteMarker(s3: s3, path: path)
+            await cache.invalidateAfterLocalWrite()
+            return .removedIndexStale(detail: detail)
         case .alreadyGone:
             // 別デバイスが先に削除済み等でエントリが既に無い帰結。invalidate は無駄ではない —
             // キャッシュがまだそのファントムを持っていれば読み直しで消える（有益。PR #58 再レビュー
