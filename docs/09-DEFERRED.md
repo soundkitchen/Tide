@@ -105,6 +105,30 @@ PR #66 レビュー指摘 1 の回帰・両方向）・rebind 回帰（rename �
    badge-only update（live vs reported 差分）が deco を除去（fileproviderd スナップショット変異ログ
    `diffs:itemDecoration` で確認・固着なし＝設計どおりの eventual 収束）。
 
+### rename 後に fileproviderd の版スタンプが stale 固着する（2026-07-31 発見・実験で全容確定 = Issue #93）
+
+fpOnly 運用中、rename したファイルに実体化チェックバッジ（#65）と Finder のクラウドアイコンが**併存**する
+事象をユーザが発見。実機実験（新規ファイルでの再現 + 治癒トリガー総当たり）で全容を確定した。
+
+- **症状**: `fileproviderctl evaluate` で `isMostRecentVersionDownloaded = 0` / `isDownloading = 1` が固着。
+  versionIdentifier がダエモン合成の `NSFileProviderEm…` ラッパー形式（118 バイト）のまま
+  （正常 = 拡張申告の生 sha256 hex 64 バイト）。ラッパー内の sha はローカル実体の sha と一致 =
+  **「クラウドに新しい版」は実在しない**（同じ版の 2 表記をダエモンが不透明比較して食い違うだけ）。
+- **再現条件**: **settle 済み**（アップロード完了・生 sha 刻印済み）ファイルの rename / reparent で**毎回**
+  発生（実験 2/2 + 実運用 2 件）。作成直後の rename は fileproviderd が最終名で createItem を送るため
+  rebind 自体が起きず無事。機序 = パス埋め込み id（`f:<path>`）→ rename = modifyItem の id rebind →
+  **fileproviderd が rebind 時にローカル内容の版スタンプを再刻印しない**（OS 側挙動）。
+  放置 2 日 + Finder ブラウズ + working set signal では治らない。
+- **実害なし（表示のみ）**: 固着中も内容変更は正常に同期・競合化しない（`hasUnresolvedConflicts = 0`）・
+  データ無傷を実機確認。
+- **治癒（実証済みランブック）**: **内容の modifyItem 往復が走ると治る**（同一バイト書き戻しで実証 =
+  内容・sha 不変のまま治癒。往復直後にダエモンが fetchContents して生 sha を再刻印）。ユーザ操作なら
+  「開いて保存し直す」だけ（次の通常編集でも自然治癒）。**touch（mtime のみ）はダエモンに握りつぶされ
+  拡張へ届かず治らない**。
+- **恒久対処候補 = Issue #93 で追跡**: ① move 後の自動治癒トリガー（アプリが FPEventLog の move イベント
+  契機で `requestDownloadForItem` 等の内容往復を誘発・API 実挙動は要実証）② 参考 = 安定 id 化（rename を
+  rebind にしない構造対処・大工事・据え置き）。
+
 ## pull がローカル削除を復活させる（✅ 解消 2026-07-18・Issue #68）
 
 上記バッジ受け入れ（2026-07-15）と同じテストセッションの factoryReset 後クリーンアップで実発生した**既存挙動**（バッジ機能とは無関係）。追跡済みファイルをローカルで削除した直後、その削除がマニフェストへ伝播する**前に**定期 pull（既定 3 分間隔）が走ると、pull がファイルを再ダウンロードして**復活**させていた（02:43 / 02:46 の pull で削除済みテストファイルの再取得を OS ログで確認）。
