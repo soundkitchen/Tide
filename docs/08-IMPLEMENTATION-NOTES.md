@@ -383,6 +383,16 @@ soak 開始**。以後この Mac の同期は FP レプリカ（`~/Library/Cloud
   設定解決 exit 2 → 60 秒スロットルの再スポーンループ・brew python 更新後は再許可の可能性）。
   aws CLI の SSO トークン更新 429 は周回単位で自己回復（watch ループは落ちない）。
   詳細 = `tools/soak/README.md`「launchd 常駐化」節。
+- **watch 健全性通知（2026-08-03・Issue #94）**: #40 の 1 週間判定（2026-08-03 合格・記録 =
+  `docs/09` #40 節と Issue #40 コメント）で、AWS 認証セッション失効
+  （profile の `login_session` ≈ 12 時間）により watch が毎周回失敗し続けても無通知 =
+  **観測空白が静かに発生**していたことが発覚（7 日中約 7 割が空白。launchd の KeepAlive は
+  プロセス生存しか保証しない）。対処 = `--watch` 自身が周回の連続失敗を検出して macOS 通知
+  （`WatchHealthNotifier`・連続 3 周回で初回通知・継続中は 1 時間ごと再通知・復帰時に回復通知
+  1 回・osascript）。通知は可視化のみで周回継続・終了コードに影響しない。方式はユーザ確定
+  （長期キー切替案より通知案を採用）— soak 監視は「唯一のバックアップ化」判断までの
+  **フェーズ限定の足場**であり、認証運用（約 12 時間ごとの `aws login`）は継続する前提。
+  詳細 = `tools/soak/README.md`「watch 健全性通知」節。
 - **既存事象の記録（切替起因でない）**: 毎起動の `enforceTLSBucketPolicy on launch failed
   (non-fatal)` は、dev-tide に TLS 強制ポリシー（`TideDenyInsecureTransport`）が**適用済み**の
   まま、アプリの IAM 資格情報にポリシー読取権限が無いための自己修復チェック失敗（aws CLI で

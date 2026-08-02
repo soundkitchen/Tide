@@ -18,6 +18,10 @@ DB / 同期フォルダに触れない（凍結温存）ため、通常スコー
 一過性ノイズの抑制: 同期進行中のズレを誤検出しないため、疑いが出たら
 --recheck-delay 秒後にもう一度だけ全パスを取り直し、両方に現れた所見だけを DRIFT として報告する。
 
+watch 健全性通知（Issue #94）: --watch 常駐で周回が連続失敗し続けたら（AWS セッション
+失効等）macOS 通知で可視化する。launchd の KeepAlive はプロセス生存しか保証せず、
+機能不全 = 観測空白が静かに発生するため。詳細は WatchHealthNotifier。
+
 終了コード: 0 = 整合 / 1 = 持続する DRIFT あり / 2 = 実行エラー。
 """
 
@@ -507,6 +511,59 @@ def sample_resources():
     return result
 
 
+# ---------------------------------------------------------------- watch 健全性通知
+
+class WatchHealthNotifier:
+    """watch 常駐の機能不全を macOS 通知で可視化する（Issue #94）。
+
+    launchd の KeepAlive はプロセスの生存しか保証せず、AWS セッション失効などで
+    周回が失敗し続けても stderr に吐くだけ = JSONL への追記が止まり観測空白が
+    静かに発生する（#40 判定時、7 日中約 7 割が空白だった実害）。
+    連続 FAIL_THRESHOLD 周回の失敗で通知し、失敗継続中は RENOTIFY_SECONDS ごとに
+    再通知、復帰時は回復通知を 1 回出す。通知は可視化のみ — 周回の継続・
+    終了コードには影響させない（通知自体の失敗も握りつぶす）。
+    """
+
+    FAIL_THRESHOLD = 3       # 300 秒間隔なら初回通知まで約 15 分（単発の 429 等は通知しない）
+    RENOTIFY_SECONDS = 3600
+
+    def __init__(self):
+        self.consecutive_failures = 0
+        self.last_notified_at = None  # None = 未通知（回復通知の要否判定も兼ねる）
+
+    def record_failure(self, error):
+        self.consecutive_failures += 1
+        if self.consecutive_failures < self.FAIL_THRESHOLD:
+            return
+        now = time.time()
+        if self.last_notified_at is not None \
+           and now - self.last_notified_at < self.RENOTIFY_SECONDS:
+            return
+        self.notify("Tide soak 監視が失敗し続けています",
+                    f"{self.consecutive_failures} 周回連続で失敗 = 観測空白が発生中。"
+                    f"直近: {str(error)[:120]}")
+        self.last_notified_at = now
+
+    def record_success(self):
+        if self.last_notified_at is not None:
+            self.notify("Tide soak 監視が復帰しました", "周回が成功し観測を再開しました。")
+        self.consecutive_failures = 0
+        self.last_notified_at = None
+
+    @staticmethod
+    def notify(title, body):
+        def esc(s):
+            return s.replace("\\", "\\\\").replace('"', '\\"')
+        try:
+            subprocess.run(
+                ["osascript", "-e",
+                 f'display notification "{esc(body)}" with title "{esc(title)}"'],
+                capture_output=True, timeout=10,
+            )
+        except Exception:
+            pass
+
+
 # ---------------------------------------------------------------- 実行・出力
 
 def format_report(findings, stats, resources, fp_only=False):
@@ -599,6 +656,7 @@ def main():
         sys.exit(1 if findings.count(DRIFT) > 0 else 0)
 
     os.makedirs(os.path.dirname(args.log), exist_ok=True)
+    notifier = WatchHealthNotifier()
     print(f"watch モード: {args.watch}s 間隔・ログ = {args.log}（Ctrl-C で終了）")
     while True:
         try:
@@ -617,10 +675,12 @@ def main():
             }
             with open(args.log, "a") as f:
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            notifier.record_success()
         except KeyboardInterrupt:
             raise
         except Exception as e:
             print(f"[ERROR] {e}", file=sys.stderr)
+            notifier.record_failure(e)
         time.sleep(args.watch)
 
 
