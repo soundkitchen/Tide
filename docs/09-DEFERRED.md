@@ -130,6 +130,78 @@ fpOnly 運用中、rename したファイルに実体化チェックバッジ（
   契機で `requestDownloadForItem` 等の内容往復を誘発・API 実挙動は要実証）② 参考 = 安定 id 化（rename を
   rebind にしない構造対処・大工事・据え置き）。
 
+## v0.3.0: ユーザー目線からの folderSync 削除（設計確定 2026-08-06・未着手 = Issue #96 / #97 / #98）
+
+fpOnly 切替（2026-07-25）と #40 の 1 週間ライブ soak 合格（2026-08-03）を受け、**v0.3.0 のテーマを
+「ユーザー目線から FSEvents（folderSync モード）を消す」に確定**（ユーザ確定 2026-08-06）。
+発端は「旧同期フォルダ `~/Tide` を削除できるか」の検討で、削除自体は安全と検証済み
+（凍結後の変更ゼロ・全 327 ファイル〈.DS_Store 除く〉が FP レプリカにパス単位で存在・
+「旧フォルダにしか無いファイル」ゼロ = 除外扱いの取り残しも無し）だが、folderSync へ戻る経路が
+残っている限り下記の事故窓が開くため、**UI 塞ぎ → ウィザード → 実体削除**の 3 段で消す。
+本節が設計の原本（設計スレッド 2026-08-06・実装は #96 → #97 → #98 の別スレッドで実施）。
+
+### 設計判断の根拠（危険知見・調査 2026-08-06）
+
+- **同名空フォルダ再作成の罠（ガード無し）**: `~/Tide` 不在で folderSync 起動 → bookmark 解決失敗 →
+  再許可パネル、までは安全側だが、同一実体判定（`PathValidator.isSameFileSystemObject`）は
+  **保存パス `config.syncRootPath` からその場で作った URL との比較**であり、旧フォルダの inode を
+  永続していない。`~/Tide` を空で作り直してパネルで選ぶと**受理**され、凍結 DB の全 FileRecord が
+  missing 判定 → `enqueueScanDeletions` が全件 delete 投入 → `Uploader.processDelete` が S3 へ一斉
+  delete marker（存在再確認・件数しきい値・確認ダイアログはいずれも無い）。「root 列挙失敗 = 全体中断」の
+  fail-safe は**正常列挙 0 件には効かない**。
+- **ゴミ箱経由も追跡される**: `syncRootBookmark` はファイル ID 追跡のため、フォルダをゴミ箱へ移すと
+  `resolveSyncRootAccess` のリネーム追随が `~/.Trash/Tide` を新しい syncRoot として受理し
+  `syncRootPath` を書き換えて同期を始める。
+- folderSync 分岐に入るのは起動時の `config.syncMode` 読み 1 箇所（`launchEngineFromCurrentConfig` 冒頭）
+  のみ。他の fpOnly/folderSync 分岐 UI はすべて `engine` / `signaler` の実体判定なので、boot を塞げば
+  上記は構造的に全て到達不能になる。
+
+### 確定方針
+
+1. **boot は syncMode を読まず常に fpOnly**。`defaults write` の脱出口も残さない（bootstrap の正規化書込で
+   上書き）。folderSync へ戻す手段は git revert のみ。
+2. **セットアップウィザードを fpOnly ネイティブ化**。factoryReset → 再セットアップの全経路が folderSync に
+   触れず完結すること = 「ユーザー目線削除」の成立条件（現行ウィザードは syncMode 参照ゼロの完全
+   folderSync 前提で、factoryReset すると folderSync に落ちる）。
+3. **FSEvents コード本体（SyncEngine / FileWatcher / DebounceQueue / `resolveSyncRootAccess` 等）の
+   物理削除はやらない**。到達不能デッドコードとして温存し、撤去は従来ゲート
+   （FP-only 無事故実績 + 2 台 soak 後）のまま据え置き。温存デッドコードのテストも将来 revert の
+   回帰網として残す。
+4. **大量削除ガード（空 root 全件削除のしきい値中断）は作らない・起票もしない**
+   （folderSync 到達不能化で論点消滅。コード物理撤去時に自然消滅する論点）。
+
+### 実施順と Issue（1 タスク 1 Issue。詳細スコープ・受け入れチェックリストは各 Issue 本文）
+
+1. **#96 boot fpOnly 固定 + Sync mode 設定 UI 撤去**（小）
+   - `launchEngineFromCurrentConfig` を無条件 fpOnly 化。folderSync 側本体は到達不能 private
+     `launchFolderSyncEngineFromCurrentConfig()` へ移動（コンパイル維持 = 温存方針と整合）
+   - `bootstrap()` に正規化書込（`syncMode != .fpOnly` なら fpOnly を書く）
+   - **`ConfigStore.syncMode` は廃止せず「外部ツール契約キー」へ転生**: `tools/soak/consistency_check.py` が
+     ① `--fp-only` 無し実行を止める突合ガード（exit 2）② DB 凍結見張り（`DBFreezeWatch`）の武装条件
+     ③ `mode:switched` WARN、の 3 箇所で保存値を読む。キー廃止は観測の**静かな縮退**になるため不可。
+     正規化書込により保存値は恒久 fpOnly = **スクリプト・Makefile・launchd 常駐 watch は無変更・
+     エージェント再インストール不要**
+   - **#96 マージ〜#97 マージの間は factoryReset / 再セットアップ禁止**（旧ウィザードがフォルダを
+     選ばせるが boot は fpOnly という過渡。データ危険は無いが踏まない）
+2. **#97 セットアップウィザードの fpOnly ネイティブ化**（大）
+   - ステップ: credentials → bucket → provisioning → **fileProvider** → done。「Start syncing」=
+     `completeSetup(credentials:bucket:region:)`（シグネチャ置換）が config/Keychain 保存 →
+     `FileProviderController.enable()` → signaler 起動を一括保証（保存前 enable は拡張が未設定状態で
+     起動するため不可）。bookmark 発行・`syncRootPath`/`syncRootBookmark` 書込は削除
+   - `.syncignore` seed は **S3 直書きへ変更**（ユーザ確定: 新規バケット〈`getIndex() == nil`〉限定・
+     `files/.syncignore` PUT + `ManifestUpdater.updateFileEntry(base: nil)` 合流・best-effort 非致命）
+   - ウィザード UI の folder 系コードは物理削除してよい（**温存の線引き** = 温存対象は folderSync 復帰
+     資産であるエンジン側。ウィザード UI は git revert で丸ごと戻せる）。再許可パネル文言キーは
+     温存デッド経路が参照するため残す
+   - security 記録: 新規セットアップは security-scoped bookmark を発行しない旨を `security/low.md` L1 +
+     `security/README.md` へ
+3. **#98 旧同期フォルダ `~/Tide` 削除 + docs/security の v0.3.0 反映**（ops + docs）
+   - **`rm -rf ~/Tide` 一択・ゴミ箱経由禁止**（上記ファイル ID 追跡のため）
+   - **温存（触らない）**: App Group の `db.sqlite` / `-wal`・`shard_state`・defaults の `syncRootPath` /
+     `syncRootBookmark` キー（`DBFreezeWatch` は db.sqlite の「不在 → 出現」も WARN 対象 = 消すと観測縮退。
+     `shard_state` は git revert 復帰時の増分 pull 資産。死にキーの defaults 手術は事故源なので残置）
+   - `MARKETING_VERSION` → 0.3.0・docs 一式反映（対象と内容の表は #98 本文）
+
 ## pull がローカル削除を復活させる（✅ 解消 2026-07-18・Issue #68）
 
 上記バッジ受け入れ（2026-07-15）と同じテストセッションの factoryReset 後クリーンアップで実発生した**既存挙動**（バッジ機能とは無関係）。追跡済みファイルをローカルで削除した直後、その削除がマニフェストへ伝播する**前に**定期 pull（既定 3 分間隔）が走ると、pull がファイルを再ダウンロードして**復活**させていた（02:43 / 02:46 の pull で削除済みテストファイルの再取得を OS ログで確認）。
