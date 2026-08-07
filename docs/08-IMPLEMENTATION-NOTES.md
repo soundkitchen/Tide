@@ -486,10 +486,13 @@ folderSync へ戻る経路を UI / defaults の両面から閉じる（動機 = 
   fpOnly 前提へ差替（「the sync folder keeps working alongside」を除去・**Disable = 全同期停止**を
   明記）。`MenuBarContent.secondaryActions` は「Open Tide in Finder」へ一本化（bootstrap 失敗時の
   else フォールバックだった「Open Sync Folder」を廃止 = #98 で消える `~/Tide` への導線を出さない）。
-  一本化に伴い **`fileProviderEnabled` の取得を `signaler != nil` ガードの外へ移動し、活性条件を
-  `fileProviderEnabled == true` に変更**（`== false` の disable だと未取得 nil で活性 = 無音 no-op の
-  同型が残る・PR #99 再レビュー指摘 7）。`openSyncFolder()` は参照ゼロになるため削除
-  （UI コードは git revert で丸ごと戻せる = 温存対象はエンジン側のみ、の線引きどおり）。
+  一本化に伴い **`fileProviderEnabled` の取得を `signaler != nil` ガードの外へ移動**（PR #99
+  再レビュー指摘 7）。disable は**既知の無効（`== false`）のみ**とし、未取得（nil = 取得中 or
+  fileproviderd 無応答）は活性のまま — クリック時の `userVisibleURL()` が真実で、取れなければ
+  実ホームの `~/Library/CloudStorage` を best-effort で開く縮退（唯一の Finder 導線を無音 no-op
+  にも恒久 disable にもしない。PR #100 レビュー指摘 4 で `== true` 活性から変更。sandbox の LS が
+  縮退パスを拒否する可能性は残るため成否をログ観測）。`openSyncFolder()` は参照ゼロになるため
+  削除（UI コードは git revert で丸ごと戻せる = 温存対象はエンジン側のみ、の線引きどおり）。
 - **xcstrings**: Sync mode 系 6 キー + 旧 FP 説明キー + `Open Sync Folder`（行ごと消滅で孤児化）を
   削除・新 FP 説明キーを追加（ja 訳・manual）。`Sync Folder` キーはウィザード step title と共有の
   ため温存（#97 で削除）。ポップオーバー用の `File Provider is not enabled — nothing is syncing.
@@ -498,8 +501,17 @@ folderSync へ戻る経路を UI / defaults の両面から閉じる（動機 = 
   フォールバック / reset クリア）を削除・`testSyncModeRoundTrip` は契約キーの往復保証として温存。
 - **運用注意**: #96 マージ〜#97 マージの間は factoryReset / 再セットアップ禁止（旧ウィザードが
   フォルダを選ばせるが boot は fpOnly という過渡。データ危険は無いが踏まない）。
-
-### バースト RMW 競合の恒久対処（Issue #91・2026-07-26）
+- **PR #100 レビュー対応（2026-08-08・7 件）**: ① 新規セットアップの FP 未有効沈黙窓 =
+  **受容**（PR #99 設計レビューで確定済みの過渡・上記運用注意で禁止・#97 が正式解消）
+  ② `completeSetup` に `syncMode = .fpOnly` の明示書込を**前倒し**（#97 予定の二重化。
+  factoryReset → 同一セッション再セットアップで次回起動まで syncMode 不在 = DB 凍結見張りが
+  静かに非武装、の窓を閉じる）③ seed `.syncignore` が fpOnly boot ではマニフェストへ届かない
+  件と bookmark 発行 = **#97 参照の NOTE コメントを付記**（挙動変更なし・過渡は再セットアップ
+  禁止でカバー）④ メニュー導線 = 上記のとおり nil 活性 + CloudStorage 縮退へ変更
+  ⑤ キー不在/未知値 → `.folderSync` フォールバックのテスト復活（正規化書込の load-bearing =
+  `?? .fpOnly` への「掃除」禁止を固定）⑥ 往復テストにリテラルのキー名・保存値 assert を追加
+  （`defaults read` の生文字列を読む外部ツール契約の実固定）⑦ `SyncMode` enum doc を
+  契約キーセマンティクスへ書換（property doc との矛盾解消）。
 
 #83 受け入れで実測した「100 件バーストで index.json CAS が枯渇 → 部分完了
 （孤児オブジェクト + stale index 宣言）」の恒久対処。3 層で潰す（方針 = ②+③+① 複合・

@@ -57,16 +57,35 @@ final class ConfigStoreTests: XCTestCase {
 
     // MARK: - syncMode（v0.3.0 #96〜 = 外部ツール契約キー。アプリは分岐のために読まない）
 
-    /// 契約キーとしての保存値の往復保証（`tools/soak/consistency_check.py` が保存値を読むため、
-    /// enum rawValue と UserDefaults キーの対応が壊れていないことを固定する）。
-    /// 旧「folderSync = 安全側既定」セマンティクスのテスト（既定値 / 未知値フォールバック /
-    /// reset でのクリア）は v0.3.0 で意味が反転した（bootstrap の正規化書込が常に fpOnly へ
-    /// 上書きする）ため削除した（#96）。
+    /// 契約キーの往復保証。Swift プロパティの往復に加えて**リテラルのキー名・保存値**を生の
+    /// UserDefaults に対して固定する — `tools/soak/consistency_check.py` は
+    /// `defaults read … tide.syncMode` の生文字列を読むため、`Key.syncMode` のリネームや
+    /// rawValue の変更はプロパティ経由の往復だけでは検出できない（PR #100 レビュー指摘 6）。
     func testSyncModeRoundTrip() {
-        let config = makeStore()
+        let suite = "tide-tests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        addTeardownBlock { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        let config = ConfigStore(defaults: defaults)
         config.syncMode = .fpOnly
         XCTAssertEqual(config.syncMode, .fpOnly)
+        XCTAssertEqual(defaults.string(forKey: "tide.syncMode"), "fpOnly")
         config.syncMode = .folderSync
         XCTAssertEqual(config.syncMode, .folderSync)
+        XCTAssertEqual(defaults.string(forKey: "tide.syncMode"), "folderSync")
+    }
+
+    /// キー不在 / 未知の保存値 → `.folderSync` フォールバックの固定（PR #100 レビュー指摘 5）。
+    /// このフォールバックは #96 正規化書込の前提（load-bearing）: bootstrap は
+    /// `syncMode != .fpOnly` のときだけ書き戻すため、不在を `.fpOnly` と読むよう「掃除」すると
+    /// 正規化が一度も書かれず、外部ツールは生 defaults 不在 → "folderSync" と解釈して
+    /// DB 凍結見張りが静かに非武装化する。`?? .fpOnly` へ変えてはならない。
+    func testSyncModeMissingOrUnknownKeyFallsBackToFolderSync() {
+        let suite = "tide-tests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        addTeardownBlock { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        let config = ConfigStore(defaults: defaults)
+        XCTAssertEqual(config.syncMode, .folderSync)          // キー不在
+        defaults.set("someFutureMode", forKey: "tide.syncMode")
+        XCTAssertEqual(config.syncMode, .folderSync)          // 未知の保存値
     }
 }

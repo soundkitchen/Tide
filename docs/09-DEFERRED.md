@@ -259,8 +259,9 @@ v0.3.0 の完了条件に含めない）。
      非 fpOnly で毎周回。再レビュー指摘 8）、の 4 箇所で保存値を読む。キー廃止は観測の**静かな縮退**に
      なるため不可。
      正規化書込により保存値は恒久 fpOnly = **スクリプト・Makefile・launchd 常駐 watch は無変更・
-     エージェント再インストール不要**（例外 = factoryReset はキーを一時削除する。#97 の completeSetup
-     明示書込が窓を閉じるが「factoryReset〜再セットアップ完了」の短い不在窓は残り、watch は
+     エージェント再インストール不要**（例外 = factoryReset はキーを一時削除する。#97 予定だった
+     completeSetup 明示書込は **#96 の PR #100 レビュー指摘 2 で前倒し実装済み**だが
+     「factoryReset〜再セットアップ完了」の短い不在窓は残り、watch は
      `mode:switched` / `mode:config-mismatch` WARN を積む → factoryReset を挟んだら
      **再セットアップ完了後に**（= completeSetup が fpOnly を書き戻した後。不在窓の最中に restart
      すると武装判定〈起動時 1 回きり〉が folderSync フォールバックで外れ、その agent 生存期間中
@@ -282,7 +283,8 @@ v0.3.0 の完了条件に含めない）。
      `FileProviderController.enable()` → signaler 起動を一括保証（保存前 enable は拡張が未設定状態で
      起動するため不可）。config 書込には **`syncMode = .fpOnly` の明示書込を含める**（factoryReset が
      キーを消した後の不在窓を completeSetup が閉じる = #96 正規化書込との二重化。PR #99 レビュー
-     指摘 3）。bookmark 発行・`syncRootPath`/`syncRootBookmark` 書込は削除
+     指摘 3。**#96 の PR #100 レビュー指摘 2 で現行 completeSetup に前倒し実装済み** — #97 の
+     シグネチャ置換時に維持する）。bookmark 発行・`syncRootPath`/`syncRootBookmark` 書込は削除
    - 設定画面「.syncignore」セクション（ソース = `engine.activeIgnorePatterns`・fpOnly では engine が
      恒常 nil のため常に「No .syncignore patterns」表示 = パターンが実効なのに空表示の誤情報）は
      **静的案内へ置換**（ユーザ確定 2026-08-08・PR #99 レビュー指摘 4）: パターン一覧を撤去し

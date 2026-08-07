@@ -394,6 +394,8 @@ final class AppEnvironment {
         // App Sandbox 下で以後の起動でも同期フォルダへアクセスできるよう、確定前に
         // security-scoped bookmark を発行する（ウィザードの Choose… パネルで選択済みなら成立）。
         // 手入力パス等でアクセス権が無ければここで失敗し、setupCompleted を立てる前に中断する。
+        // NOTE（v0.3.0 過渡・#96〜#97）: fpOnly boot はこの bookmark を使わない。#97（ウィザード
+        // fpOnly ネイティブ化）で bookmark 発行・フォルダ選択ステップごと削除予定（docs/09）。
         let syncRootURL = URL(fileURLWithPath: syncRootPath, isDirectory: true)
         let bookmark: Data
         do {
@@ -408,6 +410,11 @@ final class AppEnvironment {
         config.region = region
         config.syncRootPath = syncRootPath
         config.syncRootBookmark = bookmark
+        // v0.3.0（#96・PR #100 レビュー指摘 2 = #97 二重化の前倒し）: factoryReset がキーを
+        // 一時削除した後、同一セッションの再セットアップは bootstrap の正規化書込（起動時のみ）を
+        // 通らないため、次回起動まで syncMode 不在 = soak の DB 凍結見張りが静かに非武装のままに
+        // なる。ここで明示的に書いて不在窓を閉じる。
+        config.syncMode = .fpOnly
         config.setupCompleted = true
 
         // 二重起動防止（PR #7 レビュー Low）: setupCompleted を立てた後の seed/launch の await 中に、
@@ -417,6 +424,10 @@ final class AppEnvironment {
         defer { isBootstrapping = false }
 
         // 新規バケットのときだけ既定 .syncignore を置く（既存バケット参加時は競合回避のため作らない）
+        // NOTE（v0.3.0 過渡・#96〜#97）: seed は**ローカル同期フォルダ**へ書くため、fpOnly boot に
+        // なった今は誰も読まず S3 マニフェストへ届かない（新規バケットが既定 ignore を持たない）。
+        // #97 で S3 直書き（`files/.syncignore` PUT + ManifestUpdater 合流）へ変更予定（docs/09）。
+        // 過渡期間は再セットアップ自体を禁止（Issue #96 運用注意）。
         let syncRoot = URL(fileURLWithPath: syncRootPath, isDirectory: true)
         await Self.seedDefaultSyncIgnoreIfNewBucket(
             credentials: credentials, bucket: bucket, region: region,

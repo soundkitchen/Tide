@@ -445,11 +445,13 @@ struct MenuBarContent: View {
         VStack(alignment: .leading, spacing: 2) {
             // fpOnly 一本化（#96）: 同期の実体は FP レプリカのみ。bootstrap 失敗時にも旧同期
             // フォルダへの「Open Sync Folder」は出さない（#98 で実体ごと消えるパスへの導線に
-            // なるため）。FP 無効・状態未取得（nil）は userVisibleURL が nil = 無音の no-op に
-            // なるため、活性条件は fileProviderEnabled == true（PR #99 再レビュー指摘 7 —
-            // `== false` の disable だと nil のとき活性 = 無音 no-op の同型が残る）。
+            // なるため）。disable は**既知の無効（false）だけ**（ドメイン無し = レプリカ自体が
+            // 存在しない）。未取得（nil = 取得中 or fileproviderd 無応答）は活性のまま —
+            // クリック時の userVisibleURL が真実で、取れなければ CloudStorage へ縮退するため
+            // 無音 no-op にはならない（PR #99 再レビュー指摘 7 の趣旨維持 + PR #100 レビュー
+            // 指摘 4: 唯一の Finder 導線を状態取得失敗で恒久 disable しない）。
             menuRow("Open Tide in Finder", systemImage: "folder") { openFileProviderFolder() }
-                .disabled(fileProviderEnabled != true)
+                .disabled(fileProviderEnabled == false)
             if env.engine != nil || env.signaler != nil {
                 // Sync Activity: folderSync = DB（sync_log）/ fpOnly = FP 拡張の共有イベントログ
                 // （`FPEventLog`・Issue #83）をソース差替で表示（DB 非接触 = 凍結温存を維持）。
@@ -480,9 +482,19 @@ struct MenuBarContent: View {
     }
 
     /// fpOnly: FP レプリカ（Finder の「場所 → Tide」）を開く。URL 取得は XPC 越しなので非同期。
+    /// URL が取れない（fileproviderd 無応答等）ときは実ホームの `~/Library/CloudStorage` を
+    /// best-effort で開く縮退（唯一の Finder 導線を無音 no-op にしない・PR #100 レビュー指摘 4。
+    /// sandbox 下の LS がこのパスを拒否する可能性は残るため、成否はログで観測する）。
     private func openFileProviderFolder() {
         Task {
-            guard let url = await FileProviderController.userVisibleURL() else { return }
+            guard let url = await FileProviderController.userVisibleURL() else {
+                let fallback = URL(
+                    fileURLWithPath: PathValidator.realHomeDirectory(), isDirectory: true
+                ).appendingPathComponent("Library/CloudStorage", isDirectory: true)
+                let opened = NSWorkspace.shared.open(fallback)
+                AppLogger.ui.info("Open Tide in Finder: userVisibleURL unavailable; CloudStorage fallback opened=\(opened)")
+                return
+            }
             // getUserVisibleURL の返す URL は security-scoped。scope を開始せずに NSWorkspace へ
             // 渡すと、sandbox 下では LS が「"Tide-Tide" を開くアクセス権がありません」で拒否する
             // （B-2 実機受け入れで発見・Apple Developer Forums thread 724398 と同事例）。

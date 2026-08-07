@@ -19,12 +19,15 @@ public final class ConfigStore: @unchecked Sendable {
         static let syncMode = "tide.syncMode"
     }
 
-    /// 稼働モード（M5 Track B・FP 一本化）。
-    /// - `folderSync`: 従来の FSEvents モード（`SyncEngine` = 同期フォルダ監視 + pull + アップロード）。
-    ///   FP ドメインが有効なら並走する。
-    /// - `fpOnly`: File Provider のみで稼働。アプリは `SyncEngine` を起動せず
+    /// 稼働モードの列挙。**v0.3.0（#96）以降、アプリはこの値で分岐しない**（boot は無条件
+    /// fpOnly）。rawValue は外部ツール契約の一部（下記 `syncMode` プロパティの doc 参照）。
+    /// - `folderSync`: 旧 FSEvents モード（`SyncEngine` = 同期フォルダ監視 + pull + アップロード）。
+    ///   **到達不能の温存デッドコード**であり、生きた選択肢ではない。復活は git revert のみ
+    ///   （docs/09「revert 復帰ランブック」の遵守必須）。UI / 分岐へ再配線してはならない
+    ///   （空フォルダ受理 → S3 一斉 delete marker の事故窓が再び開く。docs/09 v0.3.0 節）。
+    /// - `fpOnly`: File Provider のみで稼働（現行唯一のモード）。アプリは `SyncEngine` を起動せず
     ///   `RemoteChangeSignaler`（index HEAD ETag 比較）だけを立ち上げる。
-    ///   DB / syncRoot / bookmark は凍結温存（`folderSync` 復帰時に通常 pull が差分を取り込む）。
+    ///   DB / syncRoot / bookmark は凍結温存（revert 復帰時に通常 pull が差分を取り込む）。
     public enum SyncMode: String, Sendable, CaseIterable {
         case folderSync
         case fpOnly
