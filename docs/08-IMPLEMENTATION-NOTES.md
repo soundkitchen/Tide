@@ -498,7 +498,11 @@ folderSync へ戻る経路を UI / defaults の両面から閉じる（動機 = 
   ため温存（#97 で削除）。ポップオーバー用の `File Provider is not enabled — nothing is syncing.
   Enable it in Settings.` も温存。
 - **テスト**: `ConfigStoreTests` の旧「folderSync = 安全側」セマンティクス 3 本（既定値 / 未知値
-  フォールバック / reset クリア）を削除・`testSyncModeRoundTrip` は契約キーの往復保証として温存。
+  フォールバック / reset クリア）を一旦削除 → **うち 2 本はレビュー対応で新セマンティクスの記述に
+  変えて復活**（未知値/不在キー → `.folderSync` フォールバック = 正規化書込の load-bearing・
+  reset のキー削除 = 不在窓モデルの前提。下記レビュー対応 ⑤ 参照）。最終的に消えているのは
+  既定値テスト `testSyncModeDefaultsToFolderSync` の 1 本だけ。`testSyncModeRoundTrip` は
+  リテラルのキー名・保存値 assert 付きで契約キーの往復保証として温存。
 - **運用注意**: #96 マージ〜#97 マージの間は factoryReset / 再セットアップ禁止（旧ウィザードが
   フォルダを選ばせるが boot は fpOnly という過渡。データ危険は無いが踏まない）。
 - **PR #100 レビュー対応（2026-08-08・7 件）**: ① 新規セットアップの FP 未有効沈黙窓 =

@@ -320,8 +320,10 @@ struct MenuBarContent: View {
             Image(systemName: fileProviderEnabled == false
                   ? "exclamationmark.circle.fill" : "externaldrive.fill.badge.icloud")
                 .font(.title2)
-                // nil = 有効状態の取得中（XPC 往復のサブ秒）。無効かもしれない間は緑を
-                // 出さず中立色にする（PR #76 レビュー任意 3）。
+                // nil = 有効状態の取得中 or 取得失敗（fileproviderd 無応答等・不明）。取得は
+                // ポップオーバー表示時の 1 回きりで再試行しないため、失敗時は表示中ずっと nil の
+                // まま。確実に分かっていない間は緑も赤も出さず中立色にする（PR #76 レビュー任意 3・
+                // isEnabled() の Bool? 化 = PR #100 再レビュー指摘 1）。
                 .foregroundStyle(fileProviderEnabled == false ? Color.red
                                  : fileProviderEnabled == true ? Color.green : Color.secondary)
             VStack(alignment: .leading, spacing: 1) {
