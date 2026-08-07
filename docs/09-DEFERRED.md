@@ -171,6 +171,13 @@ v0.3.0 の完了条件に含めない）。
   `LabeledContent("Sync Folder", …)` 行 = 無条件表示（#98 後は削除済みパスを表示し続ける）
   ② `MenuBarContent.secondaryActions` の else フォールバック = signaler 不在時（bootstrap 失敗等）に
   「Open Sync Folder」を表示（`syncRootPath` キー温存のため活性 → クリックは無音 no-op）。
+  **第 3 類 = syncRootPath の Export / Diagnostics 露出**（再レビュー指摘 5・#97 で処置）:
+  ③ Export Settings が死にキーの syncRootPath（削除済み `~/Tide`）を書き出し続ける → export 側は
+  `nil` を書く（`SettingsTransfer.Payload.syncRootPath` は optional のため schema v1 の decode 互換の
+  まま・フィールド自体は温存）④ `DiagnosticsExporter` の「Sync folder:」行が削除済みパスを出力し
+  続ける → fpOnly では値を渡さず "—" 表示 ⑤ `connectionDiffers` の syncRootPath 無条件比較 =
+  旧 export の import で不要なウィザード誘導（→ #97 既定スコープの「比較を bucket/region のみへ」で
+  解消済み）。
 
 ### 確定方針
 
@@ -194,20 +201,50 @@ v0.3.0 の完了条件に含めない）。
 危険知見（空フォルダ受理 → 全件 delete）へ直行する**。大量削除ガードを作らない判断（方針 4）は
 本ランブックの遵守が前提（PR #99 レビュー指摘 1）。
 
+**共通の前提（復帰方式に依らず最初に行う）**:
+
+- **FP レプリカの保留書込ドレイン確認**（再レビュー指摘 2）: `make soak-check-fp` 整合 OK +
+  Sync Activity にエラー / 未同期滞留がないことを確認してから進む。ドメイン削除（factoryReset /
+  Disable）は **S3 未到達の保留書込を無警告で破棄する**（PR #61 記録・本節上方の M5 節参照）ため、
+  「FP 同期の不調」が revert 動機の場合はまず実体化済みファイルを別所へ退避コピーしてから進める。
+- **常駐 watch の切替**（再レビュー指摘 11）: `soak_watch_agent.sh` は `--fp-only` ハードコードのため
+  revert 後は毎周回 `mode:config-mismatch` WARN を積み DB/ローカル面の突合が常駐観測から外れる。
+  `make soak-agent-uninstall` で常駐を解除し、通常スコープの `make soak-watch` へ切り替える。
+
+復帰方式は 2 つ:
+
 - **推奨 = factoryReset → folderSync ビルドで再セットアップ**（クリーンインストール復旧）。
   空 DB から始まるため罠が構造的に存在しない。凍結 DB / `shard_state` 資産は使わず全量 DL になる。
-- **増分復帰**（凍結 DB + `shard_state` の etag 差分を活かす場合のみ）:
+- **増分復帰**（凍結 DB + `shard_state` の etag 差分を活かす場合のみ。**実利の条件に注意** —
+  転送量メリットは FP レプリカが広く実体化済み〈Keep Downloaded 適用後〉の場合のみ。レプリカが
+  大部分 dataless の運用では復元コピー自体が全ファイル materialize = S3 全量 DL になり推奨経路と
+  転送量が変わらない。迷ったら推奨経路。再レビュー指摘 9）:
   1. revert ビルドの**起動前**に `~/Tide` を FP レプリカ（または S3）から**全量復元**する。
      **空フォルダの再作成は絶対禁止**（そのまま起動すると全件 delete）。
-  2. 起動 → 旧 bookmark は解決失敗（元の実体は消滅済み）→ 再許可パネルで復元済み `~/Tide` を選ぶ
-     （同一実体判定は保存パス基準なので受理される）。
-  3. 凍結時点（2026-07-25）と現在の差分はフルスキャン + pull の 3-way が吸収する
+  2. **起動前検証**（再レビュー指摘 3）: レプリカと復元先のファイル一覧・サイズを突合し**差分ゼロ**を
+     確認する。部分復元（materialize 失敗・コピーエラー）のまま起動すると欠落分の FileRecord が
+     削除検出に乗り S3 へ delete 伝播する = 空フォルダ罠の縮小版。手順 6 の soak-check は起動**後**の
+     事後検出にしかならないため、この事前突合が構造的な防御。
+  3. **モードを folderSync へ戻す**（再レビュー指摘 1）: git revert はコードだけ戻し defaults は
+     戻さない（保存値は #96 正規化の fpOnly のまま）ため、**このままでは revert ビルドも signaler-only
+     起動になり folderSync は立ち上がらない**。revert ビルドを一度起動し、設定画面の Sync mode
+     （revert で復活している）で Folder sync を選択 → 再起動。UI を経ない場合は group defaults の
+     `tide.syncMode` を `folderSync` へ書き換えてから起動する（revert コードに正規化書込は無いため
+     保持される）。
+  4. folderSync 起動 → 旧 bookmark は通常は解決失敗 → 再許可パネルで復元済み `~/Tide` を選ぶ
+     （同一実体判定は保存パス基準なので受理される）。**bookmark のパスフォールバック解決
+     （stale 成功）で復元フォルダへ直接解決し、パネル無しでフルスキャンに入る可能性もある**
+     （再レビュー指摘 4・PLAUSIBLE）— どちらに転んでも手順 2 の起動前検証済みなら安全側。
+     パネルが出ないことを異常と誤認しない。
+  5. 凍結時点（2026-07-25）と現在の差分はフルスキャン + pull の 3-way が吸収する
      （sha 一致は no-op 収束・凍結後にリモートで消えたファイルの record は削除検出 → リモート側
      already-gone の no-op）。
-  4. 直後に `make soak-check`（通常スコープ）で 4 面突合し、収束を確認する。
-- 補足: 温存している `syncRootBookmark` キーは復元後も解決不能の死にキーのまま（新規フォルダは
-  別実体）。再許可パネル経由の bookmark 再発行が正規経路。`~/.Trash/Tide` のような残骸を bookmark が
-  解決した場合は同期先がゴミ箱に固定されるため、復帰前にゴミ箱残骸が無いことも確認する。
+  6. 直後に `make soak-check`（通常スコープ。手順 3 で保存値を folderSync へ戻した後なので
+     exit 2 にはならない）で 4 面突合し、収束を確認する。
+- 補足: 温存している `syncRootBookmark` キーは（手順 4 のフォールバック解決が起きる場合を除き）
+  解決不能の死にキーのまま。再許可パネル経由の bookmark 再発行が正規経路。`~/.Trash/Tide` のような
+  残骸を bookmark が解決した場合は同期先がゴミ箱に固定されるため、復帰前にゴミ箱残骸が無いことも
+  確認する。
 
 ### 実施順と Issue（1 タスク 1 Issue。詳細スコープ・受け入れチェックリストは各 Issue 本文）
 
@@ -217,16 +254,25 @@ v0.3.0 の完了条件に含めない）。
    - `bootstrap()` に正規化書込（`syncMode != .fpOnly` なら fpOnly を書く）
    - **`ConfigStore.syncMode` は廃止せず「外部ツール契約キー」へ転生**: `tools/soak/consistency_check.py` が
      ① `--fp-only` 無し実行を止める突合ガード（exit 2）② DB 凍結見張り（`DBFreezeWatch`）の武装条件
-     ③ `mode:switched` WARN、の 3 箇所で保存値を読む。キー廃止は観測の**静かな縮退**になるため不可。
+     ③ `mode:switched` WARN（起動時値とのズレ）④ `mode:config-mismatch` WARN（`--fp-only` × 実モード
+     非 fpOnly で毎周回。再レビュー指摘 8）、の 4 箇所で保存値を読む。キー廃止は観測の**静かな縮退**に
+     なるため不可。
      正規化書込により保存値は恒久 fpOnly = **スクリプト・Makefile・launchd 常駐 watch は無変更・
      エージェント再インストール不要**（例外 = factoryReset はキーを一時削除する。#97 の completeSetup
      明示書込が窓を閉じるが「factoryReset〜再セットアップ完了」の短い不在窓は残り、watch は
-     `mode:switched` WARN を積む → factoryReset を挟んだら `make soak-agent-restart` の既存運用で
-     基準を取り直す。PR #99 レビュー指摘 3）
+     `mode:switched` / `mode:config-mismatch` WARN を積む → factoryReset を挟んだら
+     **再セットアップ完了後に**（= completeSetup が fpOnly を書き戻した後。不在窓の最中に restart
+     すると武装判定〈起動時 1 回きり〉が folderSync フォールバックで外れ、その agent 生存期間中
+     DB 凍結見張りが無音で非武装化する。再レビュー指摘 6）`make soak-agent-restart` で基準を
+     取り直す。PR #99 レビュー指摘 3）
    - UI 残滓 2 件の処置（PR #99 レビュー指摘 6）: Settings「Sync」セクションの「Sync Folder」行を
      削除（Issue #96 本文に既収載）+ `MenuBarContent.secondaryActions` の else フォールバックを
      「Open Tide in Finder」へ一本化（bootstrap 失敗時に削除済み `~/Tide` への「Open Sync Folder」を
-     出さない）
+     出さない）。一本化の際は **`fileProviderEnabled` の取得（現在は `signaler != nil` 時のみの
+     `.task` 内）を signaler 判定の外へ出し、活性条件を `fileProviderEnabled == true` にする** —
+     既存行を else 分岐へ移すだけだと bootstrap 失敗時に値が nil のまま = `nil == false` は偽 =
+     行が活性 → クリックは `userVisibleURL()` nil の無音 no-op、と除去目標の同型が残る
+     （再レビュー指摘 7）
    - **#96 マージ〜#97 マージの間は factoryReset / 再セットアップ禁止**（旧ウィザードがフォルダを
      選ばせるが boot は fpOnly という過渡。データ危険は無いが踏まない）
 2. **#97 セットアップウィザードの fpOnly ネイティブ化**（大）
@@ -239,8 +285,9 @@ v0.3.0 の完了条件に含めない）。
    - 設定画面「.syncignore」セクション（ソース = `engine.activeIgnorePatterns`・fpOnly では engine が
      恒常 nil のため常に「No .syncignore patterns」表示 = パターンが実効なのに空表示の誤情報）は
      **静的案内へ置換**（ユーザ確定 2026-08-08・PR #99 レビュー指摘 4）: パターン一覧を撤去し
-     「除外パターンは同期フォルダ内の `.syncignore` で管理（新規ファイルにのみ適用）」の案内 +
-     Finder で開く導線へ。実効は FP createItem 側（`ManifestIgnoreCache`）で維持・一覧表示の復権が
+     「除外パターンは **Tide フォルダ（Finder サイドバー「場所」の Tide）**内の `.syncignore` で管理
+     （新規ファイルにのみ適用）」の案内 + Finder で開く導線へ（「同期フォルダ / Sync Folder」呼称は
+     #96 で廃止するため案内文言に使わない。再レビュー指摘 10）。実効は FP createItem 側（`ManifestIgnoreCache`）で維持・一覧表示の復権が
      必要になったら別 Issue。「Excluded patterns (built-in)」セクションは静的定数ソースのため対象外
    - `.syncignore` seed は **S3 直書きへ変更**（ユーザ確定: 新規バケット〈`getIndex() == nil`〉限定・
      `files/.syncignore` PUT + `ManifestUpdater.updateFileEntry(base: nil)` 合流・best-effort 非致命）
