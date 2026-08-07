@@ -135,6 +135,10 @@ FP ドメイン内のファイル編集（`modifyItem` の .contents）と削除
 
 #### FP-only 稼働モード B-0 = モード基盤 + RemoteChangeSignaler（M5 Track B・2026-07-22）
 
+> **v0.3.0 #96（2026-08-08）で更新**: bootstrap のモード分岐と「既定 folderSync」は撤廃 —
+> boot は無条件 fpOnly・`ConfigStore.syncMode` は外部ツール契約キーへ転生（下記 #96 節）。
+> 本節のモード分岐まわりの記述は当時の記録。`RemoteChangeSignaler` の仕様は現行のまま有効。
+
 FP 一本化（切替前 soak ゲート撤廃 = `docs/09` #40 節・2026-07-22 ユーザ確定）の Track B 第 1 段。
 
 - **`ConfigStore.syncMode`**（`folderSync` / `fpOnly`・既定 `folderSync`）: 未知の保存値も
@@ -180,6 +184,10 @@ FP 一本化（切替前 soak ゲート撤廃 = `docs/09` #40 節・2026-07-22 �
   自動 evict は未検証 = 切替後ライブ soak の観察項目）。**Track B はこれで全完了**。
 
 #### FP-only 稼働モード B-1 = モード切替 UI + 表示縮退（M5 Track B・2026-07-22）
+
+> **v0.3.0 #96（2026-08-08）で更新**: 「Sync mode」セクションと folderSync 側フォールバック
+> （「Open Sync Folder」）は撤去（下記 #96 節）。fpOnly 側の表示縮退（fpOnlyHeader / 状態カード /
+> Sync Activity・Version History の扱い）は現行のまま有効。
 
 - **設定画面「Sync mode」セクション**: radioGroup の Picker（Folder sync / File Provider only）。
   他設定と同じ @State write-through（`ConfigStore.syncMode` へ即保存）だが**適用は次回起動から**
@@ -449,6 +457,47 @@ fpOnly はアプリが DB を開かない（凍結温存）ため DB 由来の S
   （DB / FP 両ソースのページング・フィルタ・reload スナップショット固定）。
 - **実機受け入れ 2026-07-26 全項目パス**（受け入れ中に発生したバースト RMW 競合インシデントと
   治癒・知見 3 件の詳細記録 = `docs/09` M5 #83 節）。
+
+#### boot fpOnly 固定 + Sync mode 設定 UI 撤去（v0.3.0 #96・2026-08-08）
+
+v0.3.0「ユーザー目線からの folderSync 削除」第 1 段（設計原本 = `docs/09` v0.3.0 節）。
+folderSync へ戻る経路を UI / defaults の両面から閉じる（動機 = 空フォルダ受理 → 全件 delete の
+事故窓。詳細は docs/09 の危険知見）。
+
+- **boot の無条件 fpOnly 化**: `launchEngineFromCurrentConfig` は syncMode を読まず常に
+  `launchFPOnlySignalerFromCurrentConfig()` へ。**ゲートは関数内部**（呼出経路 = `bootstrap()` /
+  `completeSetup` の両方を 1 点で塞ぐ・呼出側ゲート禁止 = PR #99 レビュー指摘 2）。folderSync
+  起動本体は到達不能 private `launchFolderSyncEngineFromCurrentConfig()` へ改名温存
+  （SyncEngine 一式のコンパイル維持・復活は git revert のみ = docs/09「revert 復帰ランブック」
+  必須・物理削除は従来ゲート〈FP-only 無事故実績 + 2 台 soak 後〉据え置き）。
+- **正規化書込**: `bootstrap()` の `LegacyStateMigrator` 直後・`setupCompleted` guard の前で
+  `syncMode != .fpOnly` なら fpOnly を書く。`defaults write` の脱出口封鎖と、外部ツール契約キー
+  （下記）の保存値恒久 fpOnly 化を同時に達成。
+- **`ConfigStore.syncMode` = 外部ツール契約キーへ転生**: enum / プロパティ / `migratableKeys`
+  掲載は温存・アプリは分岐のために読まない。読み手は `tools/soak/consistency_check.py` の
+  4 箇所（突合ガード exit 2 / DBFreezeWatch 武装条件 / `mode:switched` / `mode:config-mismatch`）。
+  キー廃止は観測の静かな縮退になるため不可。**スクリプト・Makefile・launchd 常駐 watch は
+  無変更**（保存値 fpOnly 不変のため再インストール不要。例外 = factoryReset はキーを一時削除 →
+  #97 の completeSetup 明示書込が窓を閉じる。factoryReset を挟んだら**再セットアップ完了後に**
+  `make soak-agent-restart`〈不在窓中の restart は DB 凍結見張りが agent 生存期間中無音で
+  非武装化〉）。
+- **UI 撤去**: 設定画面の「Sync mode」セクション一式（Picker / 再起動案内 / FP 未有効警告 /
+  `runningSyncMode`）と「Sync Folder」行（`LabeledContent`）を削除。FP セクション説明文を
+  fpOnly 前提へ差替（「the sync folder keeps working alongside」を除去・**Disable = 全同期停止**を
+  明記）。`MenuBarContent.secondaryActions` は「Open Tide in Finder」へ一本化（bootstrap 失敗時の
+  else フォールバックだった「Open Sync Folder」を廃止 = #98 で消える `~/Tide` への導線を出さない）。
+  一本化に伴い **`fileProviderEnabled` の取得を `signaler != nil` ガードの外へ移動し、活性条件を
+  `fileProviderEnabled == true` に変更**（`== false` の disable だと未取得 nil で活性 = 無音 no-op の
+  同型が残る・PR #99 再レビュー指摘 7）。`openSyncFolder()` は参照ゼロになるため削除
+  （UI コードは git revert で丸ごと戻せる = 温存対象はエンジン側のみ、の線引きどおり）。
+- **xcstrings**: Sync mode 系 6 キー + 旧 FP 説明キー + `Open Sync Folder`（行ごと消滅で孤児化）を
+  削除・新 FP 説明キーを追加（ja 訳・manual）。`Sync Folder` キーはウィザード step title と共有の
+  ため温存（#97 で削除）。ポップオーバー用の `File Provider is not enabled — nothing is syncing.
+  Enable it in Settings.` も温存。
+- **テスト**: `ConfigStoreTests` の旧「folderSync = 安全側」セマンティクス 3 本（既定値 / 未知値
+  フォールバック / reset クリア）を削除・`testSyncModeRoundTrip` は契約キーの往復保証として温存。
+- **運用注意**: #96 マージ〜#97 マージの間は factoryReset / 再セットアップ禁止（旧ウィザードが
+  フォルダを選ばせるが boot は fpOnly という過渡。データ危険は無いが踏まない）。
 
 ### バースト RMW 競合の恒久対処（Issue #91・2026-07-26）
 

@@ -83,6 +83,14 @@ final class AppEnvironment {
         if migration.databaseMigrated || migration.configMigrated {
             AppLogger.ui.info("Legacy state migrated to App Group (db: \(migration.databaseMigrated), config: \(migration.configMigrated))")
         }
+        // v0.3.0（#96）正規化書込: 保存値を常に fpOnly へ揃える。`defaults write` で folderSync を
+        // 書かれても次回起動で上書き＝脱出口を封鎖する。syncMode は外部ツール
+        // （tools/soak/consistency_check.py）が読む契約キーのため、書込で保存値を恒久 fpOnly に
+        // 保つことが soak 突合ガード（exit 2）と DB 凍結見張り武装の維持条件（docs/09 v0.3.0 節）。
+        if config.syncMode != .fpOnly {
+            AppLogger.ui.info("Normalizing stored syncMode to fpOnly (was \(self.config.syncMode.rawValue, privacy: .private))")
+            config.syncMode = .fpOnly
+        }
         guard config.setupCompleted else {
             AppLogger.ui.info("Setup not completed; awaiting wizard.")
             return
@@ -100,12 +108,19 @@ final class AppEnvironment {
     private static func isBlank(_ s: String?) -> Bool { s?.isEmpty ?? true }
 
     func launchEngineFromCurrentConfig() async throws {
-        // FP-only 稼働モード（Track B・#40 方針 2026-07-22）: SyncEngine を起動せず
-        // RemoteChangeSignaler だけを立ち上げる。モードの適用は起動時のみ（動的切替はしない）。
-        if config.syncMode == .fpOnly {
-            try await launchFPOnlySignalerFromCurrentConfig()
-            return
-        }
+        // v0.3.0（#96）: boot は syncMode を読まず常に fpOnly。folderSync（FSEvents エンジン）への
+        // 分岐は**この関数内部**で閉じる — 呼出経路は bootstrap() と completeSetup の 2 つあり、
+        // 呼出側ゲートだと旧ウィザード再セットアップ経由で FSEvents エンジンが起動し得る
+        // （空フォルダ受理 → 全件 delete の事故窓。docs/09 v0.3.0 節・PR #99 レビュー指摘 2）。
+        try await launchFPOnlySignalerFromCurrentConfig()
+    }
+
+    /// 【到達不能・温存】folderSync（FSEvents）モードの起動本体。v0.3.0（#96）で呼出経路ゼロの
+    /// デッドコードになった。復活手段は git revert のみ（docs/09「revert 復帰ランブック」の遵守必須 —
+    /// ランブック無しの revert 起動は空フォルダ受理 → S3 一斉 delete marker の事故窓へ直行する）。
+    /// SyncEngine / FileWatcher 一式のコンパイル維持のため温存し、物理削除は従来ゲート
+    /// （FP-only 無事故実績 + 2 台 soak 後 = docs/09 M5 節）まで据え置き。
+    private func launchFolderSyncEngineFromCurrentConfig() async throws {
         var missing: [String] = []
         if Self.isBlank(config.bucketName) { missing.append("bucket name") }
         if Self.isBlank(config.region) { missing.append("region") }

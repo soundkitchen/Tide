@@ -146,11 +146,18 @@ public final class ConfigStore: @unchecked Sendable {
         set { defaults.set(newValue, forKey: Key.syncRootBookmark) }
     }
 
-    /// 稼働モード（既定 `folderSync`・未知の保存値も `folderSync` へフォールバック = 常に安全側）。
-    /// **適用は次回起動から**（`AppEnvironment.bootstrap` が起動時に分岐する。稼働中の動的切替は
-    /// しない = 転送中断・キュー残行ありの停止遷移を構造的に回避。ユーザ確定 2026-07-22）。
-    /// `reset()`（再セットアップ）ではクリアされ folderSync へ戻る。`SettingsTransfer` には
-    /// フィールドが無く構造的に含まれない（マシン固有の運用選択のため持ち出さない）。
+    /// 稼働モードの保存値 = **外部ツール契約キー**（v0.3.0 / #96 で転生）。アプリ自身は分岐の
+    /// ために**読まない** — boot は無条件 fpOnly で、`AppEnvironment.bootstrap` が正規化書込
+    /// （`!= .fpOnly` なら fpOnly を書く）を行うため保存値は恒久 fpOnly。folderSync へ戻す手段は
+    /// git revert のみ（docs/09「revert 復帰ランブック」参照）。
+    /// 読み手は `tools/soak/consistency_check.py` の 4 箇所:
+    /// (a) `--fp-only` 無し実行を exit 2 で止める突合ガード (b) DB 凍結見張り（`DBFreezeWatch`）の
+    /// 武装条件 (c) `mode:switched` WARN（起動時値とのズレ）(d) `mode:config-mismatch` WARN
+    /// （`--fp-only` × 実モード非 fpOnly で毎周回）。キー廃止は観測の静かな縮退になるため不可。
+    /// 未知の保存値は `folderSync` へフォールバック（＝正規化書込の対象になり fpOnly へ戻る）。
+    /// `reset()`（factoryReset / 再セットアップ）はキーを一時削除する — #97 以降は
+    /// `completeSetup` の明示書込が不在窓を閉じる。`SettingsTransfer` にはフィールドが無く
+    /// 構造的に含まれない（マシン固有の運用値のため持ち出さない）。
     public var syncMode: SyncMode {
         get { SyncMode(rawValue: defaults.string(forKey: Key.syncMode) ?? "") ?? .folderSync }
         set { defaults.set(newValue.rawValue, forKey: Key.syncMode) }

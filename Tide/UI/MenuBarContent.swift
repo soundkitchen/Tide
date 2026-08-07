@@ -49,10 +49,10 @@ struct MenuBarContent: View {
             if !env.isSetupCompleted || env.bootstrapFailure != nil {
                 activateAndOpen("setup")
             }
-            // fpOnly 表示のときだけ FP 有効状態を取得（folderSync では余計な XPC を出さない）。
-            if env.signaler != nil {
-                fileProviderEnabled = await FileProviderController.isEnabled()
-            }
+            // FP 有効状態は bootstrap の成否に依らず常に取得する（#96）。signaler != nil ガード内に
+            // 置くと bootstrap 失敗時に nil のままになり、「Open Tide in Finder」の活性判定が
+            // できない（PR #99 再レビュー指摘 7）。
+            fileProviderEnabled = await FileProviderController.isEnabled()
         }
         // lastSyncedAt は upload 周回完了でしか前進しないため、pull 由来の download / 削除反映も
         // 拾えるよう lastRemoteCheckedAt と束ねて id にする（PR #17 レビュー Low-2）。
@@ -443,17 +443,13 @@ struct MenuBarContent: View {
 
     private var secondaryActions: some View {
         VStack(alignment: .leading, spacing: 2) {
-            if env.signaler != nil {
-                // fpOnly: 同期の実体は FP レプリカ。同期フォルダは凍結温存中なので導線を出さない
-                // （開けると「同期されないフォルダ」を同期先と誤認しやすい）。FP 無効時は
-                // userVisibleURL が nil = 無音の no-op になるため disable（「Open Sync Folder」の
-                // syncRootPath == nil ガードと対称・PR #76 レビュー任意 2）。
-                menuRow("Open Tide in Finder", systemImage: "folder") { openFileProviderFolder() }
-                    .disabled(fileProviderEnabled == false)
-            } else {
-                menuRow("Open Sync Folder", systemImage: "folder") { openSyncFolder() }
-                    .disabled(env.config.syncRootPath == nil)
-            }
+            // fpOnly 一本化（#96）: 同期の実体は FP レプリカのみ。bootstrap 失敗時にも旧同期
+            // フォルダへの「Open Sync Folder」は出さない（#98 で実体ごと消えるパスへの導線に
+            // なるため）。FP 無効・状態未取得（nil）は userVisibleURL が nil = 無音の no-op に
+            // なるため、活性条件は fileProviderEnabled == true（PR #99 再レビュー指摘 7 —
+            // `== false` の disable だと nil のとき活性 = 無音 no-op の同型が残る）。
+            menuRow("Open Tide in Finder", systemImage: "folder") { openFileProviderFolder() }
+                .disabled(fileProviderEnabled != true)
             if env.engine != nil || env.signaler != nil {
                 // Sync Activity: folderSync = DB（sync_log）/ fpOnly = FP 拡張の共有イベントログ
                 // （`FPEventLog`・Issue #83）をソース差替で表示（DB 非接触 = 凍結温存を維持）。
@@ -481,14 +477,6 @@ struct MenuBarContent: View {
         }
         .buttonStyle(.plain)
         .padding(.vertical, 1)
-    }
-
-    private func openSyncFolder() {
-        guard let path = env.config.syncRootPath, !path.isEmpty else { return }
-        var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir),
-              isDir.boolValue else { return }
-        NSWorkspace.shared.open(URL(fileURLWithPath: path, isDirectory: true))
     }
 
     /// fpOnly: FP レプリカ（Finder の「場所 → Tide」）を開く。URL 取得は XPC 越しなので非同期。

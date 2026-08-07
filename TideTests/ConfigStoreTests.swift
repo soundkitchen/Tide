@@ -55,37 +55,18 @@ final class ConfigStoreTests: XCTestCase {
         XCTAssertEqual(config.pollingIntervalSeconds, 30)    // 負値も下限へ
     }
 
-    // MARK: - syncMode（M5 Track B・FP-only 稼働モード）
+    // MARK: - syncMode（v0.3.0 #96〜 = 外部ツール契約キー。アプリは分岐のために読まない）
 
-    func testSyncModeDefaultsToFolderSync() {
-        let config = makeStore()
-        XCTAssertEqual(config.syncMode, .folderSync)
-    }
-
+    /// 契約キーとしての保存値の往復保証（`tools/soak/consistency_check.py` が保存値を読むため、
+    /// enum rawValue と UserDefaults キーの対応が壊れていないことを固定する）。
+    /// 旧「folderSync = 安全側既定」セマンティクスのテスト（既定値 / 未知値フォールバック /
+    /// reset でのクリア）は v0.3.0 で意味が反転した（bootstrap の正規化書込が常に fpOnly へ
+    /// 上書きする）ため削除した（#96）。
     func testSyncModeRoundTrip() {
         let config = makeStore()
         config.syncMode = .fpOnly
         XCTAssertEqual(config.syncMode, .fpOnly)
         config.syncMode = .folderSync
-        XCTAssertEqual(config.syncMode, .folderSync)
-    }
-
-    /// 未知の保存値（将来モードからのダウングレード等）は folderSync へフォールバック =
-    /// 常に実績のある安全側で起動する。
-    func testSyncModeUnknownRawValueFallsBackToFolderSync() {
-        let suite = "tide-tests-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        addTeardownBlock { UserDefaults.standard.removePersistentDomain(forName: suite) }
-        defaults.set("someFutureMode", forKey: "tide.syncMode")
-        let config = ConfigStore(defaults: defaults)
-        XCTAssertEqual(config.syncMode, .folderSync)
-    }
-
-    /// reset（再セットアップ）でモードもクリアされ folderSync へ戻る（migratableKeys 経由）。
-    func testResetClearsSyncMode() {
-        let config = makeStore()
-        config.syncMode = .fpOnly
-        config.reset()
         XCTAssertEqual(config.syncMode, .folderSync)
     }
 }
