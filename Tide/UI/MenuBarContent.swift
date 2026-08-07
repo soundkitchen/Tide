@@ -482,16 +482,15 @@ struct MenuBarContent: View {
     }
 
     /// fpOnly: FP レプリカ（Finder の「場所 → Tide」）を開く。URL 取得は XPC 越しなので非同期。
-    /// URL が取れない（fileproviderd 無応答等）ときは実ホームの `~/Library/CloudStorage` を
-    /// best-effort で開く縮退（唯一の Finder 導線を無音 no-op にしない・PR #100 レビュー指摘 4。
-    /// sandbox 下の LS がこのパスを拒否する可能性は残るため、成否はログで観測する）。
+    /// URL が取れない（fileproviderd 無応答等）ときは `userVisibleURLOrFallback` の縮退 URL
+    /// （実ホームの `~/Library/CloudStorage`）を best-effort で開く（唯一の Finder 導線を無音
+    /// no-op にしない・PR #100 レビュー指摘 4。sandbox 下の LS がこのパスを拒否する可能性は
+    /// 残るため、成否はログで観測する）。
     private func openFileProviderFolder() {
         Task {
-            guard let url = await FileProviderController.userVisibleURL() else {
-                let fallback = URL(
-                    fileURLWithPath: PathValidator.realHomeDirectory(), isDirectory: true
-                ).appendingPathComponent("Library/CloudStorage", isDirectory: true)
-                let opened = NSWorkspace.shared.open(fallback)
+            let (url, isFallback) = await FileProviderController.userVisibleURLOrFallback()
+            if isFallback {
+                let opened = NSWorkspace.shared.open(url)
                 AppLogger.ui.info("Open Tide in Finder: userVisibleURL unavailable; CloudStorage fallback opened=\(opened)")
                 return
             }

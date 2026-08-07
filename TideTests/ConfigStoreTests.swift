@@ -3,15 +3,21 @@ import TideCore
 @testable import Tide
 
 final class ConfigStoreTests: XCTestCase {
-    /// テスト専用の分離した UserDefaults スイートで ConfigStore を作る。
-    private func makeStore() -> ConfigStore {
+    /// テスト専用の分離した UserDefaults スイート（teardown 込み）。生 defaults へのリテラル
+    /// assert が要るテストはこちらを使う（suite 生成 + teardown の重複を 1 箇所に集約）。
+    private func makeDefaults() -> UserDefaults {
         let suite = "tide-tests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         addTeardownBlock {
             // suite 名（Sendable）だけをキャプチャして後始末する。
             UserDefaults.standard.removePersistentDomain(forName: suite)
         }
-        return ConfigStore(defaults: defaults)
+        return defaults
+    }
+
+    /// 生 defaults が不要なテスト用の簡易形。
+    private func makeStore() -> ConfigStore {
+        ConfigStore(defaults: makeDefaults())
     }
 
     func testUploadSizeLimitDefaultsTo1GiB() {
@@ -62,9 +68,7 @@ final class ConfigStoreTests: XCTestCase {
     /// `defaults read … tide.syncMode` の生文字列を読むため、`Key.syncMode` のリネームや
     /// rawValue の変更はプロパティ経由の往復だけでは検出できない（PR #100 レビュー指摘 6）。
     func testSyncModeRoundTrip() {
-        let suite = "tide-tests-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        addTeardownBlock { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        let defaults = makeDefaults()
         let config = ConfigStore(defaults: defaults)
         config.syncMode = .fpOnly
         XCTAssertEqual(config.syncMode, .fpOnly)
@@ -80,12 +84,23 @@ final class ConfigStoreTests: XCTestCase {
     /// 正規化が一度も書かれず、外部ツールは生 defaults 不在 → "folderSync" と解釈して
     /// DB 凍結見張りが静かに非武装化する。`?? .fpOnly` へ変えてはならない。
     func testSyncModeMissingOrUnknownKeyFallsBackToFolderSync() {
-        let suite = "tide-tests-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        addTeardownBlock { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        let defaults = makeDefaults()
         let config = ConfigStore(defaults: defaults)
         XCTAssertEqual(config.syncMode, .folderSync)          // キー不在
         defaults.set("someFutureMode", forKey: "tide.syncMode")
         XCTAssertEqual(config.syncMode, .folderSync)          // 未知の保存値
+    }
+
+    /// `reset()`（factoryReset / 再セットアップ）が契約キーを**削除する**（`migratableKeys` 経由）
+    /// ことの固定（PR #100 再レビュー指摘 5）。「キー不在 → getter は `.folderSync` →
+    /// `completeSetup` 冒頭 / 次回 bootstrap の明示書込が fpOnly を書き戻す」という不在窓モデルは
+    /// この削除挙動の正確さに依存する（ConfigStore doc comment / soak 運用注意の前提）。
+    func testResetClearsSyncMode() {
+        let defaults = makeDefaults()
+        let config = ConfigStore(defaults: defaults)
+        config.syncMode = .fpOnly
+        config.reset()
+        XCTAssertNil(defaults.string(forKey: "tide.syncMode"))   // キー自体が消える
+        XCTAssertEqual(config.syncMode, .folderSync)             // getter はフォールバック
     }
 }

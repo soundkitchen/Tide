@@ -158,9 +158,10 @@ public final class ConfigStore: @unchecked Sendable {
     /// 武装条件 (c) `mode:switched` WARN（起動時値とのズレ）(d) `mode:config-mismatch` WARN
     /// （`--fp-only` × 実モード非 fpOnly で毎周回）。キー廃止は観測の静かな縮退になるため不可。
     /// 未知の保存値は `folderSync` へフォールバック（＝正規化書込の対象になり fpOnly へ戻る）。
-    /// `reset()`（factoryReset / 再セットアップ）はキーを一時削除する — #97 以降は
-    /// `completeSetup` の明示書込が不在窓を閉じる。`SettingsTransfer` にはフィールドが無く
-    /// 構造的に含まれない（マシン固有の運用値のため持ち出さない）。
+    /// `reset()`（factoryReset / 再セットアップ）はキーを一時削除する — `completeSetup` 冒頭の
+    /// 明示書込（#96 で前倒し実装済み・#97 のシグネチャ置換でも維持すること）が不在窓を閉じる。
+    /// `SettingsTransfer` にはフィールドが無く構造的に含まれない
+    /// （マシン固有の運用値のため持ち出さない）。
     public var syncMode: SyncMode {
         get { SyncMode(rawValue: defaults.string(forKey: Key.syncMode) ?? "") ?? .folderSync }
         set { defaults.set(newValue.rawValue, forKey: Key.syncMode) }

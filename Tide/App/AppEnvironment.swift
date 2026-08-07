@@ -193,7 +193,7 @@ final class AppEnvironment {
 
         // FP ドメイン未登録なら signal は向こうの isEnabled ガードで no-op になる（起動自体は
         // 続行 = 設定画面から Enable すれば次の契機から効き始める）。気づけるようログだけ残す。
-        if await !FileProviderController.isEnabled() {
+        if await FileProviderController.isEnabled() != true {
             AppLogger.ui.info("FP-only mode: File Provider domain is not enabled yet; enable it in Settings")
         }
 
@@ -202,7 +202,9 @@ final class AppEnvironment {
             headIndexETag: { [s3] in try await s3.headObject(key: TideS3Client.indexKey)?.etag },
             signal: { FileProviderController.signalRemoteChanges() },
             // 拡張 OFF = 全同期停止の検出（Issue #82）。メニューバーアイコンへ反映される。
-            isFPDomainEnabled: { await FileProviderController.isEnabled() }
+            // 取得失敗（nil）は無効側に倒す = 従来挙動の維持（毎周回の再観測で自己回復する・
+            // 警告の出しすぎは次周回で消えるが、見逃しは ETag 変化まで気づけない）。
+            isFPDomainEnabled: { await FileProviderController.isEnabled() == true }
         )
         self.signaler = signaler
         signaler.start()
@@ -391,6 +393,13 @@ final class AppEnvironment {
         region: String,
         syncRootPath: String
     ) async throws {
+        // v0.3.0（#96・PR #100 レビュー指摘 2 = #97 二重化の前倒し）: factoryReset がキーを
+        // 一時削除した後、同一セッションの再セットアップは bootstrap の正規化書込（起動時のみ）を
+        // 通らないため、書かないと次回起動まで syncMode 不在 = soak の DB 凍結見張りが静かに
+        // 非武装のままになる。**throw し得る処理（bookmark 発行 / Keychain 保存）より前**に書く —
+        // 途中失敗でも不在窓を無条件に閉じるため（冪等・他に依存しない。再レビュー指摘 3）。
+        config.syncMode = .fpOnly
+
         // App Sandbox 下で以後の起動でも同期フォルダへアクセスできるよう、確定前に
         // security-scoped bookmark を発行する（ウィザードの Choose… パネルで選択済みなら成立）。
         // 手入力パス等でアクセス権が無ければここで失敗し、setupCompleted を立てる前に中断する。
@@ -410,11 +419,6 @@ final class AppEnvironment {
         config.region = region
         config.syncRootPath = syncRootPath
         config.syncRootBookmark = bookmark
-        // v0.3.0（#96・PR #100 レビュー指摘 2 = #97 二重化の前倒し）: factoryReset がキーを
-        // 一時削除した後、同一セッションの再セットアップは bootstrap の正規化書込（起動時のみ）を
-        // 通らないため、次回起動まで syncMode 不在 = soak の DB 凍結見張りが静かに非武装のままに
-        // なる。ここで明示的に書いて不在窓を閉じる。
-        config.syncMode = .fpOnly
         config.setupCompleted = true
 
         // 二重起動防止（PR #7 レビュー Low）: setupCompleted を立てた後の seed/launch の await 中に、

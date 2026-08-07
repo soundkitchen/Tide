@@ -512,6 +512,23 @@ folderSync へ戻る経路を UI / defaults の両面から閉じる（動機 = 
   `?? .fpOnly` への「掃除」禁止を固定）⑥ 往復テストにリテラルのキー名・保存値 assert を追加
   （`defaults read` の生文字列を読む外部ツール契約の実固定）⑦ `SyncMode` enum doc を
   契約キーセマンティクスへ書換（property doc との矛盾解消）。
+- **PR #100 再レビュー対応（2026-08-08・7 件）**: ① `FileProviderController.isEnabled()` を
+  **`Bool?` 化**（throw = nil。「一時的な XPC 失敗」と「既知の未登録」を区別 — false 潰しだと
+  fileproviderd 無応答で実在ドメインへの導線が誤 disable される。真偽が要る文脈は `== true` /
+  `!= true` で倒す側を明示 = signal ガード / #82 観測は従来挙動維持）② 過渡窓の UI 導線
+  （Open Setup Wizard / Factory reset ボタン）は**塞がない判断を明記** — ウィザードは
+  bootstrap 失敗（Keychain 消失等）時の復旧経路のため disable は復旧を塞ぐ・単一ユーザ運用・
+  禁止は docs / Issue 運用注意で担保（#97 で論点自体が消滅）③ completeSetup の syncMode 書込を
+  **冒頭（throw し得る bookmark 発行 / Keychain 保存の前）へ移動**（途中失敗でも不在窓を
+  無条件に閉じる・冪等）④ CloudStorage 縮退を `FileProviderController.userVisibleURLOrFallback()`
+  へ移設（将来の呼び手が nil の無音挙動を再踏襲しない・「親 `CloudStorage/` に留める =
+  `Tide-Tide` 名は OS が displayName から合成しパス恒常性の公開契約が無い」の理由をコメント化。
+  LS 拒否の可能性は実機受け入れ項目で観測）⑤ `testResetClearsSyncMode` を新セマンティクスの
+  記述（キー削除 → getter フォールバック → 明示書込で復帰、の不在窓モデル固定）で復活。
+  completeSetup / bootstrap の配線ピンは XCTest ガード（実 S3 / Keychain 非接触）の制約で
+  ユニットテスト不可 — #97 での維持は docs/09 とコード内コメントに明記 ⑥ 契約キー doc の
+  「#97 以降」表現を前倒し済みへ修正 ⑦ テストの suite 生成 + teardown を `makeDefaults()` へ
+  集約（重複ボイラープレート解消）。
 
 #83 受け入れで実測した「100 件バーストで index.json CAS が枯渇 → 部分完了
 （孤児オブジェクト + stale index 宣言）」の恒久対処。3 層で潰す（方針 = ②+③+① 複合・

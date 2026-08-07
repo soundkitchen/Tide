@@ -35,8 +35,12 @@ enum FileProviderController {
         AppLogger.ui.info("File Provider domains removed")
     }
 
-    static func isEnabled() async -> Bool {
-        let domains = (try? await NSFileProviderManager.domains()) ?? []
+    /// FP ドメインの登録状態。**nil = 取得失敗**（fileproviderd 無応答等・登録の有無は不明）。
+    /// throw を false に潰すと「一時的な XPC 失敗」と「既知の未登録」が区別できず、
+    /// 呼び出し側 UI が実在するドメインへの導線を誤って disable する（PR #100 再レビュー指摘 1）。
+    /// 真偽が要る文脈は `== true` / `!= true` で明示的に倒す側を選ぶこと。
+    static func isEnabled() async -> Bool? {
+        guard let domains = try? await NSFileProviderManager.domains() else { return nil }
         return domains.contains { $0.identifier == domain.identifier }
     }
 
@@ -102,6 +106,20 @@ enum FileProviderController {
         return try? await manager.getUserVisibleURL(for: .rootContainer)
     }
 
+    /// 「Tide を Finder で開く」導線用: `userVisibleURL()` が取れないとき（fileproviderd 無応答等）は
+    /// 実ホームの `~/Library/CloudStorage`（全プロバイダ共通の親）へ縮退する — 唯一の Finder 導線を
+    /// 無音 no-op にしないための best-effort（PR #100 レビュー指摘 4・再レビュー指摘 4 で移設）。
+    /// レプリカ実体 `…/CloudStorage/Tide-Tide` を直接使わないのは意図的な保守側の選択 —
+    /// ディレクトリ名は OS が displayName から合成するもので、パス恒常性の公開契約が無い。
+    /// `isFallback` は scope 開始の要否判定用（本物の URL は security-scoped・縮退 URL は素のパス）。
+    static func userVisibleURLOrFallback() async -> (url: URL, isFallback: Bool) {
+        if let url = await userVisibleURL() { return (url, false) }
+        let fallback = URL(
+            fileURLWithPath: PathValidator.realHomeDirectory(), isDirectory: true
+        ).appendingPathComponent("Library/CloudStorage", isDirectory: true)
+        return (fallback, true)
+    }
+
     /// リモート変化（pull がシャード変化を取り込んだ / アップロードがマニフェストを書いた）を
     /// FP ドメインへ通知する（M5 Phase 4・アプリ側が主経路）。fire-and-forget・未登録なら no-op。
     /// replicated 拡張への signal は `.workingSet` のみ有効（他コンテナは無視される）。
@@ -132,7 +150,9 @@ enum FileProviderController {
 
     private static func performSignal() {
         Task {
-            guard await isEnabled(), let manager = NSFileProviderManager(for: domain) else { return }
+            // 取得失敗（nil）も signal しない側に倒す（従来挙動の維持 — signal は fire-and-forget の
+            // 補助経路で、拡張側の世代キャッシュ・定期契機が取りこぼしを回収する）。
+            guard await isEnabled() == true, let manager = NSFileProviderManager(for: domain) else { return }
             do {
                 try await manager.signalEnumerator(for: .workingSet)
                 AppLogger.sync.debug("Signaled File Provider working set")
