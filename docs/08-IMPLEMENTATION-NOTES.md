@@ -743,6 +743,29 @@ dataless 一覧が見える」体験（クリーンインストール復旧の�
   probeDomainRecreation へ是正 ⑥ Enable/Disable 押下ごとの isEnabled XPC 二重実行 + version
   更新が呼び出し側任せ（Low）→ ラッパ内 `defer { fileProviderStateVersion += 1 }` へ移し、View の
   明示 fetch と `noteFileProviderDomainStateChanged()`（呼び手ゼロ化）を削除。
+- **PR #101 九次レビュー対応（2026-08-09・7 件）**: ① factoryReset の busy スキップが「成功」に
+  見える（呼び出し側が無条件 dismiss・High）→ `@discardableResult func factoryReset() async ->
+  Bool` 化 + Settings は成功時のみ dismiss・スキップ時は案内表示（`resetMessage`）② 旧
+  `isBootstrapping` の二役（起動中 / ドメイン変更 mutex）による誤拒否・無音ドロップ（High）→
+  **`setupGate = RemoteOpGate`（既存型の再利用）へ置換**。取得セマンティクスを呼び出し元の意味で
+  使い分け: bootstrap = tryAcquire（busy なら引く・ポップオーバー再訪で再試行）/
+  **completeSetup = acquire（FIFO 待ち — bootstrap 起動や Enable の完了を待ってから実行して
+  意味が変わらないため、拒否でなく直列化 = 誤拒否解消）**/ factoryReset・Enable・Disable =
+  tryAcquire で拒否（待たせて後から実行すると意味が変わる操作）。`isBootstrapping` は削除
+  ③ seed の部分失敗（shard 確定 → index 失敗 = #91 系）が握りつぶされ、八次④の shards probe が
+  リトライを恒久封鎖（既定除外の無い新規バケットが静かに稼働・High）→ `updateFileEntry` を
+  **1 回だけ即時リトライ**（再実行は alreadyUpToDate 経路 → repairIndexDeclarationIfStale が
+  index 宣言を治癒。両方失敗の残余は best-effort の範囲でログ）④ 損傷バケット probe の逆側
+  （`files/` 生存 × `.tide/` 全損）でカスタム `.syncignore` を既定テンプレートで置換し得る
+  （Medium）→ `files/` プレフィックスの空プローブを追加（何か見えたら seed しない）
+  ⑤ migrate の setupCompleted ゲートが pending-add 分岐のみで stale 分岐は未設定アプリでも add
+  していた（Medium）→ ゲートを stale 分岐へも拡大（未設定時は stale **除去のみ**・add と
+  フラグ set をしない）⑥ 未セットアップでも Settings の Enable が通り設定なしドメイン + 偽の
+  破壊警告になる（Medium）→ enable ラッパに `setupCompleted` ガード（**disable 側は意図的に
+  ガードなし** = 全消し済みアプリに生き残ったドメインの手動回復導線）⑦ probe 解決に無期限依存で
+  ハング時に進行ゲートが理由不明のまま閉じ続ける（Low）→ 「確認中…」インジケータ + 10 秒で
+  「不明 = 作り直し側」へのタイムアウトフォールバック（警告表示側 = 安全・probe が後から返れば
+  実値で上書き）。
 
 ### バースト RMW 競合の恒久対処（Issue #91・2026-07-26）
 

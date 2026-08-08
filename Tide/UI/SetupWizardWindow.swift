@@ -197,6 +197,17 @@ struct SetupWizardWindow: View {
             Text("No local sync folder is needed. Press “Start syncing” to enable the Tide folder and begin syncing.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            if willRecreateDomain == nil {
+                // probe 未解決（XPC 応答待ち）。進行ゲート（canAdvance）が閉じている理由を
+                // 可視化する（九次レビュー指摘 7）。10 秒でフォールバック解決する。
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Checking File Provider status…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
             // 破壊的 recreation の警告は enabled 判定の**外**（六次レビュー指摘 1）: willRecreateDomain
             // は不明（isEnabled nil = fileproviderd 無応答）を作り直し側に倒すため、警告も同じ側で
             // 出さないと「domains() 一時失敗 × Start syncing」で無警告破棄になる。既知の未登録
@@ -226,6 +237,17 @@ struct SetupWizardWindow: View {
             // 素通りし、Back → bucket 変更 → Return で警告未レンダリングのまま実行され得る。
             fileProviderAlreadyEnabled = nil
             willRecreateDomain = nil
+            // タイムアウトフォールバック（九次レビュー指摘 7）: fileproviderd がハングすると
+            // domains() はエラーも返さず戻らない（#96 受け入れ実測）。10 秒で「不明 = 作り直し側」
+            // へ倒して進行ゲートを解く（unknown は警告表示側なので安全・probe が後から返れば実値で
+            // 上書き。completeSetup 側の権威判定は従来どおりで、この値は表示とゲートのみ）。
+            let fallback = Task { @MainActor in
+                try? await Task.sleep(for: .seconds(10))
+                guard !Task.isCancelled, willRecreateDomain == nil else { return }
+                willRecreateDomain = true
+                // fileProviderAlreadyEnabled は nil のまま = enabled != false で警告が出る
+            }
+            defer { fallback.cancel() }
             // 単一 probe（七次レビュー指摘 5）: isEnabled を別途叩くと警告条件が異時点の
             // 2 スナップショット合成になり、片方だけ失敗したとき矛盾表示になる。
             let probe = await env.probeDomainRecreation(forBucket: bucket)

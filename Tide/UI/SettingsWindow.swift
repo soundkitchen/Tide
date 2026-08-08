@@ -14,6 +14,9 @@ struct SettingsWindow: View {
     /// 設定 export/import（#29）の結果メッセージ（成功/失敗の一過性表示）。
     @State private var settingsMessage: String?
 
+    /// factoryReset がスキップされたときの案内（九次レビュー指摘 1・成功時はウィンドウが閉じるので不要）。
+    @State private var resetMessage: String?
+
     /// 1 ファイルあたりのアップロード上限（ConfigStore は @Observable ではないので @State で持つ）。
     /// スライダで GB 単位（1〜100GB）を柔軟に設定。`noLimit` が true のときは無制限（-1 センチネル）。
     @State private var noLimit: Bool = false
@@ -196,9 +199,20 @@ struct SettingsWindow: View {
                 }
                 Button("Factory reset…", role: .destructive) {
                     Task {
-                        await env.factoryReset()
-                        dismissWindow(id: "settings")
+                        // スキップ（他のライフサイクル操作進行中）を「リセット完了」と誤認させない
+                        // （九次レビュー指摘 1）: 成功時のみ閉じる。
+                        if await env.factoryReset() {
+                            dismissWindow(id: "settings")
+                        } else {
+                            resetMessage = String(localized: "Factory reset was skipped — another operation is in progress. Try again in a moment.")
+                        }
                     }
+                }
+                if let resetMessage {
+                    Text(resetMessage)
+                        .textSelection(.enabled)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
         }

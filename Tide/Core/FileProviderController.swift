@@ -71,6 +71,13 @@ enum FileProviderController {
         return domains.contains { $0.identifier == domain.identifier }
     }
 
+    /// セットアップ完了済みか（migrate の add ゲート用・PR #101 四次レビュー指摘 1 / 九次レビュー
+    /// 指摘 5）。未設定アプリへの add は全分岐で禁止 — 拡張が fromSharedConfig nil の未設定エラー
+    /// 列挙になるため。
+    private static func isSetupCompleted() -> Bool {
+        ConfigStore().setupCompleted
+    }
+
     /// 移行が「stale 除去済み・現行 add 未完了」で中断したことを示すフラグ（group defaults）。
     /// 立っている間は次回の migrate が add を再試行する＝「有効化済み」意図が失われない
     /// （PR #61 レビュー #1: remove 成功 → add 失敗だと stale 検出が no-op になり移行が再走しない）。
@@ -101,7 +108,7 @@ enum FileProviderController {
             // ドメインを無言 re-add → 拡張が fromSharedConfig nil で未設定エラー列挙になる。
             // フラグは回収してよい — 正規のセットアップ完了時は enable() が無条件に add する
             // ためフラグ無しで困らない。
-            guard ConfigStore().setupCompleted else {
+            guard isSetupCompleted() else {
                 defaults.removeObject(forKey: migrationPendingAddKey)
                 AppLogger.ui.notice("Skipping pending File Provider domain re-add (setup not completed); cleared pending flag")
                 return
@@ -120,13 +127,20 @@ enum FileProviderController {
             return
         }
 
+        // 未設定アプリでは現行ドメインの add を行わない（四次レビュー指摘 1 の setupCompleted
+        // ゲートを九次レビュー指摘 5 で stale 分岐へも拡大 — factoryReset の disable 失敗握りつぶし
+        // 〈try?〉後は「stale 生存 × 全消し済み」の組合せがあり得る）。stale の**除去だけ**行い、
+        // add はセットアップ完了後の enable() に委ねる（add しないためフラグも立てない）。
+        let setupCompleted = isSetupCompleted()
         // remove の前にフラグを立てる（remove 成功 → add 失敗/クラッシュでも意図が消えない順序）。
-        defaults.set(true, forKey: migrationPendingAddKey)
+        if setupCompleted {
+            defaults.set(true, forKey: migrationPendingAddKey)
+        }
         do {
             for stale in staleDomains {
                 try await NSFileProviderManager.remove(stale)
             }
-            if !hasCurrent {
+            if !hasCurrent && setupCompleted {
                 try await NSFileProviderManager.add(domain)
             }
             defaults.removeObject(forKey: migrationPendingAddKey)

@@ -1201,6 +1201,17 @@
         }
       }
     },
+    "Checking File Provider status…" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "File Provider の状態を確認しています…"
+          }
+        }
+      }
+    },
     "Continue" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -1307,6 +1318,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "完了"
+          }
+        }
+      }
+    },
+    "Factory reset was skipped — another operation is in progress. Try again in a moment." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ファクトリーリセットは実行されませんでした — 別の処理が進行中です。しばらくしてからもう一度お試しください。"
           }
         }
       }
