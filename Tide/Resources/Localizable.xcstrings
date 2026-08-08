@@ -1520,17 +1520,6 @@
         }
       }
     },
-    "Open Sync Folder" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "同期フォルダを開く"
-          }
-        }
-      }
-    },
     "Paste an IAM access key pair with permission to read/write your Tide bucket." : {
       "extractionState" : "manual",
       "localizations" : {
@@ -2250,79 +2239,13 @@
         }
       }
     },
-    "Shows synced files in Finder (Locations → Tide) as cloud placeholders and downloads them when opened. Files you add, edit, or delete there sync directly to S3, like a separate device — the sync folder keeps working alongside. Disabling removes the local replica (placeholders and downloaded copies); data in S3 is kept." : {
+    "Shows synced files in Finder (Locations → Tide) as cloud placeholders and downloads them when opened. Files you add, edit, or delete there sync directly to S3. This is how Tide syncs — disabling stops all syncing and removes the local replica (placeholders and downloaded copies); data in S3 is kept." : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "同期済みファイルを Finder（場所 → Tide）にクラウドのプレースホルダとして表示し、開いた時に取得します。ここでの追加・編集・削除は別のデバイスと同様に S3 へ直接同期され、同期フォルダはそのまま並走して動作します。無効化するとローカルのレプリカ（プレースホルダと取得済みコピー）が削除され、S3 上のデータは残ります。"
-          }
-        }
-      }
-    },
-    "Sync mode" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "同期モード"
-          }
-        }
-      }
-    },
-    "Folder sync" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "フォルダ同期"
-          }
-        }
-      }
-    },
-    "File Provider only" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "File Provider のみ"
-          }
-        }
-      }
-    },
-    "File Provider is not enabled. Enable it above first, or nothing will sync in File Provider–only mode." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "File Provider が有効になっていません。先に上の「Enable File Provider」を実行してください。無効のまま File Provider のみモードにすると何も同期されません。"
-          }
-        }
-      }
-    },
-    "Quit and reopen Tide to apply the new mode." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "新しいモードは Tide を終了して開き直すと適用されます。"
-          }
-        }
-      }
-    },
-    "Folder sync watches your sync folder with the built-in engine. File Provider only stops that engine and syncs solely through the Tide location in Finder — the sync folder and local database are left untouched, so you can switch back anytime." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "「フォルダ同期」は内蔵エンジンが同期フォルダを監視します。「File Provider のみ」はそのエンジンを止め、Finder の「Tide」の場所だけで同期します — 同期フォルダとローカル DB には触れないため、いつでも元のモードへ戻せます。"
+            "value" : "同期済みファイルを Finder（場所 → Tide）にクラウドのプレースホルダとして表示し、開いた時に取得します。ここでの追加・編集・削除は S3 へ直接同期されます。Tide の同期はこの仕組みだけです — 無効化するとすべての同期が止まり、ローカルのレプリカ（プレースホルダと取得済みコピー）が削除されます。S3 上のデータは残ります。"
           }
         }
       }

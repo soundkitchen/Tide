@@ -83,6 +83,14 @@ final class AppEnvironment {
         if migration.databaseMigrated || migration.configMigrated {
             AppLogger.ui.info("Legacy state migrated to App Group (db: \(migration.databaseMigrated), config: \(migration.configMigrated))")
         }
+        // v0.3.0（#96）正規化書込: 保存値を常に fpOnly へ揃える。`defaults write` で folderSync を
+        // 書かれても次回起動で上書き＝脱出口を封鎖する。syncMode は外部ツール
+        // （tools/soak/consistency_check.py）が読む契約キーのため、書込で保存値を恒久 fpOnly に
+        // 保つことが soak 突合ガード（exit 2）と DB 凍結見張り武装の維持条件（docs/09 v0.3.0 節）。
+        if config.syncMode != .fpOnly {
+            AppLogger.ui.info("Normalizing stored syncMode to fpOnly (was \(self.config.syncMode.rawValue, privacy: .private))")
+            config.syncMode = .fpOnly
+        }
         guard config.setupCompleted else {
             AppLogger.ui.info("Setup not completed; awaiting wizard.")
             return
@@ -100,12 +108,19 @@ final class AppEnvironment {
     private static func isBlank(_ s: String?) -> Bool { s?.isEmpty ?? true }
 
     func launchEngineFromCurrentConfig() async throws {
-        // FP-only 稼働モード（Track B・#40 方針 2026-07-22）: SyncEngine を起動せず
-        // RemoteChangeSignaler だけを立ち上げる。モードの適用は起動時のみ（動的切替はしない）。
-        if config.syncMode == .fpOnly {
-            try await launchFPOnlySignalerFromCurrentConfig()
-            return
-        }
+        // v0.3.0（#96）: boot は syncMode を読まず常に fpOnly。folderSync（FSEvents エンジン）への
+        // 分岐は**この関数内部**で閉じる — 呼出経路は bootstrap() と completeSetup の 2 つあり、
+        // 呼出側ゲートだと旧ウィザード再セットアップ経由で FSEvents エンジンが起動し得る
+        // （空フォルダ受理 → 全件 delete の事故窓。docs/09 v0.3.0 節・PR #99 レビュー指摘 2）。
+        try await launchFPOnlySignalerFromCurrentConfig()
+    }
+
+    /// 【到達不能・温存】folderSync（FSEvents）モードの起動本体。v0.3.0（#96）で呼出経路ゼロの
+    /// デッドコードになった。復活手段は git revert のみ（docs/09「revert 復帰ランブック」の遵守必須 —
+    /// ランブック無しの revert 起動は空フォルダ受理 → S3 一斉 delete marker の事故窓へ直行する）。
+    /// SyncEngine / FileWatcher 一式のコンパイル維持のため温存し、物理削除は従来ゲート
+    /// （FP-only 無事故実績 + 2 台 soak 後 = docs/09 M5 節）まで据え置き。
+    private func launchFolderSyncEngineFromCurrentConfig() async throws {
         var missing: [String] = []
         if Self.isBlank(config.bucketName) { missing.append("bucket name") }
         if Self.isBlank(config.region) { missing.append("region") }
@@ -178,7 +193,7 @@ final class AppEnvironment {
 
         // FP ドメイン未登録なら signal は向こうの isEnabled ガードで no-op になる（起動自体は
         // 続行 = 設定画面から Enable すれば次の契機から効き始める）。気づけるようログだけ残す。
-        if await !FileProviderController.isEnabled() {
+        if await FileProviderController.isEnabled() != true {
             AppLogger.ui.info("FP-only mode: File Provider domain is not enabled yet; enable it in Settings")
         }
 
@@ -187,7 +202,9 @@ final class AppEnvironment {
             headIndexETag: { [s3] in try await s3.headObject(key: TideS3Client.indexKey)?.etag },
             signal: { FileProviderController.signalRemoteChanges() },
             // 拡張 OFF = 全同期停止の検出（Issue #82）。メニューバーアイコンへ反映される。
-            isFPDomainEnabled: { await FileProviderController.isEnabled() }
+            // 取得失敗（nil）は無効側に倒す = 従来挙動の維持（毎周回の再観測で自己回復する・
+            // 警告の出しすぎは次周回で消えるが、見逃しは ETag 変化まで気づけない）。
+            isFPDomainEnabled: { await FileProviderController.isEnabled() == true }
         )
         self.signaler = signaler
         signaler.start()
@@ -376,9 +393,18 @@ final class AppEnvironment {
         region: String,
         syncRootPath: String
     ) async throws {
+        // v0.3.0（#96・PR #100 レビュー指摘 2 = #97 二重化の前倒し）: factoryReset がキーを
+        // 一時削除した後、同一セッションの再セットアップは bootstrap の正規化書込（起動時のみ）を
+        // 通らないため、書かないと次回起動まで syncMode 不在 = soak の DB 凍結見張りが静かに
+        // 非武装のままになる。**throw し得る処理（bookmark 発行 / Keychain 保存）より前**に書く —
+        // 途中失敗でも不在窓を無条件に閉じるため（冪等・他に依存しない。再レビュー指摘 3）。
+        config.syncMode = .fpOnly
+
         // App Sandbox 下で以後の起動でも同期フォルダへアクセスできるよう、確定前に
         // security-scoped bookmark を発行する（ウィザードの Choose… パネルで選択済みなら成立）。
         // 手入力パス等でアクセス権が無ければここで失敗し、setupCompleted を立てる前に中断する。
+        // NOTE（v0.3.0 過渡・#96〜#97）: fpOnly boot はこの bookmark を使わない。#97（ウィザード
+        // fpOnly ネイティブ化）で bookmark 発行・フォルダ選択ステップごと削除予定（docs/09）。
         let syncRootURL = URL(fileURLWithPath: syncRootPath, isDirectory: true)
         let bookmark: Data
         do {
@@ -402,6 +428,10 @@ final class AppEnvironment {
         defer { isBootstrapping = false }
 
         // 新規バケットのときだけ既定 .syncignore を置く（既存バケット参加時は競合回避のため作らない）
+        // NOTE（v0.3.0 過渡・#96〜#97）: seed は**ローカル同期フォルダ**へ書くため、fpOnly boot に
+        // なった今は誰も読まず S3 マニフェストへ届かない（新規バケットが既定 ignore を持たない）。
+        // #97 で S3 直書き（`files/.syncignore` PUT + ManifestUpdater 合流）へ変更予定（docs/09）。
+        // 過渡期間は再セットアップ自体を禁止（Issue #96 運用注意）。
         let syncRoot = URL(fileURLWithPath: syncRootPath, isDirectory: true)
         await Self.seedDefaultSyncIgnoreIfNewBucket(
             credentials: credentials, bucket: bucket, region: region,

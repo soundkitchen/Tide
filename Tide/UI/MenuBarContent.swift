@@ -49,10 +49,10 @@ struct MenuBarContent: View {
             if !env.isSetupCompleted || env.bootstrapFailure != nil {
                 activateAndOpen("setup")
             }
-            // fpOnly 表示のときだけ FP 有効状態を取得（folderSync では余計な XPC を出さない）。
-            if env.signaler != nil {
-                fileProviderEnabled = await FileProviderController.isEnabled()
-            }
+            // FP 有効状態は bootstrap の成否に依らず常に取得する（#96）。signaler != nil ガード内に
+            // 置くと bootstrap 失敗時に nil のままになり、「Open Tide in Finder」の活性判定が
+            // できない（PR #99 再レビュー指摘 7）。
+            fileProviderEnabled = await FileProviderController.isEnabled()
         }
         // lastSyncedAt は upload 周回完了でしか前進しないため、pull 由来の download / 削除反映も
         // 拾えるよう lastRemoteCheckedAt と束ねて id にする（PR #17 レビュー Low-2）。
@@ -320,8 +320,10 @@ struct MenuBarContent: View {
             Image(systemName: fileProviderEnabled == false
                   ? "exclamationmark.circle.fill" : "externaldrive.fill.badge.icloud")
                 .font(.title2)
-                // nil = 有効状態の取得中（XPC 往復のサブ秒）。無効かもしれない間は緑を
-                // 出さず中立色にする（PR #76 レビュー任意 3）。
+                // nil = 有効状態の取得中 or 取得失敗（fileproviderd 無応答等・不明）。取得は
+                // ポップオーバー表示時の 1 回きりで再試行しないため、失敗時は表示中ずっと nil の
+                // まま。確実に分かっていない間は緑も赤も出さず中立色にする（PR #76 レビュー任意 3・
+                // isEnabled() の Bool? 化 = PR #100 再レビュー指摘 1）。
                 .foregroundStyle(fileProviderEnabled == false ? Color.red
                                  : fileProviderEnabled == true ? Color.green : Color.secondary)
             VStack(alignment: .leading, spacing: 1) {
@@ -443,17 +445,15 @@ struct MenuBarContent: View {
 
     private var secondaryActions: some View {
         VStack(alignment: .leading, spacing: 2) {
-            if env.signaler != nil {
-                // fpOnly: 同期の実体は FP レプリカ。同期フォルダは凍結温存中なので導線を出さない
-                // （開けると「同期されないフォルダ」を同期先と誤認しやすい）。FP 無効時は
-                // userVisibleURL が nil = 無音の no-op になるため disable（「Open Sync Folder」の
-                // syncRootPath == nil ガードと対称・PR #76 レビュー任意 2）。
-                menuRow("Open Tide in Finder", systemImage: "folder") { openFileProviderFolder() }
-                    .disabled(fileProviderEnabled == false)
-            } else {
-                menuRow("Open Sync Folder", systemImage: "folder") { openSyncFolder() }
-                    .disabled(env.config.syncRootPath == nil)
-            }
+            // fpOnly 一本化（#96）: 同期の実体は FP レプリカのみ。bootstrap 失敗時にも旧同期
+            // フォルダへの「Open Sync Folder」は出さない（#98 で実体ごと消えるパスへの導線に
+            // なるため）。disable は**既知の無効（false）だけ**（ドメイン無し = レプリカ自体が
+            // 存在しない）。未取得（nil = 取得中 or fileproviderd 無応答）は活性のまま —
+            // クリック時の userVisibleURL が真実で、取れなければ CloudStorage へ縮退するため
+            // 無音 no-op にはならない（PR #99 再レビュー指摘 7 の趣旨維持 + PR #100 レビュー
+            // 指摘 4: 唯一の Finder 導線を状態取得失敗で恒久 disable しない）。
+            menuRow("Open Tide in Finder", systemImage: "folder") { openFileProviderFolder() }
+                .disabled(fileProviderEnabled == false)
             if env.engine != nil || env.signaler != nil {
                 // Sync Activity: folderSync = DB（sync_log）/ fpOnly = FP 拡張の共有イベントログ
                 // （`FPEventLog`・Issue #83）をソース差替で表示（DB 非接触 = 凍結温存を維持）。
@@ -483,18 +483,19 @@ struct MenuBarContent: View {
         .padding(.vertical, 1)
     }
 
-    private func openSyncFolder() {
-        guard let path = env.config.syncRootPath, !path.isEmpty else { return }
-        var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir),
-              isDir.boolValue else { return }
-        NSWorkspace.shared.open(URL(fileURLWithPath: path, isDirectory: true))
-    }
-
     /// fpOnly: FP レプリカ（Finder の「場所 → Tide」）を開く。URL 取得は XPC 越しなので非同期。
+    /// URL が取れない（fileproviderd 無応答等）ときは `userVisibleURLOrFallback` の縮退 URL
+    /// （実ホームの `~/Library/CloudStorage`）を best-effort で開く（唯一の Finder 導線を無音
+    /// no-op にしない・PR #100 レビュー指摘 4。sandbox 下の LS がこのパスを拒否する可能性は
+    /// 残るため、成否はログで観測する）。
     private func openFileProviderFolder() {
         Task {
-            guard let url = await FileProviderController.userVisibleURL() else { return }
+            let (url, isFallback) = await FileProviderController.userVisibleURLOrFallback()
+            if isFallback {
+                let opened = NSWorkspace.shared.open(url)
+                AppLogger.ui.info("Open Tide in Finder: userVisibleURL unavailable; CloudStorage fallback opened=\(opened)")
+                return
+            }
             // getUserVisibleURL の返す URL は security-scoped。scope を開始せずに NSWorkspace へ
             // 渡すと、sandbox 下では LS が「"Tide-Tide" を開くアクセス権がありません」で拒否する
             // （B-2 実機受け入れで発見・Apple Developer Forums thread 724398 と同事例）。

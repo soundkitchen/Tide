@@ -135,6 +135,10 @@ FP ドメイン内のファイル編集（`modifyItem` の .contents）と削除
 
 #### FP-only 稼働モード B-0 = モード基盤 + RemoteChangeSignaler（M5 Track B・2026-07-22）
 
+> **v0.3.0 #96（2026-08-08）で更新**: bootstrap のモード分岐と「既定 folderSync」は撤廃 —
+> boot は無条件 fpOnly・`ConfigStore.syncMode` は外部ツール契約キーへ転生（下記 #96 節）。
+> 本節のモード分岐まわりの記述は当時の記録。`RemoteChangeSignaler` の仕様は現行のまま有効。
+
 FP 一本化（切替前 soak ゲート撤廃 = `docs/09` #40 節・2026-07-22 ユーザ確定）の Track B 第 1 段。
 
 - **`ConfigStore.syncMode`**（`folderSync` / `fpOnly`・既定 `folderSync`）: 未知の保存値も
@@ -180,6 +184,10 @@ FP 一本化（切替前 soak ゲート撤廃 = `docs/09` #40 節・2026-07-22 �
   自動 evict は未検証 = 切替後ライブ soak の観察項目）。**Track B はこれで全完了**。
 
 #### FP-only 稼働モード B-1 = モード切替 UI + 表示縮退（M5 Track B・2026-07-22）
+
+> **v0.3.0 #96（2026-08-08）で更新**: 「Sync mode」セクションと folderSync 側フォールバック
+> （「Open Sync Folder」）は撤去（下記 #96 節）。fpOnly 側の表示縮退（fpOnlyHeader / 状態カード /
+> Sync Activity・Version History の扱い）は現行のまま有効。
 
 - **設定画面「Sync mode」セクション**: radioGroup の Picker（Folder sync / File Provider only）。
   他設定と同じ @State write-through（`ConfigStore.syncMode` へ即保存）だが**適用は次回起動から**
@@ -450,7 +458,91 @@ fpOnly はアプリが DB を開かない（凍結温存）ため DB 由来の S
 - **実機受け入れ 2026-07-26 全項目パス**（受け入れ中に発生したバースト RMW 競合インシデントと
   治癒・知見 3 件の詳細記録 = `docs/09` M5 #83 節）。
 
-### バースト RMW 競合の恒久対処（Issue #91・2026-07-26）
+#### boot fpOnly 固定 + Sync mode 設定 UI 撤去（v0.3.0 #96・2026-08-08）
+
+v0.3.0「ユーザー目線からの folderSync 削除」第 1 段（設計原本 = `docs/09` v0.3.0 節）。
+folderSync へ戻る経路を UI / defaults の両面から閉じる（動機 = 空フォルダ受理 → 全件 delete の
+事故窓。詳細は docs/09 の危険知見）。
+
+- **boot の無条件 fpOnly 化**: `launchEngineFromCurrentConfig` は syncMode を読まず常に
+  `launchFPOnlySignalerFromCurrentConfig()` へ。**ゲートは関数内部**（呼出経路 = `bootstrap()` /
+  `completeSetup` の両方を 1 点で塞ぐ・呼出側ゲート禁止 = PR #99 レビュー指摘 2）。folderSync
+  起動本体は到達不能 private `launchFolderSyncEngineFromCurrentConfig()` へ改名温存
+  （SyncEngine 一式のコンパイル維持・復活は git revert のみ = docs/09「revert 復帰ランブック」
+  必須・物理削除は従来ゲート〈FP-only 無事故実績 + 2 台 soak 後〉据え置き）。
+- **正規化書込**: `bootstrap()` の `LegacyStateMigrator` 直後・`setupCompleted` guard の前で
+  `syncMode != .fpOnly` なら fpOnly を書く。`defaults write` の脱出口封鎖と、外部ツール契約キー
+  （下記）の保存値恒久 fpOnly 化を同時に達成。
+- **`ConfigStore.syncMode` = 外部ツール契約キーへ転生**: enum / プロパティ / `migratableKeys`
+  掲載は温存・アプリは分岐のために読まない。読み手は `tools/soak/consistency_check.py` の
+  4 箇所（突合ガード exit 2 / DBFreezeWatch 武装条件 / `mode:switched` / `mode:config-mismatch`）。
+  キー廃止は観測の静かな縮退になるため不可。**スクリプト・Makefile・launchd 常駐 watch は
+  無変更**（保存値 fpOnly 不変のため再インストール不要。例外 = factoryReset はキーを一時削除 →
+  #97 の completeSetup 明示書込が窓を閉じる。factoryReset を挟んだら**再セットアップ完了後に**
+  `make soak-agent-restart`〈不在窓中の restart は DB 凍結見張りが agent 生存期間中無音で
+  非武装化〉）。
+- **UI 撤去**: 設定画面の「Sync mode」セクション一式（Picker / 再起動案内 / FP 未有効警告 /
+  `runningSyncMode`）と「Sync Folder」行（`LabeledContent`）を削除。FP セクション説明文を
+  fpOnly 前提へ差替（「the sync folder keeps working alongside」を除去・**Disable = 全同期停止**を
+  明記）。`MenuBarContent.secondaryActions` は「Open Tide in Finder」へ一本化（bootstrap 失敗時の
+  else フォールバックだった「Open Sync Folder」を廃止 = #98 で消える `~/Tide` への導線を出さない）。
+  一本化に伴い **`fileProviderEnabled` の取得を `signaler != nil` ガードの外へ移動**（PR #99
+  再レビュー指摘 7）。disable は**既知の無効（`== false`）のみ**とし、未取得（nil = 取得中 or
+  fileproviderd 無応答）は活性のまま — クリック時の `userVisibleURL()` が真実で、取れなければ
+  実ホームの `~/Library/CloudStorage` を best-effort で開く縮退（唯一の Finder 導線を無音 no-op
+  にも恒久 disable にもしない。PR #100 レビュー指摘 4 で `== true` 活性から変更。sandbox の LS が
+  縮退パスを拒否する可能性は残るため成否をログ観測）。`openSyncFolder()` は参照ゼロになるため
+  削除（UI コードは git revert で丸ごと戻せる = 温存対象はエンジン側のみ、の線引きどおり）。
+- **xcstrings**: Sync mode 系 6 キー + 旧 FP 説明キー + `Open Sync Folder`（行ごと消滅で孤児化）を
+  削除・新 FP 説明キーを追加（ja 訳・manual）。`Sync Folder` キーはウィザード step title と共有の
+  ため温存（#97 で削除）。ポップオーバー用の `File Provider is not enabled — nothing is syncing.
+  Enable it in Settings.` も温存。
+- **テスト**: `ConfigStoreTests` の旧「folderSync = 安全側」セマンティクス 3 本（既定値 / 未知値
+  フォールバック / reset クリア）を一旦削除 → **うち 2 本はレビュー対応で新セマンティクスの記述に
+  変えて復活**（未知値/不在キー → `.folderSync` フォールバック = 正規化書込の load-bearing・
+  reset のキー削除 = 不在窓モデルの前提。下記レビュー対応 ⑤ 参照）。最終的に消えているのは
+  既定値テスト `testSyncModeDefaultsToFolderSync` の 1 本だけ。`testSyncModeRoundTrip` は
+  リテラルのキー名・保存値 assert 付きで契約キーの往復保証として温存。
+- **運用注意**: #96 マージ〜#97 マージの間は factoryReset / 再セットアップ禁止（旧ウィザードが
+  フォルダを選ばせるが boot は fpOnly という過渡。データ危険は無いが踏まない）。
+- **PR #100 レビュー対応（2026-08-08・7 件）**: ① 新規セットアップの FP 未有効沈黙窓 =
+  **受容**（PR #99 設計レビューで確定済みの過渡・上記運用注意で禁止・#97 が正式解消）
+  ② `completeSetup` に `syncMode = .fpOnly` の明示書込を**前倒し**（#97 予定の二重化。
+  factoryReset → 同一セッション再セットアップで次回起動まで syncMode 不在 = DB 凍結見張りが
+  静かに非武装、の窓を閉じる）③ seed `.syncignore` が fpOnly boot ではマニフェストへ届かない
+  件と bookmark 発行 = **#97 参照の NOTE コメントを付記**（挙動変更なし・過渡は再セットアップ
+  禁止でカバー）④ メニュー導線 = 上記のとおり nil 活性 + CloudStorage 縮退へ変更
+  ⑤ キー不在/未知値 → `.folderSync` フォールバックのテスト復活（正規化書込の load-bearing =
+  `?? .fpOnly` への「掃除」禁止を固定）⑥ 往復テストにリテラルのキー名・保存値 assert を追加
+  （`defaults read` の生文字列を読む外部ツール契約の実固定）⑦ `SyncMode` enum doc を
+  契約キーセマンティクスへ書換（property doc との矛盾解消）。
+- **PR #100 再レビュー対応（2026-08-08・7 件）**: ① `FileProviderController.isEnabled()` を
+  **`Bool?` 化**（throw = nil。「一時的な XPC 失敗」と「既知の未登録」を区別 — false 潰しだと
+  fileproviderd 無応答で実在ドメインへの導線が誤 disable される。真偽が要る文脈は `== true` /
+  `!= true` で倒す側を明示 = signal ガード / #82 観測は従来挙動維持）② 過渡窓の UI 導線
+  （Open Setup Wizard / Factory reset ボタン）は**塞がない判断を明記** — ウィザードは
+  bootstrap 失敗（Keychain 消失等）時の復旧経路のため disable は復旧を塞ぐ・単一ユーザ運用・
+  禁止は docs / Issue 運用注意で担保（#97 で論点自体が消滅）③ completeSetup の syncMode 書込を
+  **冒頭（throw し得る bookmark 発行 / Keychain 保存の前）へ移動**（途中失敗でも不在窓を
+  無条件に閉じる・冪等）④ CloudStorage 縮退を `FileProviderController.userVisibleURLOrFallback()`
+  へ移設（将来の呼び手が nil の無音挙動を再踏襲しない・「親 `CloudStorage/` に留める =
+  `Tide-Tide` 名は OS が displayName から合成しパス恒常性の公開契約が無い」の理由をコメント化。
+  LS 拒否の可能性は実機受け入れ項目で観測）⑤ `testResetClearsSyncMode` を新セマンティクスの
+  記述（キー削除 → getter フォールバック → 明示書込で復帰、の不在窓モデル固定）で復活。
+  completeSetup / bootstrap の配線ピンは XCTest ガード（実 S3 / Keychain 非接触）の制約で
+  ユニットテスト不可 — #97 での維持は docs/09 とコード内コメントに明記 ⑥ 契約キー doc の
+  「#97 以降」表現を前倒し済みへ修正 ⑦ テストの suite 生成 + teardown を `makeDefaults()` へ
+  集約（重複ボイラープレート解消）。
+- **実機受け入れ（2026-08-08・全 7 項目パス）**: fpOnly 起動ログ / 正規化実証（`defaults write`
+  で folderSync → 起動時 Normalizing ログ → 保存値 fpOnly 復帰）/ `soak-check-fp` 整合 OK
+  （manifest 1038 = s3 1038）+ フラグ無し exit 2 / 常駐 agent 継続稼働（再インストール不要の実証）/
+  Settings ja・en の UI 撤去 + 新文言 / ポップオーバー導線一本化。**項目 7 の実測知見**:
+  fileproviderd を SIGSTOP して「Open Tide in Finder」をクリックすると **XPC は throw せず
+  ハングする**（30 秒超もタイムアウト無し）— 縮退フォールバック・primary とも非発火で無反応。
+  SIGCONT で保留 XPC が完了し、正しい Finder（場所 → Tide）が遅れて開く（誤動作なし）。
+  つまり縮退（CloudStorage open）の発火条件は「XPC が実際にエラーを**返す**状況」（デーモン
+  再起動中等）に限られ、SIGSTOP 手段では **LS 拒否の成否は未検証のまま**（縮退コードは
+  best-effort + `opened=` ログ観測の位置づけを維持。発火実例を観測したら成否を追記）。
 
 #83 受け入れで実測した「100 件バーストで index.json CAS が枯渇 → 部分完了
 （孤児オブジェクト + stale index 宣言）」の恒久対処。3 層で潰す（方針 = ②+③+① 複合・

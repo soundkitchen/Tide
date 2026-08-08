@@ -19,12 +19,15 @@ public final class ConfigStore: @unchecked Sendable {
         static let syncMode = "tide.syncMode"
     }
 
-    /// 稼働モード（M5 Track B・FP 一本化）。
-    /// - `folderSync`: 従来の FSEvents モード（`SyncEngine` = 同期フォルダ監視 + pull + アップロード）。
-    ///   FP ドメインが有効なら並走する。
-    /// - `fpOnly`: File Provider のみで稼働。アプリは `SyncEngine` を起動せず
+    /// 稼働モードの列挙。**v0.3.0（#96）以降、アプリはこの値で分岐しない**（boot は無条件
+    /// fpOnly）。rawValue は外部ツール契約の一部（下記 `syncMode` プロパティの doc 参照）。
+    /// - `folderSync`: 旧 FSEvents モード（`SyncEngine` = 同期フォルダ監視 + pull + アップロード）。
+    ///   **到達不能の温存デッドコード**であり、生きた選択肢ではない。復活は git revert のみ
+    ///   （docs/09「revert 復帰ランブック」の遵守必須）。UI / 分岐へ再配線してはならない
+    ///   （空フォルダ受理 → S3 一斉 delete marker の事故窓が再び開く。docs/09 v0.3.0 節）。
+    /// - `fpOnly`: File Provider のみで稼働（現行唯一のモード）。アプリは `SyncEngine` を起動せず
     ///   `RemoteChangeSignaler`（index HEAD ETag 比較）だけを立ち上げる。
-    ///   DB / syncRoot / bookmark は凍結温存（`folderSync` 復帰時に通常 pull が差分を取り込む）。
+    ///   DB / syncRoot / bookmark は凍結温存（revert 復帰時に通常 pull が差分を取り込む）。
     public enum SyncMode: String, Sendable, CaseIterable {
         case folderSync
         case fpOnly
@@ -146,11 +149,19 @@ public final class ConfigStore: @unchecked Sendable {
         set { defaults.set(newValue, forKey: Key.syncRootBookmark) }
     }
 
-    /// 稼働モード（既定 `folderSync`・未知の保存値も `folderSync` へフォールバック = 常に安全側）。
-    /// **適用は次回起動から**（`AppEnvironment.bootstrap` が起動時に分岐する。稼働中の動的切替は
-    /// しない = 転送中断・キュー残行ありの停止遷移を構造的に回避。ユーザ確定 2026-07-22）。
-    /// `reset()`（再セットアップ）ではクリアされ folderSync へ戻る。`SettingsTransfer` には
-    /// フィールドが無く構造的に含まれない（マシン固有の運用選択のため持ち出さない）。
+    /// 稼働モードの保存値 = **外部ツール契約キー**（v0.3.0 / #96 で転生）。アプリ自身は分岐の
+    /// ために**読まない** — boot は無条件 fpOnly で、`AppEnvironment.bootstrap` が正規化書込
+    /// （`!= .fpOnly` なら fpOnly を書く）を行うため保存値は恒久 fpOnly。folderSync へ戻す手段は
+    /// git revert のみ（docs/09「revert 復帰ランブック」参照）。
+    /// 読み手は `tools/soak/consistency_check.py` の 4 箇所:
+    /// (a) `--fp-only` 無し実行を exit 2 で止める突合ガード (b) DB 凍結見張り（`DBFreezeWatch`）の
+    /// 武装条件 (c) `mode:switched` WARN（起動時値とのズレ）(d) `mode:config-mismatch` WARN
+    /// （`--fp-only` × 実モード非 fpOnly で毎周回）。キー廃止は観測の静かな縮退になるため不可。
+    /// 未知の保存値は `folderSync` へフォールバック（＝正規化書込の対象になり fpOnly へ戻る）。
+    /// `reset()`（factoryReset / 再セットアップ）はキーを一時削除する — `completeSetup` 冒頭の
+    /// 明示書込（#96 で前倒し実装済み・#97 のシグネチャ置換でも維持すること）が不在窓を閉じる。
+    /// `SettingsTransfer` にはフィールドが無く構造的に含まれない
+    /// （マシン固有の運用値のため持ち出さない）。
     public var syncMode: SyncMode {
         get { SyncMode(rawValue: defaults.string(forKey: Key.syncMode) ?? "") ?? .folderSync }
         set { defaults.set(newValue.rawValue, forKey: Key.syncMode) }

@@ -134,7 +134,7 @@ fpOnly 運用中、rename したファイルに実体化チェックバッジ（
   契機で `requestDownloadForItem` 等の内容往復を誘発・API 実挙動は要実証）② 参考 = 安定 id 化（rename を
   rebind にしない構造対処・大工事・据え置き）。
 
-## v0.3.0: ユーザー目線からの folderSync 削除（設計確定 2026-08-06・未着手 = Issue #96 / #97 / #98）
+## v0.3.0: ユーザー目線からの folderSync 削除（設計確定 2026-08-06・#96 実装・実機受け入れ済み 2026-08-08・残 = #97 / #98）
 
 fpOnly 切替（2026-07-25）と #40 の 1 週間ライブ soak 合格（2026-08-03）を受け、**v0.3.0 のテーマを
 「ユーザー目線から FSEvents（folderSync モード）を消す」に確定**（ユーザ確定 2026-08-06）。
@@ -248,7 +248,9 @@ v0.3.0 の完了条件に含めない）。
 
 ### 実施順と Issue（1 タスク 1 Issue。詳細スコープ・受け入れチェックリストは各 Issue 本文）
 
-1. **#96 boot fpOnly 固定 + Sync mode 設定 UI 撤去**（小）
+1. **#96 boot fpOnly 固定 + Sync mode 設定 UI 撤去**（小・✅ 実装・実機受け入れ済み 2026-08-08
+   〈全 7 項目パス・PR #100 レビュー 4 巡〉= 実装ノート・受け入れ知見は `docs/08`
+   「boot fpOnly 固定 + Sync mode 設定 UI 撤去」節）
    - `launchEngineFromCurrentConfig` を無条件 fpOnly 化。folderSync 側本体は到達不能 private
      `launchFolderSyncEngineFromCurrentConfig()` へ移動（コンパイル維持 = 温存方針と整合）
    - `bootstrap()` に正規化書込（`syncMode != .fpOnly` なら fpOnly を書く）
@@ -258,8 +260,9 @@ v0.3.0 の完了条件に含めない）。
      非 fpOnly で毎周回。再レビュー指摘 8）、の 4 箇所で保存値を読む。キー廃止は観測の**静かな縮退**に
      なるため不可。
      正規化書込により保存値は恒久 fpOnly = **スクリプト・Makefile・launchd 常駐 watch は無変更・
-     エージェント再インストール不要**（例外 = factoryReset はキーを一時削除する。#97 の completeSetup
-     明示書込が窓を閉じるが「factoryReset〜再セットアップ完了」の短い不在窓は残り、watch は
+     エージェント再インストール不要**（例外 = factoryReset はキーを一時削除する。#97 予定だった
+     completeSetup 明示書込は **#96 の PR #100 レビュー指摘 2 で前倒し実装済み**だが
+     「factoryReset〜再セットアップ完了」の短い不在窓は残り、watch は
      `mode:switched` / `mode:config-mismatch` WARN を積む → factoryReset を挟んだら
      **再セットアップ完了後に**（= completeSetup が fpOnly を書き戻した後。不在窓の最中に restart
      すると武装判定〈起動時 1 回きり〉が folderSync フォールバックで外れ、その agent 生存期間中
@@ -281,7 +284,8 @@ v0.3.0 の完了条件に含めない）。
      `FileProviderController.enable()` → signaler 起動を一括保証（保存前 enable は拡張が未設定状態で
      起動するため不可）。config 書込には **`syncMode = .fpOnly` の明示書込を含める**（factoryReset が
      キーを消した後の不在窓を completeSetup が閉じる = #96 正規化書込との二重化。PR #99 レビュー
-     指摘 3）。bookmark 発行・`syncRootPath`/`syncRootBookmark` 書込は削除
+     指摘 3。**#96 の PR #100 レビュー指摘 2 で現行 completeSetup に前倒し実装済み** — #97 の
+     シグネチャ置換時に維持する）。bookmark 発行・`syncRootPath`/`syncRootBookmark` 書込は削除
    - 設定画面「.syncignore」セクション（ソース = `engine.activeIgnorePatterns`・fpOnly では engine が
      恒常 nil のため常に「No .syncignore patterns」表示 = パターンが実効なのに空表示の誤情報）は
      **静的案内へ置換**（ユーザ確定 2026-08-08・PR #99 レビュー指摘 4）: パターン一覧を撤去し
