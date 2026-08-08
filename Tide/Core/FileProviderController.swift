@@ -1,3 +1,4 @@
+import AppKit
 import FileProvider
 import Foundation
 import TideCore
@@ -118,6 +119,27 @@ enum FileProviderController {
             fileURLWithPath: PathValidator.realHomeDirectory(), isDirectory: true
         ).appendingPathComponent("Library/CloudStorage", isDirectory: true)
         return (fallback, true)
+    }
+
+    /// FP レプリカ（Finder の「場所 → Tide」）を Finder で開く。URL 取得は XPC 越しなので非同期。
+    /// URL が取れない（fileproviderd 無応答等）ときは `userVisibleURLOrFallback` の縮退 URL
+    /// （実ホームの `~/Library/CloudStorage`）を best-effort で開く（唯一の Finder 導線を無音
+    /// no-op にしない・PR #100 レビュー指摘 4。sandbox 下の LS がこのパスを拒否する可能性は
+    /// 残るため、成否はログで観測する）。ポップオーバーとセットアップ完了画面が共用する
+    /// （#97。security scope の開始漏れ = B-2 受け入れで踏んだバグの構造的再発防止）。
+    static func openUserVisibleFolderInFinder() async {
+        let (url, isFallback) = await userVisibleURLOrFallback()
+        if isFallback {
+            let opened = NSWorkspace.shared.open(url)
+            AppLogger.ui.info("Open Tide in Finder: userVisibleURL unavailable; CloudStorage fallback opened=\(opened)")
+            return
+        }
+        // getUserVisibleURL の返す URL は security-scoped。scope を開始せずに NSWorkspace へ
+        // 渡すと、sandbox 下では LS が「"Tide-Tide" を開くアクセス権がありません」で拒否する
+        // （B-2 実機受け入れで発見・Apple Developer Forums thread 724398 と同事例）。
+        let accessed = url.startAccessingSecurityScopedResource()
+        defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+        NSWorkspace.shared.open(url)
     }
 
     /// リモート変化（pull がシャード変化を取り込んだ / アップロードがマニフェストを書いた）を
