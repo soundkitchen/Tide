@@ -416,7 +416,9 @@ ETag は GCS が MD5/`-n` を保証しない（CRC32C）が、**Tide は sha256 
   `IndexUpdateCoalescer` が空 index から始めるため「1 シャードだけ宣言する index」が製造され、
   生存シャード全部が読者から隠れる（stale-index DRIFT。検出は `soak-check-fp` の index↔shards
   突合がカバー）。shards 走査による index 再構築の復旧手順整備は必要になったら着手
-  （PR #101 四次レビュー指摘 5・本 PR では発火点 1 つ追加のみで修正不要と合意）。
+  （PR #101 四次レビュー指摘 5）。**ウィザード seed の発火点は八次レビュー指摘 4 で解消済み**
+  （seed 前に `.tide/shards/` の空プローブ = 損傷バケットでは seed しない）— 残る書き手
+  （FP 拡張 / Uploader / S3RestoreService）の既存挙動と復旧手順整備が本バックログの対象。
 - **`ManifestFileEntry` 生成の共通ファクトリ**: 「PutObjectResult → entry」の同型フィールド詰め
   （sha256 / mtime / versionId / etag / deviceId / uploadedAt）が `Uploader` / `S3RestoreService` /
   `ExtensionWriter`（×2）/ ウィザード seed の計 5 箇所に複製されている。entry 契約変更時の手動

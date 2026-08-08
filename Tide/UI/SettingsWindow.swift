@@ -234,9 +234,8 @@ struct SettingsWindow: View {
             } catch {
                 fileProviderMessage = String(describing: error)
             }
-            fileProviderEnabled = await FileProviderController.isEnabled()
-            // 他の購読ビュー（ウィザード / ポップオーバー）へも再取得を促す（六次レビュー指摘 3）
-            env.noteFileProviderDomainStateChanged()
+            // 状態の再取得はラッパが進める変更カウンタ → `.task(id:)` に一本化（八次レビュー
+            // 指摘 6 — ここで明示 fetch すると同じ isEnabled XPC が二重に走る）
         }
     }
 

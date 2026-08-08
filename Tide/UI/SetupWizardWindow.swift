@@ -20,7 +20,7 @@ struct SetupWizardWindow: View {
     /// nil = 未取得/取得失敗（表示しないだけで進行は妨げない）。
     @State private var fileProviderAlreadyEnabled: Bool?
     /// 「Start syncing」でドメインが作り直される（= 破壊的）か。判定は completeSetup と共有
-    /// （`AppEnvironment.willRecreateDomain(forBucket:)`・PR #101 五次レビュー指摘 2）。
+    /// （`AppEnvironment.probeDomainRecreation(forBucket:)`・PR #101 五次レビュー指摘 2）。
     @State private var willRecreateDomain: Bool?
 
     enum Step: Int, CaseIterable {
@@ -217,7 +217,10 @@ struct SetupWizardWindow: View {
         // completeSetup がドメイン状態を変える（部分失敗で disableForRecreation 済み等）ため、
         // Settings と同じ変更カウンタで再取得する（五次レビュー指摘 3 — id 無しだとエラー表示の
         // 隣に stale な緑チェックが残る）。ステップ再出現時（Back で bucket 変更後）も走る。
-        .task(id: env.fileProviderStateVersion) {
+        // id には bucket も含める（八次レビュー指摘 1）: 設定インポート（ウィザードのルートの
+        // .onChange）は fileProvider ステップ滞在中でも発火して bucket をその場で書き換えるため、
+        // version のみだと stale な緑チェック + 活性ボタンのまま破壊的作り直しへ進めてしまう。
+        .task(id: "\(env.fileProviderStateVersion)|\(bucket)") {
             // 再入時は probe 前に必ず nil へ戻す（七次レビュー指摘 1）: ウィンドウレベル @State の
             // 前回訪問値が残ると、XPC 往復中の窓で canAdvance ゲート（六次②）が stale 値で
             // 素通りし、Back → bucket 変更 → Return で警告未レンダリングのまま実行され得る。

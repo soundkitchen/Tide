@@ -723,6 +723,26 @@ dataless 一覧が見える」体験（クリーンインストール復旧の�
   scope 開始漏れの再導入扉を閉じる）⑦ pending-add フラグの命令的ステートマシン化（4 箇所分散）→
   「望ましい FP 状態 + 単一 reconcile」への宣言的リファクタを docs/09 バックログへ（本 PR
   実施不要と合意）。
+- **PR #101 八次レビュー対応（2026-08-09・6 件）**: ① probe の task id に bucket が含まれず、
+  fileProvider ステップ滞在中の設定インポート（ルートの .onChange は滞在ステップ非依存で発火し
+  bucket をその場で書き換える）で stale 緑チェック + 活性ボタンのまま無警告の破壊的作り直しに
+  到達できる（High）→ **task id を `"\(version)|\(bucket)"` の複合キー化**（bucket 変化 =
+  nil リセット + 再 probe）② Enable/Disable ラッパに completeSetup / factoryReset との相互排他が
+  無く、factoryReset の disable XPC 窓で Enable を押すと remove → add の順で「全消し済みアプリ +
+  生きたドメイン + フラグ無し」（migrate は staleDomains 空 × フラグ無しで即 return = 四次①の
+  ゲートに到達しない）に至る（High）→ **ラッパが isBootstrapping を check/set**（進行中は
+  SyncError で拒否 — 待たせて後から実行すると意味が変わるため直列化でなく拒否）+ 対称面として
+  completeSetup 冒頭にも busy ガード（syncMode 書込だけは例外的にガード前 = 不在窓を無条件に
+  閉じる既存不変条件）・factoryReset は throw 不能のためログ + no-op（設定が残るので再押下で
+  完遂可）③ `drainDomainMigration` の無条件 `migrationTask = nil` が resume 窓で spawn された
+  新タスクを孤児化（Medium）→ タスク末尾の自己解放と同じ**世代検査**を drain 側にも ④ seed の
+  新規バケット判定が「index 欠落 × shards 生存」の損傷バケットで誤爆（カスタム .syncignore の
+  最新版置換 + 1 シャード index 新造で DRIFT を WARN へ格下げ・Low）→ **seed 前に
+  `.tide/shards/` の空プローブ**（`listObjectVersions(maxKeys: 1)`・live 版 / delete marker の
+  いずれかが見えたら seed しない）⑤ 実在しないメソッド名（willRecreateDomain）へのコメント参照 →
+  probeDomainRecreation へ是正 ⑥ Enable/Disable 押下ごとの isEnabled XPC 二重実行 + version
+  更新が呼び出し側任せ（Low）→ ラッパ内 `defer { fileProviderStateVersion += 1 }` へ移し、View の
+  明示 fetch と `noteFileProviderDomainStateChanged()`（呼び手ゼロ化）を削除。
 
 ### バースト RMW 競合の恒久対処（Issue #91・2026-07-26）
 

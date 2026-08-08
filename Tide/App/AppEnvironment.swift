@@ -271,30 +271,45 @@ final class AppEnvironment {
     /// stale スナップショットで resume してドメイン変更と交錯（pending-add フラグ誤回収 / 孤児
     /// re-add）しないよう、変更前にここを通す。
     private func drainDomainMigration() async {
+        // 世代検査（八次レビュー指摘 3・タスク末尾の自己解放と同じ規約）: await 完了 → resume の
+        // 隙間に bootstrap が新タスクを spawn し得るため、無条件 nil はその新ハンドルを await
+        // されないまま孤児化する（孤児の migrate がラッパの enable/disable XPC と並走 = この
+        // チョークポイントが閉じたはずの race の再開）。
+        let generation = migrationGeneration
         await migrationTask?.value
-        migrationTask = nil
+        if migrationGeneration == generation {
+            migrationTask = nil
+        }
     }
 
-    /// Settings の Enable ボタン用ラッパ（七次レビュー指摘 3）: migrate ドレイン込みで
-    /// `FileProviderController.enable()` を呼ぶ。View から素の enable() を直接叩かないこと
-    /// （`migrationTask` は private のため View 側ではドレインできない）。
+    /// Settings の Enable ボタン用ラッパ（七次レビュー指摘 3 / 八次レビュー指摘 2・6）:
+    /// 相互排他（`isBootstrapping`）+ migrate ドレイン込みで `FileProviderController.enable()` を
+    /// 呼び、終了時に変更カウンタを進める（購読ビューへの再取得通知を呼び出し側任せにしない）。
+    /// completeSetup / factoryReset の進行中は**拒否** — 待たせて後から実行すると意味が変わる
+    /// （リセット完走後に add が着地 = 全消し済みアプリへのドメイン復活。次回起動の migrate は
+    /// staleDomains 空 × フラグ無しで即 return するため自己修復も効かない）。
+    /// View から素の FileProviderController.enable() を直接叩かないこと。
     func enableFileProviderDomain() async throws {
+        guard !isBootstrapping else {
+            throw SyncError.notConfigured(reason: "setup or reset is in progress; try again in a moment")
+        }
+        isBootstrapping = true
+        defer { isBootstrapping = false }
+        defer { fileProviderStateVersion += 1 }
         await drainDomainMigration()
         try await FileProviderController.enable()
     }
 
-    /// Settings の Disable ボタン用ラッパ（七次レビュー指摘 3・enable 側と対）。
+    /// Settings の Disable ボタン用ラッパ（enable 側と対・七次レビュー指摘 3 / 八次レビュー指摘 2・6）。
     func disableFileProviderDomain() async throws {
+        guard !isBootstrapping else {
+            throw SyncError.notConfigured(reason: "setup or reset is in progress; try again in a moment")
+        }
+        isBootstrapping = true
+        defer { isBootstrapping = false }
+        defer { fileProviderStateVersion += 1 }
         await drainDomainMigration()
         try await FileProviderController.disable()
-    }
-
-    /// FP ドメイン状態を AppEnvironment の外（Settings の Enable/Disable ボタン）で変えた呼び出し側が、
-    /// 購読ビュー（ウィザード / Settings / ポップオーバーの `.task(id: fileProviderStateVersion)`）へ
-    /// 再取得を促すための通知点（六次レビュー指摘 3）。completeSetup / factoryReset は内部で直接
-    /// インクリメントする。
-    func noteFileProviderDomainStateChanged() {
-        fileProviderStateVersion += 1
     }
 
     /// FP ドメインを作り直すか + その判定に使ったドメイン有効状態、を**単一 probe** で返す。
@@ -500,6 +515,13 @@ final class AppEnvironment {
         // 途中失敗でも不在窓を無条件に閉じるため（冪等・他に依存しない。再レビュー指摘 3）。
         config.syncMode = .fpOnly
 
+        // 相互排他（八次レビュー指摘 2 の対称面）: factoryReset / Settings の Enable・Disable が
+        // 進行中なら拒否（待たせて後から実行すると相手のドメイン変更と交錯する）。ウィザードに
+        // エラー表示 → 再試行で足りる。syncMode 書込は例外的にガードより前（途中失敗でも不在窓を
+        // 無条件に閉じる既存不変条件・冪等）。
+        guard !isBootstrapping else {
+            throw SyncError.notConfigured(reason: "another setup/reset operation is in progress; try again in a moment")
+        }
         // 二重起動防止（PR #7 レビュー Low）: 以降の await（ドメイン作り直し / seed / enable /
         // launch）中に、ポップオーバーから走る MenuBarContent.task → bootstrap() が signaler==nil
         // で通過して 2 つ目の signaler を起動するのを防ぐ（bootstrap() は isBootstrapping を見て
@@ -586,6 +608,18 @@ final class AppEnvironment {
             // リモートにマニフェストがあれば既存バケット → 作らない
             if try await s3.getIndex() != nil { return }
 
+            // index 不在でも shards が生存する「損傷バケット」（外部削除・ライフサイクル事故等）を
+            // 新規バケットと誤認しない（八次レビュー指摘 4）: この状態で seed すると、生存シャードに
+            // カスタム `.syncignore` があっても PUT が RMW 判定より先に最新版を既定テンプレートへ
+            // 置換し、さらに 1 シャードだけ宣言する index を新造して soak-check の index-missing
+            // DRIFT を WARN へ格下げしてしまう。プレフィックスに何か（live 版 / delete marker）が
+            // 見えたら seed しない（復旧手順は docs/09「損傷バケット」バックログ）。
+            let shardsProbe = try await s3.listObjectVersions(prefix: ".tide/shards/", maxKeys: 1)
+            guard shardsProbe.versions.isEmpty, shardsProbe.deleteMarkers.isEmpty else {
+                AppLogger.sync.notice("Skipping .syncignore seed: index missing but shard objects exist (damaged bucket?)")
+                return
+            }
+
             let data = Data(SyncIgnoreMatcher.defaultTemplate.utf8)
             let put = try await s3.putObject(key: "files/.syncignore", data: data)
             let now = ISO8601.now()
@@ -607,6 +641,14 @@ final class AppEnvironment {
     }
 
     func factoryReset() async {
+        // 相互排他（八次レビュー指摘 2 の対称面）: completeSetup / Enable・Disable ラッパの
+        // 進行中は実行しない — 走らせると相手の enable（XPC in-flight）と自分の全消しが交錯し、
+        // 「全消し済みアプリ + 生きたドメイン」に到達し得る。throw できないシグネチャのため
+        // ログ + no-op（設定は残るので Reset の再押下で完遂できる）。
+        guard !isBootstrapping else {
+            AppLogger.ui.notice("factoryReset skipped: another setup/domain operation is in progress")
+            return
+        }
         // completeSetup と同じ再入ガード（七次レビュー指摘 2）: これが無いと `disable()` 等の
         // XPC 待機中（engine/signaler とも nil・setupCompleted まだ true・Keychain 未消去）に
         // ポップオーバー由来の bootstrap() が全ガードを通過し、①ドレイン済みのはずの
