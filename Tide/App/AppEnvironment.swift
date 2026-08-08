@@ -397,9 +397,10 @@ final class AppEnvironment {
 
     /// セットアップウィザード完了時に呼ぶ（#97・fpOnly ネイティブ）。同期の実体は FP レプリカのみで
     /// ローカル同期フォルダは存在しないため、security-scoped bookmark の発行・`syncRootPath` /
-    /// `syncRootBookmark` の書込は行わない。順序が本質: **config/Keychain 保存 → FP enable →
-    /// seed → signaler 起動**。保存前に enable すると拡張が未設定状態で起動してエラー列挙になる
-    /// （docs/09 v0.3.0 節）。
+    /// `syncRootBookmark` の書込は行わない。順序が本質: **旧 signaler 停止 → ドメイン作り直し判定 →
+    /// config/Keychain 保存 → seed → FP enable → signaler 起動**。保存前に enable すると拡張が
+    /// 未設定状態で起動してエラー列挙になり、enable 後に seed の新規バケット判定を置くと拡張の
+    /// 先行書込で誤判定し得る（docs/09 v0.3.0 節・PR #101 再レビュー指摘 4）。
     func completeSetup(
         credentials: AWSCredentials,
         bucket: String,
@@ -412,25 +413,50 @@ final class AppEnvironment {
         // 途中失敗でも不在窓を無条件に閉じるため（冪等・他に依存しない。再レビュー指摘 3）。
         config.syncMode = .fpOnly
 
-        // 二重起動防止（PR #7 レビュー Low）: 以降の await（ドメイン作り直し / enable / seed /
+        // 二重起動防止（PR #7 レビュー Low）: 以降の await（ドメイン作り直し / seed / enable /
         // launch）中に、ポップオーバーから走る MenuBarContent.task → bootstrap() が signaler==nil
         // で通過して 2 つ目の signaler を起動するのを防ぐ（bootstrap() は isBootstrapping を見て
         // 即 return する）。最初の suspension point より前に立てる。
         isBootstrapping = true
         defer { isBootstrapping = false }
 
-        // 別バケットへの切替は FP ドメインを作り直す（PR #101 レビュー指摘 1）: `enable()` の
-        // 既有効 no-op はレプリカを温存するため、旧バケット由来の保留書込（dirty item）が残り、
-        // 拡張は書込時に共有 config から bucket を読む（`ExtensionServices.fromSharedConfig`）ので
-        // fileproviderd の再試行がそれらを**新バケットへ**アップロードして静かに混入させる。
-        // disable はドメインごと保留書込を破棄する（PR #61 記録）が、旧バケットの内容を新バケットへ
-        // 流すより安全側。**config 上書き前に旧値と比較し、disable 失敗は config 未更新のまま
-        // throw** — 先に config を書くと失敗後のリトライが「同一バケット」に見えて作り直しが
-        // スキップされ、混入窓が残る。同一バケットの再セットアップ（クリーンインストール復旧 /
-        // 認証情報の再設定）は従来どおりレプリカ温存（再 add no-op）。
-        if let previousBucket = config.bucketName, !previousBucket.isEmpty, previousBucket != bucket {
-            AppLogger.ui.info("Recreating File Provider domain for bucket switch: \(previousBucket, privacy: .private) -> \(bucket, privacy: .private)")
-            try await FileProviderController.disable()
+        // 再セットアップ（ウィザード再実行）経路: 旧 signaler を**最初に**止める（PR #101
+        // 再レビュー指摘 2）。enable の後ろに置くと enable 失敗時に旧バケット束縛（構築時の
+        // `[s3]` キャプチャ）の pollTask が生き残り、bootstrap() の signaler != nil 早期 return +
+        // bootstrapFailure クリアで「健康に見えたまま新バケットの signaler が二度と立たない」
+        // 状態に固着する。launchEngineFromCurrentConfig は毎回新規構築するため早期 stop に害は
+        // ない（途中失敗時は次の bootstrap() が現行 config で立て直す）。初回セットアップは
+        // nil = no-op。
+        signaler?.stop()
+        signaler = nil
+
+        // FP ドメインの作り直し判定（PR #101 レビュー指摘 1 + 再レビュー指摘 3）: `enable()` の
+        // 既有効 no-op はレプリカを温存するため、旧バケット由来の保留書込（dirty item）が残ると
+        // 拡張（書込時に共有 config から bucket を読む = `ExtensionServices.fromSharedConfig`）の
+        // 再試行がそれらを**新バケットへ**静かに混入させる。disable はドメインごと保留書込を
+        // 破棄する（PR #61 記録）が、旧バケットの内容を新バケットへ流すより安全側。判定は
+        // config 上書き**前**の旧値で行い、失敗は config 未更新のまま throw（先に config を書くと
+        // 失敗後のリトライが「同一バケット」に見えて作り直しがスキップされ、混入窓が残る）。
+        let previousBucket = config.bucketName
+        let needsDomainRecreation: Bool
+        if let previousBucket, !previousBucket.isEmpty {
+            // 既知の旧バケット: 変わったときだけ作り直す。同一バケットの再セットアップ
+            // （クリーンインストール復旧 / 認証情報の再設定）はレプリカ温存（再 add no-op）。
+            needsDomainRecreation = previousBucket != bucket
+        } else {
+            // bucketName 不在 = factoryReset がキーを消した後（disable 失敗の握りつぶし〈try?〉も
+            // 通過し得る）。生存ドメインがあってもレプリカの素性（どのバケット由来か）を保証
+            // できないため作り直す（再レビュー指摘 3）。既知の未登録（false = 通常のクリーン
+            // セットアップ）のみスキップし、不明（nil）は作り直し側に倒す — 温存側に倒すと
+            // 「isEnabled 失敗 → 直後の enable 成功」の並びで素性不明レプリカが残る。
+            needsDomainRecreation = await FileProviderController.isEnabled() != false
+        }
+        if needsDomainRecreation {
+            AppLogger.ui.info("Recreating File Provider domain (bucket switch or unknown replica origin): \(previousBucket ?? "(none)", privacy: .private) -> \(bucket, privacy: .private)")
+            // disableForRecreation は pending-add フラグを立ててから remove する（再レビュー
+            // 指摘 1）: この後の Keychain 保存 / enable が throw しても、次回起動の
+            // migrateStaleDomainsIfNeeded が add を再開する = 無音の同期停止にならない。
+            try await FileProviderController.disableForRecreation()
         }
 
         try keychain.save(credentials)
@@ -438,20 +464,18 @@ final class AppEnvironment {
         config.region = region
         config.setupCompleted = true
 
-        // FP ドメイン有効化（fpOnly の同期実体）。既有効の再 add は成功/no-op。失敗は throw →
-        // ウィザードにエラー表示（設定は保存済みなので Settings の Enable ボタンからも回復できる）。
-        try await FileProviderController.enable()
-
-        // 新規バケットのときだけ既定 .syncignore を S3 へ直接 seed（既存バケット参加時は作らない）
+        // 新規バケットのときだけ既定 .syncignore を S3 へ直接 seed（既存バケット参加時は作らない）。
+        // enable より**前**に行う（PR #101 再レビュー指摘 4）: 後ろだと live になった拡張の先行
+        // createItem が index.json を作り、「新規バケット」判定（getIndex == nil）が誤って既存側に
+        // 倒れて seed が無音スキップされ得る。seed は S3 にしか触れず、確定点 signal は未登録
+        // ドメインでは no-op（performSignal の isEnabled ガード）・enable 後の初回列挙が entry を拾う。
         await Self.seedDefaultSyncIgnoreIfNewBucket(
             credentials: credentials, bucket: bucket, region: region, deviceId: config.deviceId
         )
 
-        // 再セットアップ（ウィザード再実行）経路: 旧 signaler を止めてから現行 config で再起動する。
-        // 止めないと旧インスタンスの pollTask が旧設定（別バケット切替なら旧バケット）の index を
-        // HEAD し続ける（PR #101 レビュー指摘 1 の隣接論点）。初回セットアップは nil = no-op。
-        signaler?.stop()
-        signaler = nil
+        // FP ドメイン有効化（fpOnly の同期実体）。既有効の再 add は成功/no-op。失敗は throw →
+        // ウィザードにエラー表示（設定は保存済みなので Settings の Enable ボタンからも回復できる）。
+        try await FileProviderController.enable()
 
         try await launchEngineFromCurrentConfig()
         // 復旧成功＝失敗状態を解消（PR #7 レビュー Medium）。これ以降は signaler != nil 経路でも維持される。
@@ -461,8 +485,10 @@ final class AppEnvironment {
     /// リモートにマニフェストが無い（＝まだ誰も同期していない新規バケット）ときだけ、既定の除外
     /// テンプレートを S3 の `files/.syncignore` へ直接 PUT し、`ManifestUpdater` の共有チョーク
     /// ポイントで entry を確定する（#97・`S3RestoreService` と同型の書込）。fpOnly にローカル
-    /// 同期フォルダは無いため S3 が唯一の書き先で、FP レプリカへは enumerateChanges で自然反映
-    /// される（書込確定点の signal で即時化）。既存バケットに参加する場合は他デバイスの
+    /// 同期フォルダは無いため S3 が唯一の書き先。呼び出しは `enable()` より**前**（PR #101
+    /// 再レビュー指摘 4 = 拡張の先行書込による新規バケット誤判定の防止）のため確定点 signal は
+    /// no-op で、enable 後の初回列挙が entry を拾う（signal 配線は S3 内復元との共用ファクトリ
+    /// 由来・未登録ドメインでは guard され無害）。既存バケットに参加する場合は他デバイスの
     /// `.syncignore` と競合する恐れがあるので作らない。失敗しても致命的ではない（同期は続行）。
     private static func seedDefaultSyncIgnoreIfNewBucket(
         credentials: AWSCredentials, bucket: String, region: String, deviceId: String

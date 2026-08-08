@@ -128,6 +128,10 @@ struct SettingsWindow: View {
                 Button("Open Tide in Finder") {
                     Task { await FileProviderController.openUserVisibleFolderInFinder() }
                 }
+                // メニューバー行（MenuBarContent.secondaryActions）と同じ活性条件（PR #101
+                // 再レビュー指摘 5）: 既知の無効（false）だけ disable — 直下の FP セクションが
+                // 「Domain is not enabled.」を出している状態で素の CloudStorage が開く矛盾を防ぐ。
+                .disabled(fileProviderEnabled == false)
             }
             Section("Settings file") {
                 Button("Export Settings…") { exportSettings() }

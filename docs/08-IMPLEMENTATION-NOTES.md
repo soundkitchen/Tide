@@ -51,7 +51,7 @@
 
 ### App Sandbox / security-scoped bookmark（M5 Phase 2・security L1）
 - **entitlements**: `com.apple.security.app-sandbox` + `files.user-selected.read-write`（powerbox パネル）+ `network.client`（aws-sdk-swift）。File Provider 拡張（Phase 3〜）はサンドボックス必須なので app 側で先に整えた。
-- **同期フォルダのアクセス権 = `ConfigStore.syncRootBookmark`**（security-scoped bookmark）。発行はセットアップ確定時（`AppEnvironment.completeSetup`。**setupCompleted を立てる前に**発行し、手入力パス等で権限が無ければ確定前に失敗させる）。解決は `resolveSyncRootAccess`（launchEngine の入口。存在チェックより前＝アクセス確立後でないと fileExists 自体が成立しない）。stale なら再発行。アクセスはメニューバー常駐の生存中ずっと保持（stopAccessing はフォルダ変更時のみ）。
+- **同期フォルダのアクセス権 = `ConfigStore.syncRootBookmark`**（security-scoped bookmark）。**v0.3.0 #97 以降、新規セットアップは bookmark を発行しない**（`completeSetup` から発行・書込を削除 = fpOnly に syncRoot 面が無い。以下は folderSync 世代の記録 → 現行は「ウィザード fpOnly ネイティブ化」節）。旧: 発行はセットアップ確定時（`AppEnvironment.completeSetup`。**setupCompleted を立てる前に**発行し、手入力パス等で権限が無ければ確定前に失敗させる）。解決は `resolveSyncRootAccess`（launchEngine の入口。存在チェックより前＝アクセス確立後でないと fileExists 自体が成立しない。folderSync デッド経路として温存）。stale なら再発行。アクセスはメニューバー常駐の生存中ずっと保持（stopAccessing はフォルダ変更時のみ）。
 - **bookmark 欠落/失効時の再許可**: 起動時に `requestSyncRootAccessViaPanel` が NSOpenPanel（現行フォルダを初期位置・説明メッセージ付き）を一度だけ出す。キャンセルは bootstrapFailure（ポップオーバー再表示で bootstrap 経由の再試行）。**設定済みパスと不一致のフォルダ選択は拒否**する — 別フォルダを黙って受けると既存 DB との突き合わせで大量の「ローカル削除」誤検出（＝リモート削除の伝播）を起こしうるため。
 - **Caches の移設は暗黙**: `TideTmpDirectory` / `DeletedFilesCache` は `.cachesDirectory` 相対のままサンドボックスのコンテナ内へ自然に移る（中断転送の `.part` は失われるが Range 再開が頭からやり直すだけ・削除一覧キャッシュは再列挙で再生成）。
 
@@ -606,10 +606,39 @@ dataless 一覧が見える」体験（クリーンインストール復旧の�
   throw**（先に config を書くと失敗後のリトライが「同一バケット」に見えて作り直しがスキップされ
   混入窓が残る）。disable は保留書込を破棄する（PR #61 記録）が旧内容を新バケットへ流すより
   安全側。隣接論点として **completeSetup は launch 前に旧 signaler を stop**（止めないと旧
-  インスタンスの pollTask が旧設定の index を HEAD し続ける）。同一バケットの再セットアップは
-  従来どおりレプリカ温存（再 add no-op）。② signal 配線付き `ManifestUpdater` の構築を
-  `makeSignalingManifestUpdater(store:deviceId:)` ファクトリへ集約（S3 内復元 / seed 共用・
-  呼び出し側ごとの手書き配線による signal 漏れ〈PR #56 レビュー ④ の警戒〉を構造的に防止）。
+  インスタンスの pollTask が旧設定の index を HEAD し続ける。配置は再レビュー ② で冒頭へ是正）。
+  同一バケットの再セットアップは従来どおりレプリカ温存（再 add no-op）。② signal 配線付き
+  `ManifestUpdater` の構築を `makeSignalingManifestUpdater(store:deviceId:)` ファクトリへ集約
+  （S3 内復元 / seed 共用・呼び出し側ごとの手書き配線による signal 漏れ〈PR #56 レビュー ④ の
+  警戒〉を構造的に防止）。
+- **PR #101 再レビュー対応（2026-08-08・6 件）**: ① 切替 disable 成功後の途中失敗（Keychain
+  保存 / enable の throw）で FP ドメインが**補償なしで消える**件（CONFIRMED/High。`disable()` は
+  pending-add フラグも消すため、boot の migrate も launchFPOnlySignaler も re-add せず
+  「再起動しても直らない無音の同期停止」= 回復は Settings → Enable の発見頼みだった）→
+  `FileProviderController.disableForRecreation()` 新設 = **pending-add フラグを立ててから
+  remove**（`migrateStaleDomainsIfNeeded` と同順序 = remove 後の失敗/クラッシュでも「有効化
+  済み」意図が消えない）。途中失敗でも次回起動の migrate が add を再開する。`enable()` は
+  成功時に同フラグを消す（確定点で対称）。明示的無効化（factoryReset / Settings の Disable =
+  再有効化の意図なし）は従来どおり `disable()` ② 旧 signaler の stop が enable の**後ろ**に
+  あり、enable 失敗時に旧バケット束縛（構築時 `[s3]` キャプチャ）の pollTask が生き残る +
+  bootstrap() の signaler != nil 早期 return & bootstrapFailure クリアで「健康に見えたまま
+  新バケットの signaler が立たない」固着（CONFIRMED/High）→ stop を completeSetup 冒頭
+  （isBootstrapping 直後・最初の throw より前）へ移動 ③ factoryReset の握りつぶされた
+  disable（`try?`）通過後は bucketName 不在 × 生存ドメイン = 素性不明レプリカで混入窓が
+  再開する件（CONFIRMED/Medium）→ 作り直し判定を観測状態併用へ: 旧 bucketName 不在時は
+  `isEnabled() != false`（生存 / 不明）で作り直し（不明を温存側に倒すと「isEnabled 失敗 →
+  直後の enable 成功」で素性不明レプリカが残るため作り直し側）④ seed の新規バケット判定
+  （getIndex == nil）が enable の後ろで、live になった拡張の先行 createItem により既存側へ
+  誤判定 → seed 無音スキップし得る件（PLAUSIBLE/Low）→ **seed を enable 前へ移動**（seed は
+  S3 のみ・確定点 signal は未登録ドメインで no-op・enable 後の初回列挙が拾う。PUT 成功後の
+  updateFileEntry 失敗 = 孤児は benign と検証済み〈後追い作成は remote nil → .proceed で
+  無衝突・再セットアップは index 不在のまま再試行〉）⑤ Settings「.syncignore」セクションの
+  「Open Tide in Finder」へメニューバー行と同じ `.disabled(fileProviderEnabled == false)` を
+  付与（既知の無効時に素の CloudStorage が開く案内矛盾の防止）⑥ bookmark 発行削除と矛盾する
+  残存記述の是正: 本ファイル App Sandbox 節（#97 読み替え注記）/ docs/01 起動フロー図
+  （「同期フォルダ選択」→「File Provider ドメイン有効化」）/ docs/06（bookmark 発行の世代注記 +
+  entitlement の現用途）/ `ConfigStore.syncRootPath`・`SettingsTransfer` の「正規の書き手 =
+  completeSetup」コメント（書き手は `resolveSyncRootAccess` の追随更新のみへ）。
 
 ### バースト RMW 競合の恒久対処（Issue #91・2026-07-26）
 

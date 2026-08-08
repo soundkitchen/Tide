@@ -25,7 +25,23 @@ enum FileProviderController {
 
     static func enable() async throws {
         try await NSFileProviderManager.add(domain)
+        // add 完了 = pending-add（`disableForRecreation` が立てる「有効化済み」意図の引き継ぎ）は
+        // 満たされた。残しても次回 migrate が自己修復するが、確定点で消すのが対称。
+        TideAppGroup.sharedDefaults().removeObject(forKey: migrationPendingAddKey)
         AppLogger.ui.info("File Provider domain added")
+    }
+
+    /// ドメイン作り直しの前半（PR #101 再レビュー指摘 1）: **pending-add フラグを立ててから**
+    /// 全ドメインを外し、「有効化済み」の意図を引き継ぐ（`migrateStaleDomainsIfNeeded` と同じ
+    /// 順序 = remove 後の失敗/クラッシュでも意図が消えない）。呼び出し側（completeSetup の
+    /// バケット切替）が remove 後の Keychain 保存 / `enable()` で throw しても、次回起動の
+    /// `migrateStaleDomainsIfNeeded` が add を再開する = 再起動しても直らない無音の同期停止に
+    /// ならない。**明示的な無効化**（factoryReset / Settings の Disable = 再有効化の意図なし）は
+    /// 従来どおり `disable()`（フラグも消す）を使うこと。
+    static func disableForRecreation() async throws {
+        TideAppGroup.sharedDefaults().set(true, forKey: migrationPendingAddKey)
+        try await NSFileProviderManager.removeAllDomains()
+        AppLogger.ui.info("File Provider domains removed for recreation (pending re-add)")
     }
 
     /// 旧世代を含む全ドメインを外す（factoryReset からも呼ぶ）。
