@@ -533,6 +533,16 @@ folderSync へ戻る経路を UI / defaults の両面から閉じる（動機 = 
   ユニットテスト不可 — #97 での維持は docs/09 とコード内コメントに明記 ⑥ 契約キー doc の
   「#97 以降」表現を前倒し済みへ修正 ⑦ テストの suite 生成 + teardown を `makeDefaults()` へ
   集約（重複ボイラープレート解消）。
+- **実機受け入れ（2026-08-08・全 7 項目パス）**: fpOnly 起動ログ / 正規化実証（`defaults write`
+  で folderSync → 起動時 Normalizing ログ → 保存値 fpOnly 復帰）/ `soak-check-fp` 整合 OK
+  （manifest 1038 = s3 1038）+ フラグ無し exit 2 / 常駐 agent 継続稼働（再インストール不要の実証）/
+  Settings ja・en の UI 撤去 + 新文言 / ポップオーバー導線一本化。**項目 7 の実測知見**:
+  fileproviderd を SIGSTOP して「Open Tide in Finder」をクリックすると **XPC は throw せず
+  ハングする**（30 秒超もタイムアウト無し）— 縮退フォールバック・primary とも非発火で無反応。
+  SIGCONT で保留 XPC が完了し、正しい Finder（場所 → Tide）が遅れて開く（誤動作なし）。
+  つまり縮退（CloudStorage open）の発火条件は「XPC が実際にエラーを**返す**状況」（デーモン
+  再起動中等）に限られ、SIGSTOP 手段では **LS 拒否の成否は未検証のまま**（縮退コードは
+  best-effort + `opened=` ログ観測の位置づけを維持。発火実例を観測したら成否を追記）。
 
 #83 受け入れで実測した「100 件バーストで index.json CAS が枯渇 → 部分完了
 （孤児オブジェクト + stale index 宣言）」の恒久対処。3 層で潰す（方針 = ②+③+① 複合・

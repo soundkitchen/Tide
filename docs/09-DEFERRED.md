@@ -134,7 +134,7 @@ fpOnly 運用中、rename したファイルに実体化チェックバッジ（
   契機で `requestDownloadForItem` 等の内容往復を誘発・API 実挙動は要実証）② 参考 = 安定 id 化（rename を
   rebind にしない構造対処・大工事・据え置き）。
 
-## v0.3.0: ユーザー目線からの folderSync 削除（設計確定 2026-08-06・#96 実装済み 2026-08-08・残 = #97 / #98）
+## v0.3.0: ユーザー目線からの folderSync 削除（設計確定 2026-08-06・#96 実装・実機受け入れ済み 2026-08-08・残 = #97 / #98）
 
 fpOnly 切替（2026-07-25）と #40 の 1 週間ライブ soak 合格（2026-08-03）を受け、**v0.3.0 のテーマを
 「ユーザー目線から FSEvents（folderSync モード）を消す」に確定**（ユーザ確定 2026-08-06）。
@@ -248,8 +248,9 @@ v0.3.0 の完了条件に含めない）。
 
 ### 実施順と Issue（1 タスク 1 Issue。詳細スコープ・受け入れチェックリストは各 Issue 本文）
 
-1. **#96 boot fpOnly 固定 + Sync mode 設定 UI 撤去**（小・✅ 実装済み 2026-08-08 =
-   実装ノートは `docs/08`「boot fpOnly 固定 + Sync mode 設定 UI 撤去」節）
+1. **#96 boot fpOnly 固定 + Sync mode 設定 UI 撤去**（小・✅ 実装・実機受け入れ済み 2026-08-08
+   〈全 7 項目パス・PR #100 レビュー 4 巡〉= 実装ノート・受け入れ知見は `docs/08`
+   「boot fpOnly 固定 + Sync mode 設定 UI 撤去」節）
    - `launchEngineFromCurrentConfig` を無条件 fpOnly 化。folderSync 側本体は到達不能 private
      `launchFolderSyncEngineFromCurrentConfig()` へ移動（コンパイル維持 = 温存方針と整合）
    - `bootstrap()` に正規化書込（`syncMode != .fpOnly` なら fpOnly を書く）
