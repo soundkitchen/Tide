@@ -84,9 +84,11 @@ enum DiagnosticsExporter {
             deviceId: env.config.deviceId,
             bucket: env.config.bucketName,
             region: env.config.region,
-            // #97: fpOnly（engine 不在）では値を渡さず "—" 表示（死にキーの削除済みパスを診断へ
-            // 出さない）。folderSync デッド経路が生きる revert 時のみ従来どおりパスが載る。
-            syncRootPath: env.engine != nil ? env.config.syncRootPath : nil,
+            // #97: 渡さず "—" 表示（fpOnly にローカル同期フォルダは無い・死にキーの削除済みパスを
+            // 診断へ出さない）。SettingsTransfer の export と同じ素の nil に揃える — `engine != nil`
+            // 条件は #96 以降恒真で nil のデッド分岐なうえ「モード」の代理として不正確
+            // （PR #101 四次レビュー指摘 8）。folderSync revert 時は git がこの行ごと戻す。
+            syncRootPath: nil,
             uploadSizeLimitBytes: env.config.uploadSizeLimitBytes,
             notificationsEnabled: env.config.notificationsEnabled,
             queueDepth: env.engine?.queueDepth,

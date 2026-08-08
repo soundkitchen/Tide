@@ -1685,6 +1685,17 @@
         }
       }
     },
+    "Switching to a different bucket recreates the Tide folder. Changes not yet uploaded will be discarded." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "別のバケットに切り替えると Tide フォルダは作り直されます。まだアップロードされていない変更は破棄されます。"
+          }
+        }
+      }
+    },
     "Syncing…" : {
       "extractionState" : "manual",
       "localizations" : {

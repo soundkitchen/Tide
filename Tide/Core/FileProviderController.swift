@@ -90,6 +90,18 @@ enum FileProviderController {
         if staleDomains.isEmpty {
             // 前回の移行が「stale 除去後・add 前」で中断していたら add だけ再開する。
             guard defaults.bool(forKey: migrationPendingAddKey) else { return }
+            // 未設定アプリでは add しない（PR #101 四次レビュー指摘 1）: factoryReset 後の
+            // 再セットアップが disableForRecreation 直後（Keychain 保存等）で中断すると、
+            // setupCompleted 未確定のままフラグだけが残る。この migrate は setupCompleted
+            // ゲートより前（bootstrap 冒頭）に走るため、ゲート無しだと全消し済みアプリへ
+            // ドメインを無言 re-add → 拡張が fromSharedConfig nil で未設定エラー列挙になる。
+            // フラグは回収してよい — 正規のセットアップ完了時は enable() が無条件に add する
+            // ためフラグ無しで困らない。
+            guard ConfigStore().setupCompleted else {
+                defaults.removeObject(forKey: migrationPendingAddKey)
+                AppLogger.ui.notice("Skipping pending File Provider domain re-add (setup not completed); cleared pending flag")
+                return
+            }
             if !hasCurrent {
                 do {
                     try await NSFileProviderManager.add(domain)

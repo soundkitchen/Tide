@@ -91,8 +91,10 @@ enum SettingsTransfer {
             bucketName: config.bucketName,
             region: config.region,
             // #97: export しない（fpOnly にローカル同期フォルダは無い。死にキーの削除済みパスを
-            // 設定ファイルへ露出させない）。フィールド自体は optional のため schema v1 の decode
-            // 互換のまま温存する。
+            // 設定ファイルへ露出させない）。フィールド自体は温存 — decode 互換のためではなく
+            // （JSONDecoder は未知キーを無視するため、フィールドを削除しても旧 export は読める）、
+            // folderSync への git revert で読み手（ウィザード事前充填）が戻ったとき schema 上の
+            // 置き場所ごと働く revert 資産としての温存（PR #101 四次レビュー指摘 7）。
             syncRootPath: nil,
             pollingIntervalSeconds: config.pollingIntervalSeconds,
             uploadSizeLimitBytes: config.uploadSizeLimitBytes,

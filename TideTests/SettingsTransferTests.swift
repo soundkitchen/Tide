@@ -94,7 +94,8 @@ final class SettingsTransferTests: XCTestCase {
         XCTAssertEqual(p.bucketName, "b")
         XCTAssertEqual(p.region, "us-east-1")
         // #97: export は syncRootPath を書かない（fpOnly に syncRoot 面が無く、死にキーの
-        // 削除済みパスを設定ファイルへ露出させない。フィールドは schema v1 decode 互換で温存）
+        // 削除済みパスを設定ファイルへ露出させない。フィールドは folderSync revert 資産として
+        // 温存 — decode 互換のためではない〈JSONDecoder は未知キーを無視する〉）
         XCTAssertNil(p.syncRootPath)
         XCTAssertEqual(p.pollingIntervalSeconds, 120)
         XCTAssertEqual(p.uploadSizeLimitBytes, -1)

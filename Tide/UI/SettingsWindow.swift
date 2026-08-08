@@ -202,7 +202,12 @@ struct SettingsWindow: View {
         .formStyle(.grouped)
         .padding()
         .onAppear { loadStateFromConfig() }
-        .task { fileProviderEnabled = await FileProviderController.isEnabled() }
+        // ウィザード（completeSetup）が enable / ドメイン作り直しをするようになったため、
+        // 開きっぱなしの Settings が stale にならないよう変更カウンタで再取得する
+        // （PR #101 四次レビュー指摘 4。id 変化時に加えて初回出現時も走る = 従来の .task を包含）。
+        .task(id: env.fileProviderStateVersion) {
+            fileProviderEnabled = await FileProviderController.isEnabled()
+        }
         .onChange(of: notificationsEnabled) { _, newValue in
             env.config.notificationsEnabled = newValue
         }

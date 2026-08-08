@@ -192,13 +192,30 @@ struct SetupWizardWindow: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             if fileProviderAlreadyEnabled == true {
-                // 再セットアップ経路: FP ドメインが既に有効なら伝える（enable は冪等なのでそのまま進める）
-                Label("The Tide folder is already enabled on this Mac.", systemImage: "checkmark.circle")
-                    .font(.callout)
-                    .foregroundStyle(.green)
+                if isBucketSwitch {
+                    // 別バケット切替（PR #101 四次レビュー指摘 2）: completeSetup がドメインを
+                    // 作り直す = 破壊的（未アップロードの dirty item は破棄）。緑チェックの
+                    // 「継続性の示唆」は事実に反するため、警告に差し替える。
+                    Label("Switching to a different bucket recreates the Tide folder. Changes not yet uploaded will be discarded.", systemImage: "exclamationmark.triangle")
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                } else {
+                    // 同一バケットの再セットアップ経路: enable は冪等（再 add no-op）なのでそのまま進める
+                    Label("The Tide folder is already enabled on this Mac.", systemImage: "checkmark.circle")
+                        .font(.callout)
+                        .foregroundStyle(.green)
+                }
             }
         }
         .task { fileProviderAlreadyEnabled = await FileProviderController.isEnabled() }
+    }
+
+    /// 別バケットへの切替か（fileProvider ステップの警告表示用）。この時点で `config.bucketName` は
+    /// まだ旧値（completeSetup の作り直し判定が config 上書き前比較なのと同じ不変条件）。
+    /// 旧値不在（初回 / factoryReset 後）は「切替」ではないので警告しない。
+    private var isBucketSwitch: Bool {
+        guard let previous = env.config.bucketName, !previous.isEmpty else { return false }
+        return previous != bucket
     }
 
     private var doneView: some View {

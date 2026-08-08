@@ -651,6 +651,27 @@ dataless 一覧が見える」体験（クリーンインストール復旧の�
   失敗でも勝つ・remove 失敗ならドメイン残存なのでフラグ無しでも実害なし・Disable 再操作で
   回復可）② 本節 completeSetup bullet の記載順序が旧実装のままだった件（docs のみ）→
   最終実装の順序（stop 冒頭化・seed の enable 前倒し込み）へ是正。
+- **PR #101 四次レビュー対応（2026-08-08・8 件 = 修正 6 + 記録 2）**: ① 未設定アプリでの
+  pending-add フラグ残置（disableForRecreation → Keychain 保存等で中断 → setupCompleted
+  未確定のままフラグ生存 → 次回起動の migrate〈setupCompleted ゲートより前〉が未設定拡張を
+  無言 re-add・CONFIRMED）→ migrate の pending-add 再開 add を **`ConfigStore().setupCompleted`
+  でゲート** + 未設定ならフラグ回収（正規セットアップは enable() が無条件 add するため
+  フラグ無しで困らない）② バケット切替（破壊的 recreation）時にウィザードの緑チェック
+  「already enabled」が継続性を誤示唆（CONFIRMED）→ `isBucketSwitch`（config 上書き前の旧値
+  比較 = completeSetup と同じ不変条件）で**警告表示に差替**（「切替はフォルダ作り直し・
+  未アップロード変更は破棄」）③ bootstrap の fire-and-forget migrate と completeSetup の
+  recreation 窓が非直列（stale スナップショットの resume がフラグ誤回収 / 旧設定 re-add・
+  PLAUSIBLE）→ **`migrationTask` ハンドルを保持し completeSetup が disableForRecreation 前に
+  await**（cancel では XPC 待ちの本体を止められないため await）④ ウィザード経由 enable 後に
+  開きっぱなしの Settings が stale（CONFIRMED/nit）→ `AppEnvironment.fileProviderStateVersion`
+  カウンタ（completeSetup が defer で成否問わずインクリメント）+ Settings 側 `.task(id:)` 再取得
+  ⑤ `getIndex() == nil` ≠「新規バケット」（index 欠損 × shards 生存の損傷バケットで 1 シャード
+  index を製造）= 全書き手共有の既存挙動 → **修正不要と合意・docs/09 バックログへ記録**
+  ⑥ `ManifestFileEntry` 手組みの 4 箇所目コピー → **follow-up 合意・docs/09 バックログへ記録**
+  ⑦ 「schema v1 decode 互換のため温存」コメントが事実誤り（JSONDecoder は未知キーを無視）→
+  実際の理由（folderSync revert 資産）へ書換（テスト側の複製コメントも）⑧ Diagnostics の
+  `engine != nil` プロキシ（恒真 nil のデッド分岐・モードの代理として不正確）→ SettingsTransfer
+  と同じ素の nil へ統一（revert 時は git がこの行ごと戻す）。
 
 ### バースト RMW 競合の恒久対処（Issue #91・2026-07-26）
 

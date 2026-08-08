@@ -37,6 +37,19 @@ final class AppEnvironment {
     /// もう一方が guard を抜けて二重に SyncEngine を起動するのを防ぐ。
     @ObservationIgnored private var isBootstrapping = false
 
+    /// bootstrap が fire-and-forget で走らせる FP ドメイン移行タスク
+    /// （`migrateStaleDomainsIfNeeded`）のハンドル。completeSetup がドメイン作り直し
+    /// （`disableForRecreation`）の前に await して直列化する — 非直列だと除去前スナップショットで
+    /// resume した migrate が pending-add フラグを誤回収 / 旧設定のまま re-add し得る
+    /// （PR #101 四次レビュー指摘 3）。
+    @ObservationIgnored private var migrationTask: Task<Void, Never>?
+
+    /// FP ドメイン状態の変更通知カウンタ（PR #101 四次レビュー指摘 4）: completeSetup が
+    /// `enable()` / `disableForRecreation()` でドメイン状態を変えるため、開きっぱなしの
+    /// Settings ウィンドウが `.task(id:)` で再取得できるよう、completeSetup の終了時
+    /// （成否問わず = 途中 throw でも disable 済みの可能性がある）にインクリメントする。
+    private(set) var fileProviderStateVersion = 0
+
     /// 現在 security-scoped アクセスを保持している同期フォルダ（App Sandbox・M5 Phase 2）。
     /// メニューバー常駐でアプリ生存中はアクセスを保持し続けるので stopAccessing は基本呼ばない。
     /// ウィザード再設定でフォルダが変わった時だけ古い方を明示的に手放す。
@@ -76,8 +89,9 @@ final class AppEnvironment {
         defer { isBootstrapping = false }
         bootstrapFailure = nil
         // 旧 identifier（PoC 世代）の FP ドメインが残っていれば現行 identifier で作り直す。
-        // fire-and-forget（XPC 待ちで起動をブロックしない）・no-op が定常。
-        Task { await FileProviderController.migrateStaleDomainsIfNeeded() }
+        // fire-and-forget（XPC 待ちで起動をブロックしない）・no-op が定常。ハンドルは保持し、
+        // completeSetup がドメイン作り直しの前に await して直列化する（四次レビュー指摘 3）。
+        migrationTask = Task { await FileProviderController.migrateStaleDomainsIfNeeded() }
         // 旧ロケーション（非 App Group 時代）からの一度きり移行（M5 Phase 2）。冪等・非致命。
         // setupCompleted の判定より前に行う必要がある（設定自体が移行対象のため）。
         let migration = LegacyStateMigrator.migrateIfNeeded()
@@ -419,6 +433,10 @@ final class AppEnvironment {
         // 即 return する）。最初の suspension point より前に立てる。
         isBootstrapping = true
         defer { isBootstrapping = false }
+        // FP ドメイン状態は成否を問わず変わり得る（途中 throw でも disableForRecreation 済みの
+        // 可能性がある）ため、終了時に必ず通知して開きっぱなしの Settings に再取得させる
+        // （四次レビュー指摘 4）。
+        defer { fileProviderStateVersion += 1 }
 
         // 再セットアップ（ウィザード再実行）経路: 旧 signaler を**最初に**止める（PR #101
         // 再レビュー指摘 2）。enable の後ろに置くと enable 失敗時に旧バケット束縛（構築時の
@@ -429,6 +447,13 @@ final class AppEnvironment {
         // nil = no-op。
         signaler?.stop()
         signaler = nil
+
+        // bootstrap の fire-and-forget 移行タスクと直列化（四次レビュー指摘 3）: in-flight の
+        // migrate が除去**前**のスナップショットで resume すると、この後 disableForRecreation が
+        // 立てる pending-add フラグを誤回収（stale な hasCurrent=true でフラグ除去）/ 旧設定の
+        // ままの re-add をし得る。完了を待ってから進む（cancel では XPC 待ちの本体を止められない）。
+        await migrationTask?.value
+        migrationTask = nil
 
         // FP ドメインの作り直し判定（PR #101 レビュー指摘 1 + 再レビュー指摘 3）: `enable()` の
         // 既有効 no-op はレプリカを温存するため、旧バケット由来の保留書込（dirty item）が残ると
