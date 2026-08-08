@@ -55,7 +55,10 @@ struct MenuBarContent: View {
         // Settings がドメイン状態を変えたときは変更カウンタで開いたまま追従する（六次レビュー
         // 指摘 3 — 素の .task だとセットアップ成功直後も赤バナー「not enabled」が残り続ける）。
         .task(id: env.fileProviderStateVersion) {
-            fileProviderEnabled = await FileProviderController.isEnabled()
+            let enabled = await FileProviderController.isEnabled()
+            // キャンセル検査（十次レビュー指摘 4）: 連続バンプ時の逆順 resume で旧値の書き戻しを防ぐ
+            guard !Task.isCancelled else { return }
+            fileProviderEnabled = enabled
         }
         // lastSyncedAt は upload 周回完了でしか前進しないため、pull 由来の download / 削除反映も
         // 拾えるよう lastRemoteCheckedAt と束ねて id にする（PR #17 レビュー Low-2）。

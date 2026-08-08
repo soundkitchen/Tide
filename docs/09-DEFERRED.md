@@ -434,4 +434,8 @@ ETag は GCS が MD5/`-n` を保証しない（CRC32C）が、**Tide は sha256 
   次にドメイン変更点を足すとき（pause / 第 2 ドメイン等）に順序を独力で再導出させないため、
   **永続化するのは「望ましい FP 状態」（enabled/disabled の意図）1 本 + 起動時/変更後の単一
   reconcile 関数**へ集約するリファクタを積んでおく（PR #101 七次レビュー指摘 7・本 PR での
-  実施は不要と合意）。
+  実施は不要と合意）。同リファクタ時に **enabled 観測値の AppEnvironment 集約**（十次レビュー
+  指摘 4 — 現状は `.task(id: fileProviderStateVersion)` + `isEnabled()` の同型ブロックが
+  MenuBar / Settings / ウィザードの 3 面に複製され、1 バンプで同一事実へ最大 3 本の domains()
+  XPC が並走・各ビューが別スナップショットを観測し得る。observable な `fileProviderEnabled` を
+  env に 1 本置き各ビューは読むだけにする）も併せて行う。

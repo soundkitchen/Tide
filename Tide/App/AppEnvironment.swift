@@ -49,11 +49,12 @@ final class AppEnvironment {
     /// （`disableForRecreation`）の前に await して直列化する — 非直列だと除去前スナップショットで
     /// resume した migrate が pending-add フラグを誤回収 / 旧設定のまま re-add し得る
     /// （PR #101 四次レビュー指摘 3）。
+    /// **不変条件（十次レビュー指摘 5）**: spawn は bootstrap のみ・setupGate 保持下・
+    /// `migrationTask == nil` のときだけ。drain も全呼び出し元がゲート保持中。この 2 点により
+    /// 「drain の await 中に新タスクが spawn される」は構造的に不可能で、世代検査は不要
+    /// （旧 `migrationGeneration` は証明可能に不活性のため削除済み — ゲート外の spawn / drain を
+    /// 足す変更こそがレビューで弾くべき対象）。
     @ObservationIgnored private var migrationTask: Task<Void, Never>?
-
-    /// migrate タスクの世代番号（spawn ごとに +1）。`Task` は値型で identity 比較できないため、
-    /// タスク末尾の自己解放が「自分が最新世代か」を検査するのに使う（七次レビュー指摘 2 派生）。
-    @ObservationIgnored private var migrationGeneration = 0
 
     /// FP ドメイン状態の変更通知カウンタ（PR #101 四次レビュー指摘 4）: completeSetup が
     /// `enable()` / `disableForRecreation()` でドメイン状態を変えるため、開きっぱなしの
@@ -108,15 +109,12 @@ final class AppEnvironment {
         // 許す — 五次のチェーン方式は未セットアップ中のポップオーバー再訪ごとにタスクが無限連鎖し、
         // completeSetup がチェーン全長を await する問題があった（六次レビュー指摘 5）。
         if migrationTask == nil {
-            migrationGeneration += 1
-            let generation = migrationGeneration
             migrationTask = Task {
                 await FileProviderController.migrateStaleDomainsIfNeeded()
-                // 自己解放は自分が最新世代の場合のみ（七次レビュー指摘 2 派生）: 無検査だと
-                // ガード網の隙間で孤児化したタスクの解放が後続タスクのハンドルまで nil にし得る。
-                if self.migrationGeneration == generation {
-                    self.migrationTask = nil
-                }
+                // 自己解放（完了時に次回 bootstrap の新規 spawn = 再試行を許す）。spawn/drain が
+                // 全てゲート下にある不変条件（migrationTask の doc）により、この nil が別タスクの
+                // ハンドルを指すことはない — 同時に存在するタスクは常に最大 1 本。
+                self.migrationTask = nil
             }
         }
         // 旧ロケーション（非 App Group 時代）からの一度きり移行（M5 Phase 2）。冪等・非致命。
@@ -278,51 +276,47 @@ final class AppEnvironment {
     /// completeSetup / factoryReset / Settings の Enable/Disable のいずれも、in-flight の migrate が
     /// stale スナップショットで resume してドメイン変更と交錯（pending-add フラグ誤回収 / 孤児
     /// re-add）しないよう、変更前にここを通す。
+    /// **必ず setupGate 保持中に呼ぶこと**（十次レビュー指摘 5 — spawn も bootstrap のゲート下
+    /// のみ、という対の不変条件が「await 中の新規 spawn」を構造的に排除しており、無条件 nil が
+    /// 安全なのはそのため。ゲート外の呼び出し元を足すならこの前提ごと再設計する）。
     private func drainDomainMigration() async {
-        // 世代検査（八次レビュー指摘 3・タスク末尾の自己解放と同じ規約）: await 完了 → resume の
-        // 隙間に bootstrap が新タスクを spawn し得るため、無条件 nil はその新ハンドルを await
-        // されないまま孤児化する（孤児の migrate がラッパの enable/disable XPC と並走 = この
-        // チョークポイントが閉じたはずの race の再開）。
-        let generation = migrationGeneration
         await migrationTask?.value
-        if migrationGeneration == generation {
-            migrationTask = nil
-        }
+        migrationTask = nil
     }
 
-    /// Settings の Enable ボタン用ラッパ（七次レビュー指摘 3 / 八次レビュー指摘 2・6 / 九次
-    /// レビュー指摘 2・6）: 相互排他（`setupGate.tryAcquire`）+ migrate ドレイン込みで
-    /// `FileProviderController.enable()` を呼び、終了時に変更カウンタを進める（購読ビューへの
-    /// 再取得通知を呼び出し側任せにしない）。他のライフサイクル操作の進行中は**拒否** — 待たせて
-    /// 後から実行すると意味が変わる（リセット完走後に add が着地 = 全消し済みアプリへのドメイン
-    /// 復活。次回起動の migrate は staleDomains 空 × フラグ無しで即 return するため自己修復も
-    /// 効かない）。未セットアップ時も拒否（九次レビュー指摘 6 — config 無しでドメインを作ると
-    /// 拡張が未設定エラー列挙になり、後のウィザードに偽の破壊警告まで出す）。
-    /// View から素の FileProviderController.enable() を直接叩かないこと。
-    func enableFileProviderDomain() async throws {
-        guard config.setupCompleted else {
-            throw SyncError.notConfigured(reason: "run setup first — the File Provider domain needs a configured bucket")
-        }
+    /// Enable/Disable ラッパ共通の choreography（十次レビュー指摘 6 で集約）: tryAcquire 拒否 →
+    /// defer release → defer 変更カウンタバンプ → migrate ドレイン → 本体。**第 3 のドメイン操作
+    /// 導線は必ずここを通すこと** — 手コピーで drain かバンプを落とすと、本 PR のレビューで
+    /// 閉じてきた migrate/XPC race・stale 表示が再開する。他のライフサイクル操作の進行中は
+    /// **拒否**（`tryAcquire`）— 待たせて後から実行すると意味が変わる（リセット完走後に add が
+    /// 着地 = 全消し済みアプリへのドメイン復活。次回起動の migrate は staleDomains 空 ×
+    /// フラグ無しで即 return するため自己修復も効かない）。
+    private func withDomainLifecycleGate(_ op: () async throws -> Void) async throws {
         guard setupGate.tryAcquire() else {
             throw SyncError.notConfigured(reason: "another operation is in progress (startup, setup, or reset); try again in a moment")
         }
         defer { setupGate.release() }
         defer { fileProviderStateVersion += 1 }
         await drainDomainMigration()
-        try await FileProviderController.enable()
+        try await op()
+    }
+
+    /// Settings の Enable ボタン用ラッパ（七次レビュー指摘 3 / 八次レビュー指摘 2・6 / 九次
+    /// レビュー指摘 2・6）。未セットアップ時は拒否（九次レビュー指摘 6 — config 無しでドメインを
+    /// 作ると拡張が未設定エラー列挙になり、後のウィザードに偽の破壊警告まで出す）。
+    /// View から素の FileProviderController.enable() を直接叩かないこと。
+    func enableFileProviderDomain() async throws {
+        guard config.setupCompleted else {
+            throw SyncError.notConfigured(reason: "run setup first — the File Provider domain needs a configured bucket")
+        }
+        try await withDomainLifecycleGate { try await FileProviderController.enable() }
     }
 
     /// Settings の Disable ボタン用ラッパ（enable 側と対）。**setupCompleted は要求しない** —
     /// ドメイン除去は未設定アプリでも常に安全で、「全消し済みアプリに生き残ったドメイン」の
     /// 手動回復導線として機能する必要がある。
     func disableFileProviderDomain() async throws {
-        guard setupGate.tryAcquire() else {
-            throw SyncError.notConfigured(reason: "another operation is in progress (startup, setup, or reset); try again in a moment")
-        }
-        defer { setupGate.release() }
-        defer { fileProviderStateVersion += 1 }
-        await drainDomainMigration()
-        try await FileProviderController.disable()
+        try await withDomainLifecycleGate { try await FileProviderController.disable() }
     }
 
     /// FP ドメインを作り直すか + その判定に使ったドメイン有効状態、を**単一 probe** で返す。
@@ -537,6 +531,11 @@ final class AppEnvironment {
         // 閉じる既存不変条件・冪等・sync のため割り込み無し）。
         await setupGate.acquire()
         defer { setupGate.release() }
+        // syncMode の**再書込**（十次レビュー指摘 2）: FIFO 待機中にゲート保持側の factoryReset が
+        // `resetIncludingDeviceId()` でキーを消し得る。ゲート前の書込は「acquire 前に throw する
+        // 経路」への保証として残し、取得後にもう一度書いて「completeSetup が完走したのに保存
+        // syncMode 不在」（soak の DB 凍結見張りが次回起動の正規化まで非武装）を塞ぐ（冪等）。
+        config.syncMode = .fpOnly
         // FP ドメイン状態は成否を問わず変わり得る（途中 throw でも disableForRecreation 済みの
         // 可能性がある）ため、終了時に必ず通知して開きっぱなしの Settings に再取得させる
         // （四次レビュー指摘 4）。

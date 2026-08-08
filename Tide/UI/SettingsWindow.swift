@@ -223,7 +223,10 @@ struct SettingsWindow: View {
         // 開きっぱなしの Settings が stale にならないよう変更カウンタで再取得する
         // （PR #101 四次レビュー指摘 4。id 変化時に加えて初回出現時も走る = 従来の .task を包含）。
         .task(id: env.fileProviderStateVersion) {
-            fileProviderEnabled = await FileProviderController.isEnabled()
+            let enabled = await FileProviderController.isEnabled()
+            // キャンセル検査（十次レビュー指摘 4）: 連続バンプ時の逆順 resume で旧値の書き戻しを防ぐ
+            guard !Task.isCancelled else { return }
+            fileProviderEnabled = enabled
         }
         .onChange(of: notificationsEnabled) { _, newValue in
             env.config.notificationsEnabled = newValue

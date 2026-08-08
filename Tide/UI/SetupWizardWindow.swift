@@ -22,6 +22,10 @@ struct SetupWizardWindow: View {
     /// 「Start syncing」でドメインが作り直される（= 破壊的）か。判定は completeSetup と共有
     /// （`AppEnvironment.probeDomainRecreation(forBucket:)`・PR #101 五次レビュー指摘 2）。
     @State private var willRecreateDomain: Bool?
+    /// probe サイクルの世代（.task 起動ごとに +1）。フォールバック Task の自世代検査用
+    /// （十次レビュー指摘 3 — 非構造化 Task は .task(id:) 再起動でキャンセルされないため、
+    /// 旧サイクルの fallback が新サイクルの probe 窓で早期発火するのを防ぐ）。
+    @State private var probeGeneration = 0
 
     enum Step: Int, CaseIterable {
         case credentials = 0
@@ -237,13 +241,18 @@ struct SetupWizardWindow: View {
             // 素通りし、Back → bucket 変更 → Return で警告未レンダリングのまま実行され得る。
             fileProviderAlreadyEnabled = nil
             willRecreateDomain = nil
+            probeGeneration &+= 1
+            let generation = probeGeneration
             // タイムアウトフォールバック（九次レビュー指摘 7）: fileproviderd がハングすると
             // domains() はエラーも返さず戻らない（#96 受け入れ実測）。10 秒で「不明 = 作り直し側」
             // へ倒して進行ゲートを解く（unknown は警告表示側なので安全・probe が後から返れば実値で
             // 上書き。completeSetup 側の権威判定は従来どおりで、この値は表示とゲートのみ）。
+            // 自世代検査（十次レビュー指摘 3）: 非構造化 Task は .task(id:) 再起動でキャンセル
+            // されない（defer は parked な本体が戻るまで走らない）ため、旧サイクルの fallback が
+            // 新サイクルの 10 秒契約を破って早期発火しないよう世代で縛る。
             let fallback = Task { @MainActor in
                 try? await Task.sleep(for: .seconds(10))
-                guard !Task.isCancelled, willRecreateDomain == nil else { return }
+                guard probeGeneration == generation, willRecreateDomain == nil else { return }
                 willRecreateDomain = true
                 // fileProviderAlreadyEnabled は nil のまま = enabled != false で警告が出る
             }
@@ -251,6 +260,11 @@ struct SetupWizardWindow: View {
             // 単一 probe（七次レビュー指摘 5）: isEnabled を別途叩くと警告条件が異時点の
             // 2 スナップショット合成になり、片方だけ失敗したとき矛盾表示になる。
             let probe = await env.probeDomainRecreation(forBucket: bucket)
+            // キャンセル検査（十次レビュー指摘 7）: XPC はキャンセル非対応なので、id 変化で
+            // キャンセルされた旧 task も応答が返れば必ずここへ resume する。無検査だと逆順応答
+            // （新 probe が先・旧 probe が後）で stale 判定が新値を上書きし、緑チェック + 警告
+            // なしのまま破壊的作り直しへ進めてしまう。
+            guard !Task.isCancelled else { return }
             willRecreateDomain = probe.recreate
             fileProviderAlreadyEnabled = probe.enabled
         }

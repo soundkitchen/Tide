@@ -766,6 +766,26 @@ dataless 一覧が見える」体験（クリーンインストール復旧の�
   ハング時に進行ゲートが理由不明のまま閉じ続ける（Low）→ 「確認中…」インジケータ + 10 秒で
   「不明 = 作り直し側」へのタイムアウトフォールバック（警告表示側 = 安全・probe が後から返れば
   実値で上書き）。
+- **PR #101 十次レビュー対応（2026-08-09・7 件 = 修正 6 + バックログ 1）**: ① completeSetup が
+  setupGate 保持のまま無界の fileproviderd XPC を await し、ハング時に全ライフサイクル操作が
+  再起動まで固着（九次のゲート統一が爆風半径を広げた・High）→ **`FileProviderController` に
+  `boundedXPC`（10 秒・一度きり resume の continuation レース）を新設**し、ゲート保持区間から
+  届く全 XPC（isEnabled の domains() / enable の add / disable・disableForRecreation の
+  removeAll / migrate 内の domains・remove・add）を有界化。TaskGroup はスコープ終了時に
+  parked child を待つため不採用。timeout しても下層 XPC は中断されない（後着完了が無害な冪等
+  add/remove・読み取りのみを通す規約）。`userVisibleURL` は意図的に非有界（ゲート外・#96 実測 =
+  後着で正しく開く）② syncMode のゲート前書込が FIFO 待機中の factoryReset に消されると再書込
+  されない（Medium）→ acquire 後に冪等再書込（ゲート前の書込は throw 前保証として温存）
+  ③ 10 秒フォールバック Task が .task 再起動をまたいで孤児化し新サイクルで早期発火（Low）→
+  `probeGeneration` の自世代検査 ④ `.task(id:) { isEnabled }` 3 面の await 後キャンセル検査
+  欠如（逆順 resume の stale 書き戻し・Low）→ `guard !Task.isCancelled` を 3 箇所へ（enabled
+  状態の AppEnvironment 集約案は docs/09 の宣言的リファクタへ合流）⑤ `migrationGeneration` は
+  setupGate 不変条件下で証明可能に不活性（Cleanup）→ 削除し、spawn/drain の「必ずゲート下」
+  不変条件を doc へ（無条件 nil に戻す）⑥ Enable/Disable ラッパの逐語重複（Nit）→
+  `withDomainLifecycleGate(_:)` へ集約（busy 文字列も 1 箇所化・`.notConfigured` 流用の備忘は
+  現状実害なしのため据え置き）⑦ probe `.task` の await 後キャンセル検査（High）→
+  suggestion どおり `guard !Task.isCancelled` を挿入（設定インポートの逆順 XPC 応答で stale
+  判定が新 probe を上書きする無警告破壊経路を封鎖）。
 
 ### バースト RMW 競合の恒久対処（Issue #91・2026-07-26）
 
