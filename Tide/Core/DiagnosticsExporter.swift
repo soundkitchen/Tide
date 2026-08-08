@@ -84,7 +84,9 @@ enum DiagnosticsExporter {
             deviceId: env.config.deviceId,
             bucket: env.config.bucketName,
             region: env.config.region,
-            syncRootPath: env.config.syncRootPath,
+            // #97: fpOnly（engine 不在）では値を渡さず "—" 表示（死にキーの削除済みパスを診断へ
+            // 出さない）。folderSync デッド経路が生きる revert 時のみ従来どおりパスが載る。
+            syncRootPath: env.engine != nil ? env.config.syncRootPath : nil,
             uploadSizeLimitBytes: env.config.uploadSizeLimitBytes,
             notificationsEnabled: env.config.notificationsEnabled,
             queueDepth: env.engine?.queueDepth,

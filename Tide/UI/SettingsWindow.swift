@@ -14,11 +14,6 @@ struct SettingsWindow: View {
     /// 設定 export/import（#29）の結果メッセージ（成功/失敗の一過性表示）。
     @State private var settingsMessage: String?
 
-    /// 現在有効な `.syncignore` のパターン（閲覧のみ・ディレクトリ単位）。ネスト対応で階層ごとに表示する。
-    private var ignoreGroups: [LayeredSyncIgnore.DirectoryGroup] {
-        env.engine?.activeIgnorePatterns ?? []
-    }
-
     /// 1 ファイルあたりのアップロード上限（ConfigStore は @Observable ではないので @State で持つ）。
     /// スライダで GB 単位（1〜100GB）を柔軟に設定。`noLimit` が true のときは無制限（-1 センチネル）。
     @State private var noLimit: Bool = false
@@ -123,20 +118,15 @@ struct SettingsWindow: View {
                 }
             }
             Section(".syncignore") {
-                if ignoreGroups.isEmpty {
-                    Text("No .syncignore patterns").foregroundStyle(.secondary)
-                } else {
-                    ForEach(ignoreGroups) { group in
-                        // ディレクトリ見出し（ルート直下は "/"）。パスは生文字列なので verbatim 表示。
-                        Text(verbatim: group.directory.isEmpty ? "/" : group.directory + "/")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        ForEach(group.patterns, id: \.self) { p in
-                            // ユーザが書いた除外パターンを verbatim 表示する
-                            Text(verbatim: p)
-                                .font(.system(.body, design: .monospaced))
-                        }
-                    }
+                // #97: パターン一覧は撤去（ソースが engine.activeIgnorePatterns = fpOnly では
+                // engine 恒常 nil のため常に空表示 = パターンが実効なのに空という誤情報だった）。
+                // 実効は FP createItem 側（ManifestIgnoreCache）で維持。一覧表示の復権が必要に
+                // なったら別 Issue（docs/09 v0.3.0 節）。
+                Text("Exclusion patterns are managed in the .syncignore file inside the Tide folder (Locations in the Finder sidebar). They apply to newly added files only.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button("Open Tide in Finder") {
+                    Task { await FileProviderController.openUserVisibleFolderInFinder() }
                 }
             }
             Section("Settings file") {
@@ -148,7 +138,7 @@ struct SettingsWindow: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                Text("Export saves your bucket, region, folder, and preferences (no AWS credentials) to a JSON file. Import restores preferences immediately; bucket/region/folder changes open the Setup Wizard.")
+                Text("Export saves your bucket, region, and preferences (no AWS credentials) to a JSON file. Import restores preferences immediately; bucket/region changes open the Setup Wizard.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -331,7 +321,7 @@ struct SettingsWindow: View {
                 env.pendingImportedSettings = payload
                 NSApp.activate(ignoringOtherApps: true)
                 openWindow(id: "setup")
-                settingsMessage = String(localized: "Preferences imported. Opening Setup Wizard to apply bucket/region/folder changes.")
+                settingsMessage = String(localized: "Preferences imported. Opening Setup Wizard to apply bucket/region changes.")
             } else {
                 settingsMessage = String(localized: "Settings imported.")
             }
@@ -342,12 +332,13 @@ struct SettingsWindow: View {
     }
 
     /// import payload の接続設定が現在の config と異なるか（前後空白を無視して比較）。
+    /// `syncRootPath` は比較しない（#97: fpOnly にローカル同期フォルダは無い。旧 export の
+    /// 死にキー値との差分で不要なウィザード誘導を出さない）。
     private func connectionDiffers(from payload: SettingsTransfer.Payload) -> Bool {
         func norm(_ s: String?) -> String {
             (s ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         }
         return norm(payload.bucketName) != norm(env.config.bucketName)
             || norm(payload.region) != norm(env.config.region)
-            || norm(payload.syncRootPath) != norm(env.config.syncRootPath)
     }
 }

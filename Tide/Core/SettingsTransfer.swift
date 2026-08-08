@@ -90,7 +90,10 @@ enum SettingsTransfer {
             appVersion: appVersion,
             bucketName: config.bucketName,
             region: config.region,
-            syncRootPath: config.syncRootPath,
+            // #97: export しない（fpOnly にローカル同期フォルダは無い。死にキーの削除済みパスを
+            // 設定ファイルへ露出させない）。フィールド自体は optional のため schema v1 の decode
+            // 互換のまま温存する。
+            syncRootPath: nil,
             pollingIntervalSeconds: config.pollingIntervalSeconds,
             uploadSizeLimitBytes: config.uploadSizeLimitBytes,
             uploadBandwidthBytesPerSec: config.uploadBandwidthBytesPerSec,

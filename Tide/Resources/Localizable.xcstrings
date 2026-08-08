@@ -56,13 +56,13 @@
         }
       }
     },
-    "Export saves your bucket, region, folder, and preferences (no AWS credentials) to a JSON file. Import restores preferences immediately; bucket/region/folder changes open the Setup Wizard." : {
+    "Export saves your bucket, region, and preferences (no AWS credentials) to a JSON file. Import restores preferences immediately; bucket/region changes open the Setup Wizard." : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "エクスポートはバケット・リージョン・フォルダと環境設定（AWS 認証情報を除く）を JSON ファイルに保存します。インポートは環境設定をすぐに復元し、バケット／リージョン／フォルダの変更はセットアップウィザードを開いて適用します。"
+            "value" : "エクスポートはバケット・リージョンと環境設定（AWS 認証情報を除く）を JSON ファイルに保存します。インポートは環境設定をすぐに復元し、バケット／リージョンの変更はセットアップウィザードを開いて適用します。"
           }
         }
       }
@@ -89,13 +89,13 @@
         }
       }
     },
-    "Preferences imported. Opening Setup Wizard to apply bucket/region/folder changes." : {
+    "Preferences imported. Opening Setup Wizard to apply bucket/region changes." : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "環境設定をインポートしました。バケット／リージョン／フォルダの変更を適用するためセットアップウィザードを開きます。"
+            "value" : "環境設定をインポートしました。バケット／リージョンの変更を適用するためセットアップウィザードを開きます。"
           }
         }
       }
@@ -1377,13 +1377,13 @@
         }
       }
     },
-    "No .syncignore patterns" : {
+    "Exclusion patterns are managed in the .syncignore file inside the Tide folder (Locations in the Finder sidebar). They apply to newly added files only." : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "（.syncignore パターンなし）"
+            "value" : "除外パターンは Tide フォルダ（Finder サイドバー「場所」の Tide）内の .syncignore ファイルで管理します。新しく追加されるファイルにのみ適用されます。"
           }
         }
       }

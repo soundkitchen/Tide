@@ -93,7 +93,9 @@ final class SettingsTransferTests: XCTestCase {
         XCTAssertEqual(p.schemaVersion, SettingsTransfer.currentSchemaVersion)
         XCTAssertEqual(p.bucketName, "b")
         XCTAssertEqual(p.region, "us-east-1")
-        XCTAssertEqual(p.syncRootPath, "/tmp/x")
+        // #97: export は syncRootPath を書かない（fpOnly に syncRoot 面が無く、死にキーの
+        // 削除済みパスを設定ファイルへ露出させない。フィールドは schema v1 decode 互換で温存）
+        XCTAssertNil(p.syncRootPath)
         XCTAssertEqual(p.pollingIntervalSeconds, 120)
         XCTAssertEqual(p.uploadSizeLimitBytes, -1)
         XCTAssertEqual(p.uploadBandwidthBytesPerSec, 2_000_000)

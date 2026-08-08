@@ -583,6 +583,21 @@ dataless 一覧が見える」体験（クリーンインストール復旧の�
   だった旧 done 文言キー（`Setup complete. Tide will now sync your folder to S3.`）を削除・
   credentials の import 説明文を「bucket and region」へ是正・fileProvider ステップ / done の
   新キーを追加（ja 訳・`extractionState: manual`）。
+- **設定 import/export（#29）の整合**: `connectionDiffers` から syncRootPath 比較を削除
+  （bucket / region のみ。旧 export の死にキー値との差分で不要なウィザード誘導を出さない）・
+  export 側は `syncRootPath = nil` を書く（`SettingsTransfer.Payload` のフィールド自体は
+  optional のため schema v1 の decode 互換で温存・死にキーの削除済みパスを設定ファイルへ
+  露出させない）・`DiagnosticsExporter` の「Sync folder:」行は fpOnly（engine 不在）では値を
+  渡さず "—" 表示（folderSync デッド経路が生きる revert 時のみ従来どおり）。Settings の
+  export/import 説明文・import 完了メッセージからも folder 言及を除去。
+- **設定画面「.syncignore」セクションの静的案内置換**（ユーザ確定 2026-08-08・PR #99 レビュー
+  指摘 4）: パターン一覧（ソース = `engine.activeIgnorePatterns`・fpOnly では engine 恒常 nil の
+  ため常に「No .syncignore patterns」= パターンが実効なのに空表示の誤情報）を撤去し、
+  「除外パターンは Tide フォルダ（Finder サイドバー「場所」の Tide）内の `.syncignore` で管理
+  （新規ファイルにのみ適用）」の静的テキスト +「Open Tide in Finder」導線へ置換（「同期フォルダ /
+  Sync Folder」呼称は使わない）。実効は FP createItem 側（`ManifestIgnoreCache`）で維持・
+  一覧表示の復権が必要になったら別 Issue。「Excluded patterns (built-in)」セクションは静的定数
+  ソースのため不変。
 
 ### バースト RMW 競合の恒久対処（Issue #91・2026-07-26）
 
