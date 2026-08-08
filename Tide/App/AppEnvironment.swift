@@ -90,16 +90,16 @@ final class AppEnvironment {
         bootstrapFailure = nil
         // 旧 identifier（PoC 世代）の FP ドメインが残っていれば現行 identifier で作り直す。
         // fire-and-forget（XPC 待ちで起動をブロックしない）・no-op が定常。ハンドルは保持し、
-        // completeSetup がドメイン作り直しの前に await して直列化する（四次レビュー指摘 3）。
-        // 再実行（未セットアップ状態はポップオーバーを開くたび bootstrap 本体が走る）では
-        // 前回タスクへ**チェーン**してから走らせる（五次レビュー指摘 1）— 単純上書きだと
-        // completeSetup が最新の 1 本しか await できず、XPC 停滞中の孤児 migrate が stale
-        // スナップショットで resume して pending-add フラグを誤回収 / 早期 add し得る。
-        // チェーンなら最新ハンドルの await が推移的に全先行タスクを待つ。
-        let previousMigration = migrationTask
-        migrationTask = Task {
-            await previousMigration?.value
-            await FileProviderController.migrateStaleDomainsIfNeeded()
+        // completeSetup / factoryReset がドメインを変える前に await して直列化する（四次レビュー
+        // 指摘 3 / 六次レビュー指摘 4）。**実行中はハンドルを再利用**（同時 1 本 = 孤児を作らない・
+        // 五次レビュー指摘 1）し、**完了時に自己解放**して次回 bootstrap の新規 spawn（再試行）を
+        // 許す — 五次のチェーン方式は未セットアップ中のポップオーバー再訪ごとにタスクが無限連鎖し、
+        // completeSetup がチェーン全長を await する問題があった（六次レビュー指摘 5）。
+        if migrationTask == nil {
+            migrationTask = Task {
+                await FileProviderController.migrateStaleDomainsIfNeeded()
+                self.migrationTask = nil
+            }
         }
         // 旧ロケーション（非 App Group 時代）からの一度きり移行（M5 Phase 2）。冪等・非致命。
         // setupCompleted の判定より前に行う必要がある（設定自体が移行対象のため）。
@@ -259,6 +259,14 @@ final class AppEnvironment {
     /// 警告表示が共有する単一判定**（PR #101 五次レビュー指摘 2 — 複製すると枝の増減に UI が
     /// 追従できない）。判定は config 上書き**前**の旧 bucketName で行う不変条件
     /// （completeSetup 内コメント参照）。
+    /// FP ドメイン状態を AppEnvironment の外（Settings の Enable/Disable ボタン）で変えた呼び出し側が、
+    /// 購読ビュー（ウィザード / Settings / ポップオーバーの `.task(id: fileProviderStateVersion)`）へ
+    /// 再取得を促すための通知点（六次レビュー指摘 3）。completeSetup / factoryReset は内部で直接
+    /// インクリメントする。
+    func noteFileProviderDomainStateChanged() {
+        fileProviderStateVersion += 1
+    }
+
     func willRecreateDomain(forBucket bucket: String) async -> Bool {
         if let previousBucket = config.bucketName, !previousBucket.isEmpty {
             // 既知の旧バケット: 変わったときだけ作り直す。同一バケットの再セットアップ
@@ -561,6 +569,15 @@ final class AppEnvironment {
     }
 
     func factoryReset() async {
+        // bootstrap の fire-and-forget migrate と直列化（六次レビュー指摘 4）: XPC await 中の
+        // migrate がリセット完走後に stale スナップショットで resume すると、リセット済みアプリへ
+        // 孤児ドメインを re-add / add 失敗時は pending フラグを残置し得る。完了を待ってから壊す。
+        await migrationTask?.value
+        migrationTask = nil
+        // FP ドメイン状態が変わる（disable）ため、開きっぱなしのウィザード / Settings /
+        // ポップオーバーへ再取得を促す（六次レビュー指摘 3）。
+        defer { fileProviderStateVersion += 1 }
+
         await engine?.stop()
         engine = nil
         signaler?.stop()

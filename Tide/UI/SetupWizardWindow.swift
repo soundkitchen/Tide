@@ -130,7 +130,10 @@ struct SetupWizardWindow: View {
         case .provisioning:
             return !isWorking
         case .fileProvider:
-            return true
+            // probe（作り直し判定）解決前は進めない（六次レビュー指摘 2）: 無条件 true だと
+            // ステップ表示直後の Return（.defaultAction）が警告を一度もレンダリングしないまま
+            // completeSetup → disableForRecreation に到達し得る。
+            return willRecreateDomain != nil
         case .done:
             return true
         }
@@ -194,22 +197,21 @@ struct SetupWizardWindow: View {
             Text("No local sync folder is needed. Press “Start syncing” to enable the Tide folder and begin syncing.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            if fileProviderAlreadyEnabled == true {
-                if willRecreateDomain == true {
-                    // completeSetup がドメインを作り直す = 破壊的（未アップロードの dirty item は
-                    // 破棄）。緑チェックの「継続性の示唆」は事実に反するため警告に差し替える
-                    // （四次レビュー指摘 2）。判定は completeSetup と共有 = バケット切替と
-                    // 素性不明ドメイン（factoryReset の swallowed disable 後）の両枝をカバー
-                    // （五次レビュー指摘 2）。
-                    Label("This setup will recreate the Tide folder. Changes not yet uploaded will be discarded.", systemImage: "exclamationmark.triangle")
-                        .font(.callout)
-                        .foregroundStyle(.orange)
-                } else {
-                    // 同一バケットの再セットアップ経路: enable は冪等（再 add no-op）なのでそのまま進める
-                    Label("The Tide folder is already enabled on this Mac.", systemImage: "checkmark.circle")
-                        .font(.callout)
-                        .foregroundStyle(.green)
-                }
+            // 破壊的 recreation の警告は enabled 判定の**外**（六次レビュー指摘 1）: willRecreateDomain
+            // は不明（isEnabled nil = fileproviderd 無応答）を作り直し側に倒すため、警告も同じ側で
+            // 出さないと「domains() 一時失敗 × Start syncing」で無警告破棄になる。既知の未登録
+            // （enabled == false）だけは破棄対象が存在しないため除外（バケット切替でも空作り直し）。
+            // 判定は completeSetup と共有 = バケット切替と素性不明ドメインの両枝をカバー
+            // （四次レビュー指摘 2 / 五次レビュー指摘 2）。
+            if willRecreateDomain == true, fileProviderAlreadyEnabled != false {
+                Label("This setup will recreate the Tide folder. Changes not yet uploaded will be discarded.", systemImage: "exclamationmark.triangle")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+            } else if fileProviderAlreadyEnabled == true, willRecreateDomain == false {
+                // 同一バケットの再セットアップ経路: enable は冪等（再 add no-op）なのでそのまま進める
+                Label("The Tide folder is already enabled on this Mac.", systemImage: "checkmark.circle")
+                    .font(.callout)
+                    .foregroundStyle(.green)
             }
         }
         // completeSetup がドメイン状態を変える（部分失敗で disableForRecreation 済み等）ため、

@@ -232,6 +232,8 @@ struct SettingsWindow: View {
                 fileProviderMessage = String(describing: error)
             }
             fileProviderEnabled = await FileProviderController.isEnabled()
+            // 他の購読ビュー（ウィザード / ポップオーバー）へも再取得を促す（六次レビュー指摘 3）
+            env.noteFileProviderDomainStateChanged()
         }
     }
 

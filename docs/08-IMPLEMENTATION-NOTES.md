@@ -686,6 +686,24 @@ dataless 一覧が見える」体験（クリーンインストール復旧の�
   無く、completeSetup 部分失敗（disableForRecreation 済み → enable throw）後にエラー表示の隣へ
   stale な緑チェックが残る（Low）→ Settings と同じ `.task(id: env.fileProviderStateVersion)` 化
   （② の `willRecreateDomain` 再取得も同 task に同居）。
+- **PR #101 六次レビュー対応（2026-08-08・6 件）**: ① 破壊的 recreation 警告が
+  `fileProviderAlreadyEnabled == true` の内側で、isEnabled nil（fileproviderd 無応答）だと無警告
+  破棄になる（High）→ 警告を enabled 判定の外へ（`willRecreateDomain == true && enabled != false`
+  で表示 = 不明も警告側・既知の未登録のみ除外〈破棄対象が無い〉・緑チェックは
+  `enabled == true && willRecreate == false` のみ）② `.fileProvider` の `canAdvance` 無条件 true
+  で probe 解決前に Return（.defaultAction）が警告未レンダリングのまま completeSetup へ到達
+  （High）→ `willRecreateDomain != nil` をゲートに ③ `fileProviderStateVersion` のバンプが
+  completeSetup のみ + MenuBarContent 未購読（Medium）→ factoryReset に defer バンプ・Settings の
+  Enable/Disable は新設 `noteFileProviderDomainStateChanged()` 経由・ポップオーバーの
+  `fileProviderEnabled` 取得を `.task(id:)` 購読へ（セットアップ成功直後の赤バナー残置解消。
+  値の完全集約〈observable 1 本〉はカウンタ = 無効化バスで実害が閉じるため見送り）
+  ④ factoryReset が migrate と非直列（stale resume がリセット済みアプリへ孤児ドメイン re-add /
+  フラグ残置・Medium）→ 冒頭で `await migrationTask?.value` ⑤ 五次のチェーン方式は未セットアップ
+  中のポップオーバー再訪ごとに無限連鎖し completeSetup がチェーン全長を await（Low）→
+  **実行中は再利用・完了時に自己解放**（同時 1 本・再試行は完了後の次回 bootstrap が担う）
+  ⑥ クリーンインストール分岐に enable 失敗の再起動横断リトライが無い（再作成分岐と非対称・Low）→
+  `enable()` が add の**前**に pending-add フラグを立てる（成功時クリア・migrate の
+  setupCompleted ゲート + 未設定回収と組合せで全分岐対称の自己修復）。
 
 ### バースト RMW 競合の恒久対処（Issue #91・2026-07-26）
 

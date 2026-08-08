@@ -24,9 +24,13 @@ enum FileProviderController {
     }()
 
     static func enable() async throws {
+        // add の**前**に pending-add フラグを立てる（PR #101 六次レビュー指摘 6）: enable の throw
+        // （XPC 一時失敗）を再起動横断で自己修復可能にする — setupCompleted 済みなら次回起動の
+        // `migrateStaleDomainsIfNeeded` が add を再開し、未設定なら同ゲートがフラグを回収する。
+        // 再作成分岐（disableForRecreation）だけでなくクリーンインストール分岐も対称になる。
+        TideAppGroup.sharedDefaults().set(true, forKey: migrationPendingAddKey)
         try await NSFileProviderManager.add(domain)
-        // add 完了 = pending-add（`disableForRecreation` が立てる「有効化済み」意図の引き継ぎ）は
-        // 満たされた。残しても次回 migrate が自己修復するが、確定点で消すのが対称。
+        // add 完了 = pending-add の意図は満たされた（確定点で消す）。
         TideAppGroup.sharedDefaults().removeObject(forKey: migrationPendingAddKey)
         AppLogger.ui.info("File Provider domain added")
     }

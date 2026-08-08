@@ -49,9 +49,12 @@ struct MenuBarContent: View {
             if !env.isSetupCompleted || env.bootstrapFailure != nil {
                 activateAndOpen("setup")
             }
-            // FP 有効状態は bootstrap の成否に依らず常に取得する（#96）。signaler != nil ガード内に
-            // 置くと bootstrap 失敗時に nil のままになり、「Open Tide in Finder」の活性判定が
-            // できない（PR #99 再レビュー指摘 7）。
+        }
+        // FP 有効状態は bootstrap の成否に依らず常に取得する（#96・signaler != nil ガード内だと
+        // bootstrap 失敗時に nil のまま = PR #99 再レビュー指摘 7）。completeSetup / factoryReset /
+        // Settings がドメイン状態を変えたときは変更カウンタで開いたまま追従する（六次レビュー
+        // 指摘 3 — 素の .task だとセットアップ成功直後も赤バナー「not enabled」が残り続ける）。
+        .task(id: env.fileProviderStateVersion) {
             fileProviderEnabled = await FileProviderController.isEnabled()
         }
         // lastSyncedAt は upload 周回完了でしか前進しないため、pull 由来の download / 削除反映も
