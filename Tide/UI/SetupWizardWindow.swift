@@ -19,6 +19,9 @@ struct SetupWizardWindow: View {
     /// FP ドメインの現況（fileProvider ステップの表示専用・再セットアップ経路向け）。
     /// nil = 未取得/取得失敗（表示しないだけで進行は妨げない）。
     @State private var fileProviderAlreadyEnabled: Bool?
+    /// 「Start syncing」でドメインが作り直される（= 破壊的）か。判定は completeSetup と共有
+    /// （`AppEnvironment.willRecreateDomain(forBucket:)`・PR #101 五次レビュー指摘 2）。
+    @State private var willRecreateDomain: Bool?
 
     enum Step: Int, CaseIterable {
         case credentials = 0
@@ -192,11 +195,13 @@ struct SetupWizardWindow: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             if fileProviderAlreadyEnabled == true {
-                if isBucketSwitch {
-                    // 別バケット切替（PR #101 四次レビュー指摘 2）: completeSetup がドメインを
-                    // 作り直す = 破壊的（未アップロードの dirty item は破棄）。緑チェックの
-                    // 「継続性の示唆」は事実に反するため、警告に差し替える。
-                    Label("Switching to a different bucket recreates the Tide folder. Changes not yet uploaded will be discarded.", systemImage: "exclamationmark.triangle")
+                if willRecreateDomain == true {
+                    // completeSetup がドメインを作り直す = 破壊的（未アップロードの dirty item は
+                    // 破棄）。緑チェックの「継続性の示唆」は事実に反するため警告に差し替える
+                    // （四次レビュー指摘 2）。判定は completeSetup と共有 = バケット切替と
+                    // 素性不明ドメイン（factoryReset の swallowed disable 後）の両枝をカバー
+                    // （五次レビュー指摘 2）。
+                    Label("This setup will recreate the Tide folder. Changes not yet uploaded will be discarded.", systemImage: "exclamationmark.triangle")
                         .font(.callout)
                         .foregroundStyle(.orange)
                 } else {
@@ -207,15 +212,13 @@ struct SetupWizardWindow: View {
                 }
             }
         }
-        .task { fileProviderAlreadyEnabled = await FileProviderController.isEnabled() }
-    }
-
-    /// 別バケットへの切替か（fileProvider ステップの警告表示用）。この時点で `config.bucketName` は
-    /// まだ旧値（completeSetup の作り直し判定が config 上書き前比較なのと同じ不変条件）。
-    /// 旧値不在（初回 / factoryReset 後）は「切替」ではないので警告しない。
-    private var isBucketSwitch: Bool {
-        guard let previous = env.config.bucketName, !previous.isEmpty else { return false }
-        return previous != bucket
+        // completeSetup がドメイン状態を変える（部分失敗で disableForRecreation 済み等）ため、
+        // Settings と同じ変更カウンタで再取得する（五次レビュー指摘 3 — id 無しだとエラー表示の
+        // 隣に stale な緑チェックが残る）。ステップ再出現時（Back で bucket 変更後）も走る。
+        .task(id: env.fileProviderStateVersion) {
+            fileProviderAlreadyEnabled = await FileProviderController.isEnabled()
+            willRecreateDomain = await env.willRecreateDomain(forBucket: bucket)
+        }
     }
 
     private var doneView: some View {

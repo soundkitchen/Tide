@@ -91,7 +91,16 @@ final class AppEnvironment {
         // 旧 identifier（PoC 世代）の FP ドメインが残っていれば現行 identifier で作り直す。
         // fire-and-forget（XPC 待ちで起動をブロックしない）・no-op が定常。ハンドルは保持し、
         // completeSetup がドメイン作り直しの前に await して直列化する（四次レビュー指摘 3）。
-        migrationTask = Task { await FileProviderController.migrateStaleDomainsIfNeeded() }
+        // 再実行（未セットアップ状態はポップオーバーを開くたび bootstrap 本体が走る）では
+        // 前回タスクへ**チェーン**してから走らせる（五次レビュー指摘 1）— 単純上書きだと
+        // completeSetup が最新の 1 本しか await できず、XPC 停滞中の孤児 migrate が stale
+        // スナップショットで resume して pending-add フラグを誤回収 / 早期 add し得る。
+        // チェーンなら最新ハンドルの await が推移的に全先行タスクを待つ。
+        let previousMigration = migrationTask
+        migrationTask = Task {
+            await previousMigration?.value
+            await FileProviderController.migrateStaleDomainsIfNeeded()
+        }
         // 旧ロケーション（非 App Group 時代）からの一度きり移行（M5 Phase 2）。冪等・非致命。
         // setupCompleted の判定より前に行う必要がある（設定自体が移行対象のため）。
         let migration = LegacyStateMigrator.migrateIfNeeded()
@@ -244,6 +253,24 @@ final class AppEnvironment {
             downloadLimiter: RateLimiter(ratePerSec: Double(config.downloadBandwidthBytesPerSec)),
             uploadLimiter: RateLimiter(ratePerSec: Double(config.uploadBandwidthBytesPerSec))
         )
+    }
+
+    /// FP ドメインを作り直すか。**completeSetup の実行判定とウィザード fileProvider ステップの
+    /// 警告表示が共有する単一判定**（PR #101 五次レビュー指摘 2 — 複製すると枝の増減に UI が
+    /// 追従できない）。判定は config 上書き**前**の旧 bucketName で行う不変条件
+    /// （completeSetup 内コメント参照）。
+    func willRecreateDomain(forBucket bucket: String) async -> Bool {
+        if let previousBucket = config.bucketName, !previousBucket.isEmpty {
+            // 既知の旧バケット: 変わったときだけ作り直す。同一バケットの再セットアップ
+            // （クリーンインストール復旧 / 認証情報の再設定）はレプリカ温存（再 add no-op）。
+            return previousBucket != bucket
+        }
+        // bucketName 不在 = factoryReset がキーを消した後（disable 失敗の握りつぶし〈try?〉も
+        // 通過し得る）。生存ドメインがあってもレプリカの素性（どのバケット由来か）を保証
+        // できないため作り直す（再レビュー指摘 3）。既知の未登録（false = 通常のクリーン
+        // セットアップ）のみスキップし、不明（nil）は作り直し側に倒す — 温存側に倒すと
+        // 「isEnabled 失敗 → 直後の enable 成功」の並びで素性不明レプリカが残る。
+        return await FileProviderController.isEnabled() != false
     }
 
     /// 書込確定点で FP レプリカへ即時 signal する配線付き `ManifestUpdater`（S3 内復元 / seed 共用・
@@ -462,22 +489,10 @@ final class AppEnvironment {
         // 破棄する（PR #61 記録）が、旧バケットの内容を新バケットへ流すより安全側。判定は
         // config 上書き**前**の旧値で行い、失敗は config 未更新のまま throw（先に config を書くと
         // 失敗後のリトライが「同一バケット」に見えて作り直しがスキップされ、混入窓が残る）。
-        let previousBucket = config.bucketName
-        let needsDomainRecreation: Bool
-        if let previousBucket, !previousBucket.isEmpty {
-            // 既知の旧バケット: 変わったときだけ作り直す。同一バケットの再セットアップ
-            // （クリーンインストール復旧 / 認証情報の再設定）はレプリカ温存（再 add no-op）。
-            needsDomainRecreation = previousBucket != bucket
-        } else {
-            // bucketName 不在 = factoryReset がキーを消した後（disable 失敗の握りつぶし〈try?〉も
-            // 通過し得る）。生存ドメインがあってもレプリカの素性（どのバケット由来か）を保証
-            // できないため作り直す（再レビュー指摘 3）。既知の未登録（false = 通常のクリーン
-            // セットアップ）のみスキップし、不明（nil）は作り直し側に倒す — 温存側に倒すと
-            // 「isEnabled 失敗 → 直後の enable 成功」の並びで素性不明レプリカが残る。
-            needsDomainRecreation = await FileProviderController.isEnabled() != false
-        }
+        // 判定本体はウィザードの警告表示と共有（`willRecreateDomain(forBucket:)`・五次レビュー指摘 2）。
+        let needsDomainRecreation = await willRecreateDomain(forBucket: bucket)
         if needsDomainRecreation {
-            AppLogger.ui.info("Recreating File Provider domain (bucket switch or unknown replica origin): \(previousBucket ?? "(none)", privacy: .private) -> \(bucket, privacy: .private)")
+            AppLogger.ui.info("Recreating File Provider domain (bucket switch or unknown replica origin): \(self.config.bucketName ?? "(none)", privacy: .private) -> \(bucket, privacy: .private)")
             // disableForRecreation は pending-add フラグを立ててから remove する（再レビュー
             // 指摘 1）: この後の Keychain 保存 / enable が throw しても、次回起動の
             // migrateStaleDomainsIfNeeded が add を再開する = 無音の同期停止にならない。

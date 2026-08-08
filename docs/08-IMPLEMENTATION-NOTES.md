@@ -672,6 +672,20 @@ dataless 一覧が見える」体験（クリーンインストール復旧の�
   実際の理由（folderSync revert 資産）へ書換（テスト側の複製コメントも）⑧ Diagnostics の
   `engine != nil` プロキシ（恒真 nil のデッド分岐・モードの代理として不正確）→ SettingsTransfer
   と同じ素の nil へ統一（revert 時は git がこの行ごと戻す）。
+- **PR #101 五次レビュー対応（2026-08-08・3 件）**: ① bootstrap 再実行（未セットアップ状態は
+  ポップオーバーを開くたび本体が走る）で `migrationTask` が単純上書きされ、completeSetup が
+  最新 1 本しか await できない（XPC 停滞中の**孤児 migrate** が stale スナップショットで
+  resume → disableForRecreation 直後の pending-add フラグを誤回収 / seed 前の早期 add・High）→
+  spawn を**前回タスクへのチェーン**（新 Task が先頭で `await previous?.value`）へ変更 =
+  最新ハンドルの await が推移的に全先行タスクを待つ ② ウィザードの切替警告が作り直し判定の
+  枝 (a)（バケット比較）しか複製しておらず、枝 (b)（bucketName 不在 × 生存ドメイン = factoryReset
+  の swallowed disable 後）で緑チェックが破壊的 recreation を誤示唆（Medium）→ 判定を
+  `AppEnvironment.willRecreateDomain(forBucket:)` へ抽出して completeSetup とウィザード表示で
+  **共有**（枝の増減に UI が自動追従）・警告文言も枝非依存の汎用形（「このセットアップで Tide
+  フォルダは作り直されます…」）へ差替 ③ ウィザードの `fileProviderAlreadyEnabled` に更新 id が
+  無く、completeSetup 部分失敗（disableForRecreation 済み → enable throw）後にエラー表示の隣へ
+  stale な緑チェックが残る（Low）→ Settings と同じ `.task(id: env.fileProviderStateVersion)` 化
+  （② の `willRecreateDomain` 再取得も同 task に同居）。
 
 ### バースト RMW 競合の恒久対処（Issue #91・2026-07-26）
 
