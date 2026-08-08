@@ -151,7 +151,10 @@ enum FileProviderController {
     /// レプリカ実体 `…/CloudStorage/Tide-Tide` を直接使わないのは意図的な保守側の選択 —
     /// ディレクトリ名は OS が displayName から合成するもので、パス恒常性の公開契約が無い。
     /// `isFallback` は scope 開始の要否判定用（本物の URL は security-scoped・縮退 URL は素のパス）。
-    static func userVisibleURLOrFallback() async -> (url: URL, isFallback: Bool) {
+    /// private（PR #101 七次レビュー指摘 6）: 呼び出しは scope 開始込みの
+    /// `openUserVisibleFolderInFinder()` に一本化されており、外部へ開けておくと
+    /// 「scope 開始漏れ」（B-2 受け入れバグ）を将来の呼び出し側が再導入する扉になる。
+    private static func userVisibleURLOrFallback() async -> (url: URL, isFallback: Bool) {
         if let url = await userVisibleURL() { return (url, false) }
         let fallback = URL(
             fileURLWithPath: PathValidator.realHomeDirectory(), isDirectory: true

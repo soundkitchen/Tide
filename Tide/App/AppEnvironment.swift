@@ -44,6 +44,10 @@ final class AppEnvironment {
     /// （PR #101 四次レビュー指摘 3）。
     @ObservationIgnored private var migrationTask: Task<Void, Never>?
 
+    /// migrate タスクの世代番号（spawn ごとに +1）。`Task` は値型で identity 比較できないため、
+    /// タスク末尾の自己解放が「自分が最新世代か」を検査するのに使う（七次レビュー指摘 2 派生）。
+    @ObservationIgnored private var migrationGeneration = 0
+
     /// FP ドメイン状態の変更通知カウンタ（PR #101 四次レビュー指摘 4）: completeSetup が
     /// `enable()` / `disableForRecreation()` でドメイン状態を変えるため、開きっぱなしの
     /// Settings ウィンドウが `.task(id:)` で再取得できるよう、completeSetup の終了時
@@ -96,9 +100,15 @@ final class AppEnvironment {
         // 許す — 五次のチェーン方式は未セットアップ中のポップオーバー再訪ごとにタスクが無限連鎖し、
         // completeSetup がチェーン全長を await する問題があった（六次レビュー指摘 5）。
         if migrationTask == nil {
+            migrationGeneration += 1
+            let generation = migrationGeneration
             migrationTask = Task {
                 await FileProviderController.migrateStaleDomainsIfNeeded()
-                self.migrationTask = nil
+                // 自己解放は自分が最新世代の場合のみ（七次レビュー指摘 2 派生）: 無検査だと
+                // ガード網の隙間で孤児化したタスクの解放が後続タスクのハンドルまで nil にし得る。
+                if self.migrationGeneration == generation {
+                    self.migrationTask = nil
+                }
             }
         }
         // 旧ロケーション（非 App Group 時代）からの一度きり移行（M5 Phase 2）。冪等・非致命。
@@ -255,10 +265,30 @@ final class AppEnvironment {
         )
     }
 
-    /// FP ドメインを作り直すか。**completeSetup の実行判定とウィザード fileProvider ステップの
-    /// 警告表示が共有する単一判定**（PR #101 五次レビュー指摘 2 — 複製すると枝の増減に UI が
-    /// 追従できない）。判定は config 上書き**前**の旧 bucketName で行う不変条件
-    /// （completeSetup 内コメント参照）。
+    /// FP ドメインを変える操作の前に、bootstrap の fire-and-forget migrate を必ず飲み干す共通
+    /// チョークポイント（四次レビュー指摘 3 で導入・七次レビュー指摘 3 で 3 変更点へ統一）:
+    /// completeSetup / factoryReset / Settings の Enable/Disable のいずれも、in-flight の migrate が
+    /// stale スナップショットで resume してドメイン変更と交錯（pending-add フラグ誤回収 / 孤児
+    /// re-add）しないよう、変更前にここを通す。
+    private func drainDomainMigration() async {
+        await migrationTask?.value
+        migrationTask = nil
+    }
+
+    /// Settings の Enable ボタン用ラッパ（七次レビュー指摘 3）: migrate ドレイン込みで
+    /// `FileProviderController.enable()` を呼ぶ。View から素の enable() を直接叩かないこと
+    /// （`migrationTask` は private のため View 側ではドレインできない）。
+    func enableFileProviderDomain() async throws {
+        await drainDomainMigration()
+        try await FileProviderController.enable()
+    }
+
+    /// Settings の Disable ボタン用ラッパ（七次レビュー指摘 3・enable 側と対）。
+    func disableFileProviderDomain() async throws {
+        await drainDomainMigration()
+        try await FileProviderController.disable()
+    }
+
     /// FP ドメイン状態を AppEnvironment の外（Settings の Enable/Disable ボタン）で変えた呼び出し側が、
     /// 購読ビュー（ウィザード / Settings / ポップオーバーの `.task(id: fileProviderStateVersion)`）へ
     /// 再取得を促すための通知点（六次レビュー指摘 3）。completeSetup / factoryReset は内部で直接
@@ -267,18 +297,26 @@ final class AppEnvironment {
         fileProviderStateVersion += 1
     }
 
-    func willRecreateDomain(forBucket bucket: String) async -> Bool {
+    /// FP ドメインを作り直すか + その判定に使ったドメイン有効状態、を**単一 probe** で返す。
+    /// `recreate` は **completeSetup の実行判定とウィザード fileProvider ステップの警告表示が
+    /// 共有する単一判定**（五次レビュー指摘 2 — 複製すると枝の増減に UI が追従できない）。
+    /// 判定は config 上書き**前**の旧 bucketName で行う不変条件（completeSetup 内コメント参照）。
+    /// `enabled` を同一スナップショットで併せて返すのは、ウィザードの警告/緑チェックが異時点の
+    /// 2 スナップショット合成で矛盾表示にならないため（七次レビュー指摘 5。isEnabled の XPC も
+    /// 1 往復に畳まれる）。
+    func probeDomainRecreation(forBucket bucket: String) async -> (recreate: Bool, enabled: Bool?) {
+        let enabled = await FileProviderController.isEnabled()
         if let previousBucket = config.bucketName, !previousBucket.isEmpty {
             // 既知の旧バケット: 変わったときだけ作り直す。同一バケットの再セットアップ
             // （クリーンインストール復旧 / 認証情報の再設定）はレプリカ温存（再 add no-op）。
-            return previousBucket != bucket
+            return (recreate: previousBucket != bucket, enabled: enabled)
         }
         // bucketName 不在 = factoryReset がキーを消した後（disable 失敗の握りつぶし〈try?〉も
         // 通過し得る）。生存ドメインがあってもレプリカの素性（どのバケット由来か）を保証
         // できないため作り直す（再レビュー指摘 3）。既知の未登録（false = 通常のクリーン
         // セットアップ）のみスキップし、不明（nil）は作り直し側に倒す — 温存側に倒すと
         // 「isEnabled 失敗 → 直後の enable 成功」の並びで素性不明レプリカが残る。
-        return await FileProviderController.isEnabled() != false
+        return (recreate: enabled != false, enabled: enabled)
     }
 
     /// 書込確定点で FP レプリカへ即時 signal する配線付き `ManifestUpdater`（S3 内復元 / seed 共用・
@@ -487,8 +525,7 @@ final class AppEnvironment {
         // migrate が除去**前**のスナップショットで resume すると、この後 disableForRecreation が
         // 立てる pending-add フラグを誤回収（stale な hasCurrent=true でフラグ除去）/ 旧設定の
         // ままの re-add をし得る。完了を待ってから進む（cancel では XPC 待ちの本体を止められない）。
-        await migrationTask?.value
-        migrationTask = nil
+        await drainDomainMigration()
 
         // FP ドメインの作り直し判定（PR #101 レビュー指摘 1 + 再レビュー指摘 3）: `enable()` の
         // 既有効 no-op はレプリカを温存するため、旧バケット由来の保留書込（dirty item）が残ると
@@ -497,8 +534,9 @@ final class AppEnvironment {
         // 破棄する（PR #61 記録）が、旧バケットの内容を新バケットへ流すより安全側。判定は
         // config 上書き**前**の旧値で行い、失敗は config 未更新のまま throw（先に config を書くと
         // 失敗後のリトライが「同一バケット」に見えて作り直しがスキップされ、混入窓が残る）。
-        // 判定本体はウィザードの警告表示と共有（`willRecreateDomain(forBucket:)`・五次レビュー指摘 2）。
-        let needsDomainRecreation = await willRecreateDomain(forBucket: bucket)
+        // 判定本体はウィザードの警告表示と共有（`probeDomainRecreation(forBucket:)`・五次レビュー
+        // 指摘 2 / 七次レビュー指摘 5）。ここでは recreate 側だけ使う。
+        let needsDomainRecreation = await probeDomainRecreation(forBucket: bucket).recreate
         if needsDomainRecreation {
             AppLogger.ui.info("Recreating File Provider domain (bucket switch or unknown replica origin): \(self.config.bucketName ?? "(none)", privacy: .private) -> \(bucket, privacy: .private)")
             // disableForRecreation は pending-add フラグを立ててから remove する（再レビュー
@@ -569,11 +607,18 @@ final class AppEnvironment {
     }
 
     func factoryReset() async {
+        // completeSetup と同じ再入ガード（七次レビュー指摘 2）: これが無いと `disable()` 等の
+        // XPC 待機中（engine/signaler とも nil・setupCompleted まだ true・Keychain 未消去）に
+        // ポップオーバー由来の bootstrap() が全ガードを通過し、①ドレイン済みのはずの
+        // migrationTask を新規 spawn（六次④の窓の再開）②消される直前の config/Keychain で
+        // signaler を再起動（リセット完走後も削除済み認証情報の in-memory コピーで S3 を poll し
+        // 続け、以後の bootstrap は signaler != nil で早期 return = 健康に見える）、が起こり得る。
+        isBootstrapping = true
+        defer { isBootstrapping = false }
         // bootstrap の fire-and-forget migrate と直列化（六次レビュー指摘 4）: XPC await 中の
         // migrate がリセット完走後に stale スナップショットで resume すると、リセット済みアプリへ
         // 孤児ドメインを re-add / add 失敗時は pending フラグを残置し得る。完了を待ってから壊す。
-        await migrationTask?.value
-        migrationTask = nil
+        await drainDomainMigration()
         // FP ドメイン状態が変わる（disable）ため、開きっぱなしのウィザード / Settings /
         // ポップオーバーへ再取得を促す（六次レビュー指摘 3）。
         defer { fileProviderStateVersion += 1 }

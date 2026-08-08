@@ -218,8 +218,16 @@ struct SetupWizardWindow: View {
         // Settings と同じ変更カウンタで再取得する（五次レビュー指摘 3 — id 無しだとエラー表示の
         // 隣に stale な緑チェックが残る）。ステップ再出現時（Back で bucket 変更後）も走る。
         .task(id: env.fileProviderStateVersion) {
-            fileProviderAlreadyEnabled = await FileProviderController.isEnabled()
-            willRecreateDomain = await env.willRecreateDomain(forBucket: bucket)
+            // 再入時は probe 前に必ず nil へ戻す（七次レビュー指摘 1）: ウィンドウレベル @State の
+            // 前回訪問値が残ると、XPC 往復中の窓で canAdvance ゲート（六次②）が stale 値で
+            // 素通りし、Back → bucket 変更 → Return で警告未レンダリングのまま実行され得る。
+            fileProviderAlreadyEnabled = nil
+            willRecreateDomain = nil
+            // 単一 probe（七次レビュー指摘 5）: isEnabled を別途叩くと警告条件が異時点の
+            // 2 スナップショット合成になり、片方だけ失敗したとき矛盾表示になる。
+            let probe = await env.probeDomainRecreation(forBucket: bucket)
+            willRecreateDomain = probe.recreate
+            fileProviderAlreadyEnabled = probe.enabled
         }
     }
 

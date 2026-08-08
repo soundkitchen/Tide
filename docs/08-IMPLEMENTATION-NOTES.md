@@ -704,6 +704,25 @@ dataless 一覧が見える」体験（クリーンインストール復旧の�
   ⑥ クリーンインストール分岐に enable 失敗の再起動横断リトライが無い（再作成分岐と非対称・Low）→
   `enable()` が add の**前**に pending-add フラグを立てる（成功時クリア・migrate の
   setupCompleted ゲート + 未設定回収と組合せで全分岐対称の自己修復）。
+- **PR #101 七次レビュー対応（2026-08-09・7 件 = 修正 6 + バックログ 1）**: ① Back 再入時の
+  stale `@State` が probe ゲート（六次②）を素通しにする（High — 前回訪問の非 nil 値が XPC
+  往復中の窓で canAdvance を満たし、bucket 変更後の Return が警告未レンダリングのまま
+  disableForRecreation へ到達）→ `.task` 本体の先頭（await より前）で両 `@State` を nil リセット
+  ② factoryReset に `isBootstrapping` ガードが無く `disable()` の XPC 窓で bootstrap が割り込める
+  （Medium — ドレイン済みのはずの migrationTask 新規 spawn = 六次④の再開 / 消される直前の
+  config・Keychain で signaler 再起動）→ completeSetup と同じガードを冒頭に + migrate 自己解放を
+  **世代番号検査付き**に（Task は値型で identity 比較不可のため `migrationGeneration` で代替）
+  ③ Settings の Enable/Disable だけ migrate ドレイン規約の外（Low）→ `drainDomainMigration()`
+  共通チョークポイント + `enableFileProviderDomain()` / `disableFileProviderDomain()` ラッパを
+  AppEnvironment に新設し 3 変更点（completeSetup / factoryReset / Settings）で統一 ④ doc
+  コメントの取り違え（willRecreateDomain の契約が noteFileProviderDomainStateChanged に付随・
+  Nit）→ 是正 ⑤ probe が isEnabled を 2 回叩き警告条件が異時点 2 スナップショットの合成
+  （Cleanup）→ `probeDomainRecreation(forBucket:) -> (recreate, enabled)` の**単一 probe** へ統合
+  （completeSetup は recreate 側のみ使用・XPC 1 往復削減）⑥ `userVisibleURLOrFallback` を
+  private 化（呼び出しは scope 開始込みの `openUserVisibleFolderInFinder()` に一本化済み・
+  scope 開始漏れの再導入扉を閉じる）⑦ pending-add フラグの命令的ステートマシン化（4 箇所分散）→
+  「望ましい FP 状態 + 単一 reconcile」への宣言的リファクタを docs/09 バックログへ（本 PR
+  実施不要と合意）。
 
 ### バースト RMW 競合の恒久対処（Issue #91・2026-07-26）
 

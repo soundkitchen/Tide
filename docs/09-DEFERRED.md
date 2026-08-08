@@ -423,3 +423,13 @@ ETag は GCS が MD5/`-n` を保証しない（CRC32C）が、**Tide は sha256 
   反映漏れ = 無音のマニフェスト乖離になるため、TideCore へファクトリ（例:
   `ManifestFileEntry.forUploadedData(_:put:deviceId:)`）を切って app / core / FP 拡張で共用する
   （PR #101 四次レビュー指摘 6・follow-up 合意）。
+- **pending-add フラグの宣言的リファクタ（「望ましい FP 状態」+ 単一 reconcile 化）**:
+  `migrationPendingAddKey` の書き手/消し手が `enable()`（add 前 set・成功後 clear）/
+  `disableForRecreation()`（remove 前 set）/ `disable()`（remove 前 clear）+ 消費者
+  `migrateStaleDomainsIfNeeded`（setupCompleted ゲート付き回収）の 4 箇所に分散し、各所が特定の
+  インターリービングへの順序不変条件を個別コメントで担う命令的ステートマシンになっている
+  （PR #101 の三次①・四次①・六次⑥とレビューのたびにパッチが積まれた経緯自体が脆さの証拠）。
+  次にドメイン変更点を足すとき（pause / 第 2 ドメイン等）に順序を独力で再導出させないため、
+  **永続化するのは「望ましい FP 状態」（enabled/disabled の意図）1 本 + 起動時/変更後の単一
+  reconcile 関数**へ集約するリファクタを積んでおく（PR #101 七次レビュー指摘 7・本 PR での
+  実施は不要と合意）。

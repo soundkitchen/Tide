@@ -166,14 +166,17 @@ struct SettingsWindow: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+                // env のラッパ経由（七次レビュー指摘 3）: 素の FileProviderController.enable/disable を
+                // 直接叩くと bootstrap の in-flight migrate と交錯する（ドメイン変更前の migrate
+                // ドレインは completeSetup / factoryReset と共通の規約）。
                 Button("Enable File Provider") {
                     runFileProviderAction(
-                        FileProviderController.enable,
+                        env.enableFileProviderDomain,
                         successMessage: String(localized: "Enabled — check “Tide” under Locations in Finder (~/Library/CloudStorage)."))
                 }
                 Button("Disable File Provider") {
                     runFileProviderAction(
-                        FileProviderController.disable,
+                        env.disableFileProviderDomain,
                         successMessage: String(localized: "File Provider domain removed."))
                 }
                 if let fileProviderMessage {
