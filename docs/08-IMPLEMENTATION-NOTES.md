@@ -544,6 +544,48 @@ folderSync へ戻る経路を UI / defaults の両面から閉じる（動機 = 
   再起動中等）に限られ、SIGSTOP 手段では **LS 拒否の成否は未検証のまま**（縮退コードは
   best-effort + `opened=` ログ観測の位置づけを維持。発火実例を観測したら成否を追記）。
 
+#### ウィザード fpOnly ネイティブ化（v0.3.0 #97・2026-08-08）
+
+v0.3.0 第 2 段（設計原本 = `docs/09` v0.3.0 節・Issue #97）。セットアップウィザードから
+ローカル同期フォルダの概念を消し、「セットアップ完了 = Finder の『場所』に Tide が出て
+dataless 一覧が見える」体験（クリーンインストール復旧の完成形）にする。#96 の運用注意
+だった「factoryReset / 再セットアップ禁止」は本変更のマージで解除。
+
+- **ステップ構成**: credentials → bucket → provisioning → **fileProvider**（旧 folder を置換）→
+  done。fileProvider ステップは説明（Finder の「場所」に Tide が現れ、ファイルは開いた時に
+  ダウンロード）+ `FileProviderController.isEnabled()` の現況表示（再セットアップ経路向け・
+  nil = 取得失敗は表示しないだけで進行は妨げない）。**有効化ボタンは置かない** —
+  「Start syncing」= `completeSetup` が enable を内包する。
+- **`completeSetup(credentials:bucket:region:)` シグネチャ置換**（fpOnly 版の並置はしない）:
+  `syncMode = .fpOnly` 明示書込（冒頭・#96 前倒し分の維持 = factoryReset 後の不在窓を閉じる）→
+  Keychain 保存 → config 書込（bucket / region / setupCompleted）→ `isBootstrapping` ガード →
+  `FileProviderController.enable()`（既有効の再 add は成功/no-op。失敗は throw → ウィザードに
+  エラー表示・設定は保存済みなので Settings の Enable ボタンでも回復可）→ `.syncignore` seed →
+  `launchEngineFromCurrentConfig()` + `bootstrapFailure = nil`。**順序が本質**: 保存前に
+  enable すると拡張が未設定状態で起動してエラー列挙になる。security-scoped bookmark 発行と
+  `syncRootPath` / `syncRootBookmark` 書込は削除（fpOnly に syncRoot 面が無い。security L1 追記）。
+- **seed の S3 直書き化**: 新規バケット（`getIndex() == nil`）限定で
+  `SyncIgnoreMatcher.defaultTemplate` を `files/.syncignore` へ PUT +
+  `ManifestUpdater.updateFileEntry(base: nil)` 合流（`S3RestoreService` と同型の書込・best-effort
+  非致命・確定点 signal で FP レプリカへ即時反映）。既存バケット参加時は作らない（従来どおり）。
+  旧実装（ローカル同期フォルダへ書く）は fpOnly boot では誰も読まずマニフェストへ届かなかった
+  （#96 の既知の過渡・PR #100 レビュー指摘 3）。
+- **done 画面**: FP 前提の文言へ差替（既存バケットのデータは「プレースホルダとして表示・開いた時
+  にダウンロード」）+「Open Tide in Finder」ボタン追加。scope 開始ロジックは
+  `FileProviderController.openUserVisibleFolderInFinder()` へ抽出し、ポップオーバーと共用
+  （B-2 受け入れで踏んだ scope 開始漏れバグの構造的再発防止）。
+- **folder 系 UI の物理削除**: `@State syncRootPath` / `folderView` / `chooseFolder` /
+  `validateSyncRoot` / done の Folder 行 / `applyImported` の syncRootPath 充填。温存の線引き =
+  FSEvents「コード温存」の対象は folderSync 復帰資産（エンジン側）であり、ウィザード UI は
+  git revert で丸ごと戻せるため削除してよい。再許可パネル文言キー（`Tide needs access…` /
+  `Grant Access`）は温存デッド経路（`requestSyncRootAccessViaPanel`）が参照するため残す。
+- **xcstrings**: folder 系キー一式 + `Sync Folder`（#96 から持ち越しの step title）+ 参照ゼロ
+  だった旧 done 文言キー（`Setup complete. Tide will now sync your folder to S3.`）を削除・
+  credentials の import 説明文を「bucket and region」へ是正・fileProvider ステップ / done の
+  新キーを追加（ja 訳・`extractionState: manual`）。
+
+### バースト RMW 競合の恒久対処（Issue #91・2026-07-26）
+
 #83 受け入れで実測した「100 件バーストで index.json CAS が枯渇 → 部分完了
 （孤児オブジェクト + stale index 宣言）」の恒久対処。3 層で潰す（方針 = ②+③+① 複合・
 2026-07-26 ユーザ確定）:

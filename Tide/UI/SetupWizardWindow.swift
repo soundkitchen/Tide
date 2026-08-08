@@ -12,17 +12,19 @@ struct SetupWizardWindow: View {
     @State private var secretAccessKey: String = ""
     @State private var bucket: String = ""
     @State private var region: String = "ap-northeast-1"
-    @State private var syncRootPath: String = ""
     @State private var bucketSetupLog: [String] = []
     @State private var isWorking: Bool = false
     @State private var errorMessage: String?
     @State private var pendingCreateBucket: Bool = false
+    /// FP ドメインの現況（fileProvider ステップの表示専用・再セットアップ経路向け）。
+    /// nil = 未取得/取得失敗（表示しないだけで進行は妨げない）。
+    @State private var fileProviderAlreadyEnabled: Bool?
 
     enum Step: Int, CaseIterable {
         case credentials = 0
         case bucket = 1
         case provisioning = 2
-        case folder = 3
+        case fileProvider = 3
         case done = 4
 
         var title: String {
@@ -30,7 +32,7 @@ struct SetupWizardWindow: View {
             case .credentials: return String(localized: "AWS Credentials")
             case .bucket:      return String(localized: "Bucket")
             case .provisioning:return String(localized: "Provisioning")
-            case .folder:      return String(localized: "Sync Folder")
+            case .fileProvider:return String(localized: "Tide in Finder")
             case .done:        return String(localized: "Ready")
             }
         }
@@ -49,7 +51,7 @@ struct SetupWizardWindow: View {
                 case .credentials: credentialsView
                 case .bucket:      bucketView
                 case .provisioning:provisioningView
-                case .folder:      folderView
+                case .fileProvider:fileProviderView
                 case .done:        doneView
                 }
             }
@@ -111,7 +113,7 @@ struct SetupWizardWindow: View {
         case .credentials: return String(localized: "Next")
         case .bucket:      return String(localized: "Test & Provision")
         case .provisioning:return String(localized: "Continue")
-        case .folder:      return String(localized: "Start syncing")
+        case .fileProvider:return String(localized: "Start syncing")
         case .done:        return String(localized: "Finish")
         }
     }
@@ -124,8 +126,8 @@ struct SetupWizardWindow: View {
             return !bucket.isEmpty && !region.isEmpty
         case .provisioning:
             return !isWorking
-        case .folder:
-            return !syncRootPath.isEmpty
+        case .fileProvider:
+            return true
         case .done:
             return true
         }
@@ -145,7 +147,7 @@ struct SetupWizardWindow: View {
             Divider()
             HStack {
                 Button("Import settings…") { importSettings() }
-                Text("Have a Tide settings file from another Mac? Import it to pre-fill the bucket, region, and folder.")
+                Text("Have a Tide settings file from another Mac? Import it to pre-fill the bucket and region.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -181,38 +183,38 @@ struct SetupWizardWindow: View {
         }
     }
 
-    private var folderView: some View {
+    private var fileProviderView: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Choose the local folder to sync into the bucket. `.git/` and other hidden files will be included.")
+            Text("Tide will appear in the Finder sidebar under Locations. Your files show up as placeholders and download when you open them.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
-            HStack {
-                TextField("Folder path", text: $syncRootPath)
-                    .textFieldStyle(.roundedBorder)
-                Button("Choose…") { chooseFolder() }
-            }
-            if !syncRootPath.isEmpty {
-                let warn = validateSyncRoot(syncRootPath)
-                if let warn {
-                    Text(warn)
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                }
+            Text("No local sync folder is needed. Press “Start syncing” to enable the Tide folder and begin syncing.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if fileProviderAlreadyEnabled == true {
+                // 再セットアップ経路: FP ドメインが既に有効なら伝える（enable は冪等なのでそのまま進める）
+                Label("The Tide folder is already enabled on this Mac.", systemImage: "checkmark.circle")
+                    .font(.callout)
+                    .foregroundStyle(.green)
             }
         }
+        .task { fileProviderAlreadyEnabled = await FileProviderController.isEnabled() }
     }
 
     private var doneView: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Setup complete. Tide will sync your folder with S3 (uploads and downloads).")
+            Text("Setup complete. Tide is now available in the Finder sidebar under Locations.")
                 .font(.callout)
-            Text("If this bucket already has data from another Mac, those files will be downloaded on the first scan.")
+            Text("If this bucket already has data, files appear as placeholders and download when you open them.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Text("• Bucket: \(bucket)")
             Text("• Region: \(region)")
-            Text("• Folder: \(syncRootPath)")
             Text("• Device ID: \(env.config.deviceId)").font(.caption).foregroundStyle(.secondary)
+            Button("Open Tide in Finder") {
+                Task { await FileProviderController.openUserVisibleFolderInFinder() }
+            }
+            .padding(.top, 4)
         }
     }
 
@@ -231,8 +233,8 @@ struct SetupWizardWindow: View {
         case .bucket:
             await runProvisioning()
         case .provisioning:
-            step = .folder
-        case .folder:
+            step = .fileProvider
+        case .fileProvider:
             await runStartSyncing()
         case .done:
             dismissWindow(id: "setup")
@@ -377,8 +379,7 @@ struct SetupWizardWindow: View {
             try await env.completeSetup(
                 credentials: creds,
                 bucket: bucket,
-                region: region,
-                syncRootPath: syncRootPath
+                region: region
             )
             // L7: 成功したらメモリ上の鍵をすぐ手放す（参照を切る。ヒープ上のバイトは GC 任せ）
             accessKeyId = ""
@@ -412,48 +413,10 @@ struct SetupWizardWindow: View {
     /// payload の tunables を config に反映し、接続フィールド（@State）を事前充填する。
     /// 接続設定は provisioning で使うため @State にだけ入れ（completeSetup が最終的に config へ確定する）、
     /// tunables はウィザードに UI が無いものも含めて config に持ち回る。
+    /// `syncRootPath` は読まない（#97: fpOnly にローカル同期フォルダは無い。旧 export の値は無視）。
     private func applyImported(_ payload: SettingsTransfer.Payload) {
         SettingsTransfer.applyTunables(payload, to: env.config)
         if let b = payload.bucketName, !b.isEmpty { bucket = b }
         if let r = payload.region, !r.isEmpty { region = r }
-        if let s = payload.syncRootPath, !s.isEmpty { syncRootPath = s }
-    }
-
-    private func chooseFolder() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        panel.title = String(localized: "Choose a sync folder")
-        if panel.runModal() == .OK, let url = panel.url {
-            syncRootPath = url.path
-        }
-    }
-
-    private func validateSyncRoot(_ path: String) -> String? {
-        let lower = path.lowercased()
-        if lower.contains("/library/mobile documents") || lower.contains("/icloud") {
-            return String(localized: "⚠️ iCloud Drive paths can cause sync conflicts; please choose another folder.")
-        }
-        // ホームディレクトリ直下 / Library / システム領域は危険な選択肢。
-        // App Sandbox 下の NSHomeDirectory() はコンテナホームを返し実ホーム判定が死ぬので、
-        // 実ユーザホーム（getpwuid 由来）を使う（PR #49 レビュー #3）。
-        let home = PathValidator.realHomeDirectory()
-        let normalized = (path as NSString).standardizingPath
-        let dangerousExact: Set<String> = [
-            home, "\(home)/Library", "/", "/Users", "/Applications", "/System", "/Library"
-        ]
-        if dangerousExact.contains(normalized) {
-            return String(localized: "⚠️ This folder is too broad to sync safely. Pick a specific subfolder.")
-        }
-        if normalized.hasPrefix("\(home)/Library/") || normalized.hasPrefix("/System/") {
-            return String(localized: "⚠️ System or Library paths are not suitable for sync; pick a regular folder.")
-        }
-        var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir) else {
-            return String(localized: "Path does not exist.")
-        }
-        if !isDir.boolValue { return String(localized: "Path is not a directory.") }
-        return nil
     }
 }

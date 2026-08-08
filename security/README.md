@@ -76,7 +76,7 @@ F4 の是正内容（2026-06-11・M4 Sync Activity 対応に同梱）: `recentEr
 | M5 | アップロードの TOCTOU | ✅ Fixed（2026-06-02・M3。`NoFollowFileReader` で `O_NOFOLLOW` 単一 FD 化。→ F3 / L9 も同根で一括） |
 | M6 | ダウンロード書込の祖先 symlink によるルート脱出 | ✅ Fixed（2026-06-01・F2。`PathValidator.resolveForWrite`） |
 | M7 | 復元ストリーミングのサイズ無制限（M4 の回帰） | ✅ Fixed（2026-06-02。2026-06-04 サブ D-D3 で機構を `Downloader` sink の `total > entry.size` 判定へ移動） |
-| L1 | App Sandbox 無効 | ✅ Fixed（2026-07-02・M5 Phase 2。Sandbox 有効化 + 同期フォルダを security-scoped bookmark 化。欠落時は起動時パネルで再許可・パス不一致は拒否） |
+| L1 | App Sandbox 無効 | ✅ Fixed（2026-07-02・M5 Phase 2。Sandbox 有効化 + 同期フォルダを security-scoped bookmark 化。欠落時は起動時パネルで再許可・パス不一致は拒否。**2026-08-08・v0.3.0 #97**: 新規セットアップは bookmark を発行しない〈fpOnly に syncRoot 面が無い〉・解決系は folderSync デッド経路として温存・`files.user-selected.read-write` は panel 系で引き続き必要） |
 | L2 | 機密ファイル除外 | ✅ Fixed |
 | L3 | openSyncFolder URL 検証 | ✅ Fixed |
 | L4 | UI 経由のエラー詳細 | ✅ Fixed（H2 と一括） |

@@ -1,5 +1,6 @@
 import TideCore
 import AppKit
+import CryptoKit
 import Foundation
 import Observation
 
@@ -386,84 +387,83 @@ final class AppEnvironment {
         return resolved
     }
 
-    /// セットアップウィザード完了時に呼ぶ。
+    /// セットアップウィザード完了時に呼ぶ（#97・fpOnly ネイティブ）。同期の実体は FP レプリカのみで
+    /// ローカル同期フォルダは存在しないため、security-scoped bookmark の発行・`syncRootPath` /
+    /// `syncRootBookmark` の書込は行わない。順序が本質: **config/Keychain 保存 → FP enable →
+    /// seed → signaler 起動**。保存前に enable すると拡張が未設定状態で起動してエラー列挙になる
+    /// （docs/09 v0.3.0 節）。
     func completeSetup(
         credentials: AWSCredentials,
         bucket: String,
-        region: String,
-        syncRootPath: String
+        region: String
     ) async throws {
-        // v0.3.0（#96・PR #100 レビュー指摘 2 = #97 二重化の前倒し）: factoryReset がキーを
+        // v0.3.0（#96・PR #100 レビュー指摘 2 = #97 二重化）: factoryReset がキーを
         // 一時削除した後、同一セッションの再セットアップは bootstrap の正規化書込（起動時のみ）を
         // 通らないため、書かないと次回起動まで syncMode 不在 = soak の DB 凍結見張りが静かに
-        // 非武装のままになる。**throw し得る処理（bookmark 発行 / Keychain 保存）より前**に書く —
+        // 非武装のままになる。**throw し得る処理（Keychain 保存 / FP enable）より前**に書く —
         // 途中失敗でも不在窓を無条件に閉じるため（冪等・他に依存しない。再レビュー指摘 3）。
         config.syncMode = .fpOnly
-
-        // App Sandbox 下で以後の起動でも同期フォルダへアクセスできるよう、確定前に
-        // security-scoped bookmark を発行する（ウィザードの Choose… パネルで選択済みなら成立）。
-        // 手入力パス等でアクセス権が無ければここで失敗し、setupCompleted を立てる前に中断する。
-        // NOTE（v0.3.0 過渡・#96〜#97）: fpOnly boot はこの bookmark を使わない。#97（ウィザード
-        // fpOnly ネイティブ化）で bookmark 発行・フォルダ選択ステップごと削除予定（docs/09）。
-        let syncRootURL = URL(fileURLWithPath: syncRootPath, isDirectory: true)
-        let bookmark: Data
-        do {
-            bookmark = try syncRootURL.bookmarkData(options: [.withSecurityScope])
-        } catch {
-            throw SyncError.invalidSyncRoot(
-                "cannot access the folder (select it with the Choose… button): \(error)")
-        }
 
         try keychain.save(credentials)
         config.bucketName = bucket
         config.region = region
-        config.syncRootPath = syncRootPath
-        config.syncRootBookmark = bookmark
         config.setupCompleted = true
 
-        // 二重起動防止（PR #7 レビュー Low）: setupCompleted を立てた後の seed/launch の await 中に、
-        // ポップオーバーから走る MenuBarContent.task → bootstrap() が engine==nil で通過して
-        // 2 つ目の SyncEngine を起動するのを防ぐ（bootstrap() は isBootstrapping を見て即 return する）。
+        // 二重起動防止（PR #7 レビュー Low）: setupCompleted を立てた後の enable/seed/launch の
+        // await 中に、ポップオーバーから走る MenuBarContent.task → bootstrap() が signaler==nil で
+        // 通過して 2 つ目の signaler を起動するのを防ぐ（bootstrap() は isBootstrapping を見て即 return する）。
         isBootstrapping = true
         defer { isBootstrapping = false }
 
-        // 新規バケットのときだけ既定 .syncignore を置く（既存バケット参加時は競合回避のため作らない）
-        // NOTE（v0.3.0 過渡・#96〜#97）: seed は**ローカル同期フォルダ**へ書くため、fpOnly boot に
-        // なった今は誰も読まず S3 マニフェストへ届かない（新規バケットが既定 ignore を持たない）。
-        // #97 で S3 直書き（`files/.syncignore` PUT + ManifestUpdater 合流）へ変更予定（docs/09）。
-        // 過渡期間は再セットアップ自体を禁止（Issue #96 運用注意）。
-        let syncRoot = URL(fileURLWithPath: syncRootPath, isDirectory: true)
+        // FP ドメイン有効化（fpOnly の同期実体）。既有効の再 add は成功/no-op。失敗は throw →
+        // ウィザードにエラー表示（設定は保存済みなので Settings の Enable ボタンからも回復できる）。
+        try await FileProviderController.enable()
+
+        // 新規バケットのときだけ既定 .syncignore を S3 へ直接 seed（既存バケット参加時は作らない）
         await Self.seedDefaultSyncIgnoreIfNewBucket(
-            credentials: credentials, bucket: bucket, region: region,
-            deviceId: config.deviceId, syncRoot: syncRoot
+            credentials: credentials, bucket: bucket, region: region, deviceId: config.deviceId
         )
 
         try await launchEngineFromCurrentConfig()
-        // 復旧成功＝失敗状態を解消（PR #7 レビュー Medium）。これ以降は engine != nil 経路でも維持される。
+        // 復旧成功＝失敗状態を解消（PR #7 レビュー Medium）。これ以降は signaler != nil 経路でも維持される。
         bootstrapFailure = nil
     }
 
-    /// ローカルに `.syncignore` が無く、かつリモートにマニフェストも無い（＝まだ誰も同期していない
-    /// 新規バケット）ときだけ、既定の除外テンプレートを `<syncRoot>/.syncignore` に書く。
-    /// 既存バケットに参加する場合は他デバイスの `.syncignore` と競合する恐れがあるので作らない。
-    /// 失敗しても致命的ではない（同期は続行）。
+    /// リモートにマニフェストが無い（＝まだ誰も同期していない新規バケット）ときだけ、既定の除外
+    /// テンプレートを S3 の `files/.syncignore` へ直接 PUT し、`ManifestUpdater` の共有チョーク
+    /// ポイントで entry を確定する（#97・`S3RestoreService` と同型の書込）。fpOnly にローカル
+    /// 同期フォルダは無いため S3 が唯一の書き先で、FP レプリカへは enumerateChanges で自然反映
+    /// される（書込確定点の signal で即時化）。既存バケットに参加する場合は他デバイスの
+    /// `.syncignore` と競合する恐れがあるので作らない。失敗しても致命的ではない（同期は続行）。
     private static func seedDefaultSyncIgnoreIfNewBucket(
-        credentials: AWSCredentials, bucket: String, region: String,
-        deviceId: String, syncRoot: URL
+        credentials: AWSCredentials, bucket: String, region: String, deviceId: String
     ) async {
         do {
-            let localURL = try PathValidator.resolveSafely(relativePath: ".syncignore", syncRoot: syncRoot)
-            // ローカルに既にあれば触らない（symlink も「ある」扱い）
-            if FileManager.default.fileExists(atPath: localURL.path) { return }
-
             let s3 = try TideS3Client(
                 credentials: credentials, region: region, bucket: bucket, deviceId: deviceId
             )
             // リモートにマニフェストがあれば既存バケット → 作らない
             if try await s3.getIndex() != nil { return }
 
-            try SyncIgnoreMatcher.defaultTemplate.write(to: localURL, atomically: true, encoding: .utf8)
-            AppLogger.sync.info("Seeded default .syncignore for new bucket")
+            let data = Data(SyncIgnoreMatcher.defaultTemplate.utf8)
+            let put = try await s3.putObject(key: "files/.syncignore", data: data)
+            let now = ISO8601.now()
+            let entry = ManifestFileEntry(
+                size: Int64(data.count),
+                mtime: now,
+                sha256: HashCalculator.hex(SHA256.hash(data: data)),
+                s3VersionId: put.versionId,
+                etag: put.etag,
+                deviceId: deviceId,
+                uploadedAt: now
+            )
+            let updater = ManifestUpdater(
+                store: s3,
+                deviceId: deviceId,
+                onManifestDidWrite: { Task { @MainActor in FileProviderController.signalRemoteChanges() } }
+            )
+            _ = try await updater.updateFileEntry(for: ".syncignore", base: nil, newEntry: entry)
+            AppLogger.sync.info("Seeded default .syncignore for new bucket (S3 direct)")
         } catch {
             AppLogger.sync.error("Failed to seed default .syncignore: \(String(describing: error), privacy: .private)")
         }
