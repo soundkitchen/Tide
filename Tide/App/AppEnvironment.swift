@@ -220,13 +220,7 @@ final class AppEnvironment {
     func makeS3RestoreService() -> S3RestoreService? {
         guard engine == nil, signaler != nil, let s3 else { return nil }
         guard let tmpDir = try? TideTmpDirectory.cacheTmp() else { return nil }
-        let updater = ManifestUpdater(
-            store: s3,
-            deviceId: config.deviceId,
-            // 復元の書込確定点で FP レプリカへ即時 signal（アプリ Uploader の onManifestWrite と
-            // 同じ配線・coalesce は FileProviderController 側）。定期 HEAD の次周期を待たず反映される。
-            onManifestDidWrite: { Task { @MainActor in FileProviderController.signalRemoteChanges() } }
-        )
+        let updater = Self.makeSignalingManifestUpdater(store: s3, deviceId: config.deviceId)
         return S3RestoreService(
             client: s3,
             put: s3,
@@ -235,6 +229,20 @@ final class AppEnvironment {
             uploadSizeLimitBytes: config.uploadSizeLimitBytes,
             downloadLimiter: RateLimiter(ratePerSec: Double(config.downloadBandwidthBytesPerSec)),
             uploadLimiter: RateLimiter(ratePerSec: Double(config.uploadBandwidthBytesPerSec))
+        )
+    }
+
+    /// 書込確定点で FP レプリカへ即時 signal する配線付き `ManifestUpdater`（S3 内復元 / seed 共用・
+    /// PR #101 レビュー指摘 2）。アプリ Uploader の onManifestWrite と同じ配線・coalesce は
+    /// FileProviderController 側。定期 HEAD の次周期を待たず反映される。構築をここへ寄せ、
+    /// 呼び出し側ごとの手書き配線による signal 漏れ（PR #56 レビュー ④ の警戒）を構造的に防ぐ。
+    private static func makeSignalingManifestUpdater(
+        store: any ManifestStore, deviceId: String
+    ) -> ManifestUpdater {
+        ManifestUpdater(
+            store: store,
+            deviceId: deviceId,
+            onManifestDidWrite: { Task { @MainActor in FileProviderController.signalRemoteChanges() } }
         )
     }
 
@@ -404,16 +412,31 @@ final class AppEnvironment {
         // 途中失敗でも不在窓を無条件に閉じるため（冪等・他に依存しない。再レビュー指摘 3）。
         config.syncMode = .fpOnly
 
+        // 二重起動防止（PR #7 レビュー Low）: 以降の await（ドメイン作り直し / enable / seed /
+        // launch）中に、ポップオーバーから走る MenuBarContent.task → bootstrap() が signaler==nil
+        // で通過して 2 つ目の signaler を起動するのを防ぐ（bootstrap() は isBootstrapping を見て
+        // 即 return する）。最初の suspension point より前に立てる。
+        isBootstrapping = true
+        defer { isBootstrapping = false }
+
+        // 別バケットへの切替は FP ドメインを作り直す（PR #101 レビュー指摘 1）: `enable()` の
+        // 既有効 no-op はレプリカを温存するため、旧バケット由来の保留書込（dirty item）が残り、
+        // 拡張は書込時に共有 config から bucket を読む（`ExtensionServices.fromSharedConfig`）ので
+        // fileproviderd の再試行がそれらを**新バケットへ**アップロードして静かに混入させる。
+        // disable はドメインごと保留書込を破棄する（PR #61 記録）が、旧バケットの内容を新バケットへ
+        // 流すより安全側。**config 上書き前に旧値と比較し、disable 失敗は config 未更新のまま
+        // throw** — 先に config を書くと失敗後のリトライが「同一バケット」に見えて作り直しが
+        // スキップされ、混入窓が残る。同一バケットの再セットアップ（クリーンインストール復旧 /
+        // 認証情報の再設定）は従来どおりレプリカ温存（再 add no-op）。
+        if let previousBucket = config.bucketName, !previousBucket.isEmpty, previousBucket != bucket {
+            AppLogger.ui.info("Recreating File Provider domain for bucket switch: \(previousBucket, privacy: .private) -> \(bucket, privacy: .private)")
+            try await FileProviderController.disable()
+        }
+
         try keychain.save(credentials)
         config.bucketName = bucket
         config.region = region
         config.setupCompleted = true
-
-        // 二重起動防止（PR #7 レビュー Low）: setupCompleted を立てた後の enable/seed/launch の
-        // await 中に、ポップオーバーから走る MenuBarContent.task → bootstrap() が signaler==nil で
-        // 通過して 2 つ目の signaler を起動するのを防ぐ（bootstrap() は isBootstrapping を見て即 return する）。
-        isBootstrapping = true
-        defer { isBootstrapping = false }
 
         // FP ドメイン有効化（fpOnly の同期実体）。既有効の再 add は成功/no-op。失敗は throw →
         // ウィザードにエラー表示（設定は保存済みなので Settings の Enable ボタンからも回復できる）。
@@ -423,6 +446,12 @@ final class AppEnvironment {
         await Self.seedDefaultSyncIgnoreIfNewBucket(
             credentials: credentials, bucket: bucket, region: region, deviceId: config.deviceId
         )
+
+        // 再セットアップ（ウィザード再実行）経路: 旧 signaler を止めてから現行 config で再起動する。
+        // 止めないと旧インスタンスの pollTask が旧設定（別バケット切替なら旧バケット）の index を
+        // HEAD し続ける（PR #101 レビュー指摘 1 の隣接論点）。初回セットアップは nil = no-op。
+        signaler?.stop()
+        signaler = nil
 
         try await launchEngineFromCurrentConfig()
         // 復旧成功＝失敗状態を解消（PR #7 レビュー Medium）。これ以降は signaler != nil 経路でも維持される。
@@ -457,11 +486,7 @@ final class AppEnvironment {
                 deviceId: deviceId,
                 uploadedAt: now
             )
-            let updater = ManifestUpdater(
-                store: s3,
-                deviceId: deviceId,
-                onManifestDidWrite: { Task { @MainActor in FileProviderController.signalRemoteChanges() } }
-            )
+            let updater = makeSignalingManifestUpdater(store: s3, deviceId: deviceId)
             _ = try await updater.updateFileEntry(for: ".syncignore", base: nil, newEntry: entry)
             AppLogger.sync.info("Seeded default .syncignore for new bucket (S3 direct)")
         } catch {

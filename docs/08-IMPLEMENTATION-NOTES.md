@@ -598,6 +598,18 @@ dataless 一覧が見える」体験（クリーンインストール復旧の�
   Sync Folder」呼称は使わない）。実効は FP createItem 側（`ManifestIgnoreCache`）で維持・
   一覧表示の復権が必要になったら別 Issue。「Excluded patterns (built-in)」セクションは静的定数
   ソースのため不変。
+- **PR #101 レビュー対応（2026-08-08・2 件）**: ① **別バケットへの切替は `completeSetup` が
+  FP ドメインを作り直す**（disable → enable。CONFIRMED）— `enable()` の既有効 no-op はレプリカを
+  温存するため旧バケット由来の保留書込（dirty item）が残り、拡張は書込時に共有 config から
+  bucket を読む（`ExtensionServices.fromSharedConfig`）ので fileproviderd の再試行がそれらを
+  新バケットへ静かに混入させる。**比較は config 上書き前・disable 失敗は config 未更新のまま
+  throw**（先に config を書くと失敗後のリトライが「同一バケット」に見えて作り直しがスキップされ
+  混入窓が残る）。disable は保留書込を破棄する（PR #61 記録）が旧内容を新バケットへ流すより
+  安全側。隣接論点として **completeSetup は launch 前に旧 signaler を stop**（止めないと旧
+  インスタンスの pollTask が旧設定の index を HEAD し続ける）。同一バケットの再セットアップは
+  従来どおりレプリカ温存（再 add no-op）。② signal 配線付き `ManifestUpdater` の構築を
+  `makeSignalingManifestUpdater(store:deviceId:)` ファクトリへ集約（S3 内復元 / seed 共用・
+  呼び出し側ごとの手書き配線による signal 漏れ〈PR #56 レビュー ④ の警戒〉を構造的に防止）。
 
 ### バースト RMW 競合の恒久対処（Issue #91・2026-07-26）
 
