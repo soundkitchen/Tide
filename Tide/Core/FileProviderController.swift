@@ -46,9 +46,15 @@ enum FileProviderController {
 
     /// 旧世代を含む全ドメインを外す（factoryReset からも呼ぶ）。
     static func disable() async throws {
-        try await NSFileProviderManager.removeAllDomains()
-        // 明示的な無効化は移行再開の予約より優先する（残すと次回起動で勝手に再有効化される）。
+        // 明示的な無効化は移行再開の予約（pending-add）より優先する（残すと次回起動で勝手に
+        // 再有効化される）。フラグ除去は removeAllDomains の**前**（PR #101 三次レビュー指摘 1）:
+        // 後ろに置くと remove の throw（fileproviderd 無応答等）が呼び出し側の `try?`
+        // （factoryReset）に握りつぶされたときフラグが生存し、全消し済みのアプリでも次回起動の
+        // `migrateStaleDomainsIfNeeded`（setupCompleted ゲートより前に走る）が FP ドメインを
+        // 無言で re-add → 未設定拡張のエラー列挙になる。先に消せば remove 失敗時はドメインが
+        // 残るだけ（フラグ無しでも実害なし・Disable の再操作で回復できる）。
         TideAppGroup.sharedDefaults().removeObject(forKey: migrationPendingAddKey)
+        try await NSFileProviderManager.removeAllDomains()
         AppLogger.ui.info("File Provider domains removed")
     }
 

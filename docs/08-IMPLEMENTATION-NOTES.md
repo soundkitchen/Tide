@@ -558,12 +558,15 @@ dataless 一覧が見える」体験（クリーンインストール復旧の�
   「Start syncing」= `completeSetup` が enable を内包する。
 - **`completeSetup(credentials:bucket:region:)` シグネチャ置換**（fpOnly 版の並置はしない）:
   `syncMode = .fpOnly` 明示書込（冒頭・#96 前倒し分の維持 = factoryReset 後の不在窓を閉じる）→
-  Keychain 保存 → config 書込（bucket / region / setupCompleted）→ `isBootstrapping` ガード →
-  `FileProviderController.enable()`（既有効の再 add は成功/no-op。失敗は throw → ウィザードに
-  エラー表示・設定は保存済みなので Settings の Enable ボタンでも回復可）→ `.syncignore` seed →
-  `launchEngineFromCurrentConfig()` + `bootstrapFailure = nil`。**順序が本質**: 保存前に
-  enable すると拡張が未設定状態で起動してエラー列挙になる。security-scoped bookmark 発行と
-  `syncRootPath` / `syncRootBookmark` 書込は削除（fpOnly に syncRoot 面が無い。security L1 追記）。
+  `isBootstrapping` ガード（最初の suspension point より前）→ 旧 signaler stop（再レビュー ②）→
+  ドメイン作り直し判定 + `disableForRecreation()`（レビュー指摘 1 / 再レビュー ①③）→
+  Keychain 保存 → config 書込（bucket / region / setupCompleted）→ `.syncignore` seed
+  （再レビュー ④）→ `FileProviderController.enable()`（既有効の再 add は成功/no-op。失敗は
+  throw → ウィザードにエラー表示・設定は保存済みなので Settings の Enable ボタンでも回復可）→
+  `launchEngineFromCurrentConfig()` + `bootstrapFailure = nil`。**順序が本質**: 保存前に enable
+  すると拡張が未設定状態で起動してエラー列挙になり、enable 後に seed を置くと拡張の先行書込で
+  新規バケット判定が誤り得る。security-scoped bookmark 発行と `syncRootPath` /
+  `syncRootBookmark` 書込は削除（fpOnly に syncRoot 面が無い。security L1 追記）。
 - **seed の S3 直書き化**: 新規バケット（`getIndex() == nil`）限定で
   `SyncIgnoreMatcher.defaultTemplate` を `files/.syncignore` へ PUT +
   `ManifestUpdater.updateFileEntry(base: nil)` 合流（`S3RestoreService` と同型の書込・best-effort
@@ -639,6 +642,15 @@ dataless 一覧が見える」体験（クリーンインストール復旧の�
   （「同期フォルダ選択」→「File Provider ドメイン有効化」）/ docs/06（bookmark 発行の世代注記 +
   entitlement の現用途）/ `ConfigStore.syncRootPath`・`SettingsTransfer` の「正規の書き手 =
   completeSetup」コメント（書き手は `resolveSyncRootAccess` の追随更新のみへ）。
+- **PR #101 三次レビュー対応（2026-08-08・2 件）**: ① factoryReset が pending-add フラグを
+  残し得る件（PLAUSIBLE/Low。`disableForRecreation` → 途中失敗でフラグ残置 → factoryReset の
+  `disable()` が removeAllDomains の throw を呼び出し側 `try?` で握りつぶすとフラグ生存 →
+  `ConfigStore.reset` の消し込み対象外のため、全消し済みアプリで次回起動の migrate
+  〈setupCompleted ゲートより前に走る〉が FP ドメインを無言 re-add = 未設定拡張のエラー列挙）→
+  `disable()` のフラグ除去を removeAllDomains の**前**へ移動（明示的無効化の意図は remove
+  失敗でも勝つ・remove 失敗ならドメイン残存なのでフラグ無しでも実害なし・Disable 再操作で
+  回復可）② 本節 completeSetup bullet の記載順序が旧実装のままだった件（docs のみ）→
+  最終実装の順序（stop 冒頭化・seed の enable 前倒し込み）へ是正。
 
 ### バースト RMW 競合の恒久対処（Issue #91・2026-07-26）
 
