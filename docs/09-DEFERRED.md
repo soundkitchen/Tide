@@ -439,3 +439,26 @@ ETag は GCS が MD5/`-n` を保証しない（CRC32C）が、**Tide は sha256 
   MenuBar / Settings / ウィザードの 3 面に複製され、1 バンプで同一事実へ最大 3 本の domains()
   XPC が並走・各ビューが別スナップショットを観測し得る。observable な `fileProviderEnabled` を
   env に 1 本置き各ビューは読むだけにする）も併せて行う。
+
+---
+
+## deviceId のバケット変更時再生成（2026-08-12・Issue 化せず本メモで追跡）
+
+`ConfigStore.deviceId` は初回アクセス時に「当時のコンピュータ名（`Host.current().localizedName`・
+スペースはハイフン化）+ UUID 先頭 8 文字」で一度だけ生成し UserDefaults へ永続保存する
+（以降不変・`reset()` でも温存）。このため `scutil --set ComputerName` 等でコンピュータ名を
+変えても Settings / マニフェスト上の表示名は旧名のまま残る。途中で変えると S3 マニフェスト上
+「別デバイスからの書込」に見えるため、ライフサイクル途中の再生成はしない設計（実害は表示上の
+識別のみ・同期ロジックは非依存）。
+
+**改善案（ユーザ合意 2026-08-12）**: バケット変更 = マニフェスト名義がゼロから始まるタイミング
+なので、`completeSetup` のバケット変更検知（`probeDomainRecreation` / FP ドメイン作り直し分岐）
+に合わせて deviceId キーを削除 → 次アクセスで現行コンピュータ名から再生成する。実装時の留意点:
+
+1. **条件は「バケットが実際に変わった」（`previousBucket != bucket`）に限定**。同一バケットの
+   再セットアップ（認証情報の再設定等）で再生成すると同一バケット内に別デバイス名義が生える。
+2. **順序**: キー削除は `config.bucketName` 上書きと `seedDefaultSyncIgnoreIfNewBucket`
+   （`config.deviceId` を読む）より前。遅いと旧 ID が新バケットの初回書込に使われる。
+3. **ウィザードの表示整合**: 確認ステップが Device ID を表示している（`SetupWizardWindow`）ため、
+   completeSetup 内で再生成すると表示した ID と実際に使われる ID がずれる。表示側の扱い
+   （再生成後の値を表示する等）は実装時に決める。
