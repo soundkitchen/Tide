@@ -24,6 +24,15 @@ enum FileProviderController {
     }()
 
     static func enable() async throws {
+        // 未確定のレジストリ epoch bump をここで確定する（PR #106 レビュー指摘 2 の系）:
+        // 「直前の Disable が timeout（結果不明）→ 後着で remove 完了」の並びだと、この add が
+        // **新レプリカ**を作る。bump せずに add すると新レプリカの拡張が旧レジストリを有効
+        // epoch として読む = #104 再発。レプリカが実は生存していた場合（remove 真失敗）は
+        // 健全なレジストリを失うが、Disable → Enable はユーザ意図として作り直しサイクルであり
+        // 喪失は有界（バッジ再報告で復元・仮想フォルダ温存/後始末予約の喪失のみ）。
+        if TideAppGroup.sharedDefaults().bool(forKey: epochBumpPendingKey) {
+            commitRegistryEpochBump()
+        }
         // add の**前**に pending-add フラグを立てる（PR #101 六次レビュー指摘 6）: enable の throw
         // （XPC 一時失敗）を再起動横断で自己修復可能にする — setupCompleted 済みなら次回起動の
         // `migrateStaleDomainsIfNeeded` が add を再開し、未設定なら同ゲートがフラグを回収する。
@@ -45,8 +54,7 @@ enum FileProviderController {
     /// 従来どおり `disable()`（フラグも消す）を使うこと。
     static func disableForRecreation() async throws {
         TideAppGroup.sharedDefaults().set(true, forKey: migrationPendingAddKey)
-        bumpRegistryEpoch()
-        try await boundedXPC("removeAllDomains()") { try await NSFileProviderManager.removeAllDomains() }
+        try await removeAllDomainsInvalidatingRegistries()
         AppLogger.ui.info("File Provider domains removed for recreation (pending re-add)")
     }
 
@@ -60,22 +68,48 @@ enum FileProviderController {
         // 無言で re-add → 未設定拡張のエラー列挙になる。先に消せば remove 失敗時はドメインが
         // 残るだけ（フラグ無しでも実害なし・Disable の再操作で回復できる）。
         TideAppGroup.sharedDefaults().removeObject(forKey: migrationPendingAddKey)
-        bumpRegistryEpoch()
-        try await boundedXPC("removeAllDomains()") { try await NSFileProviderManager.removeAllDomains() }
+        try await removeAllDomainsInvalidatingRegistries()
         AppLogger.ui.info("File Provider domains removed")
     }
 
-    /// FP 拡張レジストリ（`PersistedPathSet` 3 本 = 実体化バッジ報告済み / 仮想フォルダ /
-    /// 除外後始末予約）のドメイン epoch を進める（Issue #104）。レジストリの内容はレプリカに
-    /// 紐づく保証で、レプリカ破棄を跨いで生き残るとバッジ永久不点灯（報告済み = 差分なし）等で
-    /// 固着するため、**レプリカを破棄する除去経路は必ずこの bump とセット**にする（呼び漏れ =
-    /// #104 再発。現行の呼び手 = `disable` / `disableForRecreation` / `migrateStaleDomainsIfNeeded`
-    /// の現行ドメイン再作成分岐）。**remove の前**に呼ぶ — 後ろだと remove 成功 → bump 前
-    /// クラッシュで stale が生き残る。前なら remove 失敗時にレジストリを無駄に失うだけ
-    /// （バッジは再報告で復元・仮想フォルダの温存保証喪失は既存の全体破棄と同じ有界な安全側）。
-    private static func bumpRegistryEpoch() {
+    /// レジストリ epoch bump が「予約済み・未確定」であることを示すフラグ（group defaults・
+    /// Issue #104 / PR #106 レビュー指摘 1〜3）。remove 成功前のクラッシュ / timeout で残った
+    /// 予約は、`enable()`（add 前に確定）と `migrateStaleDomainsIfNeeded` 冒頭（ドメイン実在の
+    /// 観測で確定 or 取り下げ）が回収する。
+    private static let epochBumpPendingKey = "fileProviderEpochBumpPending"
+
+    /// 全ドメイン除去 + FP 拡張レジストリ（`PersistedPathSet` 3 本 = 実体化バッジ報告済み /
+    /// 仮想フォルダ温存 / 除外後始末予約）の epoch 無効化のチョークポイント（Issue #104 /
+    /// PR #106 レビュー指摘 3）。レジストリの内容はレプリカに紐づく保証で、レプリカ破棄を
+    /// 跨いで生き残るとバッジ永久不点灯（報告済み = 差分なし）等で固着する。**レプリカを破棄
+    /// する除去は必ずここを通すこと** — 素の `removeAllDomains()` 直呼びは #104 再発の扉。
+    ///
+    /// bump は **remove 成功後**に確定する（pending 予約 → remove → commit。レビュー指摘 1・2）:
+    /// - **先 bump にしない**（指摘 2）: bump → remove の順だと、remove XPC 窓（最大 10 秒）で
+    ///   fileproviderd が生成した新しい拡張インスタンスが**新 epoch を capture** し、死にゆく
+    ///   レプリカの実体化セット等を新 epoch でスタンプし得る（= 作り直し後の新レプリカがそれを
+    ///   有効値として読み #104 が再発）。remove 成功後なら旧レプリカの全書き手は旧 epoch
+    ///   capture 済みで、遅延 persist ごと無効化される。
+    /// - **remove 失敗（throw）では bump しない**（指摘 1）: timeout（fileproviderd 無応答）は
+    ///   日常的な失敗モードで、レプリカは生きたまま使われ続ける可能性が高い。ここで bump すると
+    ///   健全なレプリカから仮想フォルダの存在根拠（レジストリが唯一）を奪い、`item(for:)` の
+    ///   noSuchItem → デーモンの掃除で**ユーザの空フォルダが実際に消える**。pending は残し、
+    ///   後着でレプリカが実は消えていた場合の確定は `enable()` / 次回起動の観測が担う。
+    /// - remove 成功 → commit 前のクラッシュは pending が生き残り、次回起動の
+    ///   `migrateStaleDomainsIfNeeded` 冒頭が「現行ドメイン不在」の観測で bump を確定する。
+    private static func removeAllDomainsInvalidatingRegistries() async throws {
+        TideAppGroup.sharedDefaults().set(true, forKey: epochBumpPendingKey)
+        try await boundedXPC("removeAllDomains()") { try await NSFileProviderManager.removeAllDomains() }
+        commitRegistryEpochBump()
+    }
+
+    /// 予約済みの epoch bump を確定する（新 UUID へ前進 + pending クリア）。呼び出しは
+    /// 「レプリカ破棄が確定した点」だけ: remove 成功直後 / add で新レプリカを作る直前
+    /// （`enable()`・migrate の再作成分岐）/ 起動時の不在観測。
+    private static func commitRegistryEpochBump() {
         ConfigStore().bumpFileProviderDomainEpoch()
-        AppLogger.ui.notice("File Provider registry epoch bumped (domain removal)")
+        TideAppGroup.sharedDefaults().removeObject(forKey: epochBumpPendingKey)
+        AppLogger.ui.notice("File Provider registry epoch bumped (replica destroyed)")
     }
 
     /// FP ドメインの登録状態。**nil = 取得失敗**（fileproviderd 無応答等・登録の有無は不明）。
@@ -163,7 +197,23 @@ enum FileProviderController {
         // 有界化（十次レビュー指摘 1）: この migrate は drainDomainMigration 経由で setupGate
         // 保持側（completeSetup 等）から await されるため、内部 XPC が無界だとゲート固着に波及する。
         // timeout = 取得失敗（空扱い）→ no-op で戻る（フラグ類は温存 = 次回起動で再試行）。
-        let domains = (try? await boundedXPC("domains()") { try await NSFileProviderManager.domains() }) ?? []
+        let fetchedDomains = try? await boundedXPC("domains()") { try await NSFileProviderManager.domains() }
+        // 予約済み epoch bump の起動時確定（Issue #104 / PR #106 レビュー指摘 1・2）:
+        // 「remove 成功 → commit 前」のクラッシュ / timeout 中断をここで回収する。現行ドメイン
+        // **不在** = 前回の除去は実際に完了していた → bump 確定（この後の add 分岐が新レプリカを
+        // 作る前に旧レジストリを無効化）。**実在** = 前回の remove は本当に失敗しレプリカ生存 →
+        // 予約を取り下げる（生きたレジストリ = 仮想フォルダの存在根拠を奪わない。観測後に後着
+        // remove が完了する極小窓は容認 — その場合も Disable → Enable の再操作で回復できる）。
+        // 取得失敗（nil）は判定不能 → 予約温存（次回起動 / enable() で再判定）。
+        if let fetchedDomains, defaults.bool(forKey: epochBumpPendingKey) {
+            if fetchedDomains.contains(where: { $0.identifier == domain.identifier }) {
+                defaults.removeObject(forKey: epochBumpPendingKey)
+                AppLogger.ui.notice("File Provider registry epoch bump withdrawn (current replica survived)")
+            } else {
+                commitRegistryEpochBump()
+            }
+        }
+        let domains = fetchedDomains ?? []
         let staleDomains = domains.filter { $0.identifier != domain.identifier }
         let hasCurrent = domains.contains { $0.identifier == domain.identifier }
 
@@ -205,17 +255,23 @@ enum FileProviderController {
         if setupCompleted {
             defaults.set(true, forKey: migrationPendingAddKey)
         }
-        // レジストリ epoch（Issue #104）: 現行 identifier のドメインが**無い**ときだけ bump する
-        // — この分岐の add（またはフラグ経由の後続 add）が現行レプリカをゼロから作るため、
-        // 既存レジストリはすべて死んだレプリカ由来の stale。hasCurrent なら現行レプリカは温存
-        // される（per-domain remove は stale "poc" だけ外す・PR #61 レビュー #2）ので bump しない
-        // — してしまうと生きているレプリカの報告済み/温存/予約を無駄に破棄する。
+        // レジストリ epoch（Issue #104）: 現行 identifier のドメインが**無い**ときだけ予約 →
+        // stale 除去成功後に確定する — この分岐の add（またはフラグ経由の後続 add）が現行
+        // レプリカをゼロから作るため、既存レジストリはすべて死んだレプリカ由来の stale。
+        // 確定は add より**前**（後だと新レプリカの拡張が旧 epoch を capture して stale を有効値
+        // として読む）・stale remove の成功より**後**（チョークポイントと同じ pending → commit
+        // 順序 = 途中失敗では bump しない）。hasCurrent なら現行レプリカは温存される
+        // （per-domain remove は stale "poc" だけ外す・PR #61 レビュー #2）ため予約自体しない —
+        // bump すると生きているレプリカの報告済み/温存/予約を無駄に破棄する。
         if !hasCurrent {
-            bumpRegistryEpoch()
+            defaults.set(true, forKey: epochBumpPendingKey)
         }
         do {
             for stale in staleDomains {
                 try await boundedXPC("remove(stale)") { try await NSFileProviderManager.remove(stale) }
+            }
+            if !hasCurrent {
+                commitRegistryEpochBump()
             }
             if !hasCurrent && setupCompleted {
                 try await boundedXPC("add(domain)") { try await NSFileProviderManager.add(domain) }

@@ -174,9 +174,16 @@ public actor PersistedPathSet {
               let data = try? Data(contentsOf: fileURL),
               let payload = try? JSONDecoder().decode(Payload.self, from: data),
               payload.schemaVersion == Self.currentSchemaVersion,
-              payload.bucket == bucket,
-              payload.epoch == epoch
+              payload.bucket == bucket
         else { return }
+        guard payload.epoch == epoch else {
+            // ドメイン作り直し跨ぎの stale（Issue #104）。設計どおりの全体破棄だが、事後調査で
+            // 「意図した破棄」と「意図せぬ epoch 伝播不良（stale capture）」を切り分けられるよう
+            // notice（永続）で残す（PR #106 レビュー指摘 5）。ファイル名は固定のレジストリ名・
+            // epoch はローカル生成のランダム UUID でどちらも機密性なし（.public で相関可能に）。
+            AppLogger.fileProvider.notice("persisted path set discarded (\(fileURL.lastPathComponent, privacy: .public)): domain epoch mismatch (stored \(payload.epoch ?? "none", privacy: .public), current \(self.epoch ?? "none", privacy: .public))")
+            return
+        }
         var validated: Set<String> = []
         for path in payload.paths {
             guard (try? PathValidator.validateRelativePath(path)) != nil else {

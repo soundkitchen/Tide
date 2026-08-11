@@ -842,14 +842,31 @@ Issue #97 本文のチェックリスト（9 項目 + 追補 7b〜7d）を dev �
     消し手 = アプリ」の別プロセス削除レースをファイル削除なしで構造的に解消する（アプリ側から
     レジストリファイルを unlink する案は、atomic 全書きの遅延 persist が stale 内容を復活させる
     レース窓が残るため不採用）。
-  - **bump は remove の前**（`FileProviderController.bumpRegistryEpoch`）: 後ろだと remove
-    成功 → bump 前クラッシュで stale が生き残る。前なら remove 失敗時にレジストリを無駄に
-    失うだけ（バッジは再報告で復元・温存/予約の喪失は既存の全体破棄と同じ有界な安全側）。
-  - **呼び手 = 現行レプリカを破棄する全経路**: `disable()` / `disableForRecreation()` /
-    `migrateStaleDomainsIfNeeded` の現行ドメイン再作成分岐（**`!hasCurrent` のときだけ** —
-    hasCurrent なら per-domain remove は stale "poc" だけを外し現行レプリカは温存されるため
-    bump しない）。**将来ドメイン除去経路を足すときは必ず bump とセットにする**（呼び漏れ =
-    #104 再発）。`enable()` は bump しない（除去時に bump 済み）。
+  - **bump は pending 予約 → remove 成功後に確定**（`removeAllDomainsInvalidatingRegistries` =
+    除去のチョークポイント。当初の「remove 前に bump」は PR #106 レビュー指摘 1・2 で棄却）:
+    ① **先 bump にしない**（指摘 2）— bump → remove の順だと remove XPC 窓（最大 10 秒）で
+    fileproviderd が生成した新しい拡張インスタンスが**新 epoch を capture** し、死にゆく
+    レプリカの実体化セットを新 epoch でスタンプし得る（作り直し後の新レプリカがそれを有効値と
+    して読み #104 が再発）。remove 成功後なら旧レプリカの全書き手は旧 epoch capture 済みで
+    遅延 persist ごと無効化される。② **remove 失敗（throw）では bump しない**（指摘 1）—
+    timeout（fileproviderd 無応答）は日常的な失敗モードでレプリカは生きたまま使われ続ける
+    可能性が高く、そこで bump すると健全なレプリカから仮想フォルダの存在根拠（レジストリが
+    唯一）を奪い、`item(for:)` の noSuchItem → デーモン掃除で**ユーザの空フォルダが実際に
+    消える**（= cosmetic ではない。除外後始末の予約も `.rejectedRemoteChanged` で失敗し続ける）。
+    ③ **pending の回収**: remove 成功 → commit 前のクラッシュ / timeout 中断分は、次回起動の
+    `migrateStaleDomainsIfNeeded` 冒頭が**ドメイン実在の観測**で確定（不在 = 除去は完了して
+    いた → bump）または取り下げ（実在 = remove 真失敗でレプリカ生存 → 生きたレジストリを守る。
+    観測後に後着 remove が完了する極小窓は容認 = Disable → Enable の再操作で回復可）。
+    `enable()` も add の**前**に pending を確定する（「Disable timeout → 後着で remove 完了 →
+    Enable」の並びで新レプリカが旧レジストリを有効値として読むのを防ぐ。レプリカが実は生存して
+    いた場合の喪失は、Disable → Enable = ユーザ意図の作り直しサイクルとして容認・有界）。
+  - **除去経路は必ずチョークポイント経由**（指摘 3）: `disable()` / `disableForRecreation()` は
+    `removeAllDomainsInvalidatingRegistries` を通す（素の `removeAllDomains()` 直呼びは #104
+    再発の扉。重複していた 2 関数の remove 本体もここに畳み込み）。`migrateStaleDomainsIfNeeded`
+    の現行ドメイン再作成分岐は per-domain remove のため同ヘルパーを使わないが、同じ
+    pending → commit 順序を守る（**`!hasCurrent` のときだけ**予約 — hasCurrent なら per-domain
+    remove は stale "poc" だけを外し現行レプリカは温存されるため bump しない。確定は add より
+    **前** = 後だと新レプリカの拡張が旧 epoch を capture する）。
   - **姉妹レジストリも対象 = 3 本すべて（ユーザ確定 2026-08-12）**: stale 掲載は、仮想フォルダ =
     消えた dir の空フォルダ合成（レジストリの本来目的「旧 dir 復活防止」と逆向き）、除外後始末 =
     死んだレプリカ由来の削除受理予約、として害にしかならず、作り直し後に失うものはない
@@ -862,7 +879,16 @@ Issue #97 本文のチェックリスト（9 項目 + 追補 7b〜7d）を dev �
   ごと削除するためレジストリも消える。バケット切替は payload の bucket キー不一致で読込時
   全破棄。実際に踏む穴は「**同一バケットの Disable → Enable**」（= capabilities 変更の正規手順
   そのもの）と migrate の作り直し分岐だった。
-- 回帰は `PersistedPathSetTests`（epoch 不一致 / nil 片側 / capture 遅延 persist / v1 破棄）。
+- **観測性**（PR #106 レビュー指摘 5）: アプリ側の bump / 予約取り下げ（notice）に加え、拡張が
+  capture した epoch 値（`ExtensionServices` 構築時）と `PersistedPathSet` の epoch 不一致破棄も
+  notice（永続）でログする — group defaults のプロセス間伝播にタイミング保証は無く、stale
+  capture が起きたとき症状（バッジ不点灯 / 仮想フォルダ消失）から本機構へ辿る手掛かりを残す。
+  値はローカル生成のランダム UUID・ファイル名は固定レジストリ名のためどちらも `.public`
+  （アプリ側ログと相関可能）。
+- 回帰は `PersistedPathSetTests`（epoch 不一致 / nil 片側 / capture 遅延 persist / v1 破棄）+
+  `ConfigStoreTests`（bump の前進 / reset 非対象・`migratableKeys` 非掲載の固定 = レビュー指摘 4
+  〈掲載すると `LegacyStateMigrator` が別マシン由来 epoch を持ち込み生きたレジストリを無言
+  全破棄する〉）。
 
 ### バースト RMW 競合の恒久対処（Issue #91・2026-07-26）
 

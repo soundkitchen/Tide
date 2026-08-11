@@ -180,6 +180,11 @@ struct ExtensionServices: Sendable {
             // アプリが bump しても capture 値は変えない — 遅延 persist は旧 epoch でスタンプされ
             // 次プロセスが破棄する（`PersistedPathSet` の capture 意味論）。
             let domainEpoch = config.fileProviderDomainEpoch
+            // capture 値の観測点（PR #106 レビュー指摘 5）: group defaults のプロセス間伝播に
+            // タイミング保証は無く、stale capture が起きるとバッジ不点灯 / 仮想フォルダ消失の
+            // 症状から本機構へ辿れない。アプリ側の bump ログと突合できるよう notice（永続）で
+            // 残す。値はローカル生成のランダム UUID = 機密性なし（.public で相関可能に）。
+            AppLogger.fileProvider.notice("Extension: captured domain epoch \(domainEpoch ?? "none", privacy: .public)")
             let eventsURL = try? FPEventLog.defaultURL()
             if eventsURL == nil {
                 AppLogger.fileProvider.error("Extension: event log URL unavailable (activity logging disabled)")
