@@ -292,16 +292,16 @@ FP 拡張の書込（deleteItem / modifyItem / createItem / move）は `Extensio
 
 ## L18. File Provider 実体化バッジレジストリの at-rest 内容（プライバシー境界）
 
-**Status:** ✅ Reviewed — 実体化バッジ（Issue #65・2026-07-14）用に「Finder へ最後に報告した実体化済みファイルパス集合」を App Group コンテナ内 Caches に追加。**認証情報を含まず、保存するのは相対パス + bucket 名のみ**で、露出は世代ログ（L16）の真部分集合であることを確認した。
+**Status:** ✅ Reviewed — 実体化バッジ（Issue #65・2026-07-14）用に「Finder へ最後に報告した実体化済みファイルパス集合」を App Group コンテナ内 Caches に追加。**認証情報を含まず、保存するのは相対パス + bucket 名のみ**で、露出は世代ログ（L16）の真部分集合であることを確認した。2026-08-12（Issue #104）: payload にドメイン epoch フィールド（ランダム UUID・ドメイン作り直し検出用の世代マーカー）を追加 — 機密性のある情報を含まず境界は不変。
 
 **該当箇所:** `TideCore/S3/PersistedPathSet.swift`（`<App Group>/Library/Caches/Tide/fileprovider-materialized.json`・仮想フォルダ温存 / 後始末予約と同じ部品の 3 本目のインスタンス。書き手は File Provider 拡張プロセスのみ）。
 
 **重要度:** Low（攻撃者前提なし。本人の App Group コンテナ配下に派生データを置くだけ。新規の機密露出は無し — どのファイルが実体化済みかというローカル状態のみで、内容・メタデータ・認証情報を含まない）。
 
 **境界と対策:**
-- **含まない**: AWS 認証情報・deviceId・ファイル内容・sha 等のメタデータ。`Payload` は `schemaVersion` / `bucket` / `paths`（相対パスの配列）のみ。
+- **含まない**: AWS 認証情報・deviceId・ファイル内容・sha 等のメタデータ。`Payload` は `schemaVersion` / `bucket` / `epoch`（ドメイン世代のランダム UUID・Issue #104）/ `paths`（相対パスの配列）のみ。
 - **at-rest 場所と寿命**: App Group Caches。派生データ = fileproviderd の実体化セット（`enumeratorForMaterializedItems`）からいつでも再観測可能。消えてもバッジが一時的に消えるだけで同期の正しさに影響しない（cosmetic）。`factoryReset` / `make reset` の掃除範囲は L16 と同じ。
-- **読込ゲート**: `PersistedPathSet` 共通の規約（bucket キー・読込時 `validateRelativePath` 再適用・1 件でも不正なら全体破棄・上限 = 本用途は 10,000 に注入）。
+- **読込ゲート**: `PersistedPathSet` 共通の規約（bucket キー・ドメイン epoch キー〈不一致 = ドメイン作り直し跨ぎの stale で全体破棄・Issue #104〉・読込時 `validateRelativePath` 再適用・1 件でも不正なら全体破棄・上限 = 本用途は 10,000 に注入）。
 - **上限超過の安全側**: 溢れた分は報告されない = バッジが付かないだけ。切り詰めは昇順 prefix で決定的（`MaterializedBadge.cappedReport` と `replace(with:)` が同一規則 = 差分再送のチャーンを作らない）。
 
 ## L19. File Provider イベントログの at-rest 内容（プライバシー境界）

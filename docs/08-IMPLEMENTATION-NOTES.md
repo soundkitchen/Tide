@@ -131,7 +131,7 @@ FP ドメイン内のファイル編集（`modifyItem` の .contents）と削除
 - **配信 = enumerateChanges への eventual オーバーレイ（anchor 意味論の外・docs/09 の設計判断どおり）**: **報告点（reported の前進 = `replace(with:)`）は working set の enumerateChanges だけ**（コンテナ enumerator が消費すると working set 経由の配信が空振りしてバッジが固着する）。live と reported の差分（`MaterializedBadge.changedPaths` = 点灯/消灯ファイル + チェック反転 dir）を didUpdate に合流させ、マニフェスト無変化でも badge-only 更新を同一 anchor のまま配る。**dir 反転の before 側は origin（= Finder が最後に見た世代）のツリー基準**（PR #66 レビュー指摘 1）: 両側を新ツリーで計算すると「実体化集合は不変・ツリーだけが変わった」反転（リモート削除で配下全実体化 / 古い mtime のリモート追加で dataless 混入 — どちらも dir の合成 mtime が動かずマニフェスト diff に dir が載らない）が対称差に現れずチェックが固着する。reported の replace は badge 配信の有無と独立に前進（stale パス残りで live != reported が恒常成立 → 空振り signal ループ化するのを防ぐ・同 nit 1）。didUpdate の全 item（マニフェスト diff 分も）のフラグは newReport 基準に統一。move は `renameSubtree` で reported を構造追従（チャーン防止）・削除は `removeSubtree`。fetchContents / createItem / modifyItem の返却 item は実体化済みフラグ付き（内容がローカルにある）だが reported はその場で触らない（先に足すと祖先 dir の反転差分が消える）。
 - **表示**: `FileProviderItem` が `NSFileProviderItemDecorating` 準拠・実体化時のみ `org.izukawa.Tide.materialized`（`project.yml` の `NSFileProviderDecorations` 宣言・BadgeImageType = システム UTI `com.apple.icon-decoration.badge.checkmark`）。ツリー由来の item 構築は `BadgeFlags`（tree + reported → dir 集計 1 回）経由 — プレーン構築で返すと報告済みバッジがメタデータ regress で消えたまま固着するため。判定本体は TideCore の `MaterializedBadge`（純粋・`MaterializedBadgeTests`）。
 - **既知の注意**: ① metadataVersion 形式 + Decorations 追加のため**既存レプリカはドメイン作り直し必須**（capabilities と同じ）。② **個々のファイルの materialize/evict とも OS の実体化セットに現れることを実機確認済み（2026-07-15 受け入れ）** — 設計前提成立（観測数の notice ログで判定）。③ バッジの Label（hover/VoiceOver）は Info.plist 値のため未ローカライズ = en「Downloaded」固定。
-- **実機受け入れ（2026-07-15・全項目パス）で確定した挙動**: dir move は配下の実体化が失われる（dataless 化 = Phase 5-4 パスベース id の帰結）ためバッジも消灯する — 実状態の正しい反映で誤点灯・チャーンなし（単一ファイル rename は id rebind で実体化ごと維持 = バッジも維持）。ドメイン作り直し直後の stale reported（`fileprovider-materialized.json` 残置分）は新レプリカ初回 insert に deco 付きで載る**約 0.3 秒の過渡**の後、badge-only update が deco を除去して自己修復（固着なし）。Finder プレビューペイン表示中の evict は EBUSY で失敗（OS 挙動）。知見一覧は `docs/09` M5 バッジ節。
+- **実機受け入れ（2026-07-15・全項目パス）で確定した挙動**: dir move は配下の実体化が失われる（dataless 化 = Phase 5-4 パスベース id の帰結）ためバッジも消灯する — 実状態の正しい反映で誤点灯・チャーンなし（単一ファイル rename は id rebind で実体化ごと維持 = バッジも維持）。ドメイン作り直し直後の stale reported（`fileprovider-materialized.json` 残置分）は新レプリカ初回 insert に deco 付きで載る**約 0.3 秒の過渡**の後、badge-only update が deco を除去して自己修復~~（固着なし）~~（**後日訂正**: 自己修復は消灯方向のみ — 点灯方向は stale reported が「報告済み = 差分なし」を装い**永久不点灯で固着**することが判明 = Issue #104。恒久対処 = ドメイン epoch リセット・下記「FP レジストリのドメイン epoch リセット」節）。Finder プレビューペイン表示中の evict は EBUSY で失敗（OS 挙動）。知見一覧は `docs/09` M5 バッジ節。
 
 #### FP-only 稼働モード B-0 = モード基盤 + RemoteChangeSignaler（M5 Track B・2026-07-22）
 
@@ -816,6 +816,53 @@ Issue #97 本文のチェックリスト（9 項目 + 追補 7b〜7d）を dev �
   → OS 挙動変化が濃厚。アプリ内 Disable の domain 除去経路では赤バナー正常）。
 - 副次知見: soak launchd agent の plist が消失していた（原因不明・`soak-agent-install` で
   復旧・常駐再開済み）。
+
+#### FP レジストリのドメイン epoch リセット（Issue #104・2026-08-12）
+
+ドメイン作り直し（Disable/Enable・バケット切替・factoryReset）の後、**作り直し前に一度でも
+バッジ報告済みだったパスは再実体化してもバッジ（#65）が二度と点灯しない**固着の恒久対処
+（#97 受け入れの複数回作り直しで顕在化・2026-08-12 実機確認）。
+
+- **機序**: バッジ配信は live（fileproviderd の実体化セット）と reported
+  （`fileprovider-materialized.json` = `PersistedPathSet`）の**差分**だけを working set の
+  enumerateChanges で配る設計（#65）。作り直しはダエモン側の item 記録（バッジ含む）を白紙化
+  するが App Group Caches のレジストリは残存する。残存 reported に載るパスは再実体化すると
+  live と reported の**両方**に現れ = 差分に出ず、バッジ ON が新レプリカへ一度も配信されない。
+  `replace` の前進は非 live の stale 分だけを削ぎ落とし、live 再掲載分は「報告済み」のまま
+  残す = 永久固着（バッジ節の受け入れ知見「stale reported → 自己修復」は消灯方向のみで、
+  点灯方向のこの穴を見えなくしていた）。
+- **対処 = ドメイン epoch（レジストリ削除ではなく世代マーカー・ユーザ確定 2026-08-12）**:
+  アプリがドメイン除去（= レプリカ破棄）のたびに group defaults の
+  `ConfigStore.fileProviderDomainEpoch`（ランダム UUID）を `bumpFileProviderDomainEpoch()` で
+  進め、拡張のレジストリ 3 本（実体化バッジ報告済み / 仮想フォルダ温存 / 除外後始末予約）は
+  **構築時に capture した epoch** で payload をスタンプ・読込時に現行値と不一致なら全体破棄
+  （bucket 不一致と同じ安全側 = 空集合）。schemaVersion は 1 → 2（epoch フィールド追加）。
+  - **capture 意味論が load-bearing**: アプリの bump 後に生き残りの旧拡張プロセスが遅延
+    persist しても旧 epoch でスタンプされるため、次回読込で自動破棄される —「書き手 = 拡張 /
+    消し手 = アプリ」の別プロセス削除レースをファイル削除なしで構造的に解消する（アプリ側から
+    レジストリファイルを unlink する案は、atomic 全書きの遅延 persist が stale 内容を復活させる
+    レース窓が残るため不採用）。
+  - **bump は remove の前**（`FileProviderController.bumpRegistryEpoch`）: 後ろだと remove
+    成功 → bump 前クラッシュで stale が生き残る。前なら remove 失敗時にレジストリを無駄に
+    失うだけ（バッジは再報告で復元・温存/予約の喪失は既存の全体破棄と同じ有界な安全側）。
+  - **呼び手 = 現行レプリカを破棄する全経路**: `disable()` / `disableForRecreation()` /
+    `migrateStaleDomainsIfNeeded` の現行ドメイン再作成分岐（**`!hasCurrent` のときだけ** —
+    hasCurrent なら per-domain remove は stale "poc" だけを外し現行レプリカは温存されるため
+    bump しない）。**将来ドメイン除去経路を足すときは必ず bump とセットにする**（呼び漏れ =
+    #104 再発）。`enable()` は bump しない（除去時に bump 済み）。
+  - **姉妹レジストリも対象 = 3 本すべて（ユーザ確定 2026-08-12）**: stale 掲載は、仮想フォルダ =
+    消えた dir の空フォルダ合成（レジストリの本来目的「旧 dir 復活防止」と逆向き）、除外後始末 =
+    死んだレプリカ由来の削除受理予約、として害にしかならず、作り直し後に失うものはない
+    （レプリカ破棄で仮想フォルダ実体も除外 item も消えている）。`FPEventLog` はレプリカ状態と
+    無関係な履歴のため対象外。
+- **v1 payload は schemaVersion 不一致で一度だけ全体破棄される** = 既存環境の stale レジストリ
+  （実機の固着）が**アプリ更新だけで自己治癒**する（レジストリファイルの手動削除は不要）。
+  本修正は item スキーマ / capabilities に触れないため、適用にドメイン作り直しは不要。
+- **既カバーだった経路（コード確認の記録）**: factoryReset は App Group Caches をディレクトリ
+  ごと削除するためレジストリも消える。バケット切替は payload の bucket キー不一致で読込時
+  全破棄。実際に踏む穴は「**同一バケットの Disable → Enable**」（= capabilities 変更の正規手順
+  そのもの）と migrate の作り直し分岐だった。
+- 回帰は `PersistedPathSetTests`（epoch 不一致 / nil 片側 / capture 遅延 persist / v1 破棄）。
 
 ### バースト RMW 競合の恒久対処（Issue #91・2026-07-26）
 

@@ -45,6 +45,7 @@ enum FileProviderController {
     /// 従来どおり `disable()`（フラグも消す）を使うこと。
     static func disableForRecreation() async throws {
         TideAppGroup.sharedDefaults().set(true, forKey: migrationPendingAddKey)
+        bumpRegistryEpoch()
         try await boundedXPC("removeAllDomains()") { try await NSFileProviderManager.removeAllDomains() }
         AppLogger.ui.info("File Provider domains removed for recreation (pending re-add)")
     }
@@ -59,8 +60,22 @@ enum FileProviderController {
         // 無言で re-add → 未設定拡張のエラー列挙になる。先に消せば remove 失敗時はドメインが
         // 残るだけ（フラグ無しでも実害なし・Disable の再操作で回復できる）。
         TideAppGroup.sharedDefaults().removeObject(forKey: migrationPendingAddKey)
+        bumpRegistryEpoch()
         try await boundedXPC("removeAllDomains()") { try await NSFileProviderManager.removeAllDomains() }
         AppLogger.ui.info("File Provider domains removed")
+    }
+
+    /// FP 拡張レジストリ（`PersistedPathSet` 3 本 = 実体化バッジ報告済み / 仮想フォルダ /
+    /// 除外後始末予約）のドメイン epoch を進める（Issue #104）。レジストリの内容はレプリカに
+    /// 紐づく保証で、レプリカ破棄を跨いで生き残るとバッジ永久不点灯（報告済み = 差分なし）等で
+    /// 固着するため、**レプリカを破棄する除去経路は必ずこの bump とセット**にする（呼び漏れ =
+    /// #104 再発。現行の呼び手 = `disable` / `disableForRecreation` / `migrateStaleDomainsIfNeeded`
+    /// の現行ドメイン再作成分岐）。**remove の前**に呼ぶ — 後ろだと remove 成功 → bump 前
+    /// クラッシュで stale が生き残る。前なら remove 失敗時にレジストリを無駄に失うだけ
+    /// （バッジは再報告で復元・仮想フォルダの温存保証喪失は既存の全体破棄と同じ有界な安全側）。
+    private static func bumpRegistryEpoch() {
+        ConfigStore().bumpFileProviderDomainEpoch()
+        AppLogger.ui.notice("File Provider registry epoch bumped (domain removal)")
     }
 
     /// FP ドメインの登録状態。**nil = 取得失敗**（fileproviderd 無応答等・登録の有無は不明）。
@@ -189,6 +204,14 @@ enum FileProviderController {
         // remove の前にフラグを立てる（remove 成功 → add 失敗/クラッシュでも意図が消えない順序）。
         if setupCompleted {
             defaults.set(true, forKey: migrationPendingAddKey)
+        }
+        // レジストリ epoch（Issue #104）: 現行 identifier のドメインが**無い**ときだけ bump する
+        // — この分岐の add（またはフラグ経由の後続 add）が現行レプリカをゼロから作るため、
+        // 既存レジストリはすべて死んだレプリカ由来の stale。hasCurrent なら現行レプリカは温存
+        // される（per-domain remove は stale "poc" だけ外す・PR #61 レビュー #2）ので bump しない
+        // — してしまうと生きているレプリカの報告済み/温存/予約を無駄に破棄する。
+        if !hasCurrent {
+            bumpRegistryEpoch()
         }
         do {
             for stale in staleDomains {
