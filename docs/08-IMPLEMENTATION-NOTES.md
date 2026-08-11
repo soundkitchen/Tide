@@ -787,6 +787,36 @@ dataless 一覧が見える」体験（クリーンインストール復旧の�
   suggestion どおり `guard !Task.isCancelled` を挿入（設定インポートの逆順 XPC 応答で stale
   判定が新 probe を上書きする無警告破壊経路を封鎖）。
 
+##### 実機受け入れ（2026-08-11・全項目パス）
+
+Issue #97 本文のチェックリスト（9 項目 + 追補 7b〜7d）を dev バケットで全消化し合格。要点:
+
+- **seed の S3 直書き**: 新規バケット経路で `files/.syncignore` + index/shard の整合を実測
+  （entry に sha256/size/versionId 完備）。既存バケット合流では非発動（`.syncignore` の
+  版履歴に新規 PUT なし）を確認。
+- **書込スモーク**: FP レプリカでの作成/編集/削除が各約 3 秒で S3 往復・削除後のシャード
+  後始末正常・`soak-check-fp` 整合 OK。
+- **エラー表示 UI と `boundedXPC`（十次指摘 1）を fileproviderd SIGSTOP で実機実証**:
+  「同期を開始」→ 10 秒きっかりで `removeAllDomains() timed out — fileproviderd is not
+  responding` の赤エラーがウィザードに表示・アプリは無ハング・SIGCONT 後の再実行で成功
+  （pending-add フラグ経由の自己修復設計どおり）。なお**拡張トグル OFF では `add(domain)` が
+  成功してしまいエラー経路は発火しない**（チェックリスト項目 6 の期待側が誤り → Issue #103）。
+- **バケット切替（7b）**: fileProvider ステップのオレンジ警告 →「Recreating File Provider
+  domain」→「domains removed for recreation (pending re-add)」→「File Provider domain
+  added」の正規ログ列 → レプリカが切替先バケット内容と完全一致（1038 件・双方向差分ゼロ =
+  旧バケット由来の残存なし）。
+- 進行ゲート（7d・Return 連打 / Back → bucket 変更 → 再入の一瞬 disabled）・UI 追随
+  （7c・Settings を開いたまま FP セクションが有効表示へ・ポップオーバー赤バナー消滅）・
+  import 誘導（bucket/region のみ事前充填・旧 export の syncRootPath は無視）・ja/en 文言、
+  いずれもパス。
+- **発見バグ 2 群は Issue 化（いずれも #97 リグレッションではない・マージ非阻害と判断）**:
+  **#102** = ウィザード窓が完了後も `@State` を保持（done 出っぱなし / 同一セッションの
+  import 誘導が見かけ上無反応・アプリ再起動で回避可）。**#103** = FP 拡張トグル OFF を検出
+  できず緑表示のまま無音停止（`domains()` ベース検出が現 OS で不成立。#82 受け入れ時は機能
+  → OS 挙動変化が濃厚。アプリ内 Disable の domain 除去経路では赤バナー正常）。
+- 副次知見: soak launchd agent の plist が消失していた（原因不明・`soak-agent-install` で
+  復旧・常駐再開済み）。
+
 ### バースト RMW 競合の恒久対処（Issue #91・2026-07-26）
 
 #83 受け入れで実測した「100 件バーストで index.json CAS が枯渇 → 部分完了
