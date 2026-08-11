@@ -1,3 +1,4 @@
+import AppKit
 import FileProvider
 import Foundation
 import TideCore
@@ -23,15 +24,42 @@ enum FileProviderController {
     }()
 
     static func enable() async throws {
-        try await NSFileProviderManager.add(domain)
+        // add の**前**に pending-add フラグを立てる（PR #101 六次レビュー指摘 6）: enable の throw
+        // （XPC 一時失敗）を再起動横断で自己修復可能にする — setupCompleted 済みなら次回起動の
+        // `migrateStaleDomainsIfNeeded` が add を再開し、未設定なら同ゲートがフラグを回収する。
+        // 再作成分岐（disableForRecreation）だけでなくクリーンインストール分岐も対称になる。
+        TideAppGroup.sharedDefaults().set(true, forKey: migrationPendingAddKey)
+        // timeout throw 時もフラグが残る = 次回起動の migrate が再開する（有界化と自己修復の整合）
+        try await boundedXPC("add(domain)") { try await NSFileProviderManager.add(domain) }
+        // add 完了 = pending-add の意図は満たされた（確定点で消す）。
+        TideAppGroup.sharedDefaults().removeObject(forKey: migrationPendingAddKey)
         AppLogger.ui.info("File Provider domain added")
+    }
+
+    /// ドメイン作り直しの前半（PR #101 再レビュー指摘 1）: **pending-add フラグを立ててから**
+    /// 全ドメインを外し、「有効化済み」の意図を引き継ぐ（`migrateStaleDomainsIfNeeded` と同じ
+    /// 順序 = remove 後の失敗/クラッシュでも意図が消えない）。呼び出し側（completeSetup の
+    /// バケット切替）が remove 後の Keychain 保存 / `enable()` で throw しても、次回起動の
+    /// `migrateStaleDomainsIfNeeded` が add を再開する = 再起動しても直らない無音の同期停止に
+    /// ならない。**明示的な無効化**（factoryReset / Settings の Disable = 再有効化の意図なし）は
+    /// 従来どおり `disable()`（フラグも消す）を使うこと。
+    static func disableForRecreation() async throws {
+        TideAppGroup.sharedDefaults().set(true, forKey: migrationPendingAddKey)
+        try await boundedXPC("removeAllDomains()") { try await NSFileProviderManager.removeAllDomains() }
+        AppLogger.ui.info("File Provider domains removed for recreation (pending re-add)")
     }
 
     /// 旧世代を含む全ドメインを外す（factoryReset からも呼ぶ）。
     static func disable() async throws {
-        try await NSFileProviderManager.removeAllDomains()
-        // 明示的な無効化は移行再開の予約より優先する（残すと次回起動で勝手に再有効化される）。
+        // 明示的な無効化は移行再開の予約（pending-add）より優先する（残すと次回起動で勝手に
+        // 再有効化される）。フラグ除去は removeAllDomains の**前**（PR #101 三次レビュー指摘 1）:
+        // 後ろに置くと remove の throw（fileproviderd 無応答等）が呼び出し側の `try?`
+        // （factoryReset）に握りつぶされたときフラグが生存し、全消し済みのアプリでも次回起動の
+        // `migrateStaleDomainsIfNeeded`（setupCompleted ゲートより前に走る）が FP ドメインを
+        // 無言で re-add → 未設定拡張のエラー列挙になる。先に消せば remove 失敗時はドメインが
+        // 残るだけ（フラグ無しでも実害なし・Disable の再操作で回復できる）。
         TideAppGroup.sharedDefaults().removeObject(forKey: migrationPendingAddKey)
+        try await boundedXPC("removeAllDomains()") { try await NSFileProviderManager.removeAllDomains() }
         AppLogger.ui.info("File Provider domains removed")
     }
 
@@ -40,8 +68,65 @@ enum FileProviderController {
     /// 呼び出し側 UI が実在するドメインへの導線を誤って disable する（PR #100 再レビュー指摘 1）。
     /// 真偽が要る文脈は `== true` / `!= true` で明示的に倒す側を選ぶこと。
     static func isEnabled() async -> Bool? {
-        guard let domains = try? await NSFileProviderManager.domains() else { return nil }
-        return domains.contains { $0.identifier == domain.identifier }
+        // 有界化（十次レビュー指摘 1）: timeout も「取得失敗 = nil」に合流する（呼び出し側の
+        // 既存セマンティクスどおり不明側へ倒れる）。probe 経由の全呼び出し（completeSetup /
+        // ウィザード / Settings / MenuBar / signaler）が一括で有界になる。
+        try? await boundedXPC("domains()") {
+            try await NSFileProviderManager.domains().contains { $0.identifier == domain.identifier }
+        }
+    }
+
+    /// セットアップ完了済みか（migrate の add ゲート用・PR #101 四次レビュー指摘 1 / 九次レビュー
+    /// 指摘 5）。未設定アプリへの add は全分岐で禁止 — 拡張が fromSharedConfig nil の未設定エラー
+    /// 列挙になるため。
+    private static func isSetupCompleted() -> Bool {
+        ConfigStore().setupCompleted
+    }
+
+    /// setupGate 保持区間から待つ fileproviderd XPC の有界化（PR #101 十次レビュー指摘 1）:
+    /// fileproviderd はハング時にエラーも返さず戻らない（#96 受け入れ実測）ため、無界 await は
+    /// ゲートを永久保持して全ライフサイクル操作（bootstrap / completeSetup / factoryReset /
+    /// Enable・Disable）を再起動まで固着させる。TaskGroup は使えない — スコープ終了時に全 child を
+    /// 待つため、キャンセル非対応の XPC が parked だと timeout 側が勝ってもグループごと固着する。
+    /// 一度きり resume の continuation レース（両 Task とも MainActor 直列 = claim は原子的）で
+    /// 有界化する。**timeout しても下層 XPC は中断されない**（後着で完了し得る）ので、後着完了が
+    /// 無害（冪等 add / remove・読み取り）な操作だけを通すこと。
+    private static func boundedXPC<T>(
+        _ label: String, seconds: Double = 10,
+        _ op: @escaping @MainActor () async throws -> T
+    ) async throws -> T {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, Error>) in
+            let once = OnceGate()
+            Task { @MainActor in
+                do {
+                    let value = try await op()
+                    if once.claim() { continuation.resume(returning: value) }
+                } catch {
+                    if once.claim() { continuation.resume(throwing: error) }
+                }
+            }
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(seconds))
+                if once.claim() {
+                    AppLogger.ui.error("File Provider XPC timed out after \(seconds)s: \(label, privacy: .public)")
+                    continuation.resume(throwing: SyncError.ioError(underlying: NSError(
+                        domain: "Tide.FileProviderController", code: -10,
+                        userInfo: [NSLocalizedDescriptionKey: "\(label) timed out — fileproviderd is not responding"]
+                    )))
+                }
+            }
+        }
+    }
+
+    /// `boundedXPC` の一度きり resume ガード（両レース Task が MainActor 直列のため claim は原子的）。
+    @MainActor
+    private final class OnceGate {
+        private var claimed = false
+        func claim() -> Bool {
+            if claimed { return false }
+            claimed = true
+            return true
+        }
     }
 
     /// 移行が「stale 除去済み・現行 add 未完了」で中断したことを示すフラグ（group defaults）。
@@ -60,16 +145,31 @@ enum FileProviderController {
     /// ドメイン無し/現行のみ（かつ pending なし）なら no-op。
     static func migrateStaleDomainsIfNeeded() async {
         let defaults = TideAppGroup.sharedDefaults()
-        let domains = (try? await NSFileProviderManager.domains()) ?? []
+        // 有界化（十次レビュー指摘 1）: この migrate は drainDomainMigration 経由で setupGate
+        // 保持側（completeSetup 等）から await されるため、内部 XPC が無界だとゲート固着に波及する。
+        // timeout = 取得失敗（空扱い）→ no-op で戻る（フラグ類は温存 = 次回起動で再試行）。
+        let domains = (try? await boundedXPC("domains()") { try await NSFileProviderManager.domains() }) ?? []
         let staleDomains = domains.filter { $0.identifier != domain.identifier }
         let hasCurrent = domains.contains { $0.identifier == domain.identifier }
 
         if staleDomains.isEmpty {
             // 前回の移行が「stale 除去後・add 前」で中断していたら add だけ再開する。
             guard defaults.bool(forKey: migrationPendingAddKey) else { return }
+            // 未設定アプリでは add しない（PR #101 四次レビュー指摘 1）: factoryReset 後の
+            // 再セットアップが disableForRecreation 直後（Keychain 保存等）で中断すると、
+            // setupCompleted 未確定のままフラグだけが残る。この migrate は setupCompleted
+            // ゲートより前（bootstrap 冒頭）に走るため、ゲート無しだと全消し済みアプリへ
+            // ドメインを無言 re-add → 拡張が fromSharedConfig nil で未設定エラー列挙になる。
+            // フラグは回収してよい — 正規のセットアップ完了時は enable() が無条件に add する
+            // ためフラグ無しで困らない。
+            guard isSetupCompleted() else {
+                defaults.removeObject(forKey: migrationPendingAddKey)
+                AppLogger.ui.notice("Skipping pending File Provider domain re-add (setup not completed); cleared pending flag")
+                return
+            }
             if !hasCurrent {
                 do {
-                    try await NSFileProviderManager.add(domain)
+                    try await boundedXPC("add(domain)") { try await NSFileProviderManager.add(domain) }
                     AppLogger.ui.info("Resumed File Provider domain migration (add completed)")
                 } catch {
                     // フラグ残置＝次回起動で再試行。設定画面の Enable でも回復できる。
@@ -81,14 +181,21 @@ enum FileProviderController {
             return
         }
 
+        // 未設定アプリでは現行ドメインの add を行わない（四次レビュー指摘 1 の setupCompleted
+        // ゲートを九次レビュー指摘 5 で stale 分岐へも拡大 — factoryReset の disable 失敗握りつぶし
+        // 〈try?〉後は「stale 生存 × 全消し済み」の組合せがあり得る）。stale の**除去だけ**行い、
+        // add はセットアップ完了後の enable() に委ねる（add しないためフラグも立てない）。
+        let setupCompleted = isSetupCompleted()
         // remove の前にフラグを立てる（remove 成功 → add 失敗/クラッシュでも意図が消えない順序）。
-        defaults.set(true, forKey: migrationPendingAddKey)
+        if setupCompleted {
+            defaults.set(true, forKey: migrationPendingAddKey)
+        }
         do {
             for stale in staleDomains {
-                try await NSFileProviderManager.remove(stale)
+                try await boundedXPC("remove(stale)") { try await NSFileProviderManager.remove(stale) }
             }
-            if !hasCurrent {
-                try await NSFileProviderManager.add(domain)
+            if !hasCurrent && setupCompleted {
+                try await boundedXPC("add(domain)") { try await NSFileProviderManager.add(domain) }
             }
             defaults.removeObject(forKey: migrationPendingAddKey)
             AppLogger.ui.info("Migrated stale File Provider domain(s) to current identifier")
@@ -102,6 +209,9 @@ enum FileProviderController {
     /// FP ドメインのルート（`~/Library/CloudStorage/Tide-Tide`）の Finder 表示 URL を返す
     /// （未登録 / 取得失敗は nil）。fpOnly ポップオーバーの「Open Tide in Finder」用（B-1）。
     static func userVisibleURL() async -> URL? {
+        // 意図的に**有界化しない**（十次レビュー指摘 1 の対象外）: setupGate 保持区間から呼ばれず
+        // （メニュー / done 画面のユーザ操作のみ）、#96 受け入れ実測どおりハング時は後着完了で
+        // 正しい Finder が遅れて開く（誤動作なし）。timeout で縮退させる方が体験が悪化する。
         guard let manager = NSFileProviderManager(for: domain) else { return nil }
         return try? await manager.getUserVisibleURL(for: .rootContainer)
     }
@@ -112,12 +222,36 @@ enum FileProviderController {
     /// レプリカ実体 `…/CloudStorage/Tide-Tide` を直接使わないのは意図的な保守側の選択 —
     /// ディレクトリ名は OS が displayName から合成するもので、パス恒常性の公開契約が無い。
     /// `isFallback` は scope 開始の要否判定用（本物の URL は security-scoped・縮退 URL は素のパス）。
-    static func userVisibleURLOrFallback() async -> (url: URL, isFallback: Bool) {
+    /// private（PR #101 七次レビュー指摘 6）: 呼び出しは scope 開始込みの
+    /// `openUserVisibleFolderInFinder()` に一本化されており、外部へ開けておくと
+    /// 「scope 開始漏れ」（B-2 受け入れバグ）を将来の呼び出し側が再導入する扉になる。
+    private static func userVisibleURLOrFallback() async -> (url: URL, isFallback: Bool) {
         if let url = await userVisibleURL() { return (url, false) }
         let fallback = URL(
             fileURLWithPath: PathValidator.realHomeDirectory(), isDirectory: true
         ).appendingPathComponent("Library/CloudStorage", isDirectory: true)
         return (fallback, true)
+    }
+
+    /// FP レプリカ（Finder の「場所 → Tide」）を Finder で開く。URL 取得は XPC 越しなので非同期。
+    /// URL が取れない（fileproviderd 無応答等）ときは `userVisibleURLOrFallback` の縮退 URL
+    /// （実ホームの `~/Library/CloudStorage`）を best-effort で開く（唯一の Finder 導線を無音
+    /// no-op にしない・PR #100 レビュー指摘 4。sandbox 下の LS がこのパスを拒否する可能性は
+    /// 残るため、成否はログで観測する）。ポップオーバーとセットアップ完了画面が共用する
+    /// （#97。security scope の開始漏れ = B-2 受け入れで踏んだバグの構造的再発防止）。
+    static func openUserVisibleFolderInFinder() async {
+        let (url, isFallback) = await userVisibleURLOrFallback()
+        if isFallback {
+            let opened = NSWorkspace.shared.open(url)
+            AppLogger.ui.info("Open Tide in Finder: userVisibleURL unavailable; CloudStorage fallback opened=\(opened)")
+            return
+        }
+        // getUserVisibleURL の返す URL は security-scoped。scope を開始せずに NSWorkspace へ
+        // 渡すと、sandbox 下では LS が「"Tide-Tide" を開くアクセス権がありません」で拒否する
+        // （B-2 実機受け入れで発見・Apple Developer Forums thread 724398 と同事例）。
+        let accessed = url.startAccessingSecurityScopedResource()
+        defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+        NSWorkspace.shared.open(url)
     }
 
     /// リモート変化（pull がシャード変化を取り込んだ / アップロードがマニフェストを書いた）を

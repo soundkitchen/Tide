@@ -56,13 +56,13 @@
         }
       }
     },
-    "Export saves your bucket, region, folder, and preferences (no AWS credentials) to a JSON file. Import restores preferences immediately; bucket/region/folder changes open the Setup Wizard." : {
+    "Export saves your bucket, region, and preferences (no AWS credentials) to a JSON file. Import restores preferences immediately; bucket/region changes open the Setup Wizard." : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "エクスポートはバケット・リージョン・フォルダと環境設定（AWS 認証情報を除く）を JSON ファイルに保存します。インポートは環境設定をすぐに復元し、バケット／リージョン／フォルダの変更はセットアップウィザードを開いて適用します。"
+            "value" : "エクスポートはバケット・リージョンと環境設定（AWS 認証情報を除く）を JSON ファイルに保存します。インポートは環境設定をすぐに復元し、バケット／リージョンの変更はセットアップウィザードを開いて適用します。"
           }
         }
       }
@@ -89,13 +89,13 @@
         }
       }
     },
-    "Preferences imported. Opening Setup Wizard to apply bucket/region/folder changes." : {
+    "Preferences imported. Opening Setup Wizard to apply bucket/region changes." : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "環境設定をインポートしました。バケット／リージョン／フォルダの変更を適用するためセットアップウィザードを開きます。"
+            "value" : "環境設定をインポートしました。バケット／リージョンの変更を適用するためセットアップウィザードを開きます。"
           }
         }
       }
@@ -144,13 +144,13 @@
         }
       }
     },
-    "Have a Tide settings file from another Mac? Import it to pre-fill the bucket, region, and folder." : {
+    "Have a Tide settings file from another Mac? Import it to pre-fill the bucket and region." : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "別の Mac の Tide 設定ファイルがありますか？ インポートするとバケット・リージョン・フォルダを事前入力できます。"
+            "value" : "別の Mac の Tide 設定ファイルがありますか？ インポートするとバケットとリージョンを事前入力できます。"
           }
         }
       }
@@ -937,17 +937,6 @@
         }
       }
     },
-    "• Folder: %@" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "• フォルダ: %@"
-          }
-        }
-      }
-    },
     "• Region: %@" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -955,39 +944,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "• リージョン: %@"
-          }
-        }
-      }
-    },
-    "⚠️ iCloud Drive paths can cause sync conflicts; please choose another folder." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "⚠️ iCloud Drive 配下のパスは同期競合の原因になります。別のフォルダを選択してください。"
-          }
-        }
-      }
-    },
-    "⚠️ System or Library paths are not suitable for sync; pick a regular folder." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "⚠️ System / Library 配下のパスは同期に適しません。通常のフォルダを選択してください。"
-          }
-        }
-      }
-    },
-    "⚠️ This folder is too broad to sync safely. Pick a specific subfolder." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "⚠️ このフォルダは同期対象として広すぎます。特定のサブフォルダを選択してください。"
           }
         }
       }
@@ -1245,35 +1201,13 @@
         }
       }
     },
-    "Choose a sync folder" : {
+    "Checking File Provider status…" : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "同期フォルダを選択"
-          }
-        }
-      }
-    },
-    "Choose the local folder to sync into the bucket. `.git/` and other hidden files will be included." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "バケットへ同期するローカルフォルダを選択してください。`.git/` などの隠しファイルも対象に含まれます。"
-          }
-        }
-      }
-    },
-    "Choose…" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "選択…"
+            "value" : "File Provider の状態を確認しています…"
           }
         }
       }
@@ -1388,13 +1322,13 @@
         }
       }
     },
-    "Folder path" : {
+    "Factory reset was skipped — another operation is in progress. Try again in a moment." : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "フォルダパス"
+            "value" : "ファクトリーリセットは実行されませんでした — 別の処理が進行中です。しばらくしてからもう一度お試しください。"
           }
         }
       }
@@ -1421,13 +1355,13 @@
         }
       }
     },
-    "If this bucket already has data from another Mac, those files will be downloaded on the first scan." : {
+    "If this bucket already has data, files appear as placeholders and download when you open them." : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "このバケットに他の Mac からのデータが既にある場合、初回スキャンでそれらをダウンロードします。"
+            "value" : "このバケットに既にデータがある場合、ファイルはプレースホルダとして表示され、開いた時にダウンロードされます。"
           }
         }
       }
@@ -1465,13 +1399,24 @@
         }
       }
     },
-    "No .syncignore patterns" : {
+    "Exclusion patterns are managed in the .syncignore file inside the Tide folder (Locations in the Finder sidebar). They apply to newly added files only." : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "（.syncignore パターンなし）"
+            "value" : "除外パターンは Tide フォルダ（Finder サイドバー「場所」の Tide）内の .syncignore ファイルで管理します。新しく追加されるファイルにのみ適用されます。"
+          }
+        }
+      }
+    },
+    "No local sync folder is needed. Press “Start syncing” to enable the Tide folder and begin syncing." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ローカルの同期フォルダは不要です。「同期を開始」を押すと Tide フォルダが有効になり、同期が始まります。"
           }
         }
       }
@@ -1527,28 +1472,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Tide 用バケットへの読み書き権限を持つ IAM アクセスキーのペアを貼り付けてください。"
-          }
-        }
-      }
-    },
-    "Path does not exist." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "パスが存在しません。"
-          }
-        }
-      }
-    },
-    "Path is not a directory." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "パスがディレクトリではありません。"
           }
         }
       }
@@ -1729,24 +1652,13 @@
         }
       }
     },
-    "Setup complete. Tide will now sync your folder to S3." : {
+    "Setup complete. Tide is now available in the Finder sidebar under Locations." : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "セットアップが完了しました。Tide がフォルダを S3 に同期します。"
-          }
-        }
-      }
-    },
-    "Setup complete. Tide will sync your folder with S3 (uploads and downloads)." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "セットアップが完了しました。Tide はフォルダを S3 と双方向に同期します（アップロード + ダウンロード）。"
+            "value" : "セットアップが完了しました。Finder のサイドバー「場所」から Tide を利用できます。"
           }
         }
       }
@@ -1795,13 +1707,13 @@
         }
       }
     },
-    "Sync Folder" : {
+    "This setup will recreate the Tide folder. Changes not yet uploaded will be discarded." : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "同期フォルダ"
+            "value" : "このセットアップで Tide フォルダは作り直されます。まだアップロードされていない変更は破棄されます。"
           }
         }
       }
@@ -1853,6 +1765,17 @@
     "Tide" : {
       "comment" : "The name of the app.",
       "isCommentAutoGenerated" : true
+    },
+    "The Tide folder is already enabled on this Mac." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "この Mac では Tide フォルダは既に有効です。"
+          }
+        }
+      }
     },
     "Tide Settings" : {
       "extractionState" : "manual",
@@ -2125,6 +2048,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "アプリのログ・設定・ローカル DB を .zip で保存します（ファイル名/パス・バケット名を含みますが、AWS 認証情報は含みません）。"
+          }
+        }
+      }
+    },
+    "Tide in Finder" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Finder の Tide"
+          }
+        }
+      }
+    },
+    "Tide will appear in the Finder sidebar under Locations. Your files show up as placeholders and download when you open them." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Finder のサイドバー「場所」に Tide が表示されます。ファイルはプレースホルダとして表示され、開いた時にダウンロードされます。"
           }
         }
       }

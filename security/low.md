@@ -4,6 +4,8 @@
 
 **Status:** ✅ Fixed (2026-07-02・M5 Phase 2) — App Sandbox を有効化（`project.yml` entitlements: `com.apple.security.app-sandbox` + `files.user-selected.read-write` + `network.client`）。同期フォルダへのアクセスは security-scoped bookmark で永続化: セットアップ時（`AppEnvironment.completeSetup`）に発行して `ConfigStore.syncRootBookmark` へ保存（2026-05-24 に死蔵キーとして削除した同名キーの本実装）、起動時（`resolveSyncRootAccess`）に解決して scoped アクセスを開始・stale なら再発行。bookmark 欠落/失効（サンドボックス化前からのアップグレード）は起動時に NSOpenPanel で一度だけ再許可を取り、**設定済みフォルダと同一実体（`PathValidator.isSameFileSystemObject` = volume + file id）でない選択は拒否**する（別フォルダを黙って受けると既存 DB との突き合わせで大量の削除誤検出→リモート削除伝播を起こしうるため。パス文字列等値でなく同一性判定なのは、bookmark がリネーム/移動をファイル ID で追跡するため — リネーム時は `syncRootPath` を追随更新し、パネルは出さない。PR #49 レビュー #2）。File Provider 拡張（M5 Phase 3〜）はサンドボックス必須のため、その前提を app 側で先に整えた。
 
+**Status 更新 (2026-08-08・v0.3.0 #97):** 新規セットアップは security-scoped bookmark を**発行しない**（ウィザードの fpOnly ネイティブ化で `completeSetup` から bookmark 発行・`syncRootPath` / `syncRootBookmark` 書込を削除。fpOnly に syncRoot 面が無いため）。解決系（`resolveSyncRootAccess` / `requestSyncRootAccessViaPanel`）は folderSync デッド経路として温存（到達は git revert のみ = docs/09「revert 復帰ランブック」）。entitlement `files.user-selected.read-write` は panel 系（設定 import/export・診断保存）で引き続き必要。
+
 **該当箇所:** `project.yml` entitlements / `Tide/App/AppEnvironment.swift` `resolveSyncRootAccess` `requestSyncRootAccessViaPanel` `completeSetup` / `TideCore/Storage/ConfigStore.swift` `syncRootBookmark`
 
 Hardened Runtime は有効だが、App Sandbox は無効。直配布 + Notarize 前提なら受容可能だが、サンドボックスを将来検討する場合は `tide.syncRootBookmark` の死蔵キー（`ConfigStore.swift:11`, `64`）からも分かるように、security-scoped bookmark 取得 → 永続化 → 再構築のフローが必要。今のコードでは bookmark は実際には保存していない（コード断片だけ残った "intent" 状態）。

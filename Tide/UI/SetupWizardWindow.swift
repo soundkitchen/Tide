@@ -12,17 +12,26 @@ struct SetupWizardWindow: View {
     @State private var secretAccessKey: String = ""
     @State private var bucket: String = ""
     @State private var region: String = "ap-northeast-1"
-    @State private var syncRootPath: String = ""
     @State private var bucketSetupLog: [String] = []
     @State private var isWorking: Bool = false
     @State private var errorMessage: String?
     @State private var pendingCreateBucket: Bool = false
+    /// FP ドメインの現況（fileProvider ステップの表示専用・再セットアップ経路向け）。
+    /// nil = 未取得/取得失敗（表示しないだけで進行は妨げない）。
+    @State private var fileProviderAlreadyEnabled: Bool?
+    /// 「Start syncing」でドメインが作り直される（= 破壊的）か。判定は completeSetup と共有
+    /// （`AppEnvironment.probeDomainRecreation(forBucket:)`・PR #101 五次レビュー指摘 2）。
+    @State private var willRecreateDomain: Bool?
+    /// probe サイクルの世代（.task 起動ごとに +1）。フォールバック Task の自世代検査用
+    /// （十次レビュー指摘 3 — 非構造化 Task は .task(id:) 再起動でキャンセルされないため、
+    /// 旧サイクルの fallback が新サイクルの probe 窓で早期発火するのを防ぐ）。
+    @State private var probeGeneration = 0
 
     enum Step: Int, CaseIterable {
         case credentials = 0
         case bucket = 1
         case provisioning = 2
-        case folder = 3
+        case fileProvider = 3
         case done = 4
 
         var title: String {
@@ -30,7 +39,7 @@ struct SetupWizardWindow: View {
             case .credentials: return String(localized: "AWS Credentials")
             case .bucket:      return String(localized: "Bucket")
             case .provisioning:return String(localized: "Provisioning")
-            case .folder:      return String(localized: "Sync Folder")
+            case .fileProvider:return String(localized: "Tide in Finder")
             case .done:        return String(localized: "Ready")
             }
         }
@@ -49,7 +58,7 @@ struct SetupWizardWindow: View {
                 case .credentials: credentialsView
                 case .bucket:      bucketView
                 case .provisioning:provisioningView
-                case .folder:      folderView
+                case .fileProvider:fileProviderView
                 case .done:        doneView
                 }
             }
@@ -111,7 +120,7 @@ struct SetupWizardWindow: View {
         case .credentials: return String(localized: "Next")
         case .bucket:      return String(localized: "Test & Provision")
         case .provisioning:return String(localized: "Continue")
-        case .folder:      return String(localized: "Start syncing")
+        case .fileProvider:return String(localized: "Start syncing")
         case .done:        return String(localized: "Finish")
         }
     }
@@ -124,8 +133,11 @@ struct SetupWizardWindow: View {
             return !bucket.isEmpty && !region.isEmpty
         case .provisioning:
             return !isWorking
-        case .folder:
-            return !syncRootPath.isEmpty
+        case .fileProvider:
+            // probe（作り直し判定）解決前は進めない（六次レビュー指摘 2）: 無条件 true だと
+            // ステップ表示直後の Return（.defaultAction）が警告を一度もレンダリングしないまま
+            // completeSetup → disableForRecreation に到達し得る。
+            return willRecreateDomain != nil
         case .done:
             return true
         }
@@ -145,7 +157,7 @@ struct SetupWizardWindow: View {
             Divider()
             HStack {
                 Button("Import settings…") { importSettings() }
-                Text("Have a Tide settings file from another Mac? Import it to pre-fill the bucket, region, and folder.")
+                Text("Have a Tide settings file from another Mac? Import it to pre-fill the bucket and region.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -181,38 +193,97 @@ struct SetupWizardWindow: View {
         }
     }
 
-    private var folderView: some View {
+    private var fileProviderView: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Choose the local folder to sync into the bucket. `.git/` and other hidden files will be included.")
+            Text("Tide will appear in the Finder sidebar under Locations. Your files show up as placeholders and download when you open them.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
-            HStack {
-                TextField("Folder path", text: $syncRootPath)
-                    .textFieldStyle(.roundedBorder)
-                Button("Choose…") { chooseFolder() }
-            }
-            if !syncRootPath.isEmpty {
-                let warn = validateSyncRoot(syncRootPath)
-                if let warn {
-                    Text(warn)
+            Text("No local sync folder is needed. Press “Start syncing” to enable the Tide folder and begin syncing.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if willRecreateDomain == nil {
+                // probe 未解決（XPC 応答待ち）。進行ゲート（canAdvance）が閉じている理由を
+                // 可視化する（九次レビュー指摘 7）。10 秒でフォールバック解決する。
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Checking File Provider status…")
                         .font(.caption)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(.secondary)
                 }
             }
+            // 破壊的 recreation の警告は enabled 判定の**外**（六次レビュー指摘 1）: willRecreateDomain
+            // は不明（isEnabled nil = fileproviderd 無応答）を作り直し側に倒すため、警告も同じ側で
+            // 出さないと「domains() 一時失敗 × Start syncing」で無警告破棄になる。既知の未登録
+            // （enabled == false）だけは破棄対象が存在しないため除外（バケット切替でも空作り直し）。
+            // 判定は completeSetup と共有 = バケット切替と素性不明ドメインの両枝をカバー
+            // （四次レビュー指摘 2 / 五次レビュー指摘 2）。
+            if willRecreateDomain == true, fileProviderAlreadyEnabled != false {
+                Label("This setup will recreate the Tide folder. Changes not yet uploaded will be discarded.", systemImage: "exclamationmark.triangle")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+            } else if fileProviderAlreadyEnabled == true, willRecreateDomain == false {
+                // 同一バケットの再セットアップ経路: enable は冪等（再 add no-op）なのでそのまま進める
+                Label("The Tide folder is already enabled on this Mac.", systemImage: "checkmark.circle")
+                    .font(.callout)
+                    .foregroundStyle(.green)
+            }
+        }
+        // completeSetup がドメイン状態を変える（部分失敗で disableForRecreation 済み等）ため、
+        // Settings と同じ変更カウンタで再取得する（五次レビュー指摘 3 — id 無しだとエラー表示の
+        // 隣に stale な緑チェックが残る）。ステップ再出現時（Back で bucket 変更後）も走る。
+        // id には bucket も含める（八次レビュー指摘 1）: 設定インポート（ウィザードのルートの
+        // .onChange）は fileProvider ステップ滞在中でも発火して bucket をその場で書き換えるため、
+        // version のみだと stale な緑チェック + 活性ボタンのまま破壊的作り直しへ進めてしまう。
+        .task(id: "\(env.fileProviderStateVersion)|\(bucket)") {
+            // 再入時は probe 前に必ず nil へ戻す（七次レビュー指摘 1）: ウィンドウレベル @State の
+            // 前回訪問値が残ると、XPC 往復中の窓で canAdvance ゲート（六次②）が stale 値で
+            // 素通りし、Back → bucket 変更 → Return で警告未レンダリングのまま実行され得る。
+            fileProviderAlreadyEnabled = nil
+            willRecreateDomain = nil
+            probeGeneration &+= 1
+            let generation = probeGeneration
+            // タイムアウトフォールバック（九次レビュー指摘 7）: fileproviderd がハングすると
+            // domains() はエラーも返さず戻らない（#96 受け入れ実測）。10 秒で「不明 = 作り直し側」
+            // へ倒して進行ゲートを解く（unknown は警告表示側なので安全・probe が後から返れば実値で
+            // 上書き。completeSetup 側の権威判定は従来どおりで、この値は表示とゲートのみ）。
+            // 自世代検査（十次レビュー指摘 3）: 非構造化 Task は .task(id:) 再起動でキャンセル
+            // されない（defer は parked な本体が戻るまで走らない）ため、旧サイクルの fallback が
+            // 新サイクルの 10 秒契約を破って早期発火しないよう世代で縛る。
+            let fallback = Task { @MainActor in
+                try? await Task.sleep(for: .seconds(10))
+                guard probeGeneration == generation, willRecreateDomain == nil else { return }
+                willRecreateDomain = true
+                // fileProviderAlreadyEnabled は nil のまま = enabled != false で警告が出る
+            }
+            defer { fallback.cancel() }
+            // 単一 probe（七次レビュー指摘 5）: isEnabled を別途叩くと警告条件が異時点の
+            // 2 スナップショット合成になり、片方だけ失敗したとき矛盾表示になる。
+            let probe = await env.probeDomainRecreation(forBucket: bucket)
+            // キャンセル検査（十次レビュー指摘 7）: XPC はキャンセル非対応なので、id 変化で
+            // キャンセルされた旧 task も応答が返れば必ずここへ resume する。無検査だと逆順応答
+            // （新 probe が先・旧 probe が後）で stale 判定が新値を上書きし、緑チェック + 警告
+            // なしのまま破壊的作り直しへ進めてしまう。
+            guard !Task.isCancelled else { return }
+            willRecreateDomain = probe.recreate
+            fileProviderAlreadyEnabled = probe.enabled
         }
     }
 
     private var doneView: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Setup complete. Tide will sync your folder with S3 (uploads and downloads).")
+            Text("Setup complete. Tide is now available in the Finder sidebar under Locations.")
                 .font(.callout)
-            Text("If this bucket already has data from another Mac, those files will be downloaded on the first scan.")
+            Text("If this bucket already has data, files appear as placeholders and download when you open them.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Text("• Bucket: \(bucket)")
             Text("• Region: \(region)")
-            Text("• Folder: \(syncRootPath)")
             Text("• Device ID: \(env.config.deviceId)").font(.caption).foregroundStyle(.secondary)
+            Button("Open Tide in Finder") {
+                Task { await FileProviderController.openUserVisibleFolderInFinder() }
+            }
+            .padding(.top, 4)
         }
     }
 
@@ -231,8 +302,8 @@ struct SetupWizardWindow: View {
         case .bucket:
             await runProvisioning()
         case .provisioning:
-            step = .folder
-        case .folder:
+            step = .fileProvider
+        case .fileProvider:
             await runStartSyncing()
         case .done:
             dismissWindow(id: "setup")
@@ -377,8 +448,7 @@ struct SetupWizardWindow: View {
             try await env.completeSetup(
                 credentials: creds,
                 bucket: bucket,
-                region: region,
-                syncRootPath: syncRootPath
+                region: region
             )
             // L7: 成功したらメモリ上の鍵をすぐ手放す（参照を切る。ヒープ上のバイトは GC 任せ）
             accessKeyId = ""
@@ -412,48 +482,10 @@ struct SetupWizardWindow: View {
     /// payload の tunables を config に反映し、接続フィールド（@State）を事前充填する。
     /// 接続設定は provisioning で使うため @State にだけ入れ（completeSetup が最終的に config へ確定する）、
     /// tunables はウィザードに UI が無いものも含めて config に持ち回る。
+    /// `syncRootPath` は読まない（#97: fpOnly にローカル同期フォルダは無い。旧 export の値は無視）。
     private func applyImported(_ payload: SettingsTransfer.Payload) {
         SettingsTransfer.applyTunables(payload, to: env.config)
         if let b = payload.bucketName, !b.isEmpty { bucket = b }
         if let r = payload.region, !r.isEmpty { region = r }
-        if let s = payload.syncRootPath, !s.isEmpty { syncRootPath = s }
-    }
-
-    private func chooseFolder() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        panel.title = String(localized: "Choose a sync folder")
-        if panel.runModal() == .OK, let url = panel.url {
-            syncRootPath = url.path
-        }
-    }
-
-    private func validateSyncRoot(_ path: String) -> String? {
-        let lower = path.lowercased()
-        if lower.contains("/library/mobile documents") || lower.contains("/icloud") {
-            return String(localized: "⚠️ iCloud Drive paths can cause sync conflicts; please choose another folder.")
-        }
-        // ホームディレクトリ直下 / Library / システム領域は危険な選択肢。
-        // App Sandbox 下の NSHomeDirectory() はコンテナホームを返し実ホーム判定が死ぬので、
-        // 実ユーザホーム（getpwuid 由来）を使う（PR #49 レビュー #3）。
-        let home = PathValidator.realHomeDirectory()
-        let normalized = (path as NSString).standardizingPath
-        let dangerousExact: Set<String> = [
-            home, "\(home)/Library", "/", "/Users", "/Applications", "/System", "/Library"
-        ]
-        if dangerousExact.contains(normalized) {
-            return String(localized: "⚠️ This folder is too broad to sync safely. Pick a specific subfolder.")
-        }
-        if normalized.hasPrefix("\(home)/Library/") || normalized.hasPrefix("/System/") {
-            return String(localized: "⚠️ System or Library paths are not suitable for sync; pick a regular folder.")
-        }
-        var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir) else {
-            return String(localized: "Path does not exist.")
-        }
-        if !isDir.boolValue { return String(localized: "Path is not a directory.") }
-        return nil
     }
 }

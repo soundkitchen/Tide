@@ -51,7 +51,7 @@
 
 ### App Sandbox / security-scoped bookmark（M5 Phase 2・security L1）
 - **entitlements**: `com.apple.security.app-sandbox` + `files.user-selected.read-write`（powerbox パネル）+ `network.client`（aws-sdk-swift）。File Provider 拡張（Phase 3〜）はサンドボックス必須なので app 側で先に整えた。
-- **同期フォルダのアクセス権 = `ConfigStore.syncRootBookmark`**（security-scoped bookmark）。発行はセットアップ確定時（`AppEnvironment.completeSetup`。**setupCompleted を立てる前に**発行し、手入力パス等で権限が無ければ確定前に失敗させる）。解決は `resolveSyncRootAccess`（launchEngine の入口。存在チェックより前＝アクセス確立後でないと fileExists 自体が成立しない）。stale なら再発行。アクセスはメニューバー常駐の生存中ずっと保持（stopAccessing はフォルダ変更時のみ）。
+- **同期フォルダのアクセス権 = `ConfigStore.syncRootBookmark`**（security-scoped bookmark）。**v0.3.0 #97 以降、新規セットアップは bookmark を発行しない**（`completeSetup` から発行・書込を削除 = fpOnly に syncRoot 面が無い。以下は folderSync 世代の記録 → 現行は「ウィザード fpOnly ネイティブ化」節）。旧: 発行はセットアップ確定時（`AppEnvironment.completeSetup`。**setupCompleted を立てる前に**発行し、手入力パス等で権限が無ければ確定前に失敗させる）。解決は `resolveSyncRootAccess`（launchEngine の入口。存在チェックより前＝アクセス確立後でないと fileExists 自体が成立しない。folderSync デッド経路として温存）。stale なら再発行。アクセスはメニューバー常駐の生存中ずっと保持（stopAccessing はフォルダ変更時のみ）。
 - **bookmark 欠落/失効時の再許可**: 起動時に `requestSyncRootAccessViaPanel` が NSOpenPanel（現行フォルダを初期位置・説明メッセージ付き）を一度だけ出す。キャンセルは bootstrapFailure（ポップオーバー再表示で bootstrap 経由の再試行）。**設定済みパスと不一致のフォルダ選択は拒否**する — 別フォルダを黙って受けると既存 DB との突き合わせで大量の「ローカル削除」誤検出（＝リモート削除の伝播）を起こしうるため。
 - **Caches の移設は暗黙**: `TideTmpDirectory` / `DeletedFilesCache` は `.cachesDirectory` 相対のままサンドボックスのコンテナ内へ自然に移る（中断転送の `.part` は失われるが Range 再開が頭からやり直すだけ・削除一覧キャッシュは再列挙で再生成）。
 
@@ -543,6 +543,281 @@ folderSync へ戻る経路を UI / defaults の両面から閉じる（動機 = 
   つまり縮退（CloudStorage open）の発火条件は「XPC が実際にエラーを**返す**状況」（デーモン
   再起動中等）に限られ、SIGSTOP 手段では **LS 拒否の成否は未検証のまま**（縮退コードは
   best-effort + `opened=` ログ観測の位置づけを維持。発火実例を観測したら成否を追記）。
+
+#### ウィザード fpOnly ネイティブ化（v0.3.0 #97・2026-08-08）
+
+v0.3.0 第 2 段（設計原本 = `docs/09` v0.3.0 節・Issue #97）。セットアップウィザードから
+ローカル同期フォルダの概念を消し、「セットアップ完了 = Finder の『場所』に Tide が出て
+dataless 一覧が見える」体験（クリーンインストール復旧の完成形）にする。#96 の運用注意
+だった「factoryReset / 再セットアップ禁止」は本変更のマージで解除。
+
+- **ステップ構成**: credentials → bucket → provisioning → **fileProvider**（旧 folder を置換）→
+  done。fileProvider ステップは説明（Finder の「場所」に Tide が現れ、ファイルは開いた時に
+  ダウンロード）+ `FileProviderController.isEnabled()` の現況表示（再セットアップ経路向け・
+  nil = 取得失敗は表示しないだけで進行は妨げない）。**有効化ボタンは置かない** —
+  「Start syncing」= `completeSetup` が enable を内包する。
+- **`completeSetup(credentials:bucket:region:)` シグネチャ置換**（fpOnly 版の並置はしない）:
+  `syncMode = .fpOnly` 明示書込（冒頭・#96 前倒し分の維持 = factoryReset 後の不在窓を閉じる）→
+  `isBootstrapping` ガード（最初の suspension point より前）→ 旧 signaler stop（再レビュー ②）→
+  ドメイン作り直し判定 + `disableForRecreation()`（レビュー指摘 1 / 再レビュー ①③）→
+  Keychain 保存 → config 書込（bucket / region / setupCompleted）→ `.syncignore` seed
+  （再レビュー ④）→ `FileProviderController.enable()`（既有効の再 add は成功/no-op。失敗は
+  throw → ウィザードにエラー表示・設定は保存済みなので Settings の Enable ボタンでも回復可）→
+  `launchEngineFromCurrentConfig()` + `bootstrapFailure = nil`。**順序が本質**: 保存前に enable
+  すると拡張が未設定状態で起動してエラー列挙になり、enable 後に seed を置くと拡張の先行書込で
+  新規バケット判定が誤り得る。security-scoped bookmark 発行と `syncRootPath` /
+  `syncRootBookmark` 書込は削除（fpOnly に syncRoot 面が無い。security L1 追記）。
+- **seed の S3 直書き化**: 新規バケット（`getIndex() == nil`）限定で
+  `SyncIgnoreMatcher.defaultTemplate` を `files/.syncignore` へ PUT +
+  `ManifestUpdater.updateFileEntry(base: nil)` 合流（`S3RestoreService` と同型の書込・best-effort
+  非致命・確定点 signal で FP レプリカへ即時反映）。既存バケット参加時は作らない（従来どおり）。
+  旧実装（ローカル同期フォルダへ書く）は fpOnly boot では誰も読まずマニフェストへ届かなかった
+  （#96 の既知の過渡・PR #100 レビュー指摘 3）。
+- **done 画面**: FP 前提の文言へ差替（既存バケットのデータは「プレースホルダとして表示・開いた時
+  にダウンロード」）+「Open Tide in Finder」ボタン追加。scope 開始ロジックは
+  `FileProviderController.openUserVisibleFolderInFinder()` へ抽出し、ポップオーバーと共用
+  （B-2 受け入れで踏んだ scope 開始漏れバグの構造的再発防止）。
+- **folder 系 UI の物理削除**: `@State syncRootPath` / `folderView` / `chooseFolder` /
+  `validateSyncRoot` / done の Folder 行 / `applyImported` の syncRootPath 充填。温存の線引き =
+  FSEvents「コード温存」の対象は folderSync 復帰資産（エンジン側）であり、ウィザード UI は
+  git revert で丸ごと戻せるため削除してよい。再許可パネル文言キー（`Tide needs access…` /
+  `Grant Access`）は温存デッド経路（`requestSyncRootAccessViaPanel`）が参照するため残す。
+- **xcstrings**: folder 系キー一式 + `Sync Folder`（#96 から持ち越しの step title）+ 参照ゼロ
+  だった旧 done 文言キー（`Setup complete. Tide will now sync your folder to S3.`）を削除・
+  credentials の import 説明文を「bucket and region」へ是正・fileProvider ステップ / done の
+  新キーを追加（ja 訳・`extractionState: manual`）。
+- **設定 import/export（#29）の整合**: `connectionDiffers` から syncRootPath 比較を削除
+  （bucket / region のみ。旧 export の死にキー値との差分で不要なウィザード誘導を出さない）・
+  export 側は `syncRootPath = nil` を書く（`SettingsTransfer.Payload` のフィールド自体は
+  optional のため schema v1 の decode 互換で温存・死にキーの削除済みパスを設定ファイルへ
+  露出させない）・`DiagnosticsExporter` の「Sync folder:」行は fpOnly（engine 不在）では値を
+  渡さず "—" 表示（folderSync デッド経路が生きる revert 時のみ従来どおり）。Settings の
+  export/import 説明文・import 完了メッセージからも folder 言及を除去。
+- **設定画面「.syncignore」セクションの静的案内置換**（ユーザ確定 2026-08-08・PR #99 レビュー
+  指摘 4）: パターン一覧（ソース = `engine.activeIgnorePatterns`・fpOnly では engine 恒常 nil の
+  ため常に「No .syncignore patterns」= パターンが実効なのに空表示の誤情報）を撤去し、
+  「除外パターンは Tide フォルダ（Finder サイドバー「場所」の Tide）内の `.syncignore` で管理
+  （新規ファイルにのみ適用）」の静的テキスト +「Open Tide in Finder」導線へ置換（「同期フォルダ /
+  Sync Folder」呼称は使わない）。実効は FP createItem 側（`ManifestIgnoreCache`）で維持・
+  一覧表示の復権が必要になったら別 Issue。「Excluded patterns (built-in)」セクションは静的定数
+  ソースのため不変。
+- **PR #101 レビュー対応（2026-08-08・2 件）**: ① **別バケットへの切替は `completeSetup` が
+  FP ドメインを作り直す**（disable → enable。CONFIRMED）— `enable()` の既有効 no-op はレプリカを
+  温存するため旧バケット由来の保留書込（dirty item）が残り、拡張は書込時に共有 config から
+  bucket を読む（`ExtensionServices.fromSharedConfig`）ので fileproviderd の再試行がそれらを
+  新バケットへ静かに混入させる。**比較は config 上書き前・disable 失敗は config 未更新のまま
+  throw**（先に config を書くと失敗後のリトライが「同一バケット」に見えて作り直しがスキップされ
+  混入窓が残る）。disable は保留書込を破棄する（PR #61 記録）が旧内容を新バケットへ流すより
+  安全側。隣接論点として **completeSetup は launch 前に旧 signaler を stop**（止めないと旧
+  インスタンスの pollTask が旧設定の index を HEAD し続ける。配置は再レビュー ② で冒頭へ是正）。
+  同一バケットの再セットアップは従来どおりレプリカ温存（再 add no-op）。② signal 配線付き
+  `ManifestUpdater` の構築を `makeSignalingManifestUpdater(store:deviceId:)` ファクトリへ集約
+  （S3 内復元 / seed 共用・呼び出し側ごとの手書き配線による signal 漏れ〈PR #56 レビュー ④ の
+  警戒〉を構造的に防止）。
+- **PR #101 再レビュー対応（2026-08-08・6 件）**: ① 切替 disable 成功後の途中失敗（Keychain
+  保存 / enable の throw）で FP ドメインが**補償なしで消える**件（CONFIRMED/High。`disable()` は
+  pending-add フラグも消すため、boot の migrate も launchFPOnlySignaler も re-add せず
+  「再起動しても直らない無音の同期停止」= 回復は Settings → Enable の発見頼みだった）→
+  `FileProviderController.disableForRecreation()` 新設 = **pending-add フラグを立ててから
+  remove**（`migrateStaleDomainsIfNeeded` と同順序 = remove 後の失敗/クラッシュでも「有効化
+  済み」意図が消えない）。途中失敗でも次回起動の migrate が add を再開する。`enable()` は
+  成功時に同フラグを消す（確定点で対称）。明示的無効化（factoryReset / Settings の Disable =
+  再有効化の意図なし）は従来どおり `disable()` ② 旧 signaler の stop が enable の**後ろ**に
+  あり、enable 失敗時に旧バケット束縛（構築時 `[s3]` キャプチャ）の pollTask が生き残る +
+  bootstrap() の signaler != nil 早期 return & bootstrapFailure クリアで「健康に見えたまま
+  新バケットの signaler が立たない」固着（CONFIRMED/High）→ stop を completeSetup 冒頭
+  （isBootstrapping 直後・最初の throw より前）へ移動 ③ factoryReset の握りつぶされた
+  disable（`try?`）通過後は bucketName 不在 × 生存ドメイン = 素性不明レプリカで混入窓が
+  再開する件（CONFIRMED/Medium）→ 作り直し判定を観測状態併用へ: 旧 bucketName 不在時は
+  `isEnabled() != false`（生存 / 不明）で作り直し（不明を温存側に倒すと「isEnabled 失敗 →
+  直後の enable 成功」で素性不明レプリカが残るため作り直し側）④ seed の新規バケット判定
+  （getIndex == nil）が enable の後ろで、live になった拡張の先行 createItem により既存側へ
+  誤判定 → seed 無音スキップし得る件（PLAUSIBLE/Low）→ **seed を enable 前へ移動**（seed は
+  S3 のみ・確定点 signal は未登録ドメインで no-op・enable 後の初回列挙が拾う。PUT 成功後の
+  updateFileEntry 失敗 = 孤児は benign と検証済み〈後追い作成は remote nil → .proceed で
+  無衝突・再セットアップは index 不在のまま再試行〉）⑤ Settings「.syncignore」セクションの
+  「Open Tide in Finder」へメニューバー行と同じ `.disabled(fileProviderEnabled == false)` を
+  付与（既知の無効時に素の CloudStorage が開く案内矛盾の防止）⑥ bookmark 発行削除と矛盾する
+  残存記述の是正: 本ファイル App Sandbox 節（#97 読み替え注記）/ docs/01 起動フロー図
+  （「同期フォルダ選択」→「File Provider ドメイン有効化」）/ docs/06（bookmark 発行の世代注記 +
+  entitlement の現用途）/ `ConfigStore.syncRootPath`・`SettingsTransfer` の「正規の書き手 =
+  completeSetup」コメント（書き手は `resolveSyncRootAccess` の追随更新のみへ）。
+- **PR #101 三次レビュー対応（2026-08-08・2 件）**: ① factoryReset が pending-add フラグを
+  残し得る件（PLAUSIBLE/Low。`disableForRecreation` → 途中失敗でフラグ残置 → factoryReset の
+  `disable()` が removeAllDomains の throw を呼び出し側 `try?` で握りつぶすとフラグ生存 →
+  `ConfigStore.reset` の消し込み対象外のため、全消し済みアプリで次回起動の migrate
+  〈setupCompleted ゲートより前に走る〉が FP ドメインを無言 re-add = 未設定拡張のエラー列挙）→
+  `disable()` のフラグ除去を removeAllDomains の**前**へ移動（明示的無効化の意図は remove
+  失敗でも勝つ・remove 失敗ならドメイン残存なのでフラグ無しでも実害なし・Disable 再操作で
+  回復可）② 本節 completeSetup bullet の記載順序が旧実装のままだった件（docs のみ）→
+  最終実装の順序（stop 冒頭化・seed の enable 前倒し込み）へ是正。
+- **PR #101 四次レビュー対応（2026-08-08・8 件 = 修正 6 + 記録 2）**: ① 未設定アプリでの
+  pending-add フラグ残置（disableForRecreation → Keychain 保存等で中断 → setupCompleted
+  未確定のままフラグ生存 → 次回起動の migrate〈setupCompleted ゲートより前〉が未設定拡張を
+  無言 re-add・CONFIRMED）→ migrate の pending-add 再開 add を **`ConfigStore().setupCompleted`
+  でゲート** + 未設定ならフラグ回収（正規セットアップは enable() が無条件 add するため
+  フラグ無しで困らない）② バケット切替（破壊的 recreation）時にウィザードの緑チェック
+  「already enabled」が継続性を誤示唆（CONFIRMED）→ `isBucketSwitch`（config 上書き前の旧値
+  比較 = completeSetup と同じ不変条件）で**警告表示に差替**（「切替はフォルダ作り直し・
+  未アップロード変更は破棄」）③ bootstrap の fire-and-forget migrate と completeSetup の
+  recreation 窓が非直列（stale スナップショットの resume がフラグ誤回収 / 旧設定 re-add・
+  PLAUSIBLE）→ **`migrationTask` ハンドルを保持し completeSetup が disableForRecreation 前に
+  await**（cancel では XPC 待ちの本体を止められないため await）④ ウィザード経由 enable 後に
+  開きっぱなしの Settings が stale（CONFIRMED/nit）→ `AppEnvironment.fileProviderStateVersion`
+  カウンタ（completeSetup が defer で成否問わずインクリメント）+ Settings 側 `.task(id:)` 再取得
+  ⑤ `getIndex() == nil` ≠「新規バケット」（index 欠損 × shards 生存の損傷バケットで 1 シャード
+  index を製造）= 全書き手共有の既存挙動 → **修正不要と合意・docs/09 バックログへ記録**
+  ⑥ `ManifestFileEntry` 手組みの 4 箇所目コピー → **follow-up 合意・docs/09 バックログへ記録**
+  ⑦ 「schema v1 decode 互換のため温存」コメントが事実誤り（JSONDecoder は未知キーを無視）→
+  実際の理由（folderSync revert 資産）へ書換（テスト側の複製コメントも）⑧ Diagnostics の
+  `engine != nil` プロキシ（恒真 nil のデッド分岐・モードの代理として不正確）→ SettingsTransfer
+  と同じ素の nil へ統一（revert 時は git がこの行ごと戻す）。
+- **PR #101 五次レビュー対応（2026-08-08・3 件）**: ① bootstrap 再実行（未セットアップ状態は
+  ポップオーバーを開くたび本体が走る）で `migrationTask` が単純上書きされ、completeSetup が
+  最新 1 本しか await できない（XPC 停滞中の**孤児 migrate** が stale スナップショットで
+  resume → disableForRecreation 直後の pending-add フラグを誤回収 / seed 前の早期 add・High）→
+  spawn を**前回タスクへのチェーン**（新 Task が先頭で `await previous?.value`）へ変更 =
+  最新ハンドルの await が推移的に全先行タスクを待つ ② ウィザードの切替警告が作り直し判定の
+  枝 (a)（バケット比較）しか複製しておらず、枝 (b)（bucketName 不在 × 生存ドメイン = factoryReset
+  の swallowed disable 後）で緑チェックが破壊的 recreation を誤示唆（Medium）→ 判定を
+  `AppEnvironment.willRecreateDomain(forBucket:)` へ抽出して completeSetup とウィザード表示で
+  **共有**（枝の増減に UI が自動追従）・警告文言も枝非依存の汎用形（「このセットアップで Tide
+  フォルダは作り直されます…」）へ差替 ③ ウィザードの `fileProviderAlreadyEnabled` に更新 id が
+  無く、completeSetup 部分失敗（disableForRecreation 済み → enable throw）後にエラー表示の隣へ
+  stale な緑チェックが残る（Low）→ Settings と同じ `.task(id: env.fileProviderStateVersion)` 化
+  （② の `willRecreateDomain` 再取得も同 task に同居）。
+- **PR #101 六次レビュー対応（2026-08-08・6 件）**: ① 破壊的 recreation 警告が
+  `fileProviderAlreadyEnabled == true` の内側で、isEnabled nil（fileproviderd 無応答）だと無警告
+  破棄になる（High）→ 警告を enabled 判定の外へ（`willRecreateDomain == true && enabled != false`
+  で表示 = 不明も警告側・既知の未登録のみ除外〈破棄対象が無い〉・緑チェックは
+  `enabled == true && willRecreate == false` のみ）② `.fileProvider` の `canAdvance` 無条件 true
+  で probe 解決前に Return（.defaultAction）が警告未レンダリングのまま completeSetup へ到達
+  （High）→ `willRecreateDomain != nil` をゲートに ③ `fileProviderStateVersion` のバンプが
+  completeSetup のみ + MenuBarContent 未購読（Medium）→ factoryReset に defer バンプ・Settings の
+  Enable/Disable は新設 `noteFileProviderDomainStateChanged()` 経由・ポップオーバーの
+  `fileProviderEnabled` 取得を `.task(id:)` 購読へ（セットアップ成功直後の赤バナー残置解消。
+  値の完全集約〈observable 1 本〉はカウンタ = 無効化バスで実害が閉じるため見送り）
+  ④ factoryReset が migrate と非直列（stale resume がリセット済みアプリへ孤児ドメイン re-add /
+  フラグ残置・Medium）→ 冒頭で `await migrationTask?.value` ⑤ 五次のチェーン方式は未セットアップ
+  中のポップオーバー再訪ごとに無限連鎖し completeSetup がチェーン全長を await（Low）→
+  **実行中は再利用・完了時に自己解放**（同時 1 本・再試行は完了後の次回 bootstrap が担う）
+  ⑥ クリーンインストール分岐に enable 失敗の再起動横断リトライが無い（再作成分岐と非対称・Low）→
+  `enable()` が add の**前**に pending-add フラグを立てる（成功時クリア・migrate の
+  setupCompleted ゲート + 未設定回収と組合せで全分岐対称の自己修復）。
+- **PR #101 七次レビュー対応（2026-08-09・7 件 = 修正 6 + バックログ 1）**: ① Back 再入時の
+  stale `@State` が probe ゲート（六次②）を素通しにする（High — 前回訪問の非 nil 値が XPC
+  往復中の窓で canAdvance を満たし、bucket 変更後の Return が警告未レンダリングのまま
+  disableForRecreation へ到達）→ `.task` 本体の先頭（await より前）で両 `@State` を nil リセット
+  ② factoryReset に `isBootstrapping` ガードが無く `disable()` の XPC 窓で bootstrap が割り込める
+  （Medium — ドレイン済みのはずの migrationTask 新規 spawn = 六次④の再開 / 消される直前の
+  config・Keychain で signaler 再起動）→ completeSetup と同じガードを冒頭に + migrate 自己解放を
+  **世代番号検査付き**に（Task は値型で identity 比較不可のため `migrationGeneration` で代替）
+  ③ Settings の Enable/Disable だけ migrate ドレイン規約の外（Low）→ `drainDomainMigration()`
+  共通チョークポイント + `enableFileProviderDomain()` / `disableFileProviderDomain()` ラッパを
+  AppEnvironment に新設し 3 変更点（completeSetup / factoryReset / Settings）で統一 ④ doc
+  コメントの取り違え（willRecreateDomain の契約が noteFileProviderDomainStateChanged に付随・
+  Nit）→ 是正 ⑤ probe が isEnabled を 2 回叩き警告条件が異時点 2 スナップショットの合成
+  （Cleanup）→ `probeDomainRecreation(forBucket:) -> (recreate, enabled)` の**単一 probe** へ統合
+  （completeSetup は recreate 側のみ使用・XPC 1 往復削減）⑥ `userVisibleURLOrFallback` を
+  private 化（呼び出しは scope 開始込みの `openUserVisibleFolderInFinder()` に一本化済み・
+  scope 開始漏れの再導入扉を閉じる）⑦ pending-add フラグの命令的ステートマシン化（4 箇所分散）→
+  「望ましい FP 状態 + 単一 reconcile」への宣言的リファクタを docs/09 バックログへ（本 PR
+  実施不要と合意）。
+- **PR #101 八次レビュー対応（2026-08-09・6 件）**: ① probe の task id に bucket が含まれず、
+  fileProvider ステップ滞在中の設定インポート（ルートの .onChange は滞在ステップ非依存で発火し
+  bucket をその場で書き換える）で stale 緑チェック + 活性ボタンのまま無警告の破壊的作り直しに
+  到達できる（High）→ **task id を `"\(version)|\(bucket)"` の複合キー化**（bucket 変化 =
+  nil リセット + 再 probe）② Enable/Disable ラッパに completeSetup / factoryReset との相互排他が
+  無く、factoryReset の disable XPC 窓で Enable を押すと remove → add の順で「全消し済みアプリ +
+  生きたドメイン + フラグ無し」（migrate は staleDomains 空 × フラグ無しで即 return = 四次①の
+  ゲートに到達しない）に至る（High）→ **ラッパが isBootstrapping を check/set**（進行中は
+  SyncError で拒否 — 待たせて後から実行すると意味が変わるため直列化でなく拒否）+ 対称面として
+  completeSetup 冒頭にも busy ガード（syncMode 書込だけは例外的にガード前 = 不在窓を無条件に
+  閉じる既存不変条件）・factoryReset は throw 不能のためログ + no-op（設定が残るので再押下で
+  完遂可）③ `drainDomainMigration` の無条件 `migrationTask = nil` が resume 窓で spawn された
+  新タスクを孤児化（Medium）→ タスク末尾の自己解放と同じ**世代検査**を drain 側にも ④ seed の
+  新規バケット判定が「index 欠落 × shards 生存」の損傷バケットで誤爆（カスタム .syncignore の
+  最新版置換 + 1 シャード index 新造で DRIFT を WARN へ格下げ・Low）→ **seed 前に
+  `.tide/shards/` の空プローブ**（`listObjectVersions(maxKeys: 1)`・live 版 / delete marker の
+  いずれかが見えたら seed しない）⑤ 実在しないメソッド名（willRecreateDomain）へのコメント参照 →
+  probeDomainRecreation へ是正 ⑥ Enable/Disable 押下ごとの isEnabled XPC 二重実行 + version
+  更新が呼び出し側任せ（Low）→ ラッパ内 `defer { fileProviderStateVersion += 1 }` へ移し、View の
+  明示 fetch と `noteFileProviderDomainStateChanged()`（呼び手ゼロ化）を削除。
+- **PR #101 九次レビュー対応（2026-08-09・7 件）**: ① factoryReset の busy スキップが「成功」に
+  見える（呼び出し側が無条件 dismiss・High）→ `@discardableResult func factoryReset() async ->
+  Bool` 化 + Settings は成功時のみ dismiss・スキップ時は案内表示（`resetMessage`）② 旧
+  `isBootstrapping` の二役（起動中 / ドメイン変更 mutex）による誤拒否・無音ドロップ（High）→
+  **`setupGate = RemoteOpGate`（既存型の再利用）へ置換**。取得セマンティクスを呼び出し元の意味で
+  使い分け: bootstrap = tryAcquire（busy なら引く・ポップオーバー再訪で再試行）/
+  **completeSetup = acquire（FIFO 待ち — bootstrap 起動や Enable の完了を待ってから実行して
+  意味が変わらないため、拒否でなく直列化 = 誤拒否解消）**/ factoryReset・Enable・Disable =
+  tryAcquire で拒否（待たせて後から実行すると意味が変わる操作）。`isBootstrapping` は削除
+  ③ seed の部分失敗（shard 確定 → index 失敗 = #91 系）が握りつぶされ、八次④の shards probe が
+  リトライを恒久封鎖（既定除外の無い新規バケットが静かに稼働・High）→ `updateFileEntry` を
+  **1 回だけ即時リトライ**（再実行は alreadyUpToDate 経路 → repairIndexDeclarationIfStale が
+  index 宣言を治癒。両方失敗の残余は best-effort の範囲でログ）④ 損傷バケット probe の逆側
+  （`files/` 生存 × `.tide/` 全損）でカスタム `.syncignore` を既定テンプレートで置換し得る
+  （Medium）→ `files/` プレフィックスの空プローブを追加（何か見えたら seed しない）
+  ⑤ migrate の setupCompleted ゲートが pending-add 分岐のみで stale 分岐は未設定アプリでも add
+  していた（Medium）→ ゲートを stale 分岐へも拡大（未設定時は stale **除去のみ**・add と
+  フラグ set をしない）⑥ 未セットアップでも Settings の Enable が通り設定なしドメイン + 偽の
+  破壊警告になる（Medium）→ enable ラッパに `setupCompleted` ガード（**disable 側は意図的に
+  ガードなし** = 全消し済みアプリに生き残ったドメインの手動回復導線）⑦ probe 解決に無期限依存で
+  ハング時に進行ゲートが理由不明のまま閉じ続ける（Low）→ 「確認中…」インジケータ + 10 秒で
+  「不明 = 作り直し側」へのタイムアウトフォールバック（警告表示側 = 安全・probe が後から返れば
+  実値で上書き）。
+- **PR #101 十次レビュー対応（2026-08-09・7 件 = 修正 6 + バックログ 1）**: ① completeSetup が
+  setupGate 保持のまま無界の fileproviderd XPC を await し、ハング時に全ライフサイクル操作が
+  再起動まで固着（九次のゲート統一が爆風半径を広げた・High）→ **`FileProviderController` に
+  `boundedXPC`（10 秒・一度きり resume の continuation レース）を新設**し、ゲート保持区間から
+  届く全 XPC（isEnabled の domains() / enable の add / disable・disableForRecreation の
+  removeAll / migrate 内の domains・remove・add）を有界化。TaskGroup はスコープ終了時に
+  parked child を待つため不採用。timeout しても下層 XPC は中断されない（後着完了が無害な冪等
+  add/remove・読み取りのみを通す規約）。`userVisibleURL` は意図的に非有界（ゲート外・#96 実測 =
+  後着で正しく開く）② syncMode のゲート前書込が FIFO 待機中の factoryReset に消されると再書込
+  されない（Medium）→ acquire 後に冪等再書込（ゲート前の書込は throw 前保証として温存）
+  ③ 10 秒フォールバック Task が .task 再起動をまたいで孤児化し新サイクルで早期発火（Low）→
+  `probeGeneration` の自世代検査 ④ `.task(id:) { isEnabled }` 3 面の await 後キャンセル検査
+  欠如（逆順 resume の stale 書き戻し・Low）→ `guard !Task.isCancelled` を 3 箇所へ（enabled
+  状態の AppEnvironment 集約案は docs/09 の宣言的リファクタへ合流）⑤ `migrationGeneration` は
+  setupGate 不変条件下で証明可能に不活性（Cleanup）→ 削除し、spawn/drain の「必ずゲート下」
+  不変条件を doc へ（無条件 nil に戻す）⑥ Enable/Disable ラッパの逐語重複（Nit）→
+  `withDomainLifecycleGate(_:)` へ集約（busy 文字列も 1 箇所化・`.notConfigured` 流用の備忘は
+  現状実害なしのため据え置き）⑦ probe `.task` の await 後キャンセル検査（High）→
+  suggestion どおり `guard !Task.isCancelled` を挿入（設定インポートの逆順 XPC 応答で stale
+  判定が新 probe を上書きする無警告破壊経路を封鎖）。
+
+##### 実機受け入れ（2026-08-11・全項目パス）
+
+Issue #97 本文のチェックリスト（9 項目 + 追補 7b〜7d）を dev バケットで全消化し合格。要点:
+
+- **seed の S3 直書き**: 新規バケット経路で `files/.syncignore` + index/shard の整合を実測
+  （entry に sha256/size/versionId 完備）。既存バケット合流では非発動（`.syncignore` の
+  版履歴に新規 PUT なし）を確認。
+- **書込スモーク**: FP レプリカでの作成/編集/削除が各約 3 秒で S3 往復・削除後のシャード
+  後始末正常・`soak-check-fp` 整合 OK。
+- **エラー表示 UI と `boundedXPC`（十次指摘 1）を fileproviderd SIGSTOP で実機実証**:
+  「同期を開始」→ 10 秒きっかりで `removeAllDomains() timed out — fileproviderd is not
+  responding` の赤エラーがウィザードに表示・アプリは無ハング・SIGCONT 後の再実行で成功
+  （pending-add フラグ経由の自己修復設計どおり）。なお**拡張トグル OFF では `add(domain)` が
+  成功してしまいエラー経路は発火しない**（チェックリスト項目 6 の期待側が誤り → Issue #103）。
+- **バケット切替（7b）**: fileProvider ステップのオレンジ警告 →「Recreating File Provider
+  domain」→「domains removed for recreation (pending re-add)」→「File Provider domain
+  added」の正規ログ列 → レプリカが切替先バケット内容と完全一致（1038 件・双方向差分ゼロ =
+  旧バケット由来の残存なし）。
+- 進行ゲート（7d・Return 連打 / Back → bucket 変更 → 再入の一瞬 disabled）・UI 追随
+  （7c・Settings を開いたまま FP セクションが有効表示へ・ポップオーバー赤バナー消滅）・
+  import 誘導（bucket/region のみ事前充填・旧 export の syncRootPath は無視）・ja/en 文言、
+  いずれもパス。
+- **発見バグ 2 群は Issue 化（いずれも #97 リグレッションではない・マージ非阻害と判断）**:
+  **#102** = ウィザード窓が完了後も `@State` を保持（done 出っぱなし / 同一セッションの
+  import 誘導が見かけ上無反応・アプリ再起動で回避可）。**#103** = FP 拡張トグル OFF を検出
+  できず緑表示のまま無音停止（`domains()` ベース検出が現 OS で不成立。#82 受け入れ時は機能
+  → OS 挙動変化が濃厚。アプリ内 Disable の domain 除去経路では赤バナー正常）。
+- 副次知見: soak launchd agent の plist が消失していた（原因不明・`soak-agent-install` で
+  復旧・常駐再開済み）。
+
+### バースト RMW 競合の恒久対処（Issue #91・2026-07-26）
 
 #83 受け入れで実測した「100 件バーストで index.json CAS が枯渇 → 部分完了
 （孤児オブジェクト + stale index 宣言）」の恒久対処。3 層で潰す（方針 = ②+③+① 複合・

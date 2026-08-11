@@ -407,3 +407,35 @@ ETag は GCS が MD5/`-n` を保証しない（CRC32C）が、**Tide は sha256 
 - **`RestoreService` / 復元 UI の reconcile 競合（[#34] / D5・✅ 解消済み 2026-06-30）**: 復元の atomic move は専用 tmp 名（`restore-<hash>.part`）で `Downloader` の `dl-` tmp とは非衝突だが、復元書込と並行 `triggerRemotePull` の reconcile / 削除反映が同一 path（最終的な remove → move）に同時に触れる窓が厳密には未閉鎖だった（手動操作 + フルスキャン委譲で実害報告は無かったが安全側に寄せる）。**対応**: 旧 pull 単一ゲート（`isRemotePulling` の bool 1 個）を `RemoteOpGate`（`@MainActor` の非再入 async ロック・`Tide/Core/RemoteOpGate.swift`）へ一般化し、pull と restore を **1 本のゲートで排他**した。pull は `tryAcquire`（busy ならドロップ／手動は pending・従来どおり）、restore は `acquire`（FIFO 待機）で取得する＝ restore は in-flight pull / 先行 restore の完了を待ってから書き戻すので、move と reconcile が同一 path に**同時に触れない**。restore 同士も直列化され、同一 path+versionId 復元の `restore-<hash>.part` 衝突も消える。復元中に手動「Pull from S3」が押された場合の pending は restore 完了側で 1 周 drain（pull 中押下の coalescing を restore 経路にも拡張）。`isRemotePulling` は UI 表示専用（pull 中のみ true）に残す。テストは `RemoteOpGateTests`（tryAcquire 排他・acquire 待機→解放で復帰・並行 acquire の同時保持≦1 と全完走）。詳細は `docs/08`「リモート pull の単一ゲート化」項。
 - **`bootstrapFailure` / `VersionHistoryModel.errorMessage` の生エラー文字列表示（F4 の残り面・据え置き）**: F4 本体（`recentIssues` / `.error`）は 2026-06-11 に分類サマリ化で解消したが、この 2 面は意図的に生文字列のまま — bootstrapFailure はセットアップ復旧に全文が要り、復元 UI のエラーは操作直後の文脈でデバッグ実利が大きい。露出はメタデータのみ・本人画面のみ（旧 F4 と同評価）。他人配布前に再評価（`security/README.md` 参照）。
 - **PR #17 レビューの据え置き（nit-4・[#32] / D3・✅ 解消済み 2026-06-27）**: リトライごとに同一エラーが `recentIssues` に積まれていた（give-up までに同カテゴリ最大 5 件）。上限 50 の FIFO で他カテゴリを押し流す方向に働くため、(path, category) で最新のみ残す dedupe を入れた。純粋関数 `SyncEngine.appendDeduped(_:_:cap:)`（同一 (path, category) の既存を除いてから末尾へ積み、上限 cap の FIFO）に切り出し、`recordIssue` が `recentIssues = Self.appendDeduped(recentIssues, issue)` で通す。「最新が末尾」の不変条件（`MenuBarPresentation.groupIssues` は reversed で新しい順に走査）は保持。path は `String?` で nil 同士も同一キー（path なしの pull 全体失敗等も最新のみ）。`SyncEngineTests` の `appendDeduped` 群で固定（最新のみ保持・path/category 区別・nil path collapse・末尾移動・FIFO 上限）。
+
+## #97 レビュー派生の小型バックログ（2026-08-08・Issue 化せず本メモで追跡）
+
+- **損傷バケット（index.json 欠損 × shards 生存）からの復旧手順**: `getIndex() == nil` を「新規
+  バケット」とみなす判定は `ManifestUpdater` の全書き手（FP 拡張 createItem / Uploader /
+  S3RestoreService / ウィザード seed）が共有する既存挙動で、この状態のバケットへ書くと
+  `IndexUpdateCoalescer` が空 index から始めるため「1 シャードだけ宣言する index」が製造され、
+  生存シャード全部が読者から隠れる（stale-index DRIFT。検出は `soak-check-fp` の index↔shards
+  突合がカバー）。shards 走査による index 再構築の復旧手順整備は必要になったら着手
+  （PR #101 四次レビュー指摘 5）。**ウィザード seed の発火点は八次レビュー指摘 4 で解消済み**
+  （seed 前に `.tide/shards/` の空プローブ = 損傷バケットでは seed しない）— 残る書き手
+  （FP 拡張 / Uploader / S3RestoreService）の既存挙動と復旧手順整備が本バックログの対象。
+- **`ManifestFileEntry` 生成の共通ファクトリ**: 「PutObjectResult → entry」の同型フィールド詰め
+  （sha256 / mtime / versionId / etag / deviceId / uploadedAt）が `Uploader` / `S3RestoreService` /
+  `ExtensionWriter`（×2）/ ウィザード seed の計 5 箇所に複製されている。entry 契約変更時の手動
+  反映漏れ = 無音のマニフェスト乖離になるため、TideCore へファクトリ（例:
+  `ManifestFileEntry.forUploadedData(_:put:deviceId:)`）を切って app / core / FP 拡張で共用する
+  （PR #101 四次レビュー指摘 6・follow-up 合意）。
+- **pending-add フラグの宣言的リファクタ（「望ましい FP 状態」+ 単一 reconcile 化）**:
+  `migrationPendingAddKey` の書き手/消し手が `enable()`（add 前 set・成功後 clear）/
+  `disableForRecreation()`（remove 前 set）/ `disable()`（remove 前 clear）+ 消費者
+  `migrateStaleDomainsIfNeeded`（setupCompleted ゲート付き回収）の 4 箇所に分散し、各所が特定の
+  インターリービングへの順序不変条件を個別コメントで担う命令的ステートマシンになっている
+  （PR #101 の三次①・四次①・六次⑥とレビューのたびにパッチが積まれた経緯自体が脆さの証拠）。
+  次にドメイン変更点を足すとき（pause / 第 2 ドメイン等）に順序を独力で再導出させないため、
+  **永続化するのは「望ましい FP 状態」（enabled/disabled の意図）1 本 + 起動時/変更後の単一
+  reconcile 関数**へ集約するリファクタを積んでおく（PR #101 七次レビュー指摘 7・本 PR での
+  実施は不要と合意）。同リファクタ時に **enabled 観測値の AppEnvironment 集約**（十次レビュー
+  指摘 4 — 現状は `.task(id: fileProviderStateVersion)` + `isEnabled()` の同型ブロックが
+  MenuBar / Settings / ウィザードの 3 面に複製され、1 バンプで同一事実へ最大 3 本の domains()
+  XPC が並走・各ビューが別スナップショットを観測し得る。observable な `fileProviderEnabled` を
+  env に 1 本置き各ビューは読むだけにする）も併せて行う。
