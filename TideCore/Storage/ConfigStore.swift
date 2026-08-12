@@ -177,7 +177,10 @@ public final class ConfigStore: @unchecked Sendable {
     /// 除外後始末は無意味な削除受理予約として固着するため。
     /// nil = 一度も除去していない（クリーンインストール）。`migratableKeys` 非掲載 =
     /// マシン・ドメイン固有の運用状態（設定ではない）で、`reset()` はキーに触れない —
-    /// factoryReset は `disable()` 経由で必ず bump 済みのため stale 一致は起きない。
+    /// factoryReset は disable() の bump（throw 時は pending 回収）に加え App Group Caches ごと
+    /// レジストリを削除するため stale 一致は起きない（PR #106 レビュー指摘 7: この 2 層が根拠。
+    /// 「disable 経由で必ず bump 済み」ではない — factoryReset は disable の throw を `try?` で
+    /// 握りつぶすため、timeout 時は pending のみで終わり得る）。
     public var fileProviderDomainEpoch: String? {
         defaults.string(forKey: Key.fileProviderDomainEpoch)
     }
