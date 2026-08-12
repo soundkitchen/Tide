@@ -918,6 +918,30 @@ Keep Downloaded（#40 の残フェーズ）の対向操作。
   マニフェストにも存在せず、実体まで破棄されると**復元不能**（fpOnly では DB も凍結）。
   ダエモンは未同期 item の evict を拒否する見込み（NonEvictable 系）だが未検証のため、
   受け入れで「除外ファイルを含む dir の evict → 該当ファイル温存」を必ず確認する。
+- **実機受け入れ（2026-08-12・dev バケット・全項目パス）**:
+  - **file / dir evict とも成功**（実体化 → バッジ点灯 →「ダウンロードを削除」→ dataless 化 +
+    バッジ消灯の badge-only 配信 = **追加コールバック不要が実機確定**・消灯は既存の
+    `materializedItemsDidChange` 経路）。evict 後の再取得（S3 から再 materialize・sha 一致）も確認。
+  - **除外温存の安全確認（最重要・レビュー指摘 1）パス = dir の `.allowsEvicting` 維持で確定**:
+    `.env`（`ExcludedFromSync` ローカル温存）+ 仮想フォルダを含む dir を全実体化 → evict →
+    **ダエモンはローカルのみ item をスキップ**（`.env` 実体・内容無傷 / 仮想フォルダ残存 /
+    同期ファイルのみ dataless 化）。
+  - **知見①: ダエモンは evict capability を実体化状態でマスク表示する** —
+    `fileproviderctl evaluate` の `Capabilities:` は file = dataless で `e` 非表示・実体化で
+    `rwdpfet-----`、dir = 実体化配下 1 つ以上で `e` 表示。宣言は常に効いており表示だけの話。
+  - **知見②: Finder のフォルダ右クリックは全実体化時のみ「ダウンロードを削除」を出す**
+    （部分実体化では「今すぐダウンロード」のみ = Finder 側の集計判断・Tide のバグではない）。
+  - **root 除外を確認**: root 右クリックに「ダウンロードを削除」なし + `Capabilities:
+    rw----t-----`（e なし・宣言レベルの証跡）。
+  - **#104 epoch 機構の実地初回**: Disable/Enable で bump（remove 成功後の確定）→ 新拡張が
+    新 UUID を capture（stale capture なし）→ 旧レジストリ 3 本 epoch mismatch 破棄、の全ログ点
+    確認。作り直し**前**には v1 schema 破棄 → live 全件 badge-only 再配信（25 items）= 固着
+    バッジの自己治癒も実機確認（アプリ更新 + 再起動のみ・応急処置不要を実証）。
+  - 副次: 作り直し前でも badge-only didUpdate で再取り込みされた item は新 capabilities を
+    先行反映する（再配信分のみ・全量反映は作り直し必須のまま）。プレビューペイン EBUSY を
+    実機再現（①どおり・回避可能）。evict は S3 / マニフェスト非接触（soak-check-fp が
+    ベースラインと同一の整合 OK・受け入れ全期間エラーログ 0 件）。#93 相互作用（②）は
+    未観察のまま任意扱いで据え置き。
 
 ### バースト RMW 競合の恒久対処（Issue #91・2026-07-26）
 
