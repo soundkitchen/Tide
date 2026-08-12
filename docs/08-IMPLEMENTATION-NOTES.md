@@ -890,6 +890,30 @@ Issue #97 本文のチェックリスト（9 項目 + 追補 7b〜7d）を dev �
   〈掲載すると `LegacyStateMigrator` が別マシン由来 epoch を持ち込み生きたレジストリを無言
   全破棄する〉）。
 
+#### evict 解放 =「ダウンロードを削除」（Issue #105・2026-08-12）
+
+Finder の「ダウンロードを削除」（Remove Download = オンラインのみ化）がコンテクストメニューに
+出ない件（`.allowsEvicting` 未付与 = 未実装・regression ではない）への対応。
+`FileProviderItem.capabilities` へ `.allowsEvicting` を追加した。Files-on-Demand 運用の基本操作で、
+Keep Downloaded（#40 の残フェーズ）の対向操作。
+
+- **対象 = file + dir（root 除く）**（ユーザ確定 2026-08-12）: dir の evict はダエモンが配下の
+  実体化済みファイルをまとめて evict するだけ（Dropbox 等と同じフォルダ単位 UX）。root は
+  「削除・改名・移動不可」の既存保守姿勢に合わせ除外 — root evict = 全量オンラインのみ化は
+  Keep Downloaded ピンとの相互作用が未検証のため。
+- **拡張側の追加コールバックは不要（見込み・実機受け入れで確認）**: evict はダエモン側処理。
+  バッジ消灯は既存の `materializedItemsDidChange` → 観測 → badge-only 配信経路（#65 の唯一の
+  消灯検知経路）が拾う。
+- **適用にはドメイン作り直しが必要**（capabilities 変更は既存レプリカへ自動反映されない =
+  5-3 受け入れ知見①・正規手順 = アプリ設定の Disable → Enable）。作り直し前のレジストリ 3 本は
+  #104 の epoch リセットが破棄する（本件が #104 恒久対処後の最初の実運用作り直し = 点灯方向の
+  実地確認を兼ねる）。作り直しでレプリカ全量が dataless 化する（実体は開けば再取得・S3 側は
+  無事・#97 受け入れ時の実測 = 1,055 中 1,026 ファイル）。
+- **既知の注意（実機受け入れで観察）**: ① Finder プレビューペイン表示中の evict は EBUSY で
+  失敗し得る（#65 受け入れ知見・OS 挙動）。② #93（rename 後の版スタンプ stale 固着 =
+  `isMostRecentVersionDownloaded = 0`）の item は、ダエモンが「最新版未取得」とみなして evict を
+  拒否する可能性がある（未検証の仮説・観察対象）。
+
 ### バースト RMW 競合の恒久対処（Issue #91・2026-07-26）
 
 #83 受け入れで実測した「100 件バーストで index.json CAS が枯渇 → 部分完了

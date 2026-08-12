@@ -58,8 +58,13 @@ final class FileProviderItem: NSObject, NSFileProviderItem, NSFileProviderItemDe
     var capabilities: NSFileProviderItemCapabilities {
         switch node {
         case .directory(let path, _):
-            // M5 Phase 5-3: 配下への新規作成と dir 削除（再帰）、Phase 5-4: 改名/移動を解放。
-            // root は削除・改名・移動不可。
+            // M5 Phase 5-3: 配下への新規作成と dir 削除（再帰）、Phase 5-4: 改名/移動、
+            // Issue #105: evict（「ダウンロードを削除」= 配下のオンラインのみ化。ダエモン側処理・
+            // 拡張コールバック不要）を解放。root は削除・改名・移動・evict 不可
+            // （root evict = 全量オンラインのみ化は Keep Downloaded ピンとの相互作用が未検証の
+            // ため保守側・ユーザ確定 2026-08-12）。
+            // capabilities の変更は既存レプリカへ自動反映されない = ドメイン作り直し必須
+            // （5-3 受け入れ知見①・作り直し前レジストリは #104 の epoch リセットが破棄）。
             var caps: NSFileProviderItemCapabilities = [
                 .allowsReading, .allowsContentEnumerating, .allowsAddingSubItems,
             ]
@@ -67,13 +72,14 @@ final class FileProviderItem: NSObject, NSFileProviderItem, NSFileProviderItemDe
                 caps.insert(.allowsDeleting)
                 caps.insert(.allowsRenaming)
                 caps.insert(.allowsReparenting)
+                caps.insert(.allowsEvicting)
             }
             return caps
         case .file:
-            // M5 Phase 5-2: 内容編集と削除、Phase 5-4: 改名/移動を解放。
+            // M5 Phase 5-2: 内容編集と削除、Phase 5-4: 改名/移動、Issue #105: evict を解放。
             return [
                 .allowsReading, .allowsWriting, .allowsDeleting,
-                .allowsRenaming, .allowsReparenting,
+                .allowsRenaming, .allowsReparenting, .allowsEvicting,
             ]
         }
     }
