@@ -17,6 +17,7 @@ public final class ConfigStore: @unchecked Sendable {
         static let notificationsEnabled = "tide.notificationsEnabled"
         static let syncRootBookmark = "tide.syncRootBookmark"
         static let syncMode = "tide.syncMode"
+        static let fileProviderDomainEpoch = "tide.fileProviderDomainEpoch"
     }
 
     /// 稼働モードの列挙。**v0.3.0（#96）以降、アプリはこの値で分岐しない**（boot は無条件
@@ -166,6 +167,28 @@ public final class ConfigStore: @unchecked Sendable {
     public var syncMode: SyncMode {
         get { SyncMode(rawValue: defaults.string(forKey: Key.syncMode) ?? "") ?? .folderSync }
         set { defaults.set(newValue.rawValue, forKey: Key.syncMode) }
+    }
+
+    /// FP ドメイン世代 epoch（Issue #104）。**ドメイン除去（= レプリカ破棄）のたびに**アプリが
+    /// `bumpFileProviderDomainEpoch()` で新値へ進める。拡張側レジストリ（`PersistedPathSet`）は
+    /// 構築時に capture した値で payload をスタンプし、読込時に現行値と不一致なら全体破棄する —
+    /// ダエモン側の item 記録が白紙化した後にレジストリだけが生き残ると、バッジは
+    /// 「報告済み = 差分なし」の永久不点灯、仮想フォルダは消えた dir の空フォルダ合成、
+    /// 除外後始末は無意味な削除受理予約として固着するため。
+    /// nil = 一度も除去していない（クリーンインストール）。`migratableKeys` 非掲載 =
+    /// マシン・ドメイン固有の運用状態（設定ではない）で、`reset()` はキーに触れない —
+    /// factoryReset は disable() の bump（throw 時は pending 回収）に加え App Group Caches ごと
+    /// レジストリを削除するため stale 一致は起きない（PR #106 レビュー指摘 7: この 2 層が根拠。
+    /// 「disable 経由で必ず bump 済み」ではない — factoryReset は disable の throw を `try?` で
+    /// 握りつぶすため、timeout 時は pending のみで終わり得る）。
+    public var fileProviderDomainEpoch: String? {
+        defaults.string(forKey: Key.fileProviderDomainEpoch)
+    }
+
+    /// ドメイン除去経路（`FileProviderController` の disable / disableForRecreation / migrate の
+    /// 作り直し分岐）専用。**除去とセットで呼ぶ不変条件**（呼び漏れ = Issue #104 の再発）。
+    public func bumpFileProviderDomainEpoch() {
+        defaults.set(UUID().uuidString, forKey: Key.fileProviderDomainEpoch)
     }
 
     /// 初回アクセス時に UUID を自動生成して保存する。以降不変。

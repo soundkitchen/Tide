@@ -103,4 +103,37 @@ final class ConfigStoreTests: XCTestCase {
         XCTAssertNil(defaults.string(forKey: "tide.syncMode"))   // キー自体が消える
         XCTAssertEqual(config.syncMode, .folderSync)             // getter はフォールバック
     }
+
+    // MARK: - FP ドメイン epoch（Issue #104）
+
+    /// bump は毎回新しい非 nil 値へ前進する（同値へ戻ると stale レジストリが「一致」で蘇る）。
+    func testDomainEpochBumpAdvancesToFreshValue() {
+        let config = makeStore()
+        XCTAssertNil(config.fileProviderDomainEpoch)  // クリーンインストール = nil
+        config.bumpFileProviderDomainEpoch()
+        let first = config.fileProviderDomainEpoch
+        XCTAssertNotNil(first)
+        config.bumpFileProviderDomainEpoch()
+        XCTAssertNotNil(config.fileProviderDomainEpoch)
+        XCTAssertNotEqual(config.fileProviderDomainEpoch, first)
+    }
+
+    /// epoch はマシン・ドメイン固有の**運用状態**（設定ではない）— reset / 移行の対象外を固定する
+    /// （PR #106 レビュー指摘 4）。`migratableKeys` へ足すと `LegacyStateMigrator` が別 defaults の
+    /// epoch を持ち込み / reset がキーを消し、生きているレプリカのレジストリ 3 本が epoch 不一致で
+    /// 無言全破棄される（このテスト以外に守るものがない）。
+    func testDomainEpochSurvivesResetAndIsNotMigratable() {
+        let defaults = makeDefaults()
+        let config = ConfigStore(defaults: defaults)
+        config.bumpFileProviderDomainEpoch()
+        let epoch = config.fileProviderDomainEpoch
+        XCTAssertNotNil(epoch)
+
+        config.resetIncludingDeviceId()
+        XCTAssertEqual(config.fileProviderDomainEpoch, epoch)  // reset で消えない・変わらない
+
+        // 生キーのリテラルは at-rest 契約（tide.fileProviderDomainEpoch）ごと固定する
+        XCTAssertEqual(defaults.string(forKey: "tide.fileProviderDomainEpoch"), epoch)
+        XCTAssertFalse(ConfigStore.migratableKeys.contains("tide.fileProviderDomainEpoch"))
+    }
 }

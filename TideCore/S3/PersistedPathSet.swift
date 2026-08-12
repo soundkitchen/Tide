@@ -20,6 +20,14 @@ import Foundation
 ///   改ざん/破損しうる = 世代ログと同じ規約・security/low.md L16）。壊れ / bucket 不一致 /
 ///   不正パス混入は**全体破棄** = 空集合。失うのは空フォルダの温存保証だけで、同期の正しさ
 ///   には影響しない（デーモンに掃除され得るのは未実体化の空フォルダのみ）。
+/// - **ドメイン epoch 不一致も全体破棄**（Issue #104）: レジストリの内容は「いまのレプリカ」に
+///   紐づく保証であり、ドメイン作り直し（レプリカ破棄）を跨いで生き残ると害にしかならない
+///   （報告済みバッジの永久不点灯・消えた dir の空フォルダ合成・無意味な削除受理予約）。
+///   アプリがドメイン除去のたびに group defaults の epoch（`ConfigStore.fileProviderDomainEpoch`）
+///   を進め、本レジストリは**構築時に capture した epoch** で payload をスタンプする。
+///   capture 意味論が load-bearing: アプリの bump 後に旧拡張プロセスが遅延 persist しても
+///   旧 epoch でスタンプされるため、次回読込で自動破棄される（別プロセス間の削除レースを
+///   ファイル削除なしで構造的に解消する）。
 /// 3. **実体化バッジの報告済み集合**（Issue #65）。Finder へ最後に報告した「実体化済みファイル
 ///    パス」の集合。live（fileproviderd の実体化セット）との差分が enumerateChanges の didUpdate に
 ///    合流してバッジの点灯/消灯を届ける。失っても再報告でバッジが付き直るだけ（cosmetic）。
@@ -28,26 +36,40 @@ import Foundation
 ///   温存保証/バッジを失うだけ（安全側）。
 public actor PersistedPathSet {
     public static let maxEntries = 1_000
-    private static let currentSchemaVersion = 1
+    // v2: epoch フィールド追加（Issue #104）。v1 payload は schemaVersion 不一致で一度だけ
+    // 全体破棄される = 既存環境の stale レジストリ（#104 の固着）がアプリ更新だけで自己治癒する。
+    private static let currentSchemaVersion = 2
 
     struct Payload: Codable {
         var schemaVersion: Int
         var bucket: String
+        var epoch: String?
         var paths: [String]
     }
 
     private let bucket: String
     private let fileURL: URL?
+    /// 構築時に capture したドメイン epoch（Issue #104）。persist はこの値でスタンプする —
+    /// 現行値の再読込にしないこと（bump 後の遅延 persist が新 epoch を名乗って stale 内容を
+    /// 復活させる = レース解消の要）。
+    private let epoch: String?
     private let maxEntries: Int
     private var paths: Set<String> = []
     private var loaded = false
 
     /// - Parameter fileURL: nil = 永続化なし（構築失敗時の縮退。プロセス生存中のみ有効）。
+    /// - Parameter epoch: ドメイン世代 epoch（`ConfigStore.fileProviderDomainEpoch` を構築時に
+    ///   読んで渡す。Issue #104）。payload の値と不一致なら読込時に全体破棄。nil 同士は一致扱い
+    ///   （クリーンインストール = 一度もドメイン除去していない環境）。
     /// - Parameter maxEntries: エントリ数の安全弁（既定 = `Self.maxEntries`。実体化バッジ用は
     ///   実体化ファイル数が既定 1000 を普通に超えるため引き上げる・2026-07-14 ユーザ確定）。
-    public init(bucket: String, fileURL: URL?, maxEntries: Int = PersistedPathSet.maxEntries) {
+    public init(
+        bucket: String, fileURL: URL?, epoch: String?,
+        maxEntries: Int = PersistedPathSet.maxEntries
+    ) {
         self.bucket = bucket
         self.fileURL = fileURL
+        self.epoch = epoch
         self.maxEntries = maxEntries
     }
 
@@ -154,6 +176,14 @@ public actor PersistedPathSet {
               payload.schemaVersion == Self.currentSchemaVersion,
               payload.bucket == bucket
         else { return }
+        guard payload.epoch == epoch else {
+            // ドメイン作り直し跨ぎの stale（Issue #104）。設計どおりの全体破棄だが、事後調査で
+            // 「意図した破棄」と「意図せぬ epoch 伝播不良（stale capture）」を切り分けられるよう
+            // notice（永続）で残す（PR #106 レビュー指摘 5）。ファイル名は固定のレジストリ名・
+            // epoch はローカル生成のランダム UUID でどちらも機密性なし（.public で相関可能に）。
+            AppLogger.fileProvider.notice("persisted path set discarded (\(fileURL.lastPathComponent, privacy: .public)): domain epoch mismatch (stored \(payload.epoch ?? "none", privacy: .public), current \(self.epoch ?? "none", privacy: .public))")
+            return
+        }
         var validated: Set<String> = []
         for path in payload.paths {
             guard (try? PathValidator.validateRelativePath(path)) != nil else {
@@ -169,7 +199,8 @@ public actor PersistedPathSet {
     private func persist() {
         guard let fileURL else { return }
         let payload = Payload(
-            schemaVersion: Self.currentSchemaVersion, bucket: bucket, paths: paths.sorted())
+            schemaVersion: Self.currentSchemaVersion, bucket: bucket, epoch: epoch,
+            paths: paths.sorted())
         do {
             try JSONEncoder().encode(payload).write(to: fileURL, options: .atomic)
         } catch {

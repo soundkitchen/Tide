@@ -109,6 +109,12 @@ PR #66 レビュー指摘 1 の回帰・両方向）・rebind 回帰（rename �
    `fileprovider-materialized.json` 残置分が新レプリカ初回 insert 時に deco 付きで載るが、直後の
    badge-only update（live vs reported 差分）が deco を除去（fileproviderd スナップショット変異ログ
    `diffs:itemDecoration` で確認・固着なし＝設計どおりの eventual 収束）。
+   **後日訂正（2026-08-12 = Issue #104）**: この自己修復は**消灯方向のみ**だった。stale reported に
+   載るパスは再実体化すると live と reported の両方に現れ = 差分に出ず、バッジ ON が新レプリカへ
+   一度も配信されない**永久不点灯**で固着する（#97 受け入れの複数回作り直しで顕在化）。
+   ✅ **恒久対処済み** = ドメイン epoch リセット（アプリがドメイン除去のたびに epoch を進め、
+   レジストリ 3 本は epoch 不一致で読込時全体破棄。詳細 = `docs/08`「FP レジストリのドメイン
+   epoch リセット」節）。
 
 ### rename 後に fileproviderd の版スタンプが stale 固着する（2026-07-31 発見・実験で全容確定 = Issue #93）
 
