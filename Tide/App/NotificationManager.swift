@@ -75,6 +75,12 @@ final class NotificationManager: NSObject, SyncNotifying {
             AppLogger.ui.error("Failed to post notification: \(String(describing: error), privacy: .private)")
         }
     }
+
+    /// 配達済み通知の撤去（Issue #103: FP 拡張の復帰エッジで「まだ止まっている」という
+    /// stale な通知を通知センターに残さない）。未配達 / 不在の識別子は no-op。
+    nonisolated func removeDelivered(identifier: String) {
+        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [identifier])
+    }
 }
 
 extension NotificationManager: UNUserNotificationCenterDelegate {

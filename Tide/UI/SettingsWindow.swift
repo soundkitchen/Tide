@@ -36,7 +36,8 @@ struct SettingsWindow: View {
     @State private var notificationsEnabled: Bool = true
 
     /// File Provider PoC ドメインの状態表示（M5 Phase 3）。nil = 未取得。
-    @State private var fileProviderEnabled: Bool?
+    /// FP ドメインの状態（#82 / #103）。nil = 取得中 or 取得失敗（不明）。
+    @State private var fileProviderStatus: FileProviderController.DomainStatus?
     @State private var fileProviderMessage: String?
 
     private static let bytesPerMBps: Int64 = 1_000_000
@@ -132,9 +133,10 @@ struct SettingsWindow: View {
                     Task { await FileProviderController.openUserVisibleFolderInFinder() }
                 }
                 // メニューバー行（MenuBarContent.secondaryActions）と同じ活性条件（PR #101
-                // 再レビュー指摘 5）: 既知の無効（false）だけ disable — 直下の FP セクションが
-                // 「Domain is not enabled.」を出している状態で素の CloudStorage が開く矛盾を防ぐ。
-                .disabled(fileProviderEnabled == false)
+                // 再レビュー指摘 5）: 既知の不活性（未登録 / ユーザ OFF = レプリカ不可視・#103）
+                // だけ disable — 直下の FP セクションが停止を示している状態で素の CloudStorage が
+                // 開く矛盾を防ぐ。不明（nil）は活性のまま（MenuBar 側と同じ倒し方）。
+                .disabled(fileProviderStatus == .notRegistered || fileProviderStatus == .userDisabled)
             }
             Section("Settings file") {
                 Button("Export Settings…") { exportSettings() }
@@ -162,12 +164,24 @@ struct SettingsWindow: View {
                     .foregroundStyle(.secondary)
             }
             Section("File Provider") {
-                if let fileProviderEnabled {
-                    Text(fileProviderEnabled
-                         ? String(localized: "Domain is enabled.")
-                         : String(localized: "Domain is not enabled."))
+                switch fileProviderStatus {
+                case .enabled:
+                    Text("Domain is enabled.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                case .notRegistered:
+                    Text("Domain is not enabled.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                case .userDisabled:
+                    // システム設定でユーザ OFF（#103）: この画面の Enable/Disable では直せない
+                    // ため、専用文言 + システム設定への誘導（設計確定 2026-08-15）。
+                    Text("The Tide File Provider extension is turned off in System Settings — nothing is syncing.")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                    Button("Open System Settings") { openLoginItemsAndExtensionsSettings() }
+                case nil:
+                    EmptyView()
                 }
                 // env のラッパ経由（七次レビュー指摘 3）: 素の FileProviderController.enable/disable を
                 // 直接叩くと bootstrap の in-flight migrate と交錯する（ドメイン変更前の migrate
@@ -223,10 +237,10 @@ struct SettingsWindow: View {
         // 開きっぱなしの Settings が stale にならないよう変更カウンタで再取得する
         // （PR #101 四次レビュー指摘 4。id 変化時に加えて初回出現時も走る = 従来の .task を包含）。
         .task(id: env.fileProviderStateVersion) {
-            let enabled = await FileProviderController.isEnabled()
+            let status = await FileProviderController.domainStatus()
             // キャンセル検査（十次レビュー指摘 4）: 連続バンプ時の逆順 resume で旧値の書き戻しを防ぐ
             guard !Task.isCancelled else { return }
-            fileProviderEnabled = enabled
+            fileProviderStatus = status
         }
         .onChange(of: notificationsEnabled) { _, newValue in
             env.config.notificationsEnabled = newValue

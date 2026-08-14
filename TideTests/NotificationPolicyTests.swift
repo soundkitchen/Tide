@@ -23,6 +23,12 @@ final class NotificationPolicyTests: XCTestCase {
             NotificationPolicy.content(for: .fileKeepsChanging(path: "a/b.txt")).identifier,
             "unstable:a/b.txt"
         )
+        // FP 拡張 OFF（#103）は path を持たない単一事象 = identifier 固定（再発火も 1 件に置換・
+        // 復帰エッジの撤去も同じ識別子で行う load-bearing な契約）。
+        XCTAssertEqual(
+            NotificationPolicy.content(for: .fileProviderDisabled).identifier,
+            "fpDisabled"
+        )
     }
 
     /// 種別が同じでも path が違えば identifier は別（畳まれない）。
@@ -53,6 +59,7 @@ final class NotificationPolicyTests: XCTestCase {
             .fileTooLarge(path: "p"),
             .uploadGaveUp(path: "p"),
             .fileKeepsChanging(path: "p"),
+            .fileProviderDisabled,
         ]
         for e in events {
             let c = NotificationPolicy.content(for: e)

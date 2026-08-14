@@ -112,16 +112,34 @@ enum FileProviderController {
         AppLogger.ui.notice("File Provider registry epoch bumped (replica destroyed)")
     }
 
-    /// FP ドメインの登録状態。**nil = 取得失敗**（fileproviderd 無応答等・登録の有無は不明）。
-    /// throw を false に潰すと「一時的な XPC 失敗」と「既知の未登録」が区別できず、
-    /// 呼び出し側 UI が実在するドメインへの導線を誤って disable する（PR #100 再レビュー指摘 1）。
-    /// 真偽が要る文脈は `== true` / `!= true` で明示的に倒す側を選ぶこと。
-    static func isEnabled() async -> Bool? {
-        // 有界化（十次レビュー指摘 1）: timeout も「取得失敗 = nil」に合流する（呼び出し側の
-        // 既存セマンティクスどおり不明側へ倒れる）。probe 経由の全呼び出し（completeSetup /
-        // ウィザード / Settings / MenuBar / signaler）が一括で有界になる。
+    /// FP ドメインの詳細状態（Issue #103）。
+    enum DomainStatus: Equatable, Sendable {
+        /// 登録済み・拡張有効（同期が動ける唯一の状態）。
+        case enabled
+        /// 登録済みだがシステム設定（ログイン項目と機能拡張）で拡張がユーザ OFF = 全同期停止。
+        case userDisabled
+        /// 未登録（Disable 済み / 未セットアップ）。
+        case notRegistered
+    }
+
+    /// FP ドメインの登録・有効状態。**nil = 取得失敗**（fileproviderd 無応答等・不明）。
+    /// throw を潰すと「一時的な XPC 失敗」と「既知の未登録」が区別できず、呼び出し側 UI が
+    /// 実在するドメインへの導線を誤って disable する（PR #100 再レビュー指摘 1）。
+    /// 真偽が要る文脈は `== .enabled` / `!= .notRegistered` 等で明示的に倒す側を選ぶこと。
+    ///
+    /// `.userDisabled` の判定は `userEnabled` プロパティ（Issue #103・実機実証 2026-08-15）:
+    /// システム設定のトグル OFF では **`domains()` に載ったまま** `userEnabled` だけが false に
+    /// なる（反映 ≤15 秒）。掲載有無だけを見る旧 `isEnabled()` はこの状態を「有効」と誤判定し、
+    /// 「緑表示のまま無音の同期停止」になっていた。
+    static func domainStatus() async -> DomainStatus? {
+        // 有界化（PR #101 十次レビュー指摘 1）: timeout も「取得失敗 = nil」に合流する。
+        // probe 経由の全呼び出し（completeSetup / ウィザード / Settings / MenuBar / signaler）が
+        // 一括で有界になる。
         try? await boundedXPC("domains()") {
-            try await NSFileProviderManager.domains().contains { $0.identifier == domain.identifier }
+            guard let current = try await NSFileProviderManager.domains()
+                .first(where: { $0.identifier == domain.identifier })
+            else { return DomainStatus.notRegistered }
+            return current.userEnabled ? .enabled : .userDisabled
         }
     }
 
@@ -363,9 +381,10 @@ enum FileProviderController {
 
     private static func performSignal() {
         Task {
-            // 取得失敗（nil）も signal しない側に倒す（従来挙動の維持 — signal は fire-and-forget の
-            // 補助経路で、拡張側の世代キャッシュ・定期契機が取りこぼしを回収する）。
-            guard await isEnabled() == true, let manager = NSFileProviderManager(for: domain) else { return }
+            // 取得失敗（nil）・userDisabled も signal しない側に倒す（従来挙動の維持 — signal は
+            // fire-and-forget の補助経路で、拡張側の世代キャッシュ・定期契機が取りこぼしを回収する。
+            // userDisabled は拡張が起動できないため signal しても届かない・#103）。
+            guard await domainStatus() == .enabled, let manager = NSFileProviderManager(for: domain) else { return }
             do {
                 try await manager.signalEnumerator(for: .workingSet)
                 AppLogger.sync.debug("Signaled File Provider working set")

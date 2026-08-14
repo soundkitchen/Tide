@@ -27,9 +27,14 @@ final class RemoteChangeSignaler {
     /// 変化時の通知先。プロダクションは `FileProviderController.signalRemoteChanges()`
     /// （coalesce は向こう側が持つ）。
     @ObservationIgnored private let signal: () -> Void
-    /// FP ドメインの有効性（Issue #82）。プロダクションは `FileProviderController.isEnabled()`
-    /// （fileproviderd へのローカル XPC 1 発）を配線し、テストはフェイクを注入する。
+    /// FP ドメインの有効性（Issue #82）。プロダクションは `FileProviderController.domainStatus()
+    /// == .enabled`（fileproviderd へのローカル XPC 1 発・userEnabled 込み = #103）を配線し、
+    /// テストはフェイクを注入する。
     @ObservationIgnored private let isFPDomainEnabled: @Sendable () async -> Bool
+    /// 無効/復帰の**エッジ検出時のみ**呼ばれる追加フック（Issue #103）。引数 = 無効になったか。
+    /// プロダクションは OS 通知の発火（true）/ 配達済み通知の撤去（false）を配線する。
+    /// 既定は no-op（テスト互換・通知はエッジのみ = 毎周回の連発にならない）。
+    @ObservationIgnored private let onFPDomainDisabledEdge: (Bool) -> Void
     @ObservationIgnored private let intervalSeconds: Int
 
     // UI 表示用の観測状態（B-1・fpOnly ポップオーバー）。判定ロジックは一切持たない読み出し専用。
@@ -58,12 +63,14 @@ final class RemoteChangeSignaler {
         intervalSeconds: Int,
         headIndexETag: @escaping @Sendable () async throws -> String?,
         signal: @escaping () -> Void,
-        isFPDomainEnabled: @escaping @Sendable () async -> Bool
+        isFPDomainEnabled: @escaping @Sendable () async -> Bool,
+        onFPDomainDisabledEdge: @escaping (Bool) -> Void = { _ in }
     ) {
         self.intervalSeconds = intervalSeconds
         self.headIndexETag = headIndexETag
         self.signal = signal
         self.isFPDomainEnabled = isFPDomainEnabled
+        self.onFPDomainDisabledEdge = onFPDomainDisabledEdge
     }
 
     func start() {
@@ -148,11 +155,13 @@ final class RemoteChangeSignaler {
             signal()
             lastSignaledAt = Date()
             AppLogger.sync.notice("RemoteChangeSignaler: FP domain re-enabled (\(reason, privacy: .public)); signaled FP domain to catch up")
+            onFPDomainDisabledEdge(false)
         } else if !fpDomainDisabled && !enabled {
             // fpOnly では拡張 OFF = 全同期停止。エラーがどこにも出ない盲点なので、ここだけは
             // .error で 1 回残す（エッジ検出 = 恒常ノイズにはならない）。
             fpDomainDisabled = true
             AppLogger.sync.error("RemoteChangeSignaler: FP domain is disabled (\(reason, privacy: .public)) — nothing is syncing until it is re-enabled")
+            onFPDomainDisabledEdge(true)
         }
     }
 

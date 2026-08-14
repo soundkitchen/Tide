@@ -237,20 +237,34 @@ final class AppEnvironment {
         )
         self.s3 = s3
 
-        // FP ドメイン未登録なら signal は向こうの isEnabled ガードで no-op になる（起動自体は
-        // 続行 = 設定画面から Enable すれば次の契機から効き始める）。気づけるようログだけ残す。
-        if await FileProviderController.isEnabled() != true {
-            AppLogger.ui.info("FP-only mode: File Provider domain is not enabled yet; enable it in Settings")
+        // FP ドメインが有効でなければ signal は向こうの status ガードで no-op になる（起動自体は
+        // 続行 = Enable / システム設定で ON にすれば次の契機から効き始める）。気づけるようログだけ
+        // 残す（定常の可視化は signaler の毎周回観測が担う・#82/#103）。
+        let initialStatus = await FileProviderController.domainStatus()
+        if initialStatus != .enabled {
+            AppLogger.ui.info("FP-only mode: File Provider domain is not active (status: \(String(describing: initialStatus), privacy: .public)); syncing is paused until it is enabled")
         }
 
         let signaler = RemoteChangeSignaler(
             intervalSeconds: config.pollingIntervalSeconds,
             headIndexETag: { [s3] in try await s3.headObject(key: TideS3Client.indexKey)?.etag },
             signal: { FileProviderController.signalRemoteChanges() },
-            // 拡張 OFF = 全同期停止の検出（Issue #82）。メニューバーアイコンへ反映される。
-            // 取得失敗（nil）は無効側に倒す = 従来挙動の維持（毎周回の再観測で自己回復する・
-            // 警告の出しすぎは次周回で消えるが、見逃しは ETag 変化まで気づけない）。
-            isFPDomainEnabled: { await FileProviderController.isEnabled() == true }
+            // 拡張 OFF = 全同期停止の検出（Issue #82 / #103）。メニューバーアイコンへ反映される。
+            // 判定は userEnabled 込みの domainStatus() — 掲載有無だけではシステム設定のトグル OFF
+            // を検出できない（現 OS では domains() に載ったまま userEnabled=false になる・#103
+            // 実機実証 2026-08-15）。取得失敗（nil）は無効側に倒す = 従来挙動の維持
+            // （毎周回の再観測で自己回復する・見逃しは ETag 変化まで気づけない）。
+            isFPDomainEnabled: { await FileProviderController.domainStatus() == .enabled },
+            // 無効/復帰エッジで OS 通知を発火/撤去（Issue #103・通知 5 事象目 =「ユーザ介入が要る
+            // 確定的な全同期停止」。エッジ検出のみ = 連発しない・identifier 固定で万一も置換）。
+            onFPDomainDisabledEdge: { [notifications] disabled in
+                if disabled {
+                    Task { await notifications.post(.fileProviderDisabled) }
+                } else {
+                    notifications.removeDelivered(
+                        identifier: NotificationPolicy.content(for: .fileProviderDisabled).identifier)
+                }
+            }
         )
         self.signaler = signaler
         signaler.start()
@@ -333,7 +347,9 @@ final class AppEnvironment {
     /// 2 スナップショット合成で矛盾表示にならないため（七次レビュー指摘 5。isEnabled の XPC も
     /// 1 往復に畳まれる）。
     func probeDomainRecreation(forBucket bucket: String) async -> (recreate: Bool, enabled: Bool?) {
-        let enabled = await FileProviderController.isEnabled()
+        // この判定に要るのは**登録有無**: userDisabled のドメインもレプリカ実在 = 登録済みとして
+        // 扱う（#103。拡張の有効性はセットアップ完了後のウィザード検査と signaler 観測が別途担う）。
+        let enabled: Bool? = (await FileProviderController.domainStatus()).map { $0 != .notRegistered }
         if let previousBucket = config.bucketName, !previousBucket.isEmpty {
             // 既知の旧バケット: 変わったときだけ作り直す。同一バケットの再セットアップ
             // （クリーンインストール復旧 / 認証情報の再設定）はレプリカ温存（再 add no-op）。

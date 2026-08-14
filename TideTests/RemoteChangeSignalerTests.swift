@@ -200,6 +200,33 @@ final class RemoteChangeSignalerTests: XCTestCase {
         XCTAssertNotEqual(signaler.lastSignaledAt, signaledBefore, "catch-up で lastSignaledAt が前進していない")
     }
 
+    /// 無効/復帰エッジのフック（Issue #103: OS 通知の発火/撤去の配線面）は**エッジ検出時のみ**
+    /// 呼ばれる — 毎周回呼ぶと通知の連発（identifier 置換でも音は毎回鳴る）になる。
+    func testFPDomainDisabledEdgeHookFiresOnEdgesOnly() async {
+        let head = FakeHead([.success("etag-1")])
+        let counter = SignalCounter()
+        let enabled = FakeEnabled([true, false, false, true, true])
+        var hookCalls: [Bool] = []
+        let signaler = RemoteChangeSignaler(
+            intervalSeconds: 3600,
+            headIndexETag: { try head.next() },
+            signal: { counter.fire() },
+            isFPDomainEnabled: { enabled.next() },
+            onFPDomainDisabledEdge: { hookCalls.append($0) }
+        )
+
+        await signaler.checkOnce(reason: "test")  // 有効（初回・エッジではない）
+        XCTAssertEqual(hookCalls, [])
+        await signaler.checkOnce(reason: "test")  // 無効エッジ
+        XCTAssertEqual(hookCalls, [true], "無効エッジでフックが呼ばれていない")
+        await signaler.checkOnce(reason: "test")  // 無効のまま → 呼ばない
+        XCTAssertEqual(hookCalls, [true], "非エッジ周回でフックが連発している")
+        await signaler.checkOnce(reason: "test")  // 復帰エッジ
+        XCTAssertEqual(hookCalls, [true, false], "復帰エッジでフックが呼ばれていない")
+        await signaler.checkOnce(reason: "test")  // 有効のまま → 呼ばない
+        XCTAssertEqual(hookCalls, [true, false])
+    }
+
     /// 併観測は HEAD より先に走る = HEAD 失敗（オフライン等）でも拡張 OFF に気づける。
     func testDisabledDetectionSurvivesHeadFailure() async {
         let head = FakeHead([.failure(HeadError())])

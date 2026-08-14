@@ -13,6 +13,10 @@ enum NotificationEvent: Equatable, Sendable {
     case uploadGaveUp(path: String)
     /// 読込中に変化し続けて安定せず、まだバックアップされていない（L6 A-detect の延期）。
     case fileKeepsChanging(path: String)
+    /// fpOnly: FP 拡張がシステム設定でユーザ OFF にされ**全同期が停止**した（ON に戻す介入が
+    /// 要る確定的事象・Issue #103）。発火は signaler のエッジ検出のみ = 連発しない。
+    /// 復帰エッジで配達済み通知は撤去される（`NotificationManager.removeDelivered`）。
+    case fileProviderDisabled
 }
 
 /// OS 通知 1 件分の表示内容。`NotificationManager` が `UNMutableNotificationContent` へ詰め替える。
@@ -56,6 +60,14 @@ enum NotificationPolicy {
                 identifier: "unstable:\(path)",
                 title: String(localized: "File not backed up yet"),
                 body: String(localized: "“\(name)” keeps changing and hasn’t been backed up yet.")
+            )
+        case .fileProviderDisabled:
+            // identifier は固定（path なし）= 万一の再発火も UNUserNotificationCenter の
+            // 「同じ識別子は置換」で 1 件に畳まれる。復帰エッジの撤去もこの識別子で行う。
+            return NotificationContent(
+                identifier: "fpDisabled",
+                title: String(localized: "Tide is not syncing"),
+                body: String(localized: "The Tide File Provider extension is turned off in System Settings. Turn it on to resume syncing.")
             )
         }
     }

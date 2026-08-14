@@ -35,6 +35,10 @@ struct SetupWizardWindow: View {
     /// factoryReset は setupGate で completeSetup とは排他だが、S3 probe 系はゲート外なので
     /// 進行中リセットが実際に起こり得る）。
     @State private var wizardGeneration = 0
+    /// セットアップ完了検査で「FP 拡張がシステム設定でユーザ OFF」を検出した（Issue #103 現象 1:
+    /// 拡張 OFF でも `add(domain)` は成功してしまうため、done へ進めず誘導する）。
+    /// true の間はエラーメッセージ + システム設定への誘導ボタンを表示する。
+    @State private var fpExtensionOffAfterSetup = false
 
     enum Step: Int, CaseIterable {
         case credentials = 0
@@ -78,6 +82,10 @@ struct SetupWizardWindow: View {
                         .textSelection(.enabled)
                     .foregroundStyle(.red)
                     .font(.callout)
+            }
+            if fpExtensionOffAfterSetup {
+                // #103: アプリ内では直せない（システム設定のトグル）ため誘導ボタンを添える。
+                Button("Open System Settings") { openLoginItemsAndExtensionsSettings() }
             }
 
             Spacer()
@@ -347,6 +355,7 @@ struct SetupWizardWindow: View {
         bucketSetupLog = []
         isWorking = false
         errorMessage = nil
+        fpExtensionOffAfterSetup = false
         pendingCreateBucket = false
         fileProviderAlreadyEnabled = nil
         willRecreateDomain = nil
@@ -357,6 +366,7 @@ struct SetupWizardWindow: View {
     private func onNext(generation: Int) async {
         guard generation == wizardGeneration else { return }
         errorMessage = nil
+        fpExtensionOffAfterSetup = false
         switch step {
         case .credentials:
             step = .bucket
@@ -535,6 +545,17 @@ struct SetupWizardWindow: View {
             // import 誘導の消費（リセット）は進行中でも発火し得る。stale 完了で step = .done に
             // 進めない（リセットが資格情報の消去も済ませている）。
             guard generation == wizardGeneration else { return }
+            // #103 現象 1: 拡張がシステム設定で OFF でも add(domain) は成功してしまい、無音停止の
+            // まま done に到達する。userEnabled を検査し、OFF なら done へ進めず誘導する
+            // （設計確定 2026-08-15 = エラーで止める）。設定・ドメインは保存済みなので、ON に
+            // してから再度「Start syncing」を押せば冪等に成功する（資格情報も温存する）。
+            let status = await FileProviderController.domainStatus()
+            guard generation == wizardGeneration else { return }
+            if status == .userDisabled {
+                fpExtensionOffAfterSetup = true
+                errorMessage = String(localized: "Setup was saved, but the Tide File Provider extension is turned off in System Settings — nothing will sync. Turn it on, then press “Start syncing” again.")
+                return
+            }
             // L7: 成功したらメモリ上の鍵をすぐ手放す（参照を切る。ヒープ上のバイトは GC 任せ）
             accessKeyId = ""
             secretAccessKey = ""

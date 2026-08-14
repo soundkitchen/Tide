@@ -1465,6 +1465,61 @@
         }
       }
     },
+    "Open System Settings" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "システム設定を開く"
+          }
+        }
+      }
+    },
+    "Setup was saved, but the Tide File Provider extension is turned off in System Settings — nothing will sync. Turn it on, then press “Start syncing” again." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "設定は保存されましたが、Tide の File Provider 機能拡張がシステム設定でオフのため同期できません。オンにしてから、もう一度「同期を開始」を押してください。"
+          }
+        }
+      }
+    },
+    "The Tide File Provider extension is turned off in System Settings — nothing is syncing." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tide の File Provider 機能拡張がシステム設定でオフになっています — 同期は停止中です。"
+          }
+        }
+      }
+    },
+    "The Tide File Provider extension is turned off in System Settings. Turn it on to resume syncing." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tide の File Provider 機能拡張がシステム設定でオフになっています。同期を再開するにはオンにしてください。"
+          }
+        }
+      }
+    },
+    "Tide is not syncing" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tide は同期していません"
+          }
+        }
+      }
+    },
     "Paste an IAM access key pair with permission to read/write your Tide bucket." : {
       "extractionState" : "manual",
       "localizations" : {
