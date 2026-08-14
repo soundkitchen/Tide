@@ -7,11 +7,13 @@ struct SetupWizardWindow: View {
     @Environment(AppEnvironment.self) private var env
     @Environment(\.dismissWindow) private var dismissWindow
 
+    private static let defaultRegion = "ap-northeast-1"
+
     @State private var step: Step = .credentials
     @State private var accessKeyId: String = ""
     @State private var secretAccessKey: String = ""
     @State private var bucket: String = ""
-    @State private var region: String = "ap-northeast-1"
+    @State private var region: String = Self.defaultRegion
     @State private var bucketSetupLog: [String] = []
     @State private var isWorking: Bool = false
     @State private var errorMessage: String?
@@ -26,6 +28,13 @@ struct SetupWizardWindow: View {
     /// （十次レビュー指摘 3 — 非構造化 Task は .task(id:) 再起動でキャンセルされないため、
     /// 旧サイクルの fallback が新サイクルの probe 窓で早期発火するのを防ぐ）。
     @State private var probeGeneration = 0
+    /// ウィザードセッションの世代（`resetWizard` ごとに +1・Issue #102）。async アクション
+    /// （runProvisioning / finishProvisioning / runStartSyncing）は開始時の世代を capture し、
+    /// await 復帰後の `@State` 書込前に自世代を検査する — リセット後に stale 完了が新セッションの
+    /// step / log / errorMessage / isWorking を汚さないため（probeGeneration と同じパターン。
+    /// factoryReset は setupGate で completeSetup とは排他だが、S3 probe 系はゲート外なので
+    /// 進行中リセットが実際に起こり得る）。
+    @State private var wizardGeneration = 0
 
     enum Step: Int, CaseIterable {
         case credentials = 0
@@ -81,13 +90,23 @@ struct SetupWizardWindow: View {
                 Spacer()
                 if step == .done {
                     Button("Finish") {
+                        // 常駐 Window は閉じても @State が生存するため、閉じると同時に
+                        // 新規セッションへ戻す（#102 現象 3 — 次回表示を done から始めない）。
                         dismissWindow(id: "setup")
+                        resetWizard()
                     }
                     .keyboardShortcut(.defaultAction)
                 } else {
-                    Button(nextButtonLabel) { Task { await onNext() } }
-                        .keyboardShortcut(.defaultAction)
-                        .disabled(!canAdvance || isWorking)
+                    Button(nextButtonLabel) {
+                        // 世代は**押下 tick で** capture する（PR #108 レビュー指摘 = stale「意図」）:
+                        // Task スケジュールと本体実行の間の 1 tick にリセット（factoryReset 通知 /
+                        // import 消費）が割り込むと、本体側 capture ではリセット**後**の世代を掴んで
+                        // 新セッション上で実行されてしまう。押下時世代を渡し本体冒頭で検査する。
+                        let generation = wizardGeneration
+                        Task { await onNext(generation: generation) }
+                    }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!canAdvance || isWorking)
                 }
             }
         }
@@ -99,16 +118,34 @@ struct SetupWizardWindow: View {
         // 両方で消費でき、消費後は nil に戻すので古い payload が将来の appear まで居残らない。
         .onChange(of: env.pendingImportedSettings, initial: true) {
             if let pending = env.pendingImportedSettings {
+                // 消費前に必ず新規セッションへ戻す（#102 現象 2・3）: done 到達後は資格情報
+                // @State が消去済み（L7）のため、残存 step のまま充填しても done 画面のまま
+                // = 誘導が機能しない。リセット後に充填するので着地は credentials
+                // （bucket/region は事前充填済み・資格情報の再入力から自然に bucket へ進む）。
+                // ウィザード内の「Import settings…」ボタン（applyImported 直呼び）はリセット
+                // しない — credentials 入力途中の値を消さないため。
+                resetWizard()
                 applyImported(pending)
                 env.pendingImportedSettings = nil
             }
+        }
+        // factoryReset の通知（#102 現象 1）: 開きっぱなしの窓（done 出っぱなし等）を閉じて
+        // 状態を破棄する — リセット済みアプリに旧セッションの done 画面 / 入力値を見せない。
+        // 常駐 scene のため窓が閉じていても発火するが、その場合 dismiss は no-op・リセットは無害。
+        .onChange(of: env.setupWizardResetVersion) {
+            dismissWindow(id: "setup")
+            resetWizard()
         }
         .alert("Bucket not found", isPresented: $pendingCreateBucket) {
             Button("Cancel", role: .cancel) {
                 step = .bucket
             }
             Button("Create new bucket") {
-                Task { await runCreateBucketAndProvision() }
+                // Next ボタンと同じ stale「意図」対策（PR #108 レビュー指摘）。なお
+                // pendingCreateBucket での判別は不可 — alert は正常経路でもボタン押下で
+                // isPresented を false に戻すため、リセット由来の強制クリアと区別できない。
+                let generation = wizardGeneration
+                Task { await runCreateBucketAndProvision(generation: generation) }
             }
         } message: {
             Text("Bucket \(bucket) does not exist. Create it in region \(region)?")
@@ -294,35 +331,67 @@ struct SetupWizardWindow: View {
         step = Step(rawValue: step.rawValue - 1) ?? .credentials
     }
 
-    private func onNext() async {
+    /// ウィザードを新規セッションへ戻す（Issue #102）。単一・常駐の `Window` は閉じても
+    /// `@State` が生存し `.onAppear` 再発火にも頼れないため、「セッション終端」の 3 点
+    /// （Finish 押下 / import 誘導の消費 / factoryReset 通知）で明示的に呼ぶ。
+    /// 世代カウンタを進めることで in-flight の async アクションと probe fallback の
+    /// 遅延書込を無効化する（stale 完了が新セッションを汚さない）。
+    private func resetWizard() {
+        wizardGeneration &+= 1
+        probeGeneration &+= 1
+        step = .credentials
+        accessKeyId = ""
+        secretAccessKey = ""
+        bucket = ""
+        region = Self.defaultRegion
+        bucketSetupLog = []
+        isWorking = false
+        errorMessage = nil
+        pendingCreateBucket = false
+        fileProviderAlreadyEnabled = nil
+        willRecreateDomain = nil
+    }
+
+    /// `generation` = ボタン押下 tick の世代。押下〜本体実行の 1 tick にリセットが割り込んだ
+    /// stale「意図」はここで棄却する（PR #108 レビュー指摘・新セッションを進めない/汚さない）。
+    private func onNext(generation: Int) async {
+        guard generation == wizardGeneration else { return }
         errorMessage = nil
         switch step {
         case .credentials:
             step = .bucket
         case .bucket:
-            await runProvisioning()
+            await runProvisioning(generation: generation)
         case .provisioning:
             step = .fileProvider
         case .fileProvider:
-            await runStartSyncing()
+            await runStartSyncing(generation: generation)
         case .done:
+            // Finish ボタンと同義（done では Next は出ないが分岐は対称に保つ・#102）
             dismissWindow(id: "setup")
+            resetWizard()
         }
     }
 
-    private func runProvisioning() async {
+    /// `generation` = 押下 tick の世代（#102 / PR #108 レビュー指摘）: await 復帰後の @State
+    /// 書込は自世代のときだけ行う。isWorking の復帰も自世代限定 — stale 完了の defer が
+    /// 新セッションの実行中フラグを落とすと、進行中の新アクションのボタンが誤って再活性化する。
+    private func runProvisioning(generation: Int) async {
+        guard generation == wizardGeneration else { return }
         isWorking = true
         bucketSetupLog = []
         step = .provisioning
-        defer { isWorking = false }
+        defer { if generation == wizardGeneration { isWorking = false } }
 
         guard let probe = makeProbeClient() else { return }
 
         do {
             try await probe.headBucket()
+            guard generation == wizardGeneration else { return }
             bucketSetupLog.append(String(localized: "✓ HeadBucket: reachable"))
         } catch {
             AppLogger.s3.error("HeadBucket failed: \(String(describing: error), privacy: .private)")
+            guard generation == wizardGeneration else { return }
             // 404（非存在）、または 404 以外の空ボディ（権限不足 / 別リージョン / 名前重複などが
             // missingRequiredData として届く）。後者は HeadBucket だけでは確定できないので、
             // 「作成または既存利用」フローへ進め、createBucket の結果で確定させる。
@@ -341,20 +410,23 @@ struct SetupWizardWindow: View {
             return
         }
 
-        await finishProvisioning(probe: probe)
+        await finishProvisioning(probe: probe, generation: generation)
     }
 
     /// 「作成する」アラートが押されたあとに呼ばれる: バケット作成 → 既存パスへ合流。
-    private func runCreateBucketAndProvision() async {
+    private func runCreateBucketAndProvision(generation: Int) async {
+        guard generation == wizardGeneration else { return }
         isWorking = true
-        defer { isWorking = false }
+        defer { if generation == wizardGeneration { isWorking = false } }
         guard let probe = makeProbeClient() else { return }
 
         do {
             try await probe.createBucket()
+            guard generation == wizardGeneration else { return }
             bucketSetupLog.append(String(localized: "✓ Bucket created"))
         } catch {
             AppLogger.s3.error("CreateBucket failed: \(String(describing: error), privacy: .private)")
+            guard generation == wizardGeneration else { return }
             if S3ErrorClassifier.isBucketAlreadyOwnedByYou(error) {
                 // 既に存在し、かつ自分の所有 → そのまま使う（複数マシンでの既存バケット合流）
                 bucketSetupLog.append(String(localized: "✓ Bucket already exists (owned by you) — using it"))
@@ -373,34 +445,40 @@ struct SetupWizardWindow: View {
                 return
             }
         }
-        await finishProvisioning(probe: probe)
+        await finishProvisioning(probe: probe, generation: generation)
     }
 
     /// HeadBucket / CreateBucket 後の共通処理（バージョニング + ライフサイクル）。
-    private func finishProvisioning(probe: TideS3Client) async {
+    /// `generation` は呼び出し元アクションの開始時世代（#102 — await 復帰後の書込ガード用）。
+    private func finishProvisioning(probe: TideS3Client, generation: Int) async {
         do {
             let alreadyEnabled = try await probe.isVersioningEnabled()
             if !alreadyEnabled {
                 try await probe.enableVersioning()
             }
+            guard generation == wizardGeneration else { return }
             bucketSetupLog.append(alreadyEnabled
                 ? String(localized: "✓ Versioning was already enabled")
                 : String(localized: "✓ Versioning enabled"))
 
             let lifecycle = try await probe.ensureLifecycleRules()
+            guard generation == wizardGeneration else { return }
             bucketSetupLog.append(lifecycle == .alreadyConfigured
                 ? String(localized: "✓ Lifecycle rules already configured")
                 : String(localized: "✓ Lifecycle rules updated"))
 
             // Block Public Access の 4 つの設定を強制
             try await probe.enforcePublicAccessBlock()
+            guard generation == wizardGeneration else { return }
             bucketSetupLog.append(String(localized: "✓ Public access block enforced"))
 
             // HTTPS 強制バケットポリシー（C3 後半・Issue #26）。非致命: 失敗してもセットアップは続行する
             // （SDK 既定 HTTPS の多層防御。s3:PutBucketPolicy 権限が無い構成でも止めない）。Block Public Access の
             // 後でよい（Deny statement は public 判定にならず弾かれない）。
             do {
-                switch try await probe.enforceTLSBucketPolicy() {
+                let outcome = try await probe.enforceTLSBucketPolicy()
+                guard generation == wizardGeneration else { return }
+                switch outcome {
                 case .alreadyEnforced:
                     bucketSetupLog.append(String(localized: "✓ HTTPS-only bucket policy already enforced"))
                 case .updated:
@@ -412,12 +490,14 @@ struct SetupWizardWindow: View {
                 }
             } catch {
                 AppLogger.s3.error("enforceTLSBucketPolicy failed (non-fatal): \(String(describing: error), privacy: .private)")
+                guard generation == wizardGeneration else { return }
                 bucketSetupLog.append(String(localized: "⚠ Could not set HTTPS-only policy (continuing)"))
             }
 
             bucketSetupLog.append(String(localized: "✓ Provisioning complete"))
         } catch {
             let detail = String(describing: error)
+            guard generation == wizardGeneration else { return }
             errorMessage = String(localized: "Provisioning failed: \(detail)")
             step = .bucket
         }
@@ -440,9 +520,10 @@ struct SetupWizardWindow: View {
         }
     }
 
-    private func runStartSyncing() async {
+    private func runStartSyncing(generation: Int) async {
+        guard generation == wizardGeneration else { return }
         isWorking = true
-        defer { isWorking = false }
+        defer { if generation == wizardGeneration { isWorking = false } }
         do {
             let creds = AWSCredentials(accessKeyId: accessKeyId, secretAccessKey: secretAccessKey)
             try await env.completeSetup(
@@ -450,12 +531,17 @@ struct SetupWizardWindow: View {
                 bucket: bucket,
                 region: region
             )
+            // 世代ガード（#102）: completeSetup 自体は setupGate で factoryReset と排他だが、
+            // import 誘導の消費（リセット）は進行中でも発火し得る。stale 完了で step = .done に
+            // 進めない（リセットが資格情報の消去も済ませている）。
+            guard generation == wizardGeneration else { return }
             // L7: 成功したらメモリ上の鍵をすぐ手放す（参照を切る。ヒープ上のバイトは GC 任せ）
             accessKeyId = ""
             secretAccessKey = ""
             step = .done
         } catch {
             let detail = String(describing: error)
+            guard generation == wizardGeneration else { return }
             errorMessage = String(localized: "Failed to start sync engine: \(detail)")
         }
     }
