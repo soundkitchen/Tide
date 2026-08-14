@@ -963,13 +963,17 @@ Keep Downloaded（#40 の残フェーズ）の対向操作。
      factoryReset の実行パスで bump）を `.onChange` で受け,**窓を閉じて**状態破棄
      （設計確定: リセット済みアプリに旧セッションを見せない・Settings 窓が reset 成功時に
      閉じる仕様と対称）。常駐 scene のため窓が閉じていても発火するが dismiss は no-op で無害。
-- **世代ガード** = `wizardGeneration`（`probeGeneration` と同パターン）: S3 probe 系
-  （`runProvisioning` / `runCreateBucketAndProvision` / `finishProvisioning`）と
-  `runStartSyncing` は開始時世代を capture し、await 復帰後の `@State` 書込（log append /
-  `step` / `errorMessage` / `pendingCreateBucket`）前に自世代を検査。`isWorking = false` の
-  defer も自世代限定 — stale 完了の defer が新セッションの実行中フラグを落とすと進行中の
-  新アクションのボタンが誤再活性化するため。probe 系は setupGate の外で走るので
-  「進行中に factoryReset / import 消費でリセット」は実際に起こり得る。
+- **世代ガード** = `wizardGeneration`（`probeGeneration` と同パターン）: 世代は**ボタン押下
+  tick で capture して async 本体へ引数で渡す**（PR #108 レビュー指摘 = stale「意図」対策。
+  `Task { … }` のスケジュールと本体実行の間の 1 tick にリセットが割り込むと、本体側 capture
+  ではリセット後の世代を掴んで新セッション上で実行される。`pendingCreateBucket` での判別は
+  不可 — alert は正常経路でもボタン押下で isPresented が false に戻るため）。本体は冒頭 +
+  await 復帰後の `@State` 書込（log append / `step` / `errorMessage` / `pendingCreateBucket`）
+  前に自世代を検査（`onNext` / `runProvisioning` / `runCreateBucketAndProvision` /
+  `finishProvisioning` / `runStartSyncing`）。`isWorking = false` の defer も自世代限定 —
+  stale 完了の defer が新セッションの実行中フラグを落とすと進行中の新アクションのボタンが
+  誤再活性化するため。probe 系は setupGate の外で走るので「進行中に factoryReset /
+  import 消費でリセット」は実際に起こり得る。
   `resetWizard` は `probeGeneration` も進めて fileProvider ステップの 10 秒フォールバックの
   遅延書込も無効化する。
 

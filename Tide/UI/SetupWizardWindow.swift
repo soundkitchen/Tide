@@ -97,9 +97,16 @@ struct SetupWizardWindow: View {
                     }
                     .keyboardShortcut(.defaultAction)
                 } else {
-                    Button(nextButtonLabel) { Task { await onNext() } }
-                        .keyboardShortcut(.defaultAction)
-                        .disabled(!canAdvance || isWorking)
+                    Button(nextButtonLabel) {
+                        // 世代は**押下 tick で** capture する（PR #108 レビュー指摘 = stale「意図」）:
+                        // Task スケジュールと本体実行の間の 1 tick にリセット（factoryReset 通知 /
+                        // import 消費）が割り込むと、本体側 capture ではリセット**後**の世代を掴んで
+                        // 新セッション上で実行されてしまう。押下時世代を渡し本体冒頭で検査する。
+                        let generation = wizardGeneration
+                        Task { await onNext(generation: generation) }
+                    }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!canAdvance || isWorking)
                 }
             }
         }
@@ -134,7 +141,11 @@ struct SetupWizardWindow: View {
                 step = .bucket
             }
             Button("Create new bucket") {
-                Task { await runCreateBucketAndProvision() }
+                // Next ボタンと同じ stale「意図」対策（PR #108 レビュー指摘）。なお
+                // pendingCreateBucket での判別は不可 — alert は正常経路でもボタン押下で
+                // isPresented を false に戻すため、リセット由来の強制クリアと区別できない。
+                let generation = wizardGeneration
+                Task { await runCreateBucketAndProvision(generation: generation) }
             }
         } message: {
             Text("Bucket \(bucket) does not exist. Create it in region \(region)?")
@@ -341,17 +352,20 @@ struct SetupWizardWindow: View {
         willRecreateDomain = nil
     }
 
-    private func onNext() async {
+    /// `generation` = ボタン押下 tick の世代。押下〜本体実行の 1 tick にリセットが割り込んだ
+    /// stale「意図」はここで棄却する（PR #108 レビュー指摘・新セッションを進めない/汚さない）。
+    private func onNext(generation: Int) async {
+        guard generation == wizardGeneration else { return }
         errorMessage = nil
         switch step {
         case .credentials:
             step = .bucket
         case .bucket:
-            await runProvisioning()
+            await runProvisioning(generation: generation)
         case .provisioning:
             step = .fileProvider
         case .fileProvider:
-            await runStartSyncing()
+            await runStartSyncing(generation: generation)
         case .done:
             // Finish ボタンと同義（done では Next は出ないが分岐は対称に保つ・#102）
             dismissWindow(id: "setup")
@@ -359,11 +373,11 @@ struct SetupWizardWindow: View {
         }
     }
 
-    private func runProvisioning() async {
-        // 世代 capture（#102）: await 復帰後の @State 書込は自世代のときだけ行う。
-        // isWorking の復帰も自世代限定 — stale 完了の defer が新セッションの実行中フラグを
-        // 落とすと、進行中の新アクションのボタンが誤って再活性化する。
-        let generation = wizardGeneration
+    /// `generation` = 押下 tick の世代（#102 / PR #108 レビュー指摘）: await 復帰後の @State
+    /// 書込は自世代のときだけ行う。isWorking の復帰も自世代限定 — stale 完了の defer が
+    /// 新セッションの実行中フラグを落とすと、進行中の新アクションのボタンが誤って再活性化する。
+    private func runProvisioning(generation: Int) async {
+        guard generation == wizardGeneration else { return }
         isWorking = true
         bucketSetupLog = []
         step = .provisioning
@@ -400,8 +414,8 @@ struct SetupWizardWindow: View {
     }
 
     /// 「作成する」アラートが押されたあとに呼ばれる: バケット作成 → 既存パスへ合流。
-    private func runCreateBucketAndProvision() async {
-        let generation = wizardGeneration
+    private func runCreateBucketAndProvision(generation: Int) async {
+        guard generation == wizardGeneration else { return }
         isWorking = true
         defer { if generation == wizardGeneration { isWorking = false } }
         guard let probe = makeProbeClient() else { return }
@@ -506,8 +520,8 @@ struct SetupWizardWindow: View {
         }
     }
 
-    private func runStartSyncing() async {
-        let generation = wizardGeneration
+    private func runStartSyncing(generation: Int) async {
+        guard generation == wizardGeneration else { return }
         isWorking = true
         defer { if generation == wizardGeneration { isWorking = false } }
         do {
