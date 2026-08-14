@@ -973,6 +973,24 @@ Keep Downloaded（#40 の残フェーズ）の対向操作。
   `resetWizard` は `probeGeneration` も進めて fileProvider ステップの 10 秒フォールバックの
   遅延書込も無効化する。
 
+##### 実機受け入れ（2026-08-15・全 6 項目パス）
+
+- **3 現象すべて解消**: Finish リセット（同一バケット再セットアップ → done → Finish →
+  開き直しで credentials）/ import 誘導（done 窓 → Settings import → 前面 + credentials 着地・
+  bucket/region 充填・payload 消費済み）/ factoryReset 連動（done 窓が閉じる → 開き直しで
+  credentials）。リグレッション = 通常セットアップ（factoryReset 後フル 2 回）・ウィザード内
+  Import ボタンの入力温存、いずれもパス。
+- **世代ガードの実機実証**: `/etc/hosts` 黒穴（S3 ホストを 10.255.255.1 へ → HeadBucket が
+  接続タイムアウトまでハング）で provisioning 進行中に factoryReset → **ハング中でも両窓
+  クローズ** → 黒穴解除後 90 秒静止（stale 完了は成功側で復帰し無ログで破棄 = 成功側ガードの
+  想定どおり。失敗側で戻れば `HeadBucket failed` が 1 行残る）。#104 epoch bump の連鎖発火も
+  ログで確認。
+- **副次知見**: factoryReset の旧世代ロケーション掃除（`LegacyStateMigrator` 系パスの削除）で
+  macOS の**アプリデータ分離 TCC プロンプトが初回発火**し、応答まで factoryReset が停止する
+  （許可は永続・2 回目以降は非再発。#102 無関係の既存挙動）。受け入れ中に aws CLI セッション
+  失効で soak 観測が一時停止（#94 の既知パターン・`aws login` 再認証で復旧・整合 OK
+  5625/5625 維持）。
+
 ### バースト RMW 競合の恒久対処（Issue #91・2026-07-26）
 
 #83 受け入れで実測した「100 件バーストで index.json CAS が枯渇 → 部分完了
