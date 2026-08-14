@@ -62,6 +62,12 @@ final class AppEnvironment {
     /// （成否問わず = 途中 throw でも disable 済みの可能性がある）にインクリメントする。
     private(set) var fileProviderStateVersion = 0
 
+    /// factoryReset 実行の通知カウンタ（Issue #102）: 開きっぱなしのセットアップウィザードが
+    /// これを observe して自窓を閉じ、`@State`（旧セッションの done 画面 / 入力値）を破棄する。
+    /// 単一・常駐の `Window` scene はウィンドウを閉じても view と `@State` が生存するため、
+    /// env 側からの明示通知がリセット済みアプリへの唯一の到達手段。
+    private(set) var setupWizardResetVersion = 0
+
     /// 現在 security-scoped アクセスを保持している同期フォルダ（App Sandbox・M5 Phase 2）。
     /// メニューバー常駐でアプリ生存中はアクセスを保持し続けるので stopAccessing は基本呼ばない。
     /// ウィザード再設定でフォルダが変わった時だけ古い方を明示的に手放す。
@@ -691,6 +697,9 @@ final class AppEnvironment {
         // FP ドメイン状態が変わる（disable）ため、開きっぱなしのウィザード / Settings /
         // ポップオーバーへ再取得を促す（六次レビュー指摘 3）。
         defer { fileProviderStateVersion += 1 }
+        // 開きっぱなしのウィザード窓（done 出っぱなし等）へ「閉じて状態破棄」を通知する
+        // （Issue #102 現象 1 — 通知しないと旧セッションの done 画面が残り続ける）。
+        defer { setupWizardResetVersion += 1 }
 
         await engine?.stop()
         engine = nil

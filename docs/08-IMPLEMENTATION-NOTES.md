@@ -811,7 +811,8 @@ Issue #97 本文のチェックリスト（9 項目 + 追補 7b〜7d）を dev �
   いずれもパス。
 - **発見バグ 2 群は Issue 化（いずれも #97 リグレッションではない・マージ非阻害と判断）**:
   **#102** = ウィザード窓が完了後も `@State` を保持（done 出っぱなし / 同一セッションの
-  import 誘導が見かけ上無反応・アプリ再起動で回避可）。**#103** = FP 拡張トグル OFF を検出
+  import 誘導が見かけ上無反応・アプリ再起動で回避可 → **修正済み 2026-08-15**・後述
+  「ウィザードの状態リセット」節）。**#103** = FP 拡張トグル OFF を検出
   できず緑表示のまま無音停止（`domains()` ベース検出が現 OS で不成立。#82 受け入れ時は機能
   → OS 挙動変化が濃厚。アプリ内 Disable の domain 除去経路では赤バナー正常）。
 - 副次知見: soak launchd agent の plist が消失していた（原因不明・`soak-agent-install` で
@@ -942,6 +943,35 @@ Keep Downloaded（#40 の残フェーズ）の対向操作。
     実機再現（①どおり・回避可能）。evict は S3 / マニフェスト非接触（soak-check-fp が
     ベースラインと同一の整合 OK・受け入れ全期間エラーログ 0 件）。#93 相互作用（②）は
     未観察のまま任意扱いで据え置き。
+
+#### ウィザードの状態リセット（Issue #102・2026-08-15）
+
+#97 受け入れで発見した「ウィザード窓が完了後も `@State` を保持し続ける」（done 出っぱなし /
+同一セッションの import 誘導が見かけ上無反応 / Finish で閉じても直らない = 3 態同根）の修正。
+
+- **機序（再掲）**: `"setup"` は単一・常駐の `Window` scene で、**ウィンドウを閉じても view と
+  `@State`（`step` 等）が生存**し `.onAppear` 再発火にも頼れない。import 消費の `.onChange` は
+  フィールド充填のみで `step` を動かさなかった。
+- **対処 = 「セッション終端」の 3 点で明示リセット**（`SetupWizardWindow.resetWizard()`）:
+  1. **Finish 押下**（`onNext` の `.done` 分岐も対称）= dismiss と同時に新規セッションへ。
+  2. **import 誘導の消費**（`pendingImportedSettings` の `.onChange`）= リセット **→** 充填の順。
+     着地は **credentials**（bucket/region は事前充填済み）— done 到達後は L7 対策で資格情報
+     `@State` が消去済みのため、Issue 対処案の `.bucket` 直行では provisioning が必ず認証エラーに
+     なる（設計確定 2026-08-15・ユーザ承認）。ウィザード内「Import settings…」ボタン
+     （`applyImported` 直呼び）はリセットしない = credentials 入力途中の値を消さない。
+  3. **factoryReset 通知** = `AppEnvironment.setupWizardResetVersion`（専用カウンタ・
+     factoryReset の実行パスで bump）を `.onChange` で受け,**窓を閉じて**状態破棄
+     （設計確定: リセット済みアプリに旧セッションを見せない・Settings 窓が reset 成功時に
+     閉じる仕様と対称）。常駐 scene のため窓が閉じていても発火するが dismiss は no-op で無害。
+- **世代ガード** = `wizardGeneration`（`probeGeneration` と同パターン）: S3 probe 系
+  （`runProvisioning` / `runCreateBucketAndProvision` / `finishProvisioning`）と
+  `runStartSyncing` は開始時世代を capture し、await 復帰後の `@State` 書込（log append /
+  `step` / `errorMessage` / `pendingCreateBucket`）前に自世代を検査。`isWorking = false` の
+  defer も自世代限定 — stale 完了の defer が新セッションの実行中フラグを落とすと進行中の
+  新アクションのボタンが誤再活性化するため。probe 系は setupGate の外で走るので
+  「進行中に factoryReset / import 消費でリセット」は実際に起こり得る。
+  `resetWizard` は `probeGeneration` も進めて fileProvider ステップの 10 秒フォールバックの
+  遅延書込も無効化する。
 
 ### バースト RMW 競合の恒久対処（Issue #91・2026-07-26）
 
