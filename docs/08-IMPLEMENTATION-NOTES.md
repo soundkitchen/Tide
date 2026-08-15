@@ -1020,6 +1020,11 @@ Keep Downloaded（#40 の残フェーズ）の対向操作。
   追加し、無効エッジで `NotificationEvent.fileProviderDisabled` を発火・復帰エッジで配達済みを
   撤去（`NotificationManager.removeDelivered`）。エッジ検出のみ = 連発しない（回帰は
   `testFPDomainDisabledEdgeHookFiresOnEdgesOnly`）。identifier 固定 `"fpDisabled"`。
+  **撤去はエッジ経路だけでは足りない（受け入れ 2026-08-16 で発見）**: 復帰がウィザード
+  （completeSetup）経由だと signaler が作り直され、無効状態を保持していた旧 signaler の
+  復帰エッジが発火しない（アプリ再起動をまたいだ復帰も同様）。このため
+  `launchFPOnlySignalerFromCurrentConfig` は **enabled で立ち上がるとき常に配達済みを掃除**する
+  （冪等・不在なら no-op）。
 - **UI（設計確定 2026-08-15 = 専用文言 + システム設定誘導）**: ポップオーバー / Settings は
   `DomainStatus?` を保持し、`.userDisabled` で専用赤文言 +「システム設定を開く」ボタン
   （`openLoginItemsAndExtensionsSettings()` = `x-apple.systempreferences:com.apple.LoginItems-Settings.extension`・
