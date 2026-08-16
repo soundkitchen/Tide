@@ -1024,12 +1024,19 @@ Keep Downloaded（#40 の残フェーズ）の対向操作。
   （completeSetup）経由だと signaler が作り直され、無効状態を保持していた旧 signaler の
   復帰エッジが発火しない（アプリ再起動をまたいだ復帰も同様）。このため
   `launchFPOnlySignalerFromCurrentConfig` は **enabled で立ち上がるとき常に配達済みを掃除**する
-  （冪等・不在なら no-op）。
+  （冪等・不在なら no-op）。さらに **in-flight post と復帰エッジのレース**（PR #109 レビュー
+  指摘 1: post は許可プロンプト応答待ち等で長く suspend し得るため、復帰エッジの撤去が未配達
+  no-op になった後に stale が配達され得る）は、**post 完了後に現在の観測
+  （`signaler.fpDomainDisabled`）を再読し、もう無効でなければ即撤去**で閉じる。
 - **UI（設計確定 2026-08-15 = 専用文言 + システム設定誘導）**: ポップオーバー / Settings は
   `DomainStatus?` を保持し、`.userDisabled` で専用赤文言 +「システム設定を開く」ボタン
   （`openLoginItemsAndExtensionsSettings()` = `x-apple.systempreferences:com.apple.LoginItems-Settings.extension`・
   アプリ内 Settings では直せないため）。`.notRegistered` は従来文言。「Open Tide in Finder」の
-  disable 条件は両不活性状態（userDisabled はレプリカ不可視）・不明（nil）は従来どおり活性。
+  disable 条件は両不活性状態（userDisabled はレプリカ不可視）・不明（nil）は従来どおり活性
+  （述語は `DomainStatus.isInactive` を両画面で共有・PR #109 レビュー指摘 7）。ウィザードの
+  fileProvider ステップは probe（`(recreate, status)` タプル・追加 XPC ゼロ）で userDisabled を
+  **押す前に**オレンジ警告 + 誘導表示（PR #109 レビュー指摘 2 — 緑チェックを見せてから post
+  検査で止める「一度騙す」動線の解消。進行はゲートせず権威は completeSetup 後の検査のまま）。
 - **ウィザードゲート（現象 1・設計確定 = エラーで止める）**: 拡張 OFF でも `add(domain)` は
   **成功してしまう**（#97 受け入れ実測）ため、`runStartSyncing` の completeSetup 成功後に
   `domainStatus()` を検査し、`.userDisabled` なら done へ進めずエラー + 誘導ボタン。設定・

@@ -148,7 +148,7 @@ final class RemoteChangeSignaler {
         let enabled = await isFPDomainEnabled()
         if fpDomainDisabled && enabled {
             // 復帰エッジでは必ず 1 回 signal する: 無効期間中も HEAD は ETag を進めており
-            // （その間の signal は FileProviderController 側の isEnabled ガードで no-op）、
+            // （その間の signal は FileProviderController 側の domainStatus ガードで no-op）、
             // 次の ETag 変化まで取り込み契機が来ない「見逃し窓」をここで閉じる。
             // 変化が無ければ拡張側の世代キャッシュで no-op（XPC 2 回だけ）。
             fpDomainDisabled = false

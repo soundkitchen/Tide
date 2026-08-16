@@ -35,7 +35,6 @@ struct SettingsWindow: View {
     /// 通知トグル（既定 on）。ConfigStore は @Observable でないので他の設定と同じ @State write-through。
     @State private var notificationsEnabled: Bool = true
 
-    /// File Provider PoC ドメインの状態表示（M5 Phase 3）。nil = 未取得。
     /// FP ドメインの状態（#82 / #103）。nil = 取得中 or 取得失敗（不明）。
     @State private var fileProviderStatus: FileProviderController.DomainStatus?
     @State private var fileProviderMessage: String?
@@ -135,8 +134,9 @@ struct SettingsWindow: View {
                 // メニューバー行（MenuBarContent.secondaryActions）と同じ活性条件（PR #101
                 // 再レビュー指摘 5）: 既知の不活性（未登録 / ユーザ OFF = レプリカ不可視・#103）
                 // だけ disable — 直下の FP セクションが停止を示している状態で素の CloudStorage が
-                // 開く矛盾を防ぐ。不明（nil）は活性のまま（MenuBar 側と同じ倒し方）。
-                .disabled(fileProviderStatus == .notRegistered || fileProviderStatus == .userDisabled)
+                // 開く矛盾を防ぐ。不明（nil）は活性のまま（MenuBar 側と同じ倒し方・述語共有 =
+                // `DomainStatus.isInactive`・PR #109 レビュー指摘 7）。
+                .disabled(fileProviderStatus?.isInactive == true)
             }
             Section("Settings file") {
                 Button("Export Settings…") { exportSettings() }
@@ -167,16 +167,19 @@ struct SettingsWindow: View {
                 switch fileProviderStatus {
                 case .enabled:
                     Text("Domain is enabled.")
+                        .textSelection(.enabled)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 case .notRegistered:
                     Text("Domain is not enabled.")
+                        .textSelection(.enabled)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 case .userDisabled:
                     // システム設定でユーザ OFF（#103）: この画面の Enable/Disable では直せない
                     // ため、専用文言 + システム設定への誘導（設計確定 2026-08-15）。
                     Text("The Tide File Provider extension is turned off in System Settings — nothing is syncing.")
+                        .textSelection(.enabled)
                         .font(.caption)
                         .foregroundStyle(.red)
                     Button("Open System Settings") { openLoginItemsAndExtensionsSettings() }

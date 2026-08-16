@@ -19,8 +19,10 @@ struct SetupWizardWindow: View {
     @State private var errorMessage: String?
     @State private var pendingCreateBucket: Bool = false
     /// FP ドメインの現況（fileProvider ステップの表示専用・再セットアップ経路向け）。
-    /// nil = 未取得/取得失敗（表示しないだけで進行は妨げない）。
-    @State private var fileProviderAlreadyEnabled: Bool?
+    /// nil = 未取得/取得失敗（表示しないだけで進行は妨げない）。userDisabled は Start syncing
+    /// 前の事前警告に使う（PR #109 レビュー指摘 2 — 緑チェックを見せた後に post 検査で止める
+    /// 「一度騙す」動線を避ける。権威判定は従来どおり completeSetup 後の検査）。
+    @State private var probedDomainStatus: FileProviderController.DomainStatus?
     /// 「Start syncing」でドメインが作り直される（= 破壊的）か。判定は completeSetup と共有
     /// （`AppEnvironment.probeDomainRecreation(forBucket:)`・PR #101 五次レビュー指摘 2）。
     @State private var willRecreateDomain: Bool?
@@ -257,21 +259,30 @@ struct SetupWizardWindow: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            // 破壊的 recreation の警告は enabled 判定の**外**（六次レビュー指摘 1）: willRecreateDomain
-            // は不明（isEnabled nil = fileproviderd 無応答）を作り直し側に倒すため、警告も同じ側で
+            // 破壊的 recreation の警告は有効性判定の**外**（六次レビュー指摘 1）: willRecreateDomain
+            // は不明（status nil = fileproviderd 無応答）を作り直し側に倒すため、警告も同じ側で
             // 出さないと「domains() 一時失敗 × Start syncing」で無警告破棄になる。既知の未登録
-            // （enabled == false）だけは破棄対象が存在しないため除外（バケット切替でも空作り直し）。
+            // （.notRegistered）だけは破棄対象が存在しないため除外（バケット切替でも空作り直し）。
             // 判定は completeSetup と共有 = バケット切替と素性不明ドメインの両枝をカバー
             // （四次レビュー指摘 2 / 五次レビュー指摘 2）。
-            if willRecreateDomain == true, fileProviderAlreadyEnabled != false {
+            if willRecreateDomain == true, probedDomainStatus != .notRegistered {
                 Label("This setup will recreate the Tide folder. Changes not yet uploaded will be discarded.", systemImage: "exclamationmark.triangle")
                     .font(.callout)
                     .foregroundStyle(.orange)
-            } else if fileProviderAlreadyEnabled == true, willRecreateDomain == false {
+            } else if probedDomainStatus == .enabled, willRecreateDomain == false {
                 // 同一バケットの再セットアップ経路: enable は冪等（再 add no-op）なのでそのまま進める
                 Label("The Tide folder is already enabled on this Mac.", systemImage: "checkmark.circle")
                     .font(.callout)
                     .foregroundStyle(.green)
+            }
+            if probedDomainStatus == .userDisabled {
+                // 拡張がシステム設定でユーザ OFF（#103・PR #109 レビュー指摘 2）: このまま
+                // Start syncing しても completeSetup 後の検査で止まる。押す前にここで知らせる
+                // （進行はゲートしない = 権威は post 検査のまま。recreation 警告とは並存し得る）。
+                Label("The Tide File Provider extension is turned off in System Settings. Turn it on before you press “Start syncing”.", systemImage: "exclamationmark.triangle")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+                Button("Open System Settings") { openLoginItemsAndExtensionsSettings() }
             }
         }
         // completeSetup がドメイン状態を変える（部分失敗で disableForRecreation 済み等）ため、
@@ -284,7 +295,7 @@ struct SetupWizardWindow: View {
             // 再入時は probe 前に必ず nil へ戻す（七次レビュー指摘 1）: ウィンドウレベル @State の
             // 前回訪問値が残ると、XPC 往復中の窓で canAdvance ゲート（六次②）が stale 値で
             // 素通りし、Back → bucket 変更 → Return で警告未レンダリングのまま実行され得る。
-            fileProviderAlreadyEnabled = nil
+            probedDomainStatus = nil
             willRecreateDomain = nil
             probeGeneration &+= 1
             let generation = probeGeneration
@@ -299,10 +310,10 @@ struct SetupWizardWindow: View {
                 try? await Task.sleep(for: .seconds(10))
                 guard probeGeneration == generation, willRecreateDomain == nil else { return }
                 willRecreateDomain = true
-                // fileProviderAlreadyEnabled は nil のまま = enabled != false で警告が出る
+                // probedDomainStatus は nil のまま = != .notRegistered で警告が出る
             }
             defer { fallback.cancel() }
-            // 単一 probe（七次レビュー指摘 5）: isEnabled を別途叩くと警告条件が異時点の
+            // 単一 probe（七次レビュー指摘 5）: domainStatus を別途叩くと警告条件が異時点の
             // 2 スナップショット合成になり、片方だけ失敗したとき矛盾表示になる。
             let probe = await env.probeDomainRecreation(forBucket: bucket)
             // キャンセル検査（十次レビュー指摘 7）: XPC はキャンセル非対応なので、id 変化で
@@ -311,7 +322,7 @@ struct SetupWizardWindow: View {
             // なしのまま破壊的作り直しへ進めてしまう。
             guard !Task.isCancelled else { return }
             willRecreateDomain = probe.recreate
-            fileProviderAlreadyEnabled = probe.enabled
+            probedDomainStatus = probe.status
         }
     }
 
@@ -357,7 +368,7 @@ struct SetupWizardWindow: View {
         errorMessage = nil
         fpExtensionOffAfterSetup = false
         pendingCreateBucket = false
-        fileProviderAlreadyEnabled = nil
+        probedDomainStatus = nil
         willRecreateDomain = nil
     }
 

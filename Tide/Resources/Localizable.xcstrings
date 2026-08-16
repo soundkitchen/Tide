@@ -1487,6 +1487,17 @@
         }
       }
     },
+    "The Tide File Provider extension is turned off in System Settings. Turn it on before you press “Start syncing”." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tide の File Provider 機能拡張がシステム設定でオフになっています。「同期を開始」を押す前にオンにしてください。"
+          }
+        }
+      }
+    },
     "The Tide File Provider extension is turned off in System Settings — nothing is syncing." : {
       "extractionState" : "manual",
       "localizations" : {

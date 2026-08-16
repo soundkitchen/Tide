@@ -182,7 +182,7 @@ final class RemoteChangeSignalerTests: XCTestCase {
     }
 
     /// 復帰エッジは ETag 不変でも必ず 1 回 signal する（見逃し窓の閉鎖）: 無効期間中の
-    /// ETag 変化は観測だけ進み（プロダクションでは下流の isEnabled ガードで signal が no-op）、
+    /// ETag 変化は観測だけ進み（プロダクションでは下流の domainStatus ガードで signal が no-op）、
     /// 次の変化まで取り込み契機が来ないため、復帰時に catch-up を強制する。
     func testReEnableEdgeForcesCatchUpSignal() async {
         let head = FakeHead([.success("etag-1")])

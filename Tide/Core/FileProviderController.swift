@@ -120,6 +120,12 @@ enum FileProviderController {
         case userDisabled
         /// 未登録（Disable 済み / 未セットアップ）。
         case notRegistered
+
+        /// 「同期が動いていないと確定している」側か（未登録 / ユーザ OFF）。MenuBar / Settings が
+        /// 共有する述語（PR #109 レビュー指摘 7 — 将来ケース追加時の片側判定漏れを防ぐ。既定は
+        /// 不活性側 = fail-safe 表示）。不明（nil）を含めない判定は Optional に対する
+        /// `?.isInactive == true` で行う（nil は false 側 = エラー表示も disable もしない）。
+        var isInactive: Bool { self != .enabled }
     }
 
     /// FP ドメインの登録・有効状態。**nil = 取得失敗**（fileproviderd 無応答等・不明）。

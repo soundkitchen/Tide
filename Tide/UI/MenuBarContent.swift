@@ -9,15 +9,15 @@ struct MenuBarContent: View {
     /// SyncEngine にメモリ状態を増やさず、ポップオーバー表示時と同期完了ごとに読み直す。
     @State private var recentActivity: [SyncLogRecord] = []
 
-    /// fpOnly 表示用: FP ドメインの有効状態（nil = 未取得）。無効なら「何も同期されない」警告を出す。
     /// FP ドメインの状態（#82 / #103）。nil = 取得中 or 取得失敗（不明）。
     @State private var fileProviderStatus: FileProviderController.DomainStatus?
 
     /// 「同期が動いていないと確定している」状態（未登録 or システム設定でユーザ OFF・#103）。
     /// 不明（nil）は含めない — 確実に分かっていない間はエラー表示も disable もしない側に倒す
-    /// （PR #76 レビュー任意 3 / PR #100 レビュー指摘 4 の趣旨維持）。
+    /// （PR #76 レビュー任意 3 / PR #100 レビュー指摘 4 の趣旨維持。述語は Settings と共有 =
+    /// `DomainStatus.isInactive`・PR #109 レビュー指摘 7）。
     private var fileProviderInactive: Bool {
-        fileProviderStatus == .notRegistered || fileProviderStatus == .userDisabled
+        fileProviderStatus?.isInactive == true
     }
 
     var body: some View {
@@ -354,12 +354,14 @@ struct MenuBarContent: View {
             // システム設定でユーザ OFF（#103）: アプリ内 Settings では直せないため専用文言 +
             // システム設定への誘導ボタン（設計確定 2026-08-15）。
             Text("The Tide File Provider extension is turned off in System Settings — nothing is syncing.")
+                .textSelection(.enabled)
                 .font(.caption)
                 .foregroundStyle(.red)
             Button("Open System Settings") { openLoginItemsAndExtensionsSettings() }
                 .controlSize(.small)
         } else if fileProviderStatus == .notRegistered {
             Text("File Provider is not enabled — nothing is syncing. Enable it in Settings.")
+                .textSelection(.enabled)
                 .font(.caption)
                 .foregroundStyle(.red)
         }

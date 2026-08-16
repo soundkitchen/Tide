@@ -265,12 +265,22 @@ final class AppEnvironment {
             isFPDomainEnabled: { await FileProviderController.domainStatus() == .enabled },
             // 無効/復帰エッジで OS 通知を発火/撤去（Issue #103・通知 5 事象目 =「ユーザ介入が要る
             // 確定的な全同期停止」。エッジ検出のみ = 連発しない・identifier 固定で万一も置換）。
-            onFPDomainDisabledEdge: { [notifications] disabled in
+            onFPDomainDisabledEdge: { [weak self, notifications] disabled in
+                let identifier = NotificationPolicy.content(for: .fileProviderDisabled).identifier
                 if disabled {
-                    Task { await notifications.post(.fileProviderDisabled) }
+                    Task { @MainActor in
+                        await notifications.post(.fileProviderDisabled)
+                        // post は許可プロンプト応答待ち等で長く suspend し得る（初回は分単位も
+                        // あり得る）。その間に復帰エッジが来ると撤去（下の分岐）が**未配達で
+                        // no-op** になり、後から配達された stale 通知が残る（PR #109 レビュー
+                        // 指摘 1）。配達後に現在の観測を再読し、もう無効でなければ即撤去する
+                        // （signaler 不在 = factoryReset 後も撤去側。撤去は冪等）。
+                        if self?.signaler?.fpDomainDisabled != true {
+                            notifications.removeDelivered(identifier: identifier)
+                        }
+                    }
                 } else {
-                    notifications.removeDelivered(
-                        identifier: NotificationPolicy.content(for: .fileProviderDisabled).identifier)
+                    notifications.removeDelivered(identifier: identifier)
                 }
             }
         )
@@ -354,21 +364,22 @@ final class AppEnvironment {
     /// `enabled` を同一スナップショットで併せて返すのは、ウィザードの警告/緑チェックが異時点の
     /// 2 スナップショット合成で矛盾表示にならないため（七次レビュー指摘 5。isEnabled の XPC も
     /// 1 往復に畳まれる）。
-    func probeDomainRecreation(forBucket bucket: String) async -> (recreate: Bool, enabled: Bool?) {
-        // この判定に要るのは**登録有無**: userDisabled のドメインもレプリカ実在 = 登録済みとして
-        // 扱う（#103。拡張の有効性はセットアップ完了後のウィザード検査と signaler 観測が別途担う）。
-        let enabled: Bool? = (await FileProviderController.domainStatus()).map { $0 != .notRegistered }
+    func probeDomainRecreation(forBucket bucket: String) async -> (recreate: Bool, status: FileProviderController.DomainStatus?) {
+        // 作り直し判定に要るのは**登録有無**: userDisabled のドメインもレプリカ実在 = 登録済みと
+        // して扱う（#103）。status を生のまま返すのは、ウィザードが userDisabled の事前警告に
+        // 使うため（PR #109 レビュー指摘 2 — 追加 XPC ゼロ・単一スナップショット維持）。
+        let status = await FileProviderController.domainStatus()
         if let previousBucket = config.bucketName, !previousBucket.isEmpty {
             // 既知の旧バケット: 変わったときだけ作り直す。同一バケットの再セットアップ
             // （クリーンインストール復旧 / 認証情報の再設定）はレプリカ温存（再 add no-op）。
-            return (recreate: previousBucket != bucket, enabled: enabled)
+            return (recreate: previousBucket != bucket, status: status)
         }
         // bucketName 不在 = factoryReset がキーを消した後（disable 失敗の握りつぶし〈try?〉も
         // 通過し得る）。生存ドメインがあってもレプリカの素性（どのバケット由来か）を保証
-        // できないため作り直す（再レビュー指摘 3）。既知の未登録（false = 通常のクリーン
-        // セットアップ）のみスキップし、不明（nil）は作り直し側に倒す — 温存側に倒すと
-        // 「isEnabled 失敗 → 直後の enable 成功」の並びで素性不明レプリカが残る。
-        return (recreate: enabled != false, enabled: enabled)
+        // できないため作り直す（再レビュー指摘 3）。既知の未登録（.notRegistered = 通常の
+        // クリーンセットアップ）のみスキップし、不明（nil）は作り直し側に倒す — 温存側に倒すと
+        // 「domainStatus 失敗 → 直後の enable 成功」の並びで素性不明レプリカが残る。
+        return (recreate: status != .notRegistered, status: status)
     }
 
     /// 書込確定点で FP レプリカへ即時 signal する配線付き `ManifestUpdater`（S3 内復元 / seed 共用・
@@ -614,7 +625,7 @@ final class AppEnvironment {
         // enable より**前**に行う（PR #101 再レビュー指摘 4）: 後ろだと live になった拡張の先行
         // createItem が index.json を作り、「新規バケット」判定（getIndex == nil）が誤って既存側に
         // 倒れて seed が無音スキップされ得る。seed は S3 にしか触れず、確定点 signal は未登録
-        // ドメインでは no-op（performSignal の isEnabled ガード）・enable 後の初回列挙が entry を拾う。
+        // ドメインでは no-op（performSignal の domainStatus ガード）・enable 後の初回列挙が entry を拾う。
         await Self.seedDefaultSyncIgnoreIfNewBucket(
             credentials: credentials, bucket: bucket, region: region, deviceId: config.deviceId
         )
