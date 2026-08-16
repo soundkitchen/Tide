@@ -35,7 +35,7 @@ macOS のクリーンインストール後の復旧を主目的とした、Dropb
 ### 対象機能（最終形）
 
 - macOS 専用、Swift + SwiftUI、メニューバー常駐アプリ
-- 単一同期フォルダ → 単一 S3 バケットの双方向同期
+- 単一の Tide フォルダ（FP ドメイン）⇄ 単一 S3 バケットの双方向同期（1 対 1）
 - ファイルオンデマンド（File Provider モード = **唯一の稼働モード**。dataless プレースホルダをオンラインのみ実体化する `~/Library/CloudStorage/Tide` ドメイン。**v0.3.0 でユーザー目線から旧 FSEvents（folderSync）モードを削除** — boot 固定 #96 / ウィザード fpOnly ネイティブ化 #97 / 旧同期フォルダ削除 #98。コード本体はデッドコード温存 = 物理撤去は 2 台 soak 後。経緯は `09-DEFERRED.md` M5 節・v0.3.0 節）
 - 暗号化なし（クライアント側暗号化なし、S3 側は SSE-S3 を全 PUT 経路で明示指定）
 - ローカル変更は File Provider 拡張の書込コールバックが S3 へ直接反映（旧 FSEvents + デバウンス方式は v0.3.0 で到達不能化・コード温存）
@@ -94,8 +94,10 @@ macOS のクリーンインストール後の復旧を主目的とした、Dropb
 - ✅ 競合検出と `<stem> (local copy YYYY-MM-DD HH-MM-SS).<ext>` リネーム（`ConflictNamer`）
 - ✅ マルチパートアップロード / レンジダウンロード（サブ A・D。**自前ラッパ方式**で実装。`aws-sdk-swift-s3-transfer-manager` は不採用）
 - ✅ 中断・再開機能（サブ D・`transfer_state` + Range 再開）
+  - **現行（fpOnly）の読み替え**: FP の DL（`fetchContents`）に再開機構は無い（毎回先頭から・SHA 検証で担保）。`transfer_state` は凍結 DB 内 = folderSync 世代。
 - ✅ `.syncignore` 対応（サブ B）
 - ✅ 帯域制御（オプション・サブ E・トークンバケット `RateLimiter`。アップロード／ダウンロードの上限を Settings で MB/s 指定。既定は無制限）
+  - **現行（fpOnly）の読み替え**: FP 拡張が配線するのは**アップロード側 limiter のみ**。`fetchContents` は limiter 非経由のため、Settings のダウンロード上限は fpOnly では実質 no-op。
 
 ### M4: 運用機能と磨き込み（実装済み）
 

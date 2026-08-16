@@ -5,9 +5,10 @@
 対応する `docs/*.md` も同時更新（→ `CLAUDE.md` 大原則 (2)）。
 
 > `CLAUDE.md` には毎回守るべき load-bearing な不変条件の要約だけを残し（CLAUDE.md §7「実装上の不変条件」）、
-> 詳細・経緯・テスト名・PR レビュー番号は本ファイルに置く。一部のトピック（3-way merge / リモート pull 単一ゲート /
-> mtime 不変条件 / torn upload / reconcile stat ゲート等）は `docs/04-SYNC-LOGIC.md` に権威的記述があり、
-> 本ファイルは補足。将来 topical な docs へ漸進的に寄せる。
+> 詳細・経緯・テスト名・PR レビュー番号は本ファイルに置く。一部のトピックは仕様書側に権威的記述があり
+> 本ファイルは補足 — **3-way merge / マニフェスト RMW は `docs/04-SYNC-LOGIC.md`**、
+> **リモート pull 単一ゲート / mtime 不変条件 / torn upload / reconcile stat ゲート等の folderSync 系は
+> `docs/04a-SYNC-LOGIC-FOLDERSYNC.md`**。将来 topical な docs へ漸進的に寄せる。
 
 ---
 

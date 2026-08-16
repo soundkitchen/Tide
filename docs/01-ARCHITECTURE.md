@@ -281,9 +281,13 @@ struct HashCalculator {
 ### folderSync 世代のコンポーネント（デッドコード温存）
 
 `SyncEngine`（FSEvents 同期の中枢）/ `FileWatcher`（FSEvents ラッパー）/ `DebounceQueue` /
-`RemoteOpGate`（pull/restore 直列化）/ `ChangeDetector` / `StabilityCheck` / `LocalDatabase`（GRDB）/
+`ChangeDetector` / `StabilityCheck` / `LocalDatabase`（GRDB）/
 `ManifestReader` / `Downloader` / `RestoreService` / `TransferStateStore`。
-いずれも v0.3.0 で到達経路ゼロ（起動もインスタンス化もされない）。仕様は
+いずれも v0.3.0 で到達経路ゼロ（起動もインスタンス化もされない）。
+**例外 = `RemoteOpGate`**: 本来の用途（pull/restore 直列化）はデッドだが、**インスタンスは
+`setupGate` として毎起動生成され、bootstrap / completeSetup / factoryReset の非再入ロックに
+流用中**（上記起動フロー参照。物理撤去時は setupGate の代替実装が必要 = 撤去対象リストに
+そのまま含めてはならない）。仕様は
 [`04a-SYNC-LOGIC-FOLDERSYNC.md`](04a-SYNC-LOGIC-FOLDERSYNC.md) と `03-LOCAL-DATABASE.md`、
 回帰テスト網は `TideTests/` に維持（復帰は git revert + `09-DEFERRED.md`「revert 復帰ランブック」）。
 

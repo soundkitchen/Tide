@@ -1,7 +1,7 @@
 # 同期ロジック
 
 > **スコープの現状（v0.3.0・2026-08-17）**:
-> - 稼働モードは **fpOnly（File Provider）のみ**。同期面は FP ドメイン（`~/Library/CloudStorage/Tide`）で、
+> - 稼働モードは **fpOnly（File Provider）のみ**。同期面は FP ドメイン（`~/Library/CloudStorage/Tide`・レプリカ実体パスは `Tide-Tide`）で、
 >   書き手は FP 拡張（`TideFileProvider.appex`）、リモート変化検知はアプリ側の `RemoteChangeSignaler`。
 >   アプリ・拡張とも**ローカル DB には一切触れない**。本書はこの現行 fpOnly の同期ロジックを記述する。
 > - 旧 folderSync（FSEvents）世代の同期ロジック（フルスキャン / イベント駆動 / アップロードキュー /
@@ -244,9 +244,15 @@ gitignore 構文の一般的サブセット。詳細な確定仕様は `docs/07-
   （`.tide/shards/` と `files/` の `listObjectVersions` に何か見えたら seed しない — 生存カスタム
   `.syncignore` の置換や孤児化 index の新造を防ぐ）付き。呼び出しは FP ドメイン `enable()` より
   **前**（拡張の先行書込による新規バケット誤判定の防止）。
-- **現行の適用点（fpOnly）**: FP 拡張の **`createItem`** が唯一の新規流入口で、
+- **現行の適用点（fpOnly）は 2 つ**: ① FP 拡張の **`createItem`**（新規流入口）が
   `IgnoreDecision.shouldSkip(relativePath:isAlreadyTracked:matcher:)`（folderSync 3 経路と同一関数・
   同一優先順位）で判定し、該当は `NSFileProviderError(.excludedFromSync)` = ローカル温存・S3 非汚染。
+  ② **`modifyItem` の move（rename/reparent）経路**も独立の適用点 — ファイルは**新 path** に
+  `shouldSkip` を適用し、該当時は後始末予約 `exclusionCleanups.add(旧 path)` を積んだうえで
+  `.excludedFromSync` を返す（追跡済みファイルを ignore 対象名へリネームすると S3 側は旧 path の
+  後始末で収束・ローカルは温存）。dir は `layered.evaluate(新 path + "/") == .ignored` で判定
+  （`FileProviderExtension` の move 処理・後始末予約の永続化は `docs/03`「fpOnly の永続状態」の
+  `fileprovider-exclusion-cleanups.json`）。
   matcher の構築はローカルフォルダが無いため**マニフェスト経由**: `ManifestIgnoreCache` が同期済み
   `.syncignore` 群を **versionId 固定 + sha 検証**で取得し `LayeredSyncIgnore` を組む
   （`security/low.md` L17）。folderSync 世代の 3 適用点（scan / event / reconcile）は `docs/04a`。

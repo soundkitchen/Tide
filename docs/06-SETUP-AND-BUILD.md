@@ -188,8 +188,8 @@ Gatekeeper に止められない（ネットワーク経由でコピーした場
 v0.3.0 以降、セットアップは **File Provider ネイティブ**（同期フォルダの選択は存在しない）。
 ウィザードは 5 ステップ:
 
-1. **AWS Credentials** — アクセスキー ID / シークレットアクセスキー / リージョン
-2. **Bucket** — バケット名を入力し「Test & Provision」（HeadBucket → 必要なら作成 confirm）
+1. **AWS Credentials** — アクセスキー ID / シークレットアクセスキー（設定インポートもここ）
+2. **Bucket** — リージョンを選択・バケット名を入力し「Test & Provision」（HeadBucket → 必要なら作成 confirm）
 3. **Provisioning** — バージョニング / Public Access Block / ライフサイクル / TLS 強制ポリシーの適用結果
 4. **Tide in Finder** — 同期の説明と FP ドメインの現況表示。「**Start syncing**」で設定保存 →
    FP ドメイン登録（= 同期の実体）→ signaler 起動まで一括実行
