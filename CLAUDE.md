@@ -62,7 +62,7 @@
 - App Group: `G5G54TCH8W.org.izukawa.Tide`（M5 Phase 2〜。定数は `TideAppGroup`。**チーム ID プレフィックス形式必須** — `group.` 形式は macOS では TCC 保護され、UI の無い File Provider 拡張が containermanagerd に拒否される。Phase 2 の一時 ID `group.org.izukawa.Tide` は移行元としてアプリ entitlement にのみ残存）
 - ローカル DB: `~/Library/Group Containers/G5G54TCH8W.org.izukawa.Tide/Library/Application Support/Tide/db.sqlite`（GRDB.swift / WAL。M5 Phase 2 で App Group コンテナへ移設。旧世代パスからは `LegacyStateMigrator` が一度きり移行）
 - 設定: group suite の UserDefaults（`TideAppGroup.sharedDefaults()`）。Keychain は `kSecAttrAccessGroup` 明示（`$(AppIdentifierPrefix)org.izukawa.Tide`）
-- 同期フォルダのアクセス権: `ConfigStore.syncRootBookmark`（security-scoped bookmark。セットアップ時発行 → 起動時 `resolveSyncRootAccess` で解決。リネーム/移動は bookmark が追跡し `syncRootPath` を追随更新。欠落時は再許可パネル・設定と**同一実体でない**フォルダは拒否＝判定は `PathValidator.isSameFileSystemObject`）
+- 同期フォルダのアクセス権（**folderSync 世代・デッドコード温存 = 到達は git revert のみ**。v0.3.0 で新規セットアップは bookmark を発行せず、稼働環境の当該キーは #97 受け入れの factoryReset で消滅済み）: `ConfigStore.syncRootBookmark`（security-scoped bookmark。セットアップ時発行 → 起動時 `resolveSyncRootAccess` で解決。リネーム/移動は bookmark が追跡し `syncRootPath` を追随更新。欠落時は再許可パネル・設定と**同一実体でない**フォルダは拒否＝判定は `PathValidator.isSameFileSystemObject`）
 - ダウンロード一時ディレクトリ: `~/Library/Caches/Tide/tmp/`（同期ルートと別ボリュームの時のみ `<syncRoot>/.tide/tmp/` にフォールバック）
 - S3 マニフェスト: `.tide/index.json` + `.tide/shards/XX.json`（XX は SHA-1 先頭 1 バイト、256 シャード）
 - ローカル相対パスは常に POSIX、ハッシュは SHA-256 hex 小文字、時刻は ISO8601 UTC
