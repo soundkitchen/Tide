@@ -76,10 +76,14 @@ final class NotificationManager: NSObject, SyncNotifying {
         }
     }
 
-    /// 配達済み通知の撤去（Issue #103: FP 拡張の復帰エッジで「まだ止まっている」という
-    /// stale な通知を通知センターに残さない）。未配達 / 不在の識別子は no-op。
-    nonisolated func removeDelivered(identifier: String) {
-        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [identifier])
+    /// 配達済み通知の撤去（Issue #103: FP 拡張の復帰エッジ / factoryReset / 起動時掃除で
+    /// 「まだ止まっている」という stale な通知を通知センターに残さない）。identifier の対応は
+    /// post と同じ `NotificationPolicy.content(for:)` から引く — 呼び出し側に生文字列を綴らせない
+    /// ことで、identifier 変更時に post と撤去がズレる余地を構造的に無くす（PR #109 レビュー）。
+    /// 未配達 / 不在は no-op。
+    nonisolated func removeDelivered(for event: NotificationEvent) {
+        UNUserNotificationCenter.current()
+            .removeDeliveredNotifications(withIdentifiers: [NotificationPolicy.content(for: event).identifier])
     }
 }
 

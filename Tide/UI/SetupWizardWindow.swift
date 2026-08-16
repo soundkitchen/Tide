@@ -347,6 +347,9 @@ struct SetupWizardWindow: View {
 
     private func goBack() {
         errorMessage = nil
+        // #103 ゲートの誘導ボタンは errorMessage とロックステップで消す（PR #109 収束レビュー
+        // ブロッカー 5 — 残すと provisioning ステップに文脈のないボタンだけが浮く）。
+        fpExtensionOffAfterSetup = false
         step = Step(rawValue: step.rawValue - 1) ?? .credentials
     }
 

@@ -1487,6 +1487,17 @@
         }
       }
     },
+    "The domain was added, but the Tide File Provider extension is turned off in System Settings. Turn it on to start syncing (no need to enable again)." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ドメインは追加されましたが、Tide の File Provider 機能拡張がシステム設定でオフです。オンにすればそのまま同期が始まります（再有効化は不要です）。"
+          }
+        }
+      }
+    },
     "The Tide File Provider extension is turned off in System Settings. Turn it on before you press “Start syncing”." : {
       "extractionState" : "manual",
       "localizations" : {

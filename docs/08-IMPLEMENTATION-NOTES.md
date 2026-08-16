@@ -1030,6 +1030,14 @@ Keep Downloaded（#40 の残フェーズ）の対向操作。
   指摘 1: post は許可プロンプト応答待ち等で長く suspend し得るため、復帰エッジの撤去が未配達
   no-op になった後に stale が配達され得る）は、**post 完了後に現在の観測
   （`signaler.fpDomainDisabled`）を再読し、もう無効でなければ即撤去**で閉じる。
+  **発火は「`.userDisabled` の実観測」に限定**（収束レビュー ブロッカー 1・2・2026-08-17）:
+  エッジフックは観測した `DomainStatus` を素通しで受け、アプリ内 Disable（`.notRegistered` =
+  ユーザ自身の意図的操作）と一過性の取得失敗（nil・wake 直後の fileproviderd 未起動等）では
+  通知を出さない — アイコンの無効表示（fail-safe = nil も無効側）は従来どおり全ケースで出る。
+  **factoryReset も配達済みを撤去**（ブロッカー 4 — 全消し後の起動は signaler 起動時の掃除に
+  到達しないため、消さないと再セットアップ完走まで残る）。撤去 API は
+  `NotificationManager.removeDelivered(for: NotificationEvent)`（identifier の対応を post と
+  同じ `NotificationPolicy` から引く = 呼び出し側に生文字列を綴らせない）。
 - **UI（設計確定 2026-08-15 = 専用文言 + システム設定誘導）**: ポップオーバー / Settings は
   `DomainStatus?` を保持し、`.userDisabled` で専用赤文言 +「システム設定を開く」ボタン
   （`openLoginItemsAndExtensionsSettings()` = `x-apple.systempreferences:com.apple.LoginItems-Settings.extension`・
@@ -1043,6 +1051,11 @@ Keep Downloaded（#40 の残フェーズ）の対向操作。
   **成功してしまう**（#97 受け入れ実測）ため、`runStartSyncing` の completeSetup 成功後に
   `domainStatus()` を検査し、`.userDisabled` なら done へ進めずエラー + 誘導ボタン。設定・
   ドメインは保存済みなので ON にして再度「Start syncing」で冪等に成功（資格情報も温存）。
+  誘導ボタンは `errorMessage` とロックステップで消す（`onNext` / `goBack` / `resetWizard` —
+  収束レビュー ブロッカー 5）。**Settings の「Enable File Provider」にも同じ事後検査**
+  （`AppEnvironment.enableFileProviderDomain` — ブロッカー 3: 検査なしだと成功メッセージが
+  直上の赤文「nothing is syncing」と矛盾する。ドメイン追加自体は有効なので「ON に戻せば
+  そのまま同期が始まる・再 Enable 不要」の文言で throw）。
 
 ##### 実機受け入れ（2026-08-16・全 8 項目パス）
 

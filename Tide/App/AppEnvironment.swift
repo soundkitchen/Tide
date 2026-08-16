@@ -252,8 +252,7 @@ final class AppEnvironment {
         // は false 始まりのため enabled 観測はどちらのエッジも成立しない）。撤去は冪等で、本当に
         // 無効な起動でも直後の初回 checkOnce が無効エッジで同一 identifier の通知を再発行する
         // （従来から毎起動で置換再発行）ため、可視挙動は退行しない。
-        notifications.removeDelivered(
-            identifier: NotificationPolicy.content(for: .fileProviderDisabled).identifier)
+        notifications.removeDelivered(for: .fileProviderDisabled)
 
         let signaler = RemoteChangeSignaler(
             intervalSeconds: config.pollingIntervalSeconds,
@@ -262,14 +261,19 @@ final class AppEnvironment {
             // 拡張 OFF = 全同期停止の検出（Issue #82 / #103）。メニューバーアイコンへ反映される。
             // 判定は userEnabled 込みの domainStatus() — 掲載有無だけではシステム設定のトグル OFF
             // を検出できない（現 OS では domains() に載ったまま userEnabled=false になる・#103
-            // 実機実証 2026-08-15）。取得失敗（nil）は無効側に倒す = 従来挙動の維持
-            // （毎周回の再観測で自己回復する・見逃しは ETag 変化まで気づけない）。
-            isFPDomainEnabled: { await FileProviderController.domainStatus() == .enabled },
+            // 実機実証 2026-08-15）。アイコン側は取得失敗（nil）も無効側に倒す fail-safe を維持
+            // （畳み込みは signaler 内・毎周回の再観測で自己回復する）。
+            fpDomainStatus: { await FileProviderController.domainStatus() },
             // 無効/復帰エッジで OS 通知を発火/撤去（Issue #103・通知 5 事象目 =「ユーザ介入が要る
             // 確定的な全同期停止」。エッジ検出のみ = 連発しない・identifier 固定で万一も置換）。
-            onFPDomainDisabledEdge: { [weak self, notifications] disabled in
-                let identifier = NotificationPolicy.content(for: .fileProviderDisabled).identifier
+            onFPDomainDisabledEdge: { [weak self, notifications] disabled, status in
                 if disabled {
+                    // 通知は「.userDisabled の実観測」に限定（PR #109 収束レビュー ブロッカー
+                    // 1・2）: アプリ内 Disable（.notRegistered）はユーザ自身の意図的操作・
+                    // 取得失敗（nil）は一過性の可能性があり、いずれも「System Settings で
+                    // オフ」という通知文言が誤指示になる。アイコンの無効表示（fail-safe）は
+                    // 従来どおり全ケースで出る。
+                    guard status == .userDisabled else { return }
                     Task { @MainActor in
                         await notifications.post(.fileProviderDisabled)
                         // post は許可プロンプト応答待ち等で長く suspend し得る（初回は分単位も
@@ -278,11 +282,11 @@ final class AppEnvironment {
                         // 指摘 1）。配達後に現在の観測を再読し、もう無効でなければ即撤去する
                         // （signaler 不在 = factoryReset 後も撤去側。撤去は冪等）。
                         if self?.signaler?.fpDomainDisabled != true {
-                            notifications.removeDelivered(identifier: identifier)
+                            notifications.removeDelivered(for: .fileProviderDisabled)
                         }
                     }
                 } else {
-                    notifications.removeDelivered(identifier: identifier)
+                    notifications.removeDelivered(for: .fileProviderDisabled)
                 }
             }
         )
@@ -350,6 +354,14 @@ final class AppEnvironment {
             throw SyncError.notConfigured(reason: "run setup first — the File Provider domain needs a configured bucket")
         }
         try await withDomainLifecycleGate { try await FileProviderController.enable() }
+        // 拡張がユーザ OFF でも add は成功してしまう（#103）。成功メッセージが FP セクションの
+        // 赤文「nothing is syncing」と矛盾しないよう、事後検査で明示エラーにする（PR #109
+        // 収束レビュー ブロッカー 3）。ウィザードは専用 UI 状態（誘導ボタン）を持つため
+        // runStartSyncing 側の検査を維持 — どちらも同じ domainStatus() を見る。ドメイン追加
+        // 自体は有効なので、ON に戻せばそのまま同期が始まる（再 Enable 不要）旨を文言に含める。
+        if await FileProviderController.domainStatus() == .userDisabled {
+            throw SyncError.notConfigured(reason: String(localized: "The domain was added, but the Tide File Provider extension is turned off in System Settings. Turn it on to start syncing (no need to enable again)."))
+        }
     }
 
     /// Settings の Disable ボタン用ラッパ（enable 側と対）。**setupCompleted は要求しない** —
@@ -742,6 +754,10 @@ final class AppEnvironment {
         engine = nil
         signaler?.stop()
         signaler = nil
+        // 配達済みの「Tide is not syncing」を撤去（PR #109 収束レビュー ブロッカー 4）: 全消し後の
+        // 起動は launchFPOnlySignaler の無条件掃除に到達しない（setupCompleted 手前で return）ため、
+        // ここで消さないと再セットアップ完走まで stale 通知が残り続ける。撤去は冪等。
+        notifications.removeDelivered(for: .fileProviderDisabled)
         s3 = nil
         database = nil
 
