@@ -6,6 +6,8 @@
 
 **Status 更新 (2026-08-08・v0.3.0 #97):** 新規セットアップは security-scoped bookmark を**発行しない**（ウィザードの fpOnly ネイティブ化で `completeSetup` から bookmark 発行・`syncRootPath` / `syncRootBookmark` 書込を削除。fpOnly に syncRoot 面が無いため）。解決系（`resolveSyncRootAccess` / `requestSyncRootAccessViaPanel`）は folderSync デッド経路として温存（到達は git revert のみ = docs/09「revert 復帰ランブック」）。entitlement `files.user-selected.read-write` は panel 系（設定 import/export・診断保存）で引き続き必要。
 
+**Status 更新 (2026-08-17・v0.3.0 #98):** 旧同期フォルダ `~/Tide` の実体を削除（`rm -rf` 直接削除・ゴミ箱経由は bookmark のファイル ID 追跡による `~/.Trash/Tide` 同期再開リスクがあるため禁止 = 設計時判断）。group defaults の `syncRootPath` / `syncRootBookmark` キーと凍結 DB は「残置」ではなく **#97 受け入れ（2026-08-11）の factoryReset で消滅済みだったことを実施時に確認**（新ウィザードは folderSync 系キーを書かない）。稼働環境に bookmark 面は存在しない。実施記録 = `docs/08`「v0.3.0 … #98 実施記録」節。
+
 **該当箇所:** `project.yml` entitlements / `Tide/App/AppEnvironment.swift` `resolveSyncRootAccess` `requestSyncRootAccessViaPanel` `completeSetup` / `TideCore/Storage/ConfigStore.swift` `syncRootBookmark`
 
 Hardened Runtime は有効だが、App Sandbox は無効。直配布 + Notarize 前提なら受容可能だが、サンドボックスを将来検討する場合は `tide.syncRootBookmark` の死蔵キー（`ConfigStore.swift:11`, `64`）からも分かるように、security-scoped bookmark 取得 → 永続化 → 再構築のフローが必要。今のコードでは bookmark は実際には保存していない（コード断片だけ残った "intent" 状態）。

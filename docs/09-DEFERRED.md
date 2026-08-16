@@ -140,7 +140,7 @@ fpOnly 運用中、rename したファイルに実体化チェックバッジ（
   契機で `requestDownloadForItem` 等の内容往復を誘発・API 実挙動は要実証）② 参考 = 安定 id 化（rename を
   rebind にしない構造対処・大工事・据え置き）。
 
-## v0.3.0: ユーザー目線からの folderSync 削除（設計確定 2026-08-06・#96 実装・実機受け入れ済み 2026-08-08・残 = #97 / #98）
+## v0.3.0: ユーザー目線からの folderSync 削除（設計確定 2026-08-06・✅ **完了 2026-08-17** = #96 / #97 / #98 全実施 + `MARKETING_VERSION` 0.3.0）
 
 fpOnly 切替（2026-07-25）と #40 の 1 週間ライブ soak 合格（2026-08-03）を受け、**v0.3.0 のテーマを
 「ユーザー目線から FSEvents（folderSync モード）を消す」に確定**（ユーザ確定 2026-08-06）。
@@ -152,7 +152,13 @@ fpOnly 切替（2026-07-25）と #40 の 1 週間ライブ soak 合格（2026-08
 **位置づけ**: M5（上記節）は機能マイルストーン（Files-On-Demand）の追跡・本節は **v0.3.0 リリースの
 テーマ**であり、リリースの完了条件 = #96 / #97 / #98 の全マージ + `~/Tide` 削除 +
 `MARKETING_VERSION` 0.3.0（M5 側の継続作業〈重要ファイル投入・Keep Downloaded 運用・#93 等〉は
-v0.3.0 の完了条件に含めない）。
+v0.3.0 の完了条件に含めない）。**→ 完了（2026-08-17・#98 実施記録 = `docs/08`「v0.3.0:
+ユーザー目線からの folderSync 削除 = 総括 + #98 実施記録」節）**。FSEvents コード本体の物理撤去は
+従来ゲート（FP-only 無事故実績 + 2 台 soak 後）のまま**据え置き**（下記方針 3）。
+**#98 で判明した重要な事実**: 温存予定だった revert 資産（凍結 DB / `shard_state` /
+`syncRootPath`・`syncRootBookmark` キー）は **#97 受け入れ（2026-08-11）の factoryReset →
+fpOnly ネイティブ再セットアップで既に消滅していた** — 下記ランブックの「増分復帰」経路は
+実行不能となり、folderSync 復帰は**推奨経路（クリーン再セットアップ）のみ**。
 
 ### 設計判断の根拠（危険知見・調査 2026-08-06）
 
@@ -206,6 +212,14 @@ v0.3.0 の完了条件に含めない）。
 #98 実施後は `~/Tide` 不在が恒久状態になるため、**ランブック無しの revert 起動は本節冒頭の
 危険知見（空フォルダ受理 → 全件 delete）へ直行する**。大量削除ガードを作らない判断（方針 4）は
 本ランブックの遵守が前提（PR #99 レビュー指摘 1）。
+
+> **#98 実施時の追記（2026-08-17）**: 下記「増分復帰」経路は**実行不能になった** — 前提資産
+> （凍結 DB / `shard_state`・`syncRootPath`・`syncRootBookmark` キー）が #97 受け入れ
+> （2026-08-11）の factoryReset → fpOnly ネイティブ再セットアップで消滅済み（新ウィザードは
+> folderSync 系キーを書かない）。**復帰方式は「推奨 = factoryReset → folderSync ビルドで
+> 再セットアップ」の一択**。増分復帰の手順は、将来 folderSync 稼働実績のある環境で同種の
+> 凍結切替を行う場合の参考として残す。bookmark 残骸への注意（末尾補足）も現環境では対象キーが
+> 無く死文だが、同種運用の参考として温存。
 
 **共通の前提（復帰方式に依らず最初に行う）**:
 
@@ -284,7 +298,9 @@ v0.3.0 の完了条件に含めない）。
      （再レビュー指摘 7）
    - **#96 マージ〜#97 マージの間は factoryReset / 再セットアップ禁止**（旧ウィザードがフォルダを
      選ばせるが boot は fpOnly という過渡。データ危険は無いが踏まない）
-2. **#97 セットアップウィザードの fpOnly ネイティブ化**（大）
+2. **#97 セットアップウィザードの fpOnly ネイティブ化**（大・✅ 実装・実機受け入れ済み 2026-08-11
+   〈全項目パス・PR #101・レビュー 11 巡〉= 実装ノート・受け入れ知見は `docs/08`「ウィザード fpOnly
+   ネイティブ化」節。受け入れ発見バグは #102 / #103 として個別解消済み）
    - ステップ: credentials → bucket → provisioning → **fileProvider** → done。「Start syncing」=
      `completeSetup(credentials:bucket:region:)`（シグネチャ置換）が config/Keychain 保存 →
      `FileProviderController.enable()` → signaler 起動を一括保証（保存前 enable は拡張が未設定状態で
@@ -306,17 +322,18 @@ v0.3.0 の完了条件に含めない）。
      温存デッド経路が参照するため残す
    - security 記録: 新規セットアップは security-scoped bookmark を発行しない旨を `security/low.md` L1 +
      `security/README.md` へ
-3. **#98 旧同期フォルダ `~/Tide` 削除 + docs/security の v0.3.0 反映**（ops + docs）
+3. **#98 旧同期フォルダ `~/Tide` 削除 + docs/security の v0.3.0 反映**（ops + docs・✅ 実施済み
+   2026-08-17〈実施記録 = `docs/08`「v0.3.0 … #98 実施記録」節〉）
    - **`rm -rf ~/Tide` 一択・ゴミ箱経由禁止** — 温存する `syncRootBookmark` キーがゴミ箱内の実体を
      ファイル ID で追跡し続け、将来の revert 復帰時に `~/.Trash/Tide` への同期再開になるため
      （#98 時点で folderSync boot は到達不能だが、revert 経路を温存する限り現実の危険。
-     PR #99 レビュー指摘 7）
-   - **温存（触らない）**: App Group の `db.sqlite` / `-wal`・`shard_state`・defaults の `syncRootPath` /
-     `syncRootBookmark` キー。温存理由 = **revert 資産**（FileRecord 群 = 増分復帰時の 3-way ベース・
-     `shard_state` = 増分 pull の etag 差分）。DBFreezeWatch の観測は DB を消しても縮退しない
-     （「不在 → 出現」も WARN 対象のため再出現書込を検出できる = 観測は温存理由ではない。
-     PR #99 レビュー指摘 5）。死にキーの defaults 手術は事故源なので残置
-   - `MARKETING_VERSION` → 0.3.0・docs 一式反映（対象と内容の表は #98 本文）
+     PR #99 レビュー指摘 7）→ 実施時は当該キー自体が消滅済みだったが防御として手順を維持
+   - ~~**温存（触らない）**: App Group の `db.sqlite` / `-wal`・`shard_state`・defaults の
+     `syncRootPath` / `syncRootBookmark` キー~~ → **実施時点で全て消滅済みと判明**（#97 受け入れの
+     factoryReset 起因。上記「位置づけ」末尾と revert 復帰ランブック追記を参照）。当時の温存理由
+     （revert 資産 = FileRecord 群 / etag 差分・DBFreezeWatch は「不在 → 出現」も WARN 対象・
+     死にキーの defaults 手術は事故源。PR #99 レビュー指摘 5）は記録として残す
+   - `MARKETING_VERSION` → 0.3.0・docs 一式反映（対象と内容の表は #98 本文）→ ✅ 同一 PR で反映
 
 ## pull がローカル削除を復活させる（✅ 解消 2026-07-18・Issue #68）
 

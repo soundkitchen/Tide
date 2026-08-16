@@ -143,7 +143,9 @@ cmd_restart() {
 
 cmd_status() {
     if [ ! -f "$PLIST" ]; then
-        echo "未インストール（plist なし: $PLIST）"
+        # ${PLIST} の波括弧は必須 — 直後の全角「）」を bash が変数名に飲み込み
+        # set -u の unbound variable でエラー終了する（bash 3.2 / 5.3 両方で再現）。
+        echo "未インストール（plist なし: ${PLIST}）"
         exit 0
     fi
     if ! launchctl print "$DOMAIN/$LABEL" 2>/dev/null \
