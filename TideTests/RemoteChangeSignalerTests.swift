@@ -44,7 +44,9 @@ final class RemoteChangeSignalerTests: XCTestCase {
             intervalSeconds: 3600,  // タイマーはテストでは実質発火しない（checkOnce を直接駆動）
             headIndexETag: { try head.next() },
             signal: { counter.fire() },
-            isFPDomainEnabled: { enabled.next() }
+            // Bool フェイクを status へ写像（無効側は userDisabled 代表・アイコン系テストは
+            // enabled か否かしか見ないため十分。status 伝搬自体はフック専用テストで固定）
+            fpDomainStatus: { enabled.next() ? .enabled : .userDisabled }
         )
     }
 
@@ -182,7 +184,7 @@ final class RemoteChangeSignalerTests: XCTestCase {
     }
 
     /// 復帰エッジは ETag 不変でも必ず 1 回 signal する（見逃し窓の閉鎖）: 無効期間中の
-    /// ETag 変化は観測だけ進み（プロダクションでは下流の isEnabled ガードで signal が no-op）、
+    /// ETag 変化は観測だけ進み（プロダクションでは下流の domainStatus ガードで signal が no-op）、
     /// 次の変化まで取り込み契機が来ないため、復帰時に catch-up を強制する。
     func testReEnableEdgeForcesCatchUpSignal() async {
         let head = FakeHead([.success("etag-1")])
@@ -198,6 +200,52 @@ final class RemoteChangeSignalerTests: XCTestCase {
         await signaler.checkOnce(reason: "test")  // 復帰・ETag 不変 → catch-up signal
         XCTAssertEqual(counter.count, 2, "復帰エッジの catch-up signal が出ていない")
         XCTAssertNotEqual(signaler.lastSignaledAt, signaledBefore, "catch-up で lastSignaledAt が前進していない")
+    }
+
+    /// 無効/復帰エッジのフック（Issue #103: OS 通知の発火/撤去の配線面）は**エッジ検出時のみ**
+    /// 呼ばれ、**観測した status を素通しで渡す**（PR #109 収束レビュー ブロッカー 1・2 —
+    /// 通知側が「.userDisabled の実観測」だけに発火を限定するための契約。.notRegistered / nil の
+    /// 無効エッジもフック自体は呼ばれる = アイコンの fail-safe と対で、区別は受け手が行う）。
+    func testFPDomainDisabledEdgeHookFiresOnEdgesOnlyWithStatus() async {
+        let head = FakeHead([.success("etag-1")])
+        let counter = SignalCounter()
+        let statuses = FakeStatus([.enabled, .userDisabled, .userDisabled, nil, .enabled])
+        var hookCalls: [(Bool, FileProviderController.DomainStatus?)] = []
+        let signaler = RemoteChangeSignaler(
+            intervalSeconds: 3600,
+            headIndexETag: { try head.next() },
+            signal: { counter.fire() },
+            fpDomainStatus: { statuses.next() },
+            onFPDomainDisabledEdge: { hookCalls.append(($0, $1)) }
+        )
+
+        await signaler.checkOnce(reason: "test")  // 有効（初回・エッジではない）
+        XCTAssertTrue(hookCalls.isEmpty)
+        await signaler.checkOnce(reason: "test")  // 無効エッジ（userDisabled）
+        XCTAssertEqual(hookCalls.count, 1, "無効エッジでフックが呼ばれていない")
+        XCTAssertEqual(hookCalls[0].0, true)
+        XCTAssertEqual(hookCalls[0].1, .userDisabled, "観測 status が素通しされていない")
+        await signaler.checkOnce(reason: "test")  // 無効のまま → 呼ばない
+        XCTAssertEqual(hookCalls.count, 1, "非エッジ周回でフックが連発している")
+        await signaler.checkOnce(reason: "test")  // nil 観測・無効のまま → エッジではない
+        XCTAssertEqual(hookCalls.count, 1, "nil 観測（無効継続）でフックが呼ばれている")
+        await signaler.checkOnce(reason: "test")  // 復帰エッジ
+        XCTAssertEqual(hookCalls.count, 2, "復帰エッジでフックが呼ばれていない")
+        XCTAssertEqual(hookCalls[1].0, false)
+        XCTAssertEqual(hookCalls[1].1, .enabled)
+    }
+
+    /// フェイク FP ドメイン status（#103・FakeEnabled と同型）: 呼び出しごとに `values` を
+    /// 先頭から消費し、尽きたら最後の値を返し続ける。
+    private final class FakeStatus: @unchecked Sendable {
+        private let lock = NSLock()
+        private var values: [FileProviderController.DomainStatus?]
+        init(_ values: [FileProviderController.DomainStatus?]) { self.values = values }
+        func next() -> FileProviderController.DomainStatus? {
+            lock.lock()
+            defer { lock.unlock() }
+            return values.count > 1 ? values.removeFirst() : values[0]
+        }
     }
 
     /// 併観測は HEAD より先に走る = HEAD 失敗（オフライン等）でも拡張 OFF に気づける。

@@ -1,4 +1,5 @@
 import TideCore
+import AppKit
 import SwiftUI
 
 /// UI 層で複数の View が共有する小さな表示ヘルパ群。
@@ -54,4 +55,15 @@ extension View {
     func cardBackground() -> some View {
         background(.quinary, in: RoundedRectangle(cornerRadius: 8))
     }
+}
+
+// MARK: - システム設定への誘導（Issue #103）
+
+/// システム設定の「ログイン項目と機能拡張」ペインを開く（FP 拡張がユーザ OFF のときの誘導先。
+/// アプリ内 Settings では直せないため、ポップオーバー / Settings / ウィザードの 3 導線が共用する）。
+/// ペイン ID が解決できない環境でも NSWorkspace がシステム設定本体へフォールバックする。
+@MainActor
+func openLoginItemsAndExtensionsSettings() {
+    guard let url = URL(string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension") else { return }
+    NSWorkspace.shared.open(url)
 }

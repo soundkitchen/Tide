@@ -27,9 +27,18 @@ final class RemoteChangeSignaler {
     /// 変化時の通知先。プロダクションは `FileProviderController.signalRemoteChanges()`
     /// （coalesce は向こう側が持つ）。
     @ObservationIgnored private let signal: () -> Void
-    /// FP ドメインの有効性（Issue #82）。プロダクションは `FileProviderController.isEnabled()`
-    /// （fileproviderd へのローカル XPC 1 発）を配線し、テストはフェイクを注入する。
-    @ObservationIgnored private let isFPDomainEnabled: @Sendable () async -> Bool
+    /// FP ドメインの状態（Issue #82 / #103）。プロダクションは `FileProviderController.domainStatus()`
+    /// （fileproviderd へのローカル XPC 1 発・userEnabled 込み）を配線し、テストはフェイクを注入
+    /// する。nil = 取得失敗。有効判定（アイコン用の fail-safe = nil も無効側）は signaler 内で
+    /// `== .enabled` に畳むが、**生の status もエッジフックへ流す** — 通知の発火を
+    /// 「.userDisabled の実観測」に限定するため（PR #109 収束レビュー ブロッカー 1・2）。
+    @ObservationIgnored private let fpDomainStatus: @Sendable () async -> FileProviderController.DomainStatus?
+    /// 無効/復帰の**エッジ検出時のみ**呼ばれる追加フック（Issue #103）。引数 = (無効になったか,
+    /// そのとき観測した status)。プロダクションは OS 通知の発火（無効 ∧ `.userDisabled` のみ —
+    /// アプリ内 Disable〈`.notRegistered`〉はユーザ自身の意図的操作・取得失敗〈nil〉は一過性の
+    /// 可能性があり、いずれも「System Settings でオフ」の通知は誤指示になる）/ 配達済み通知の
+    /// 撤去（復帰）を配線する。既定は no-op（テスト互換・通知はエッジのみ = 連発にならない）。
+    @ObservationIgnored private let onFPDomainDisabledEdge: (Bool, FileProviderController.DomainStatus?) -> Void
     @ObservationIgnored private let intervalSeconds: Int
 
     // UI 表示用の観測状態（B-1・fpOnly ポップオーバー）。判定ロジックは一切持たない読み出し専用。
@@ -58,12 +67,14 @@ final class RemoteChangeSignaler {
         intervalSeconds: Int,
         headIndexETag: @escaping @Sendable () async throws -> String?,
         signal: @escaping () -> Void,
-        isFPDomainEnabled: @escaping @Sendable () async -> Bool
+        fpDomainStatus: @escaping @Sendable () async -> FileProviderController.DomainStatus?,
+        onFPDomainDisabledEdge: @escaping (Bool, FileProviderController.DomainStatus?) -> Void = { _, _ in }
     ) {
         self.intervalSeconds = intervalSeconds
         self.headIndexETag = headIndexETag
         self.signal = signal
-        self.isFPDomainEnabled = isFPDomainEnabled
+        self.fpDomainStatus = fpDomainStatus
+        self.onFPDomainDisabledEdge = onFPDomainDisabledEdge
     }
 
     func start() {
@@ -138,21 +149,25 @@ final class RemoteChangeSignaler {
     /// エッジ検出時のみ（毎周回出すとノイズ床を上げる = #81 と同方針）。HEAD より先に観測する
     /// （拡張 OFF の検出は S3 到達性と独立 = オフラインでも気づける）。
     private func observeFPDomainEnabled(reason: String) async {
-        let enabled = await isFPDomainEnabled()
+        let status = await fpDomainStatus()
+        // アイコン側の有効判定は従来どおり fail-safe（nil = 取得失敗も無効側に倒す）。
+        let enabled = status == .enabled
         if fpDomainDisabled && enabled {
             // 復帰エッジでは必ず 1 回 signal する: 無効期間中も HEAD は ETag を進めており
-            // （その間の signal は FileProviderController 側の isEnabled ガードで no-op）、
+            // （その間の signal は FileProviderController 側の domainStatus ガードで no-op）、
             // 次の ETag 変化まで取り込み契機が来ない「見逃し窓」をここで閉じる。
             // 変化が無ければ拡張側の世代キャッシュで no-op（XPC 2 回だけ）。
             fpDomainDisabled = false
             signal()
             lastSignaledAt = Date()
             AppLogger.sync.notice("RemoteChangeSignaler: FP domain re-enabled (\(reason, privacy: .public)); signaled FP domain to catch up")
+            onFPDomainDisabledEdge(false, status)
         } else if !fpDomainDisabled && !enabled {
             // fpOnly では拡張 OFF = 全同期停止。エラーがどこにも出ない盲点なので、ここだけは
             // .error で 1 回残す（エッジ検出 = 恒常ノイズにはならない）。
             fpDomainDisabled = true
             AppLogger.sync.error("RemoteChangeSignaler: FP domain is disabled (\(reason, privacy: .public)) — nothing is syncing until it is re-enabled")
+            onFPDomainDisabledEdge(true, status)
         }
     }
 

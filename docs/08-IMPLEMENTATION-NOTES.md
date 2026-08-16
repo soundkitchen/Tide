@@ -814,7 +814,8 @@ Issue #97 本文のチェックリスト（9 項目 + 追補 7b〜7d）を dev �
   import 誘導が見かけ上無反応・アプリ再起動で回避可 → **修正済み 2026-08-15**・後述
   「ウィザードの状態リセット」節）。**#103** = FP 拡張トグル OFF を検出
   できず緑表示のまま無音停止（`domains()` ベース検出が現 OS で不成立。#82 受け入れ時は機能
-  → OS 挙動変化が濃厚。アプリ内 Disable の domain 除去経路では赤バナー正常）。
+  → OS 挙動変化が濃厚。アプリ内 Disable の domain 除去経路では赤バナー正常 →
+  **修正 2026-08-15**・後述「FP 拡張トグル OFF の検出」節）。
 - 副次知見: soak launchd agent の plist が消失していた（原因不明・`soak-agent-install` で
   復旧・常駐再開済み）。
 
@@ -994,6 +995,86 @@ Keep Downloaded（#40 の残フェーズ）の対向操作。
   （許可は永続・2 回目以降は非再発。#102 無関係の既存挙動）。受け入れ中に aws CLI セッション
   失効で soak 観測が一時停止（#94 の既知パターン・`aws login` 再認証で復旧・整合 OK
   5625/5625 維持）。
+
+#### FP 拡張トグル OFF の検出（Issue #103・2026-08-15）
+
+システム設定（ログイン項目と機能拡張）で FP 拡張をユーザが OFF にすると、拡張は kill され
+レプリカも Finder から消えるのに、アプリは緑表示のまま「無音の同期停止」になっていた問題の
+恒久対処。#82（PR #88）受け入れ時（2026-07-25）は機能していた検出が現 OS で不成立になっていた。
+
+- **検出シグナル = `NSFileProviderDomain.userEnabled`（スパイク実機実証 2026-08-15・Issue
+  コメント記録）**: トグル OFF では **`domains()` に載ったまま** `userEnabled` だけが false に
+  なる（反映 ≤15 秒・ON 復帰も即時。`isDisconnected` / `isHidden` は不変）。SDK ドキュメントに
+  「macOS のシステム設定でユーザが無効化すると NO になる」と明記された、まさにこの用途の
+  プロパティ。#82 の検出（`domains()` の**掲載有無**のみ）はこの状態を「有効」と誤判定していた。
+- **API = `FileProviderController.domainStatus()`**（旧 `isEnabled()` を置換・有界化は同じ）:
+  `enabled` / `.userDisabled` / `.notRegistered` / nil（取得失敗）。呼び出し側は
+  `== .enabled`（signaler / performSignal）・`!= .notRegistered`（probeDomainRecreation =
+  作り直し判定に要るのは登録有無で、userDisabled のドメインもレプリカ実在として扱う）のように
+  **明示的に倒す側を選ぶ**（旧 isEnabled と同じ流儀・PR #100 再レビュー指摘 1）。
+- **定期検知は #82 の既存骨格を再利用**: `RemoteChangeSignaler.observeFPDomainEnabled`
+  （毎周回 + wake + networkUp・HEAD より先 = オフラインでも検出）→ `fpDomainDisabled` →
+  `MenuBarPresentation.fpOnlyHeadline` → メニューバーアイコン `MenuBarError`、の配線は
+  無変更で、**判定クロージャの差し替えだけで復活**。復帰エッジの catch-up signal も従来どおり。
+- **OS 通知（5 事象目・設計確定 2026-08-15）**: signaler に `onFPDomainDisabledEdge` フックを
+  追加し、無効エッジで `NotificationEvent.fileProviderDisabled` を発火・復帰エッジで配達済みを
+  撤去（`NotificationManager.removeDelivered`）。エッジ検出のみ = 連発しない（回帰は
+  `testFPDomainDisabledEdgeHookFiresOnEdgesOnly`）。identifier 固定 `"fpDisabled"`。
+  **撤去はエッジ経路だけでは足りない（受け入れ 2026-08-16 で発見）**: 復帰がウィザード
+  （completeSetup）経由だと signaler が作り直され、無効状態を保持していた旧 signaler の
+  復帰エッジが発火しない（アプリ再起動をまたいだ復帰も同様）。このため
+  `launchFPOnlySignalerFromCurrentConfig` は **起動時に無条件で配達済みを掃除**する
+  （冪等・不在なら no-op。enabled 限定だと取得失敗〈nil〉の起動で漏れて以後回収不能 =
+  PR #109 再レビュー指摘。本当に無効な起動でも初回 checkOnce の無効エッジが同一 identifier で
+  再発行するため可視挙動は退行しない）。さらに **in-flight post と復帰エッジのレース**（PR #109 レビュー
+  指摘 1: post は許可プロンプト応答待ち等で長く suspend し得るため、復帰エッジの撤去が未配達
+  no-op になった後に stale が配達され得る）は、**post 完了後に現在の観測
+  （`signaler.fpDomainDisabled`）を再読し、もう無効でなければ即撤去**で閉じる。
+  **発火は「`.userDisabled` の実観測」に限定**（収束レビュー ブロッカー 1・2・2026-08-17）:
+  エッジフックは観測した `DomainStatus` を素通しで受け、アプリ内 Disable（`.notRegistered` =
+  ユーザ自身の意図的操作）と一過性の取得失敗（nil・wake 直後の fileproviderd 未起動等）では
+  通知を出さない — アイコンの無効表示（fail-safe = nil も無効側）は従来どおり全ケースで出る。
+  **factoryReset も配達済みを撤去**（ブロッカー 4 — 全消し後の起動は signaler 起動時の掃除に
+  到達しないため、消さないと再セットアップ完走まで残る）。撤去 API は
+  `NotificationManager.removeDelivered(for: NotificationEvent)`（identifier の対応を post と
+  同じ `NotificationPolicy` から引く = 呼び出し側に生文字列を綴らせない）。
+- **UI（設計確定 2026-08-15 = 専用文言 + システム設定誘導）**: ポップオーバー / Settings は
+  `DomainStatus?` を保持し、`.userDisabled` で専用赤文言 +「システム設定を開く」ボタン
+  （`openLoginItemsAndExtensionsSettings()` = `x-apple.systempreferences:com.apple.LoginItems-Settings.extension`・
+  アプリ内 Settings では直せないため）。`.notRegistered` は従来文言。「Open Tide in Finder」の
+  disable 条件は両不活性状態（userDisabled はレプリカ不可視）・不明（nil）は従来どおり活性
+  （述語は `DomainStatus.isInactive` を両画面で共有・PR #109 レビュー指摘 7）。ウィザードの
+  fileProvider ステップは probe（`(recreate, status)` タプル・追加 XPC ゼロ）で userDisabled を
+  **押す前に**オレンジ警告 + 誘導表示（PR #109 レビュー指摘 2 — 緑チェックを見せてから post
+  検査で止める「一度騙す」動線の解消。進行はゲートせず権威は completeSetup 後の検査のまま）。
+- **ウィザードゲート（現象 1・設計確定 = エラーで止める）**: 拡張 OFF でも `add(domain)` は
+  **成功してしまう**（#97 受け入れ実測）ため、`runStartSyncing` の completeSetup 成功後に
+  `domainStatus()` を検査し、`.userDisabled` なら done へ進めずエラー + 誘導ボタン。設定・
+  ドメインは保存済みなので ON にして再度「Start syncing」で冪等に成功（資格情報も温存）。
+  誘導ボタンは `errorMessage` とロックステップで消す（`onNext` / `goBack` / `resetWizard` —
+  収束レビュー ブロッカー 5）。**Settings の「Enable File Provider」にも同じ事後検査**
+  （`AppEnvironment.enableFileProviderDomain` — ブロッカー 3: 検査なしだと成功メッセージが
+  直上の赤文「nothing is syncing」と矛盾する。ドメイン追加自体は有効なので「ON に戻せば
+  そのまま同期が始まる・再 Enable 不要」の文言で throw）。
+
+##### 実機受け入れ（2026-08-16・全 8 項目パス）
+
+- **定期検知**: トグル OFF → poll 周回でエッジ検出 1 回のみ（ログ・連発なし）・メニューバー
+  アイコン異常化 + 通知 1 回。**起動時（startup）経路の検知**も副次確認（受け入れ中の
+  Cmd+Q 中断 → 再起動で即検出・通知は新プロセスで再発火 = セッション単位のエッジ検出どおり）。
+- **OFF 中 UI**: ポップオーバー赤ヘッダ + 専用文言 + ボタンで「ログイン項目と機能拡張」
+  ペインが開く・「Open Tide in Finder」disabled（ポップオーバー / Settings 両方）・Settings は
+  userDisabled 専用文言（notRegistered と区別）。
+- **ウィザードゲート**: OFF で Start syncing → エラー + 誘導で停止（2 回確認）→ ON 後の
+  再押下で done 到達（冪等・資格情報温存）。
+- **復帰**: アイコン / ポップオーバー復帰。**受け入れが実バグを発見** = ウィザード経由復帰では
+  signaler 作り直しで復帰エッジ不発 → 通知撤去が呼ばれず「Tide is not syncing」が通知センターに
+  残存 → enabled 起動時の掃除で修正（上記追記・修正ビルドの再起動で通知消滅を実機確認）。
+- **正常系**: 書込スモーク往復（作成 / 削除とも `FPEventLog` で S3 反映確認）・`soak-check-fp`
+  整合 OK（5625/5625）・言語 = ja（システム日本語での全観察 = 新規文言の ja 表示確認を兼ねる）。
+- **副次知見**: メニューバーアイコンの通常（なめらかな波）と異常（ギザギザ波）の差は 18px
+  実寸では気づきにくい（受け入れ中のユーザ指摘）。検出機構（本 Issue）のスコープ外 —
+  差別化の改善（色 / 記号バッジ等）が要るなら別 Issue。
 
 ### バースト RMW 競合の恒久対処（Issue #91・2026-07-26）
 
@@ -1238,15 +1319,15 @@ Keep Downloaded（#40 の残フェーズ）の対向操作。
 
 ### 通知（UserNotifications・M4・2026-06-15）
 
-- **発火は「ユーザの介入が要る／取りこぼし（未バックアップ）が起きうる確定的な事象」だけに絞る**（4 種）: ① 競合コピー作成（`reconcileRemoteEntry` の `.conflictThenDownload`）、② サイズ上限超過 `fileTooLarge`、③ リトライ give-up（`attempts >= 5`）、④ 不安定ファイル（`unstableFile` 警告・既に `unstableWarned` で dedup 済み）。**一過性エラー（network 等）は出さない**（オフラインのたびに通知が溢れるのを避ける＝本ファイル「構造化エラー」の `recentIssues` とは別ポリシー: recentIssues は全失敗を載せるが通知は確定事象だけ）。
+- **発火は「ユーザの介入が要る／取りこぼし（未バックアップ）が起きうる確定的な事象」だけに絞る**（5 種）: ① 競合コピー作成（`reconcileRemoteEntry` の `.conflictThenDownload`）、② サイズ上限超過 `fileTooLarge`、③ リトライ give-up（`attempts >= 5`）、④ 不安定ファイル（`unstableFile` 警告・既に `unstableWarned` で dedup 済み）、⑤ **FP 拡張のユーザ OFF**（`fileProviderDisabled`・fpOnly = 全同期停止・Issue #103・2026-08-15 追加。発火元は SyncEngine ではなく `RemoteChangeSignaler` のエッジ検出 = 連発しない・identifier 固定 `"fpDisabled"`・復帰エッジで配達済みを撤去。詳細は「FP 拡張トグル OFF の検出」節）。**一過性エラー（network 等）は出さない**（オフラインのたびに通知が溢れるのを避ける＝本ファイル「構造化エラー」の `recentIssues` とは別ポリシー: recentIssues は全失敗を載せるが通知は確定事象だけ）。
 - **配線は `SyncEngine`（@MainActor）の各点から fire-and-forget の `Task { await self.notifier?.post(...) }`**（PR #18 レビュー Medium）。`post` の初回呼びは許可プロンプト応答までサスペンドし得るため、インライン `await` だと確定エラー 1 件で以降のアップロード処理（特に `fileTooLarge` 分岐はキュー除去 Tx の直前）が宙吊りになる。通知は順序保証不要なので同期処理から切り離す（@MainActor 同士＋ path 値渡しで安全）。
-- **判定は純粋関数 `NotificationPolicy.content(for:) -> NotificationContent`（`Tide/Core/NotificationPolicy.swift`）**。`NotificationEvent` enum（上記 4 種）→ `(identifier, title, body)`。**identifier は `"<種別>:<path>"`**（例 `conflict:a/b.txt`）で、UNUserNotificationCenter の「同一 identifier は置換」仕様により同一 (path, 種別) の連発を 1 件に畳む（バナー溢れ防止）。本文はフルパスでなく**末尾コンポーネント**（通知は幅が狭い）。全分岐 `NotificationPolicyTests`（identifier の安定性 / path・種別での分離 / 本文がファイル名を含む）。表示文言は xcstrings（`%@` 一個・`extractionState:"manual"`）。
+- **判定は純粋関数 `NotificationPolicy.content(for:) -> NotificationContent`（`Tide/Core/NotificationPolicy.swift`）**。`NotificationEvent` enum（上記 5 種）→ `(identifier, title, body)`。**identifier は `"<種別>:<path>"`**（例 `conflict:a/b.txt`。path を持たない `fileProviderDisabled` は固定 `"fpDisabled"`）で、UNUserNotificationCenter の「同一 identifier は置換」仕様により同一 (path, 種別) の連発を 1 件に畳む（バナー溢れ防止）。本文はフルパスでなく**末尾コンポーネント**（通知は幅が狭い）。全分岐 `NotificationPolicyTests`（identifier の安定性 / path・種別での分離 / 本文がファイル名を含む）。表示文言は xcstrings（`%@` 一個・`extractionState:"manual"`）。
 - **発行と OS 連携は `NotificationManager`（`Tide/App/NotificationManager.swift`・@MainActor・`SyncNotifying` 実装）**。SyncEngine には `SyncNotifying`（`NotificationPolicy.swift` 定義）だけ注入し、UserNotifications / AppKit を持ち込まない（テストでも nil 差し替え可・既存 SyncEngine 直構築は AppEnvironment 1 箇所のみ）。`AppEnvironment` が 1 インスタンス保持し `notifier:` で SyncEngine へ注入。
 - **許可（authorization）は初回 `post` 時に一度だけリクエスト**（起動時・セットアップ時には出さない＝エラー/競合が一度も起きないユーザにいきなりプロンプトしない）。許可されていなければ静かに諦める。Settings の「Notifications」トグル（`ConfigStore.notificationsEnabled`・**既定 on**・presence 判定）が off なら許可も求めない。`factoryReset` で消える設定群にも追加済み。
 - **初回リクエストは単一タスク `authorizationRequest: Task<Void, Never>?` に集約**（PR #18 レビュー Low）。並行 post はこのタスクの完了を `await` してから `notificationSettings()` を読むので、初回プロンプト応答待ち中に来た 2 件目が `.notDetermined` で early-return＝取りこぼされない。許可状態は毎回読む（後から System Settings で許可された場合も拾う）。`requestAuthorization` は `.notDetermined` のときだけプロンプトを出し確定済みなら即返る。
 - **通知クリックで Sync Activity を開く**: `NotificationManager.openActivity` クロージャを App 層が登録する（`openWindow` は SwiftUI の View 環境にしか無く AppKit デリゲートから直接呼べないため）。登録は **MenuBarExtra のラベル（`MenuBarLabel`・常駐アプリでは起動直後に必ず生成される）の `onAppear`** が一次、`MenuBarContent.task` が保険。クリック時も `openWindow` 前に `NSApp.activate`（LSUIElement の定石）。デリゲート登録は `AppDelegate.applicationDidFinishLaunching` で `registerAsDelegate()`。
 - **据え置き**: file 名（末尾コンポーネント）が OS 通知本文＝ロック画面等に出うる（メタデータ露出）。バックアップツールとして「どのファイルか」を伝えるのが通知の目的なので by-design・トグル + OS 許可でゲート・**生エラー文字列は通知に出さない**（`SyncIssue.rawDetail` は通知に載せない）。`security/README.md` に注記。**実機受け入れ消化済み（✅ 2026-06-16・対話形式・チェックリストは運用どおり削除）**: ① 競合バナー（同期済みファイルを `chmod 000` → `.unreadable` → `.conflictThenDownload` で単一マシン再現）、② fileTooLarge バナー（1GiB 超スパースで誘発・FD `fstat` のみで本体未読のまま弾く）、③ バナークリック → Sync Activity 起動、④ トグル off で抑止（許可プロンプトも出ない＝`post` 冒頭ガードが `authorizationRequest` の前で return）、⑤ 初回許可プロンプト（OFF→ON 後の最初の確定事象で 1 回）を実機確認。give-up / unstable バナーは `NotificationPolicyTests` + 同一 `notifier?.post` 経路で担保しライブ確認は省略（divert と同じ判断）。**消化中に `ConflictNamer` のタイムスタンプ書式バグを発見し修正**（→ §3「競合ファイル命名」の注記）。
-- **将来の 5 種目候補（PR #18 レビュー・スコープ外メモ）**: `applyRemoteDeletion` の `.keepLocalRemoteDeleted`（リモート削除だがローカル編集で残した＝ユーザ判断が要る）も通知候補。現状 sync_log warning のみで通知はしない。今回 4 種に絞る判断は妥当だが、将来の通知拡張時に検討。
+- **将来の追加候補（PR #18 レビュー・スコープ外メモ）**: `applyRemoteDeletion` の `.keepLocalRemoteDeleted`（リモート削除だがローカル編集で残した＝ユーザ判断が要る）も通知候補。現状 sync_log warning のみで通知はしない。将来の通知拡張時に検討（⑤ は #103 で 2026-08-15 に追加済み）。
 
 ### reconcile 入口の stat ゲート（M4 perf・pull コスト削減・2026-06-16）
 

@@ -217,7 +217,7 @@
 - **[競合/復元コピー名]** `ConflictNamer` の命名は**時系列ソート可能書式**（`Date.VerbatimFormatStyle`・`YYYY-MM-DD HH-MM-SS`）。ロケール依存書式（`.dateTime` 等）にしない（辞書順が時系列にならない）。
 - **[エラー表示]** UI に見せるエラーは構造化型 `SyncIssue` に一本化し、生エラー文字列は `rawDetail` に隔離（オンデマンド参照のみ）。`sync_log.event_type` はリテラル禁止＝`SyncLogEventType` の rawValue。DB 内の path/message/details は英語生文字列なので UI では **`Text(verbatim:)`**。
 - **[bootstrap eager]** bootstrap は `AppDelegate.applicationDidFinishLaunching` から eager 実行（`MenuBarContent.task` は未設定時ウィザードの保険）。再入は `engine != nil` / `isBootstrapping` でガード。
-- **[通知の発火条件]** 通知は「ユーザ介入が要る/取りこぼし確定」の 4 事象だけ（競合コピー / `fileTooLarge` / give-up / 不安定）。一過性エラーは出さない。配線は fire-and-forget。
+- **[通知の発火条件]** 通知は「ユーザ介入が要る/取りこぼし確定」の 5 事象だけ（競合コピー / `fileTooLarge` / give-up / 不安定 / **FP 拡張のユーザ OFF = 全同期停止**〈#103・signaler のエッジ検出のみ = 連発しない・識別子固定・復帰エッジで配達済みを撤去〉）。一過性エラーは出さない。配線は fire-and-forget。
 
 > S3/バケット運用・マルチパート・帯域制御・復元 UI・Sync Activity・ポップオーバー構成・通知の実装詳細など、
 > 上記以外の運用決定はすべて `docs/08-IMPLEMENTATION-NOTES.md` を参照。新しい実装決定もそちらへ追記する。

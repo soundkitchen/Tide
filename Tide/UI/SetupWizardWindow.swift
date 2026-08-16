@@ -19,8 +19,10 @@ struct SetupWizardWindow: View {
     @State private var errorMessage: String?
     @State private var pendingCreateBucket: Bool = false
     /// FP ドメインの現況（fileProvider ステップの表示専用・再セットアップ経路向け）。
-    /// nil = 未取得/取得失敗（表示しないだけで進行は妨げない）。
-    @State private var fileProviderAlreadyEnabled: Bool?
+    /// nil = 未取得/取得失敗（表示しないだけで進行は妨げない）。userDisabled は Start syncing
+    /// 前の事前警告に使う（PR #109 レビュー指摘 2 — 緑チェックを見せた後に post 検査で止める
+    /// 「一度騙す」動線を避ける。権威判定は従来どおり completeSetup 後の検査）。
+    @State private var probedDomainStatus: FileProviderController.DomainStatus?
     /// 「Start syncing」でドメインが作り直される（= 破壊的）か。判定は completeSetup と共有
     /// （`AppEnvironment.probeDomainRecreation(forBucket:)`・PR #101 五次レビュー指摘 2）。
     @State private var willRecreateDomain: Bool?
@@ -35,6 +37,10 @@ struct SetupWizardWindow: View {
     /// factoryReset は setupGate で completeSetup とは排他だが、S3 probe 系はゲート外なので
     /// 進行中リセットが実際に起こり得る）。
     @State private var wizardGeneration = 0
+    /// セットアップ完了検査で「FP 拡張がシステム設定でユーザ OFF」を検出した（Issue #103 現象 1:
+    /// 拡張 OFF でも `add(domain)` は成功してしまうため、done へ進めず誘導する）。
+    /// true の間はエラーメッセージ + システム設定への誘導ボタンを表示する。
+    @State private var fpExtensionOffAfterSetup = false
 
     enum Step: Int, CaseIterable {
         case credentials = 0
@@ -78,6 +84,10 @@ struct SetupWizardWindow: View {
                         .textSelection(.enabled)
                     .foregroundStyle(.red)
                     .font(.callout)
+            }
+            if fpExtensionOffAfterSetup {
+                // #103: アプリ内では直せない（システム設定のトグル）ため誘導ボタンを添える。
+                Button("Open System Settings") { openLoginItemsAndExtensionsSettings() }
             }
 
             Spacer()
@@ -249,21 +259,30 @@ struct SetupWizardWindow: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            // 破壊的 recreation の警告は enabled 判定の**外**（六次レビュー指摘 1）: willRecreateDomain
-            // は不明（isEnabled nil = fileproviderd 無応答）を作り直し側に倒すため、警告も同じ側で
+            // 破壊的 recreation の警告は有効性判定の**外**（六次レビュー指摘 1）: willRecreateDomain
+            // は不明（status nil = fileproviderd 無応答）を作り直し側に倒すため、警告も同じ側で
             // 出さないと「domains() 一時失敗 × Start syncing」で無警告破棄になる。既知の未登録
-            // （enabled == false）だけは破棄対象が存在しないため除外（バケット切替でも空作り直し）。
+            // （.notRegistered）だけは破棄対象が存在しないため除外（バケット切替でも空作り直し）。
             // 判定は completeSetup と共有 = バケット切替と素性不明ドメインの両枝をカバー
             // （四次レビュー指摘 2 / 五次レビュー指摘 2）。
-            if willRecreateDomain == true, fileProviderAlreadyEnabled != false {
+            if willRecreateDomain == true, probedDomainStatus != .notRegistered {
                 Label("This setup will recreate the Tide folder. Changes not yet uploaded will be discarded.", systemImage: "exclamationmark.triangle")
                     .font(.callout)
                     .foregroundStyle(.orange)
-            } else if fileProviderAlreadyEnabled == true, willRecreateDomain == false {
+            } else if probedDomainStatus == .enabled, willRecreateDomain == false {
                 // 同一バケットの再セットアップ経路: enable は冪等（再 add no-op）なのでそのまま進める
                 Label("The Tide folder is already enabled on this Mac.", systemImage: "checkmark.circle")
                     .font(.callout)
                     .foregroundStyle(.green)
+            }
+            if probedDomainStatus == .userDisabled {
+                // 拡張がシステム設定でユーザ OFF（#103・PR #109 レビュー指摘 2）: このまま
+                // Start syncing しても completeSetup 後の検査で止まる。押す前にここで知らせる
+                // （進行はゲートしない = 権威は post 検査のまま。recreation 警告とは並存し得る）。
+                Label("The Tide File Provider extension is turned off in System Settings. Turn it on before you press “Start syncing”.", systemImage: "exclamationmark.triangle")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+                Button("Open System Settings") { openLoginItemsAndExtensionsSettings() }
             }
         }
         // completeSetup がドメイン状態を変える（部分失敗で disableForRecreation 済み等）ため、
@@ -276,7 +295,7 @@ struct SetupWizardWindow: View {
             // 再入時は probe 前に必ず nil へ戻す（七次レビュー指摘 1）: ウィンドウレベル @State の
             // 前回訪問値が残ると、XPC 往復中の窓で canAdvance ゲート（六次②）が stale 値で
             // 素通りし、Back → bucket 変更 → Return で警告未レンダリングのまま実行され得る。
-            fileProviderAlreadyEnabled = nil
+            probedDomainStatus = nil
             willRecreateDomain = nil
             probeGeneration &+= 1
             let generation = probeGeneration
@@ -291,10 +310,10 @@ struct SetupWizardWindow: View {
                 try? await Task.sleep(for: .seconds(10))
                 guard probeGeneration == generation, willRecreateDomain == nil else { return }
                 willRecreateDomain = true
-                // fileProviderAlreadyEnabled は nil のまま = enabled != false で警告が出る
+                // probedDomainStatus は nil のまま = != .notRegistered で警告が出る
             }
             defer { fallback.cancel() }
-            // 単一 probe（七次レビュー指摘 5）: isEnabled を別途叩くと警告条件が異時点の
+            // 単一 probe（七次レビュー指摘 5）: domainStatus を別途叩くと警告条件が異時点の
             // 2 スナップショット合成になり、片方だけ失敗したとき矛盾表示になる。
             let probe = await env.probeDomainRecreation(forBucket: bucket)
             // キャンセル検査（十次レビュー指摘 7）: XPC はキャンセル非対応なので、id 変化で
@@ -303,7 +322,7 @@ struct SetupWizardWindow: View {
             // なしのまま破壊的作り直しへ進めてしまう。
             guard !Task.isCancelled else { return }
             willRecreateDomain = probe.recreate
-            fileProviderAlreadyEnabled = probe.enabled
+            probedDomainStatus = probe.status
         }
     }
 
@@ -328,6 +347,9 @@ struct SetupWizardWindow: View {
 
     private func goBack() {
         errorMessage = nil
+        // #103 ゲートの誘導ボタンは errorMessage とロックステップで消す（PR #109 収束レビュー
+        // ブロッカー 5 — 残すと provisioning ステップに文脈のないボタンだけが浮く）。
+        fpExtensionOffAfterSetup = false
         step = Step(rawValue: step.rawValue - 1) ?? .credentials
     }
 
@@ -347,8 +369,9 @@ struct SetupWizardWindow: View {
         bucketSetupLog = []
         isWorking = false
         errorMessage = nil
+        fpExtensionOffAfterSetup = false
         pendingCreateBucket = false
-        fileProviderAlreadyEnabled = nil
+        probedDomainStatus = nil
         willRecreateDomain = nil
     }
 
@@ -357,6 +380,7 @@ struct SetupWizardWindow: View {
     private func onNext(generation: Int) async {
         guard generation == wizardGeneration else { return }
         errorMessage = nil
+        fpExtensionOffAfterSetup = false
         switch step {
         case .credentials:
             step = .bucket
@@ -535,6 +559,17 @@ struct SetupWizardWindow: View {
             // import 誘導の消費（リセット）は進行中でも発火し得る。stale 完了で step = .done に
             // 進めない（リセットが資格情報の消去も済ませている）。
             guard generation == wizardGeneration else { return }
+            // #103 現象 1: 拡張がシステム設定で OFF でも add(domain) は成功してしまい、無音停止の
+            // まま done に到達する。userEnabled を検査し、OFF なら done へ進めず誘導する
+            // （設計確定 2026-08-15 = エラーで止める）。設定・ドメインは保存済みなので、ON に
+            // してから再度「Start syncing」を押せば冪等に成功する（資格情報も温存する）。
+            let status = await FileProviderController.domainStatus()
+            guard generation == wizardGeneration else { return }
+            if status == .userDisabled {
+                fpExtensionOffAfterSetup = true
+                errorMessage = String(localized: "Setup was saved, but the Tide File Provider extension is turned off in System Settings — nothing will sync. Turn it on, then press “Start syncing” again.")
+                return
+            }
             // L7: 成功したらメモリ上の鍵をすぐ手放す（参照を切る。ヒープ上のバイトは GC 任せ）
             accessKeyId = ""
             secretAccessKey = ""

@@ -9,8 +9,16 @@ struct MenuBarContent: View {
     /// SyncEngine にメモリ状態を増やさず、ポップオーバー表示時と同期完了ごとに読み直す。
     @State private var recentActivity: [SyncLogRecord] = []
 
-    /// fpOnly 表示用: FP ドメインの有効状態（nil = 未取得）。無効なら「何も同期されない」警告を出す。
-    @State private var fileProviderEnabled: Bool?
+    /// FP ドメインの状態（#82 / #103）。nil = 取得中 or 取得失敗（不明）。
+    @State private var fileProviderStatus: FileProviderController.DomainStatus?
+
+    /// 「同期が動いていないと確定している」状態（未登録 or システム設定でユーザ OFF・#103）。
+    /// 不明（nil）は含めない — 確実に分かっていない間はエラー表示も disable もしない側に倒す
+    /// （PR #76 レビュー任意 3 / PR #100 レビュー指摘 4 の趣旨維持。述語は Settings と共有 =
+    /// `DomainStatus.isInactive`・PR #109 レビュー指摘 7）。
+    private var fileProviderInactive: Bool {
+        fileProviderStatus?.isInactive == true
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -55,10 +63,10 @@ struct MenuBarContent: View {
         // Settings がドメイン状態を変えたときは変更カウンタで開いたまま追従する（六次レビュー
         // 指摘 3 — 素の .task だとセットアップ成功直後も赤バナー「not enabled」が残り続ける）。
         .task(id: env.fileProviderStateVersion) {
-            let enabled = await FileProviderController.isEnabled()
+            let status = await FileProviderController.domainStatus()
             // キャンセル検査（十次レビュー指摘 4）: 連続バンプ時の逆順 resume で旧値の書き戻しを防ぐ
             guard !Task.isCancelled else { return }
-            fileProviderEnabled = enabled
+            fileProviderStatus = status
         }
         // lastSyncedAt は upload 周回完了でしか前進しないため、pull 由来の download / 削除反映も
         // 拾えるよう lastRemoteCheckedAt と束ねて id にする（PR #17 レビュー Low-2）。
@@ -323,15 +331,15 @@ struct MenuBarContent: View {
     @ViewBuilder
     private func fpOnlyHeader(_ signaler: RemoteChangeSignaler) -> some View {
         HStack(spacing: 10) {
-            Image(systemName: fileProviderEnabled == false
+            Image(systemName: fileProviderInactive
                   ? "exclamationmark.circle.fill" : "externaldrive.fill.badge.icloud")
                 .font(.title2)
                 // nil = 有効状態の取得中 or 取得失敗（fileproviderd 無応答等・不明）。取得は
                 // ポップオーバー表示時の 1 回きりで再試行しないため、失敗時は表示中ずっと nil の
                 // まま。確実に分かっていない間は緑も赤も出さず中立色にする（PR #76 レビュー任意 3・
-                // isEnabled() の Bool? 化 = PR #100 再レビュー指摘 1）。
-                .foregroundStyle(fileProviderEnabled == false ? Color.red
-                                 : fileProviderEnabled == true ? Color.green : Color.secondary)
+                // 取得失敗 = nil の流儀は PR #100 再レビュー指摘 1）。
+                .foregroundStyle(fileProviderInactive ? Color.red
+                                 : fileProviderStatus == .enabled ? Color.green : Color.secondary)
             VStack(alignment: .leading, spacing: 1) {
                 Text("File Provider Sync")
                     .font(.headline)
@@ -342,8 +350,18 @@ struct MenuBarContent: View {
             }
             Spacer()
         }
-        if fileProviderEnabled == false {
+        if fileProviderStatus == .userDisabled {
+            // システム設定でユーザ OFF（#103）: アプリ内 Settings では直せないため専用文言 +
+            // システム設定への誘導ボタン（設計確定 2026-08-15）。
+            Text("The Tide File Provider extension is turned off in System Settings — nothing is syncing.")
+                .textSelection(.enabled)
+                .font(.caption)
+                .foregroundStyle(.red)
+            Button("Open System Settings") { openLoginItemsAndExtensionsSettings() }
+                .controlSize(.small)
+        } else if fileProviderStatus == .notRegistered {
             Text("File Provider is not enabled — nothing is syncing. Enable it in Settings.")
+                .textSelection(.enabled)
                 .font(.caption)
                 .foregroundStyle(.red)
         }
@@ -453,15 +471,16 @@ struct MenuBarContent: View {
         VStack(alignment: .leading, spacing: 2) {
             // fpOnly 一本化（#96）: 同期の実体は FP レプリカのみ。bootstrap 失敗時にも旧同期
             // フォルダへの「Open Sync Folder」は出さない（#98 で実体ごと消えるパスへの導線に
-            // なるため）。disable は**既知の無効（false）だけ**（ドメイン無し = レプリカ自体が
-            // 存在しない）。未取得（nil = 取得中 or fileproviderd 無応答）は活性のまま —
-            // クリック時の userVisibleURL が真実で、取れなければ CloudStorage へ縮退するため
-            // 無音 no-op にはならない（PR #99 再レビュー指摘 7 の趣旨維持 + PR #100 レビュー
-            // 指摘 4: 唯一の Finder 導線を状態取得失敗で恒久 disable しない）。
+            // なるため）。disable は**既知の不活性だけ**（未登録 = レプリカ自体が存在しない /
+            // ユーザ OFF = レプリカが Finder から不可視・#103）。未取得（nil = 取得中 or
+            // fileproviderd 無応答）は活性のまま — クリック時の userVisibleURL が真実で、
+            // 取れなければ CloudStorage へ縮退するため無音 no-op にはならない（PR #99 再レビュー
+            // 指摘 7 の趣旨維持 + PR #100 レビュー指摘 4: 唯一の Finder 導線を状態取得失敗で
+            // 恒久 disable しない）。
             menuRow("Open Tide in Finder", systemImage: "folder") {
                 Task { await FileProviderController.openUserVisibleFolderInFinder() }
             }
-            .disabled(fileProviderEnabled == false)
+            .disabled(fileProviderInactive)
             if env.engine != nil || env.signaler != nil {
                 // Sync Activity: folderSync = DB（sync_log）/ fpOnly = FP 拡張の共有イベントログ
                 // （`FPEventLog`・Issue #83）をソース差替で表示（DB 非接触 = 凍結温存を維持）。

@@ -237,20 +237,58 @@ final class AppEnvironment {
         )
         self.s3 = s3
 
-        // FP ドメイン未登録なら signal は向こうの isEnabled ガードで no-op になる（起動自体は
-        // 続行 = 設定画面から Enable すれば次の契機から効き始める）。気づけるようログだけ残す。
-        if await FileProviderController.isEnabled() != true {
-            AppLogger.ui.info("FP-only mode: File Provider domain is not enabled yet; enable it in Settings")
+        // FP ドメインが有効でなければ signal は向こうの status ガードで no-op になる（起動自体は
+        // 続行 = Enable / システム設定で ON にすれば次の契機から効き始める）。気づけるようログだけ
+        // 残す（定常の可視化は signaler の毎周回観測が担う・#82/#103）。
+        let initialStatus = await FileProviderController.domainStatus()
+        if initialStatus != .enabled {
+            AppLogger.ui.info("FP-only mode: File Provider domain is not active (status: \(String(describing: initialStatus), privacy: .public)); syncing is paused until it is enabled")
         }
+        // stale な「Tide is not syncing」通知の掃除は**無条件**（#103 受け入れ 2026-08-16 で発見・
+        // 無条件化は PR #109 再レビュー指摘）: 復帰がウィザード（completeSetup）経由だと signaler
+        // がここで作り直されるため、無効状態を保持していた旧 signaler の復帰エッジ（撤去の通常
+        // 経路）が発火しない。アプリ再起動をまたいだ復帰も同様。enabled 限定だと取得失敗
+        // （nil = fileproviderd 無応答）の起動で漏れ、以後の通常経路でも回収できない（新 signaler
+        // は false 始まりのため enabled 観測はどちらのエッジも成立しない）。撤去は冪等で、本当に
+        // 無効な起動でも直後の初回 checkOnce が無効エッジで同一 identifier の通知を再発行する
+        // （従来から毎起動で置換再発行）ため、可視挙動は退行しない。
+        notifications.removeDelivered(for: .fileProviderDisabled)
 
         let signaler = RemoteChangeSignaler(
             intervalSeconds: config.pollingIntervalSeconds,
             headIndexETag: { [s3] in try await s3.headObject(key: TideS3Client.indexKey)?.etag },
             signal: { FileProviderController.signalRemoteChanges() },
-            // 拡張 OFF = 全同期停止の検出（Issue #82）。メニューバーアイコンへ反映される。
-            // 取得失敗（nil）は無効側に倒す = 従来挙動の維持（毎周回の再観測で自己回復する・
-            // 警告の出しすぎは次周回で消えるが、見逃しは ETag 変化まで気づけない）。
-            isFPDomainEnabled: { await FileProviderController.isEnabled() == true }
+            // 拡張 OFF = 全同期停止の検出（Issue #82 / #103）。メニューバーアイコンへ反映される。
+            // 判定は userEnabled 込みの domainStatus() — 掲載有無だけではシステム設定のトグル OFF
+            // を検出できない（現 OS では domains() に載ったまま userEnabled=false になる・#103
+            // 実機実証 2026-08-15）。アイコン側は取得失敗（nil）も無効側に倒す fail-safe を維持
+            // （畳み込みは signaler 内・毎周回の再観測で自己回復する）。
+            fpDomainStatus: { await FileProviderController.domainStatus() },
+            // 無効/復帰エッジで OS 通知を発火/撤去（Issue #103・通知 5 事象目 =「ユーザ介入が要る
+            // 確定的な全同期停止」。エッジ検出のみ = 連発しない・identifier 固定で万一も置換）。
+            onFPDomainDisabledEdge: { [weak self, notifications] disabled, status in
+                if disabled {
+                    // 通知は「.userDisabled の実観測」に限定（PR #109 収束レビュー ブロッカー
+                    // 1・2）: アプリ内 Disable（.notRegistered）はユーザ自身の意図的操作・
+                    // 取得失敗（nil）は一過性の可能性があり、いずれも「System Settings で
+                    // オフ」という通知文言が誤指示になる。アイコンの無効表示（fail-safe）は
+                    // 従来どおり全ケースで出る。
+                    guard status == .userDisabled else { return }
+                    Task { @MainActor in
+                        await notifications.post(.fileProviderDisabled)
+                        // post は許可プロンプト応答待ち等で長く suspend し得る（初回は分単位も
+                        // あり得る）。その間に復帰エッジが来ると撤去（下の分岐）が**未配達で
+                        // no-op** になり、後から配達された stale 通知が残る（PR #109 レビュー
+                        // 指摘 1）。配達後に現在の観測を再読し、もう無効でなければ即撤去する
+                        // （signaler 不在 = factoryReset 後も撤去側。撤去は冪等）。
+                        if self?.signaler?.fpDomainDisabled != true {
+                            notifications.removeDelivered(for: .fileProviderDisabled)
+                        }
+                    }
+                } else {
+                    notifications.removeDelivered(for: .fileProviderDisabled)
+                }
+            }
         )
         self.signaler = signaler
         signaler.start()
@@ -316,6 +354,14 @@ final class AppEnvironment {
             throw SyncError.notConfigured(reason: "run setup first — the File Provider domain needs a configured bucket")
         }
         try await withDomainLifecycleGate { try await FileProviderController.enable() }
+        // 拡張がユーザ OFF でも add は成功してしまう（#103）。成功メッセージが FP セクションの
+        // 赤文「nothing is syncing」と矛盾しないよう、事後検査で明示エラーにする（PR #109
+        // 収束レビュー ブロッカー 3）。ウィザードは専用 UI 状態（誘導ボタン）を持つため
+        // runStartSyncing 側の検査を維持 — どちらも同じ domainStatus() を見る。ドメイン追加
+        // 自体は有効なので、ON に戻せばそのまま同期が始まる（再 Enable 不要）旨を文言に含める。
+        if await FileProviderController.domainStatus() == .userDisabled {
+            throw SyncError.notConfigured(reason: String(localized: "The domain was added, but the Tide File Provider extension is turned off in System Settings. Turn it on to start syncing (no need to enable again)."))
+        }
     }
 
     /// Settings の Disable ボタン用ラッパ（enable 側と対）。**setupCompleted は要求しない** —
@@ -332,19 +378,22 @@ final class AppEnvironment {
     /// `enabled` を同一スナップショットで併せて返すのは、ウィザードの警告/緑チェックが異時点の
     /// 2 スナップショット合成で矛盾表示にならないため（七次レビュー指摘 5。isEnabled の XPC も
     /// 1 往復に畳まれる）。
-    func probeDomainRecreation(forBucket bucket: String) async -> (recreate: Bool, enabled: Bool?) {
-        let enabled = await FileProviderController.isEnabled()
+    func probeDomainRecreation(forBucket bucket: String) async -> (recreate: Bool, status: FileProviderController.DomainStatus?) {
+        // 作り直し判定に要るのは**登録有無**: userDisabled のドメインもレプリカ実在 = 登録済みと
+        // して扱う（#103）。status を生のまま返すのは、ウィザードが userDisabled の事前警告に
+        // 使うため（PR #109 レビュー指摘 2 — 追加 XPC ゼロ・単一スナップショット維持）。
+        let status = await FileProviderController.domainStatus()
         if let previousBucket = config.bucketName, !previousBucket.isEmpty {
             // 既知の旧バケット: 変わったときだけ作り直す。同一バケットの再セットアップ
             // （クリーンインストール復旧 / 認証情報の再設定）はレプリカ温存（再 add no-op）。
-            return (recreate: previousBucket != bucket, enabled: enabled)
+            return (recreate: previousBucket != bucket, status: status)
         }
         // bucketName 不在 = factoryReset がキーを消した後（disable 失敗の握りつぶし〈try?〉も
         // 通過し得る）。生存ドメインがあってもレプリカの素性（どのバケット由来か）を保証
-        // できないため作り直す（再レビュー指摘 3）。既知の未登録（false = 通常のクリーン
-        // セットアップ）のみスキップし、不明（nil）は作り直し側に倒す — 温存側に倒すと
-        // 「isEnabled 失敗 → 直後の enable 成功」の並びで素性不明レプリカが残る。
-        return (recreate: enabled != false, enabled: enabled)
+        // できないため作り直す（再レビュー指摘 3）。既知の未登録（.notRegistered = 通常の
+        // クリーンセットアップ）のみスキップし、不明（nil）は作り直し側に倒す — 温存側に倒すと
+        // 「domainStatus 失敗 → 直後の enable 成功」の並びで素性不明レプリカが残る。
+        return (recreate: status != .notRegistered, status: status)
     }
 
     /// 書込確定点で FP レプリカへ即時 signal する配線付き `ManifestUpdater`（S3 内復元 / seed 共用・
@@ -590,7 +639,7 @@ final class AppEnvironment {
         // enable より**前**に行う（PR #101 再レビュー指摘 4）: 後ろだと live になった拡張の先行
         // createItem が index.json を作り、「新規バケット」判定（getIndex == nil）が誤って既存側に
         // 倒れて seed が無音スキップされ得る。seed は S3 にしか触れず、確定点 signal は未登録
-        // ドメインでは no-op（performSignal の isEnabled ガード）・enable 後の初回列挙が entry を拾う。
+        // ドメインでは no-op（performSignal の domainStatus ガード）・enable 後の初回列挙が entry を拾う。
         await Self.seedDefaultSyncIgnoreIfNewBucket(
             credentials: credentials, bucket: bucket, region: region, deviceId: config.deviceId
         )
@@ -705,6 +754,10 @@ final class AppEnvironment {
         engine = nil
         signaler?.stop()
         signaler = nil
+        // 配達済みの「Tide is not syncing」を撤去（PR #109 収束レビュー ブロッカー 4）: 全消し後の
+        // 起動は launchFPOnlySignaler の無条件掃除に到達しない（setupCompleted 手前で return）ため、
+        // ここで消さないと再セットアップ完走まで stale 通知が残り続ける。撤去は冪等。
+        notifications.removeDelivered(for: .fileProviderDisabled)
         s3 = nil
         database = nil
 
