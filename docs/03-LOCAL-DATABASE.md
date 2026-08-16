@@ -1,5 +1,14 @@
 # ローカルデータベース仕様
 
+> **【folderSync 世代の凍結仕様書】（v0.3.0・2026-08-17）**: 現在の稼働モードは fpOnly のみで、
+> **アプリも File Provider 拡張もこの DB を開かない**（fpOnly boot は DB / syncRoot / bookmark に
+> 一切触れない・FP 拡張は DB 非接触が不変条件）。DB 実体（`db.sqlite`）も #97 受け入れ
+> （2026-08-11）の factoryReset で消滅し、fpOnly では再作成されない。スキーマ定義と GRDB コード
+> （`TideCore/Storage/`）は folderSync 復帰資産としてコンパイル維持されるデッドコードで、
+> **本書はその台帳**（スキーマ・モデル定義は実コードと一致を維持する）。復帰手段は git revert +
+> `docs/09`「revert 復帰ランブック」のクリーン再セットアップのみ（増分復帰は資産消滅により不能）。
+> **fpOnly が実際に持つ永続状態は下記「fpOnly の永続状態」節**を参照（GRDB 非依存）。
+
 ## 概要
 
 ローカル状態管理に SQLite を使用。GRDB.swift をラッパとして採用。
@@ -16,6 +25,25 @@ UI の無い File Provider 拡張がアクセス拒否されるため。Phase 3 
 `LegacyStateMigrator` が新しい世代優先で一度きりコピー移行する（冪等・旧ファイルは温存）。
 
 WAL モードで運用。
+
+## fpOnly の永続状態（現行・GRDB 非依存）
+
+fpOnly が実際に持つローカル永続状態は以下のみ（DB は使わない）。ファイル系はすべて
+App Group の Caches（`~/Library/Group Containers/G5G54TCH8W.org.izukawa.Tide/Library/Caches/Tide/`）
+に置かれ、**書き手は FP 拡張のみ**（アプリは読み手）:
+
+| 実体 | 型 | 役割 |
+|---|---|---|
+| `fp-events-ext.jsonl`（+ `.1`） | `FPEventLog`（追記型 JSONL） | Sync Activity のソース（#83）。30 日刈りではなく**サイズ上限 2MiB × 2 世代ローテーション** |
+| `fileprovider-materialized.json` | `PersistedPathSet` | 実体化バッジの「報告済み」レジストリ（#65・上限 10,000） |
+| `fileprovider-virtual-dirs.json` | `PersistedPathSet` | 空フォルダのローカル仮想受理の温存（Phase 5-3。未使用なら未作成） |
+| `fileprovider-exclusion-cleanups.json` | `PersistedPathSet` | 除外後始末の予約（Phase 5-4。未使用なら未作成） |
+| `fileprovider-manifest-log.json` | `ManifestGenerationLog` | マニフェスト世代ログ（`enumerateChanges` の anchor 解決。書き手 = 拡張の `ManifestGenerationCache` アクター） |
+| group defaults | `ConfigStore`（`TideAppGroup.sharedDefaults()`） | 設定（bucket / region / deviceId / setupCompleted / syncMode〈外部ツール契約キー〉/ fileProviderDomainEpoch） |
+| Data Protection Keychain | `KeychainStore` | AWS 認証情報 |
+
+`PersistedPathSet` 3 本はドメイン epoch（`fileProviderDomainEpoch`）を構築時 capture し、
+ドメイン作り直し跨ぎの stale を読込時全体破棄で防ぐ（#104）。
 
 ## テーブル定義
 
@@ -88,7 +116,10 @@ CREATE INDEX idx_queue_retry ON upload_queue(next_retry_at)
 
 ### shard_state
 
-シャードの ETag を覚えておくテーブル。マニフェスト更新時の楽観的ロック用。
+シャードの ETag を覚えておくテーブル。**folderSync pull の増分差分キャッシュ**（`ManifestReader` が
+「前回取得時から変化したシャード」だけを GET するための比較基準）。楽観的ロック（CAS）用ではない —
+CAS の If-Match に使う ETag は書込時の GET 応答から直接取る（`ManifestUpdater`）。fpOnly 側は
+DB 非接触の `ManifestSnapshotLoader` を使い、このテーブルは読まない。
 
 ```sql
 CREATE TABLE shard_state (
@@ -106,6 +137,10 @@ CREATE TABLE shard_state (
 ### sync_log
 
 同期イベントのログ。トラブルシューティングとUI表示用。古いものは定期削除（30日経過したら）。
+
+> **現行注記**: fpOnly の Sync Activity のデータ源はこのテーブルではなく `FPEventLog`
+> （`fp-events-ext.jsonl`・上記「fpOnly の永続状態」節。保持は 30 日刈りではなく
+> サイズ上限ローテーション）。以下は folderSync 世代（engine 稼働時）のソース。
 
 ```sql
 CREATE TABLE sync_log (
@@ -257,7 +292,7 @@ struct ShardStateRecord: Codable, FetchableRecord, MutablePersistableRecord {
 
 ## 重要なクエリ
 
-> 以下は概念説明用の簡略例。現行の差分検出は `ChangeDetector`（stat ベースの `preDecision` / `postHash`）が担い、未同期判定は部分インデックス `idx_files_unsynced`（`WHERE last_synced_at IS NULL`）を前提とする。
+> 以下は概念説明用の簡略例。folderSync 世代の差分検出は `ChangeDetector`（stat ベースの `preDecision` / `postHash`）が担い、未同期判定は部分インデックス `idx_files_unsynced`（`WHERE last_synced_at IS NULL`）を前提とする。
 
 ### 未同期のファイル取得（概念例）
 
@@ -269,8 +304,8 @@ let unsynced = try FileRecord
 
 ### リトライ対象のキュー取得
 
-実装は give-up 上限 `attempts < 5` を先頭に持ち、1 周あたり 20 件取る（`SyncEngine.fetchReadyItems`）。
-attempts が 5 に達した行はリトライ対象から外れ、give-up 扱いになる。
+folderSync 世代の実装は give-up 上限 `attempts < 5` を先頭に持ち、1 周あたり 20 件取る
+（`SyncEngine.fetchReadyItems`）。attempts が 5 に達した行はリトライ対象から外れ、give-up 扱いになる。
 
 ```swift
 let now = Date().timeIntervalSince1970
@@ -299,7 +334,9 @@ mtime 比較で 1ms の許容（`abs(diff) < 0.001` を一致扱い）を入れ�
 
 ## キャッシュサイズの管理
 
-`sync_log` テーブルは無限に増えるので、起動時とアプリアイドル時に定期掃除:
+`sync_log` テーブルは無限に増えるので、folderSync 世代では起動時（`pruneOldLogs`）に定期掃除していた
+（fpOnly では DB を開かないため走らない。現行の Sync Activity ログ = `FPEventLog` はサイズ上限
+ローテーションで自己管理）:
 
 ```swift
 let cutoff = Date().addingTimeInterval(-30 * 24 * 3600).timeIntervalSince1970

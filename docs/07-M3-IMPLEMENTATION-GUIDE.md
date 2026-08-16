@@ -1,17 +1,27 @@
-# M3 実装ガイド（着手前の設計メモ）
+# M3 実装記録（サブ A〜E 完了）
 
-> 本書は **M3 着手前の起点メモ** であり、まだ実装案の詳細を詰めきっていない。
-> 個別タスクごとに最終仕様を決めながら実装する想定。
-> M1 用の `05-IMPLEMENTATION-GUIDE.md` のような完成度の高いステップ分解ではない。
+> 本書は M3 着手前のメモとして書き起こし、**実装完了まで追記し続けた確定記録**。
+> 設計判断の根拠（`aws-sdk-swift-s3-transfer-manager` 不採用の理由・3-way ベースを
+> `FileRecord.sha256` にした理由・帯域制御の予約方式選定 など）と実測値
+> （帯域制御の実 S3 スループット等）の**一次ソース**として維持する。
+>
+> **v0.3.0（fpOnly 化・2026-08-17）の読み替え**: 本書のうち FSEvents / `SyncEngine` 前提の
+> 統合点記述（サブ B の `performFullScan` / `processEventToQueue` / `reconcileRemoteEntry` の
+> 3 経路・「FSEvents で検知」等）は **folderSync 世代**（到達不能のデッドコード温存 =
+> `docs/04a-SYNC-LOGIC-FOLDERSYNC.md`）。現行の `.syncignore` 適用点は FP 拡張の
+> `createItem`（`IgnoreDecision.shouldSkip` + `ManifestIgnoreCache`・`docs/04`）。
+> マルチパート / `.syncignore` マッチャ / 3-way merge / 帯域制御の**コア機構自体は
+> FP 経路でも現役**。コードのパスは M5 Phase 1 で `TideCore/` へ移設済み
+> （ファイル名・型名は不変 — CLAUDE.md §6 の読み替え規則参照）。
 
 ## 前提
 
-- M1 / M2 は実装完了。詳細は `04-SYNC-LOGIC.md`、コードは `Tide/Core/SyncEngine.swift` 等を参照。
+- M1 / M2 は実装完了。詳細は `04-SYNC-LOGIC.md` を参照。
 - 既存挙動を壊さないことが大前提。
 - セキュリティベースライン (`security/`) と「会話で確定した実装決定」（`docs/08-IMPLEMENTATION-NOTES.md`）を必ず保つ。
 - 新規実装には PathValidator / Logger プライバシー / SSE 等の現行ルールを継承する。
 
-## M3 スコープ（`00-OVERVIEW.md` から）
+## M3 スコープ（`docs/README.md` の M3 節から）
 
 1. 3-way merge による双方向同期
 2. S3 Transfer Manager 統合（マルチパートアップロード、レンジダウンロード）
@@ -24,7 +34,7 @@
 
 ---
 
-## サブタスク A: マルチパートアップロード（実装済み）
+## サブタスク A: マルチパートアップロード — ✅ 実装済み（2026-06-02）
 
 > 実装日: 2026-06-02。**自前ラッパ方式**で実装した（当初案の `aws-sdk-swift-s3-transfer-manager`
 > パッケージは採用せず＝新規依存なし）。FD/ハッシュ統合（M5）とパート進捗の制御を握りやすく、既存の
@@ -74,7 +84,7 @@ M1 で導入した「100 MB を超えたら `sync_log` にエラーを残して�
 
 ---
 
-## サブタスク B: `.syncignore` 対応（実装済み）
+## サブタスク B: `.syncignore` 対応 — ✅ 実装済み（2026-06-01）
 
 > 実装日: 2026-06-01。会話で 3 つの設計判断を確定して実装した（下記）。
 
@@ -154,7 +164,7 @@ M2 の単純ルール（`04-SYNC-LOGIC.md`「競合解決」）を **ベース /
 
 ---
 
-## サブタスク D: 中断・再開（✅ 実装済み 2026-06-05）
+## サブタスク D: 中断・再開 — ✅ 実装済み（2026-06-05）
 
 ### 目的
 ダウンロード / アップロードが途中で中断した場合に、次回起動時に**ファイル内の途中から**再開する。
@@ -195,7 +205,7 @@ soundkitchen のレビュー（ブロッカー無し）を受けて 4 点を対�
 
 ---
 
-## サブタスク E: 帯域制御（✅ 実装済み・2026-06-10）
+## サブタスク E: 帯域制御 — ✅ 実装済み（2026-06-10）
 
 ### 目的
 バックグラウンドで動作中に帯域を制限したい時のための上限設定。Settings で「アップロード上限 X MB/s」「ダウンロード上限 Y MB/s」を独立に指定できる（既定は無制限）。
@@ -230,10 +240,3 @@ soundkitchen のレビュー（ブロッカー無し）を受けて 4 点を対�
 - マニフェストバージョン番号の bump（既存 `version: 1` を `2` に上げて、リーダ側で互換層を持つかどうか議論）
 - セキュリティレビューの C3 後半 (`PutBucketPolicy` で HTTPS 強制) → ✅ **解消済み（2026-06-23・Issue #26 / B・M3 ではスコープ外だった）**。`enforceTLSBucketPolicy()` で `aws:SecureTransport=false` Deny を冪等適用（`security/critical.md` C3 / `docs/09`）。H3（IAM Identity Center 検討）は引き続き据え置き
 - 動作確認用に `tmp/M3-動作チェックリスト.md` を切る運用は M1 / M2 と同じ
-
-## 着手前の必読
-
-- `CLAUDE.md`（特に「会話を通じて確定した実装決定」と「コミット前ドキュメント更新」の大原則）
-- `security/README.md` の Status 表
-- `docs/04-SYNC-LOGIC.md` の M2 セクション
-- 直近のコミットログ（`git log --oneline`）

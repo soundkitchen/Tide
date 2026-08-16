@@ -4,6 +4,7 @@
 
 - macOS 26.0 (Tahoe) 以降
 - Xcode 17 以降
+- [xcodegen](https://github.com/yonaskolb/XcodeGen)（`Tide.xcodeproj` は `project.yml` から**毎回生成**する。`brew install xcodegen`）
 - AWS アカウント
 - テスト用 S3 バケット
 - AWS IAM ユーザー（テスト用、最小権限）
@@ -68,7 +69,7 @@ aws s3 mb s3://your-tide-test-bucket --region ap-northeast-1
 
 #### バケットも Tide から作成したい場合（オプション）
 
-M1 のセットアップウィザードは「バケットが存在しなければ作成しますか？」と尋ねる。アプリ内からバケットを作成するなら、上記とは別途、以下のステートメントを **アタッチして、初回作成後に剥がす** のが推奨運用:
+セットアップウィザードは「バケットが存在しなければ作成しますか？」と尋ねる。アプリ内からバケットを作成するなら、上記とは別途、以下のステートメントを **アタッチして、初回作成後に剥がす** のが推奨運用:
 
 ```json
 {
@@ -101,24 +102,48 @@ M1 のセットアップウィザードは「バケットが存在しなけれ�
 
 ## プロジェクトのビルド
 
-### コマンドラインから
+### 正規手順は Makefile 経由
+
+**ビルド・テスト・実行は Makefile を経由するのが基本**（`make help` で一覧）。`Tide.xcodeproj` は
+xcodegen が `project.yml` から毎回生成するため、**直接編集しない**（Swift ファイルの追加 / 削除 /
+リネーム後は `make generate` 必須。`make build` は generate を内包する）。
 
 ```bash
 cd /path/to/Tide
 
-# デバッグビルド
-xcodebuild -project Tide.xcodeproj \
-           -scheme Tide \
-           -configuration Debug \
-           -derivedDataPath ./build
+make build      # xcodegen → Debug ビルド
+make test       # ユニットテスト
+make run        # ビルドして起動（run-ja / run-en で言語切替起動）
+make fresh      # reset → build → 起動（新規セットアップ検証の定番）
 
 # 生成物
 ls ./build/Build/Products/Debug/Tide.app
 ```
 
+### 生の xcodebuild を叩く場合（例外）
+
+Makefile を使わず `xcodebuild` を直接叩くときは、以下のフラグが**必須**（Makefile はすべて内包している）:
+
+```bash
+xcodebuild -project Tide.xcodeproj \
+           -scheme Tide \
+           -configuration Debug \
+           -derivedDataPath ./build \
+           -destination 'platform=macOS,arch=arm64' \
+           -skipPackagePluginValidation \
+           -skipMacroValidation \
+           -allowProvisioningUpdates
+```
+
+- `-skipPackagePluginValidation -skipMacroValidation`: aws-sdk-swift が依存する smithy-swift の
+  ビルドプラグイン検証が CLI からは初回承認できないため（初回のみ Xcode GUI で
+  SmithyCodeGeneratorPlugin の承認を求められる）。
+- `-allowProvisioningUpdates`: Keychain / App Group entitlement のためのプロビジョニング
+  プロファイル生成・更新を CLI から行うため（下記「コード署名」参照）。
+
 ### コード署名と Keychain entitlement（初回のみ Mac の登録が必要）
 
-Tide は AWS 認証情報を **Data Protection Keychain**（`kSecUseDataProtectionKeychain=true`、セキュリティ対応 H1）に保存する。これを使うにはアプリに `keychain-access-groups` entitlement が必要で、`project.yml` の `entitlements` から `Tide/Tide.entitlements`（`$(AppIdentifierPrefix)org.izukawa.Tide`）が生成され署名に埋め込まれる。M5 Phase 2 からはこれに加えて **App Group entitlement**（`com.apple.security.application-groups` = `group.org.izukawa.Tide`）と **App Sandbox 一式**（`com.apple.security.app-sandbox` / `files.user-selected.read-write` / `network.client`）も署名に埋め込まれる（DB / 設定の置き場所が App Group コンテナになり、アプリ自体がサンドボックスで動くため）。automatic signing が App Group capability を App ID / プロファイルに反映できない場合は、Keychain と同様に初回だけ Xcode GUI でのビルドが要る。サンドボックス化後、同期フォルダへのアクセスは security-scoped bookmark で維持されていた（folderSync 世代。**v0.3.0 #97 以降の新規セットアップは bookmark を発行しない** — fpOnly に同期フォルダ面が無いため。再許可パネル等の解決系はデッド経路として温存・`files.user-selected.read-write` は設定 import/export・診断保存の panel 系で引き続き必要）。
+Tide は AWS 認証情報を **Data Protection Keychain**（`kSecUseDataProtectionKeychain=true`、セキュリティ対応 H1）に保存する。これを使うにはアプリに `keychain-access-groups` entitlement が必要で、`project.yml` の `entitlements` から `Tide/Tide.entitlements`（`$(AppIdentifierPrefix)org.izukawa.Tide`）が生成され署名に埋め込まれる。M5 Phase 2 からはこれに加えて **App Group entitlement**（`com.apple.security.application-groups` = **`G5G54TCH8W.org.izukawa.Tide`・チーム ID プレフィックス形式必須** — `group.org.izukawa.Tide` 形式は macOS では TCC 保護され、UI の無い File Provider 拡張が containermanagerd に拒否されるため。旧 `group.` 形式は `LegacyStateMigrator` の移行元としてアプリ側 entitlement にのみ残存）と **App Sandbox 一式**（`com.apple.security.app-sandbox` / `files.user-selected.read-write` / `network.client`）も署名に埋め込まれる（DB / 設定の置き場所が App Group コンテナになり、アプリ自体がサンドボックスで動くため）。**File Provider 拡張（`TideFileProvider.appex`・アプリの `PlugIns/` へ埋め込み）も同一 team・同一 App Group capability で署名される**必要がある（`project.yml` が両ターゲット分の entitlements を生成する）。automatic signing が App Group capability を App ID / プロファイルに反映できない場合は、Keychain と同様に初回だけ Xcode GUI でのビルドが要る。なお同期フォルダへの security-scoped bookmark は folderSync 世代の仕組みで、**v0.3.0 #97 以降の新規セットアップは bookmark を発行しない**（fpOnly に同期フォルダ面が無いため。再許可パネル等の解決系はデッド経路として温存・`files.user-selected.read-write` は設定 import/export・診断保存の panel 系で引き続き必要）。
 
 automatic signing でこの entitlement を付与するには **Mac App Development プロビジョニングプロファイル**が要り、その生成には **この Mac が開発者アカウントにデバイス登録**されている必要がある。未登録だとビルドが
 `Device "…" isn't registered in your developer account` で失敗し、実行時には Keychain 保存が `OSStatus 34018 (errSecMissingEntitlement)` になる。
@@ -133,13 +158,18 @@ automatic signing でこの entitlement を付与するには **Mac App Developm
 
 ### リリースビルド & インストール
 
-自分専用なので簡単に `~/Applications/` に置く:
+自分専用なので簡単に `~/Applications/` に置く（Release でも必須フラグは Debug と同じ）:
 
 ```bash
+xcodegen generate
 xcodebuild -project Tide.xcodeproj \
            -scheme Tide \
            -configuration Release \
-           -derivedDataPath ./build
+           -derivedDataPath ./build \
+           -destination 'platform=macOS,arch=arm64' \
+           -skipPackagePluginValidation \
+           -skipMacroValidation \
+           -allowProvisioningUpdates
 
 # ~/Applications に配置
 rm -rf ~/Applications/Tide.app
@@ -149,10 +179,35 @@ cp -R ./build/Build/Products/Release/Tide.app ~/Applications/
 open ~/Applications/Tide.app
 ```
 
-コード署名なしで起動時に Gatekeeper に止められる場合:
-```bash
-xattr -d com.apple.quarantine ~/Applications/Tide.app
-```
+ローカルでビルドした .app は development 署名済みで quarantine 属性も付かないため、通常は
+Gatekeeper に止められない（ネットワーク経由でコピーした場合のみ
+`xattr -d com.apple.quarantine` が要ることがある）。
+
+## 初回起動とセットアップ（fpOnly）
+
+v0.3.0 以降、セットアップは **File Provider ネイティブ**（同期フォルダの選択は存在しない）。
+ウィザードは 5 ステップ:
+
+1. **AWS Credentials** — アクセスキー ID / シークレットアクセスキー / リージョン
+2. **Bucket** — バケット名を入力し「Test & Provision」（HeadBucket → 必要なら作成 confirm）
+3. **Provisioning** — バージョニング / Public Access Block / ライフサイクル / TLS 強制ポリシーの適用結果
+4. **Tide in Finder** — 同期の説明と FP ドメインの現況表示。「**Start syncing**」で設定保存 →
+   FP ドメイン登録（= 同期の実体）→ signaler 起動まで一括実行
+5. **Ready** — 完了
+
+重要な点:
+
+- **同期面は Finder サイドバー「場所」の Tide**（実体 `~/Library/CloudStorage/Tide-Tide`）。
+  ファイルは dataless プレースホルダで列挙され、開いた瞬間に S3 からダウンロードされる。
+  ローカル同期フォルダは作られない。
+- **File Provider 拡張がシステム設定で OFF だと同期は無音で止まる**。ウィザードは
+  fileProvider ステップで検出して警告 +「Open System Settings」ボタン
+  （システム設定 >「ログイン項目と機能拡張」> ファイルプロバイダ）で誘導し、OFF のまま
+  Start syncing しても post 検査で停止する。稼働中の OFF 化も検出してメニューバー表示 +
+  通知で警告する（Issue #103）。
+- **再セットアップ（バケット変更等）は FP ドメインの作り直し = 破壊的**。ウィザードが
+  「This setup will recreate the Tide folder. Changes not yet uploaded will be discarded.」を
+  表示する。未アップロードの変更は破棄されるため、必要なら先に退避する。
 
 ## 自動起動の設定
 
@@ -169,24 +224,30 @@ macOS のログイン項目に登録するには:
 
 Console.app で以下のフィルタ:
 - Subsystem: `org.izukawa.Tide`
-- Process: `Tide`
+
+**同期の本体は `TideFileProvider` プロセス（FP 拡張）で動く**ため、Process を `Tide` に
+絞ると肝心の同期ログが落ちる。subsystem は app / 拡張とも `org.izukawa.Tide` で共通なので、
+subsystem フィルタだけで両プロセスを拾うのがよい。
 
 コマンドラインなら:
 ```bash
 log stream --predicate 'subsystem == "org.izukawa.Tide"' --level debug
 ```
 
-### ローカル DB の確認
+Info ログは 10〜15 分で消えるため、事象が起きたら**即** `log show --last 10m …` で採取する。
+
+### ローカル DB の確認（folderSync 世代・fpOnly では存在しない）
+
+**v0.3.0（fpOnly）ではアプリは DB を開かず、新規セットアップでは `db.sqlite` は作られない**
+（スキーマは folderSync 復帰資産としてコード温存 — `docs/03-LOCAL-DATABASE.md`）。
+folderSync 世代の DB が残っている環境で覗く場合のパスは App Group コンテナ:
 
 ```bash
-sqlite3 ~/Library/Application\ Support/Tide/db.sqlite
-
-sqlite> .tables
-sqlite> .schema files
-sqlite> SELECT * FROM files LIMIT 5;
-sqlite> SELECT * FROM upload_queue WHERE next_retry_at IS NOT NULL;
-sqlite> SELECT * FROM sync_log ORDER BY timestamp DESC LIMIT 20;
+sqlite3 ~/Library/Group\ Containers/G5G54TCH8W.org.izukawa.Tide/Library/Application\ Support/Tide/db.sqlite
 ```
+
+fpOnly の Sync Activity のデータ源は DB ではなく、FP 拡張が書く JSONL
+（App Group コンテナの `Library/Caches/Tide/fp-events-ext.jsonl`）。
 
 ### マニフェストの確認
 
@@ -232,35 +293,51 @@ aws s3api list-object-versions --bucket your-bucket \
 ### ローカルアプリのリセット
 
 ```bash
-# ローカル DB を削除
-rm -rf ~/Library/Application\ Support/Tide
-
-# 設定削除
-defaults delete org.izukawa.Tide
-
-# Keychain からも削除（手動で Keychain Access から、または）
-security delete-generic-password -s org.izukawa.Tide
+make reset   # ローカル状態を全消し
+make fresh   # reset → build → 起動（新規セットアップ検証の定番）
 ```
+
+`make reset` が消すもの: App Group コンテナ（DB / 設定の正位置・旧 `group.` 形式含む）・
+App Sandbox コンテナ（標準 UserDefaults / Caches の実体）・実ホームの旧ロケーション残置分・
+UserDefaults（`defaults delete` + `killall cfprefsd` = キャッシュ残り対策）・
+Keychain エントリ（`security delete-generic-password` は 1 件ずつしか消せないためループで全件）。
+手動で個別コマンドを叩くと消し漏れが出るので Makefile を使う。
+
+注意:
+
+- **FP ドメイン（`~/Library/CloudStorage/Tide-Tide`）は `make reset` では消えない**。
+  再セットアップ時にウィザードがドメインを作り直す（破壊的 = 未アップロード変更は破棄・警告あり）。
+- アプリ内 Settings の factory reset はサンドボックスから届く範囲のみ
+  （実ホームの旧ロケーション残置分には届かない）。完全削除は `make reset`。
 
 ## 既知の落とし穴
 
-### 1. App Sandbox を有効にすると同期フォルダにアクセスできない
+### 1. FP 拡張がシステム設定で OFF だと同期が無音で止まる
 
-M1 では Sandbox オフで開発。本格配布する場合は:
-- `com.apple.security.files.user-selected.read-write` 権限を追加
-- ブックマークデータでフォルダアクセスを永続化
+FP ドメインの登録（`add(domain)`）自体は成功するのに、拡張が OFF だと fileproviderd が
+拡張を起動せず**エラーなしで同期が止まる**。ウィザードの検出 / 誘導と稼働中の定期検知 +
+通知（Issue #103）はあるが、開発中に「同期しない」と思ったらまずシステム設定 >
+「ログイン項目と機能拡張」> ファイルプロバイダの Tide トグルを確認する。
 
-### 2. FSEvents が外付けディスクで動かない
+### 2. FP ドメインの作り直しは破壊的
 
-外付け SSD やネットワーク共有上の同期フォルダでは FSEvents が動かない、または挙動が異なる場合がある。M1 では内蔵ディスクのみサポート。
+identifier スキーマ・ドメイン属性・item capabilities を変えたビルドへ切り替えた時は
+**Disable → Enable でドメインを作り直す必要がある**（既存レプリカのキャッシュは自動更新
+されない）。作り直しは S3 未到達の保留書込を**無警告で破棄する**ため、正規手順は
+アプリ設定の Disable/Enable ボタン（`removeAllDomainsInvalidatingRegistries` 経由 =
+レジストリ epoch リセット込み。素の `removeAllDomains` 直呼びは禁止 — Issue #104）。
+システム設定のトグル OFF はレプリカを消さない（≠ Disable）。
 
-### 3. iCloud Drive 内のフォルダを同期対象にしない
+### 3. 初回ビルドは Xcode GUI が必要
 
-`~/Library/Mobile Documents/` 配下や iCloud Drive のフォルダを指定すると、iCloud と Tide が互いに変更を打ち消し合う無限ループになる可能性がある。セットアップウィザードでバリデーションを入れる。
+Keychain / App Group entitlement のプロビジョニングにこの Mac のデバイス登録が要る
+（上記「コード署名」節）。CLI だけでは未登録デバイスの新規登録ができない。
 
 ### 4. Time Machine のスナップショットフォルダ
 
-`.Spotlight-V100`、`.fseventsd`、`.Trashes` など、システムが管理する隠しフォルダは除外必須。
+`.Spotlight-V100`、`.fseventsd`、`.Trashes` など、システムが管理する隠しフォルダは
+`HardcodedIgnoreRules` で**除外実装済み**（`TideCore/Core/IgnoreRules.swift`）。
+新しい「機密が紛れ込みそうな」dotfile / 拡張子を見つけたら即追加する（CLAUDE.md §3）。
 
 ## パッケージ更新
 
