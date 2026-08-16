@@ -1,17 +1,27 @@
-# M3 実装ガイド（着手前の設計メモ）
+# M3 実装記録（サブ A〜E 完了）
 
-> 本書は **M3 着手前の起点メモ** であり、まだ実装案の詳細を詰めきっていない。
-> 個別タスクごとに最終仕様を決めながら実装する想定。
-> M1 用の `05-IMPLEMENTATION-GUIDE.md` のような完成度の高いステップ分解ではない。
+> 本書は M3 着手前のメモとして書き起こし、**実装完了まで追記し続けた確定記録**。
+> 設計判断の根拠（`aws-sdk-swift-s3-transfer-manager` 不採用の理由・3-way ベースを
+> `FileRecord.sha256` にした理由・帯域制御の予約方式選定 など）と実測値
+> （帯域制御の実 S3 スループット等）の**一次ソース**として維持する。
+>
+> **v0.3.0（fpOnly 化・2026-08-17）の読み替え**: 本書のうち FSEvents / `SyncEngine` 前提の
+> 統合点記述（サブ B の `performFullScan` / `processEventToQueue` / `reconcileRemoteEntry` の
+> 3 経路・「FSEvents で検知」等）は **folderSync 世代**（到達不能のデッドコード温存 =
+> `docs/04a-SYNC-LOGIC-FOLDERSYNC.md`）。現行の `.syncignore` 適用点は FP 拡張の
+> `createItem`（`IgnoreDecision.shouldSkip` + `ManifestIgnoreCache`・`docs/04`）。
+> マルチパート / `.syncignore` マッチャ / 3-way merge / 帯域制御の**コア機構自体は
+> FP 経路でも現役**。コードのパスは M5 Phase 1 で `TideCore/` へ移設済み
+> （ファイル名・型名は不変 — CLAUDE.md §6 の読み替え規則参照）。
 
 ## 前提
 
-- M1 / M2 は実装完了。詳細は `04-SYNC-LOGIC.md`、コードは `Tide/Core/SyncEngine.swift` 等を参照。
+- M1 / M2 は実装完了。詳細は `04a-SYNC-LOGIC-FOLDERSYNC.md`（folderSync 世代の記録）を参照。
 - 既存挙動を壊さないことが大前提。
 - セキュリティベースライン (`security/`) と「会話で確定した実装決定」（`docs/08-IMPLEMENTATION-NOTES.md`）を必ず保つ。
 - 新規実装には PathValidator / Logger プライバシー / SSE 等の現行ルールを継承する。
 
-## M3 スコープ（`00-OVERVIEW.md` から）
+## M3 スコープ（`docs/README.md` の M3 節から）
 
 1. 3-way merge による双方向同期
 2. S3 Transfer Manager 統合（マルチパートアップロード、レンジダウンロード）
@@ -24,7 +34,7 @@
 
 ---
 
-## サブタスク A: マルチパートアップロード（実装済み）
+## サブタスク A: マルチパートアップロード — ✅ 実装済み（2026-06-02）
 
 > 実装日: 2026-06-02。**自前ラッパ方式**で実装した（当初案の `aws-sdk-swift-s3-transfer-manager`
 > パッケージは採用せず＝新規依存なし）。FD/ハッシュ統合（M5）とパート進捗の制御を握りやすく、既存の
@@ -74,7 +84,7 @@ M1 で導入した「100 MB を超えたら `sync_log` にエラーを残して�
 
 ---
 
-## サブタスク B: `.syncignore` 対応（実装済み）
+## サブタスク B: `.syncignore` 対応 — ✅ 実装済み（2026-06-01）
 
 > 実装日: 2026-06-01。会話で 3 つの設計判断を確定して実装した（下記）。
 
@@ -154,7 +164,7 @@ M2 の単純ルール（`04-SYNC-LOGIC.md`「競合解決」）を **ベース /
 
 ---
 
-## サブタスク D: 中断・再開（✅ 実装済み 2026-06-05）
+## サブタスク D: 中断・再開 — ✅ 実装済み（2026-06-05）
 
 ### 目的
 ダウンロード / アップロードが途中で中断した場合に、次回起動時に**ファイル内の途中から**再開する。
@@ -172,7 +182,7 @@ M2 の単純ルール（`04-SYNC-LOGIC.md`「競合解決」）を **ベース /
 - **D2 アップロード再開（✅ 実装済み）**: `UploadCheckpointStore` シーム（`TransferStateStoring` から分離）を `MultipartUploader.ResumeContext` 経由で注入。mtime/size 一致なら前回 UploadId・完了パート・partSize を引き継いで未送分だけ送り（既送分も読み順に hash 更新して全体 SHA を復元）、不一致なら古い MPU を best-effort abort してフル再開。パート完了ごとに `recordCompletedPart` で checkpoint、成功で `clearUpload`。**失敗時の方針**: `resume` 指定時は abort も clear もせず MPU と進捗を保持（次回のファイル単位リトライ／プロセス kill 後の次回起動で再開）。恒久失敗の残骸はライフサイクル tide-abort-incomplete-multipart（7日）と D5 起動時掃除に委ねる。`resume` なしの呼びは従来どおり失敗時 best-effort abort（後方互換）。`MultipartUploaderTests` にフェイク checkpoint で 4 ケース追加（新規永続→クリア / 既送スキップ / ファイル変化でフル再開 / 恒久失敗で保持）。
 - **D3 ダウンロード再開（✅ 実装済み）**: 旧 `downloadToFile` を Range 対応の `TideS3Client.streamObject(key:rangeStart:sink:)` に置換し、`RangedDownloadClient` シーム（`TideS3Client` 適合 + テストでフェイク差込）を新設。`Downloader` は決定的 tmp（`dl-<sha(path)>.part`）を使い、`transfer_state` の download 行が現エントリ etag と一致し tmp が `0 < size < entry.size` なら既存プレフィクスを読み直して hash に前置きし `Range: bytes=size-` で再開、無効なら作り直してフル取得。M7 の DoS ガードは sink で受信累積長を `entry.size` と突合（超過は破棄）。ネットワーク失敗は部分 tmp + 行を保持して次回再開、etag/SHA 不一致・サイズ超過・404 は破棄して仕切り直す。`DownloaderTests`（実 DB + フェイク seam）で fresh/resume/etag 不一致/ネットワーク失敗保持/SHA 不一致/404 を網羅＝DL 経路のテスト負債も返済。
 - **D4 進捗 UI（✅ 実装済み）**: `SyncEngine.activeTransfers: [TransferProgress]`（@Observable）を追加。off-main の `Uploader`/`Downloader` が `@Sendable` な `TransferProgressReporter`（`begin`/`update`/`end`）を発行し、`SyncEngine` が `Task { @MainActor }` で `applyProgress` に集約（到着順は前後し得るので update は既存エントリの増加方向のみ適用、(path, direction) で一意）。アップロードはパート完了ごと（既送分も即時加算）、ダウンロードは ~4MiB ごとに coalesce。`MenuBarContent` のポップオーバーに「Transferring」セクション（方向アイコン + ファイル名 + % + `ProgressView`）を追加。新規 xcstrings キー `"Transferring"`（`extractionState:"manual"`）。`stop()` で `activeTransfers` をクリア。視覚確認は D5 の動作チェックリストで実機実施。
-- **D5 ドキュメント＋セキュリティ＋掃除（✅ 実装済み）**: `SyncEngine.start()` 冒頭で `pruneOrphanTransfers()`（キュー/プル開始前に awaited＝再開ロジックと競合させない）。ローカルファイルの消えた upload 行は宙ぶらりんの MPU を best-effort `abortMultipartUpload` して削除、tmp の消えた download 行は削除、両方向とも 7 日より古い行は失効扱い（S3 `tide-abort-incomplete-multipart` と歩調を合わせる）。セキュリティは `security/low.md` L12（攻撃面レビュー＝Range 注入なし / tmp_path 再計算照合 / 再開時 symlink 破棄ガード / SHA ゲート / オーファン掃除）。受け入れは `tmp/M3-動作チェックリスト.md`（大ファイル round-trip・kill→再開 up/down・進捗 UI を実機で確認後に削除）→ **✅ 全項目消化済み（2026-06-07・チェックリストは運用どおり削除）＝サブタスク D 完了**。消化中に発見した項目（L6 実害化＝torn-write アップロード／prune clear 分岐の `invalidateShardCache` 漏れ（✅ 修正済み 2026-06-07・下記）／毎起動再アップロード（✅ 修正済み 2026-06-08・mtime 精度不一致 + SHA ゲート未実装が原因。`docs/08-IMPLEMENTATION-NOTES.md`「mtime の不変条件」 / `docs/09-DEFERRED.md` と `docs/04-SYNC-LOGIC.md` 実装ノート参照））は `docs/09-DEFERRED.md` と `security/low.md` L6 に記録。
+- **D5 ドキュメント＋セキュリティ＋掃除（✅ 実装済み）**: `SyncEngine.start()` 冒頭で `pruneOrphanTransfers()`（キュー/プル開始前に awaited＝再開ロジックと競合させない）。ローカルファイルの消えた upload 行は宙ぶらりんの MPU を best-effort `abortMultipartUpload` して削除、tmp の消えた download 行は削除、両方向とも 7 日より古い行は失効扱い（S3 `tide-abort-incomplete-multipart` と歩調を合わせる）。セキュリティは `security/low.md` L12（攻撃面レビュー＝Range 注入なし / tmp_path 再計算照合 / 再開時 symlink 破棄ガード / SHA ゲート / オーファン掃除）。受け入れは `tmp/M3-動作チェックリスト.md`（大ファイル round-trip・kill→再開 up/down・進捗 UI を実機で確認後に削除）→ **✅ 全項目消化済み（2026-06-07・チェックリストは運用どおり削除）＝サブタスク D 完了**。消化中に発見した項目（L6 実害化＝torn-write アップロード／prune clear 分岐の `invalidateShardCache` 漏れ（✅ 修正済み 2026-06-07・下記）／毎起動再アップロード（✅ 修正済み 2026-06-08・mtime 精度不一致 + SHA ゲート未実装が原因。`docs/08-IMPLEMENTATION-NOTES.md`「mtime の不変条件」 / `docs/09-DEFERRED.md` と `docs/04a-SYNC-LOGIC-FOLDERSYNC.md` 実装ノート参照））は `docs/09-DEFERRED.md` と `security/low.md` L6 に記録。
 
 ### PR #4 レビュー反映（2026-06-05）
 soundkitchen のレビュー（ブロッカー無し）を受けて 4 点を対応、2 点を据え置き。
@@ -190,12 +200,12 @@ soundkitchen のレビュー（ブロッカー無し）を受けて 4 点を対�
 - **検証**: 修正版で kill→再開すると復元ファイルが size+sha ともマニフェスト記載値にぴったり一致・過大化なしを実機確認。`make build && make test` 通過。
 - **関連で発見した別バグ（✅ 修正済み）**: 中断したダウンロードが**再起動だけでは自動再開しなかった**（`ManifestReader` が DL 完了前にシャードを `shard_state` へ「取得済み」記録するため、次回 pull が当該シャードをスキップ＋未完で DB レコードも無い→ reconcile されず `Downloader.download` に到達しない）。Range 再開機構自体は正しいが到達経路が無かった。**修正**: `SyncEngine.pruneOrphanTransfers` で再開可能な download 行（tmp あり・新しい）の path のシャードの `shard_state` を invalidate し、起動 pull に再取得→reconcile→Range 再開させる（既存機構の再利用）。実機で「再起動のみで自動 Range 再開・SHA 一致」を確認。docs/09-DEFERRED.md 参照。
 - **セッション中の再 arm（PR #9 レビュー ②・✅ 修正済み 2026-06-07）**: 上記の再 arm は当初**起動時 prune でのみ**走り、セッション中に DL がネットワーク断等で失敗すると、シャードがリモートで変化するか再起動するまで取り残された。**修正**: sentinel 化を `LocalDatabase.invalidateShardCache(forPath:)` に共通化し、`Downloader.download` のネットワーク失敗 catch（部分 tmp を保持する resumable 失敗）からも呼ぶ。次の poll/wake/network-up pull が再取得→reconcile→Range 再開する。破棄系（SHA/サイズ不一致・404）は決定的に再失敗するため再 arm しない（`DownloaderTests` で両スコープを回帰固定）。
-- **手動 pull の coalescing（PR #9 レビュー ④・✅ 修正済み 2026-06-07）**: 単一ゲート化の副作用で、pull 進行中の手動「S3 から取得」が無反応・無表示でドロップされていた。**修正**: 手動（`reason == .manual`）のみ pending 化して現 pull 終了後にもう 1 周（`.manualCoalesced`）。ゲートフラグは `isRemotePulling`（@Observable・`private(set)`）に改名・公開し、ボタンは pull 中スピナー + 「Pulling…」表示（enabled のまま＝押下が coalescing の入口）。PR #10 レビュー反映で coalesced ラウンドに stop/cancel ガード（Low-1）と `reason` の `SyncEngine.PullReason` enum 化（Low-2）を追加。`docs/04-SYNC-LOGIC.md` トリガー節参照。
+- **手動 pull の coalescing（PR #9 レビュー ④・✅ 修正済み 2026-06-07）**: 単一ゲート化の副作用で、pull 進行中の手動「S3 から取得」が無反応・無表示でドロップされていた。**修正**: 手動（`reason == .manual`）のみ pending 化して現 pull 終了後にもう 1 周（`.manualCoalesced`）。ゲートフラグは `isRemotePulling`（@Observable・`private(set)`）に改名・公開し、ボタンは pull 中スピナー + 「Pulling…」表示（enabled のまま＝押下が coalescing の入口）。PR #10 レビュー反映で coalesced ラウンドに stop/cancel ガード（Low-1）と `reason` の `SyncEngine.PullReason` enum 化（Low-2）を追加。`docs/04a-SYNC-LOGIC-FOLDERSYNC.md` トリガー節参照。
 - **prune clear 分岐の invalidate 漏れ（受け入れテスト §6-2 で発見・✅ 修正済み 2026-06-07）**: 上記の起動時再 arm は **resumable な download 行（tmp あり・新しい）だけ**を invalidate しており、tmp が消えている（または stale な）行の clear 分岐は `transfer_state` 行を削除するだけだった → FileRecord 無し + `shard_state` は実 etag のままで、当該ファイルはシャードがリモートで変化するまで**永久に再 DL されない**。**修正**: clear 分岐でも行を落とす**前に** `invalidateShardCache` を実行（resumable 分岐と対称）。invalidate 失敗時は行を消さず continue（行が残れば次回起動の prune が再試行＝自己回復。先に行を消すと取り残しが再発するため順序が本質）。あわせて prune 本体を `SyncEngine.pruneOrphanTransfers(db:store:syncRoot:now:abortUpload:)`（`nonisolated static`・依存注入）へ切り出し、`TransferPruneTests`（実 DB + abort フェイク）で clear（tmp 消失/stale）・resumable・upload 全分岐の「分岐 → 実 I/O」配線を回帰固定（`security/low.md` L12 の「prune 結合テスト未整備」据え置きも解消）。PR #11 レビュー反映で `default:` 分岐（未知 direction・到達不能）にも同ガードを適用して不変条件を全分岐化（Low-1）、clear 成否どおりのログ出し分け（nit-2）。Low-1 のテスト追加で旧 `default:` 分岐は direction フィルタの都合で実際には何も消せていなかったことも判明し、`TransferStateStore.clearUnknownDirections(path:)` を新設して除去を実効化。据え置き nit（invalidate 失敗経路のテスト・stale tmp litter のトレードオフ）は `docs/09-DEFERRED.md` に記録。
 
 ---
 
-## サブタスク E: 帯域制御（✅ 実装済み・2026-06-10）
+## サブタスク E: 帯域制御 — ✅ 実装済み（2026-06-10）
 
 ### 目的
 バックグラウンドで動作中に帯域を制限したい時のための上限設定。Settings で「アップロード上限 X MB/s」「ダウンロード上限 Y MB/s」を独立に指定できる（既定は無制限）。
@@ -230,10 +240,3 @@ soundkitchen のレビュー（ブロッカー無し）を受けて 4 点を対�
 - マニフェストバージョン番号の bump（既存 `version: 1` を `2` に上げて、リーダ側で互換層を持つかどうか議論）
 - セキュリティレビューの C3 後半 (`PutBucketPolicy` で HTTPS 強制) → ✅ **解消済み（2026-06-23・Issue #26 / B・M3 ではスコープ外だった）**。`enforceTLSBucketPolicy()` で `aws:SecureTransport=false` Deny を冪等適用（`security/critical.md` C3 / `docs/09`）。H3（IAM Identity Center 検討）は引き続き据え置き
 - 動作確認用に `tmp/M3-動作チェックリスト.md` を切る運用は M1 / M2 と同じ
-
-## 着手前の必読
-
-- `CLAUDE.md`（特に「会話を通じて確定した実装決定」と「コミット前ドキュメント更新」の大原則）
-- `security/README.md` の Status 表
-- `docs/04-SYNC-LOGIC.md` の M2 セクション
-- 直近のコミットログ（`git log --oneline`）

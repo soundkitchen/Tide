@@ -1,617 +1,290 @@
 # 同期ロジック
 
-> **スコープの現状**:
-> - **M1 完了**: ローカル → S3 の一方向アップロード（本書の前半）
-> - **M2 完了**: S3 → ローカルのダウンロード、定期ポーリング、リモート削除反映、コンフリクトリネーム（本書末尾「M2 セクション」）
-> - **M3 完了（サブ A〜E）**: 形式的な 3-way merge（サブ C・本書「競合解決」）、マルチパートアップロード / レンジダウンロード再開（サブ A・D）、`.syncignore`（サブ B）、中断・再開（サブ D）、帯域制御（サブ E・`RateLimiter`）。詳細は `07-M3-IMPLEMENTATION-GUIDE.md`
->
-> 注: 本書前半（M1）の擬似コードには当時のスケッチが残っている箇所がある（object metadata の sha256、`HardcodedIgnoreRules` のシグネチャ等）。後続セクションで設計が更新された点はその都度注記し、実コードを正とする。
+> **スコープの現状（v0.3.0・2026-08-17）**:
+> - 稼働モードは **fpOnly（File Provider）のみ**。同期面は FP ドメイン（`~/Library/CloudStorage/Tide`・レプリカ実体パスは `Tide-Tide`）で、
+>   書き手は FP 拡張（`TideFileProvider.appex`）、リモート変化検知はアプリ側の `RemoteChangeSignaler`。
+>   アプリ・拡張とも**ローカル DB には一切触れない**。本書はこの現行 fpOnly の同期ロジックを記述する。
+> - 旧 folderSync（FSEvents）世代の同期ロジック（フルスキャン / イベント駆動 / アップロードキュー /
+>   pull・reconcile）は **[`04a-SYNC-LOGIC-FOLDERSYNC.md`](04a-SYNC-LOGIC-FOLDERSYNC.md) へ退避**した
+>   （デッドコード仕様の記録・削除予約。到達は git revert のみ = `docs/09`「revert 復帰ランブック」）。
+> - 3-way merge・マニフェスト RMW・除外ルールなどの**共有純粋ロジックは本書が正**（FP 経路が現役で使う）。
 
-## M1 のスコープ
-
-M1 では **ローカル → S3 の一方向** のみを実装する。
-
-そのため M1 の同期ロジックは「ローカルファイルの変更を検知し、S3 に反映する」だけのシンプルな構造になる。3-way merge は M3 で実装する。
-
-## 起動時のフルスキャン
-
-アプリ起動時、`SyncEngine.triggerFullScan()` で実行される。
+## 全体像（fpOnly）
 
 ```
-1. 同期フォルダを再帰的にウォーク（FileManager.enumerator）
-   - 除外パターンにマッチするものはスキップ
-   - シンボリックリンクは追従しない
-   
-2. 各ファイルについて:
-   a. (path, size, mtime) を DB の files テーブルと比較
-   b. DB にエントリがない → 新規ファイル → アップロードキュー追加
-   c. DB にエントリあり、size または mtime が違う → SHA-256 再計算
-      - ハッシュも違う → 変更あり → アップロードキュー追加
-      - ハッシュ同じ → mtime だけ DB 更新（再アップロード不要）
-   d. DB にエントリあり、size と mtime が同じ → スキップ（ハッシュ計算もしない）
-   
-3. DB にあるが実ファイルにないパスを検出
-   - これらは削除されたファイル → 削除キュー追加
-   
-4. キューに溜まったジョブを順次実行
+[ローカル → S3]（書込方向）
+  Finder / アプリでの作成・編集・削除・リネーム
+     │ fileproviderd（OS デーモン）
+     ▼
+  FP 拡張の書込コールバック（createItem / modifyItem / deleteItem）
+     │ ExtensionWriter
+     ▼
+  S3 本体 PUT / delete marker + マニフェスト RMW（ManifestUpdater = 共有チョークポイント）
+
+[S3 → ローカル]（取り込み方向）
+  RemoteChangeSignaler（アプリ・index.json の HEAD ETag 比較・既定 180 秒）
+     │ 変化時のみ signalEnumerator(.workingSet)
+     ▼
+  FP 拡張の enumerateChanges（マニフェスト世代 diff → dataless プレースホルダ更新）
+     │ ユーザがファイルを開いた瞬間
+     ▼
+  fetchContents（S3 から streaming 取得 + サイズ / SHA-256 検証 = materialize）
 ```
 
-> **実装ノート（2026-06-08・SHA ゲート実装）**: 2.b〜d の変更判定は純粋関数 **`ChangeDetector`**（`Tide/Core/ChangeDetector.swift`、`preDecision`/`postHash` の two-step）に集約し、FSEvents 経路（後述）と共用する。仕様との差分は最適化 1 点のみ: **size 不一致のときは SHA を再計算せず直接アップロードキューへ**（size が違えば sha は一致し得ないため挙動は同義）。「ハッシュ同じ → mtime だけ DB 更新」は **CAS**（`LocalDatabase.refreshMtimeIfShaUnchanged`: 単一 write Tx 内で再フェッチし sha 一致時のみ更新・`lastSyncedAt` は保持）で行い、判定〜書込の間に走った並行 pull の更新（新 sha / versionId）を巻き戻さない。
->
-> **不変条件: 「`FileRecord.mtime` = 最後に同期した時点のローカル stat mtime」**。マニフェスト `mtime` は ISO8601 秒精度（fractional なし）なので、これで DB を上書きすると上記 2.d の比較（許容差 0.001s）が常に外れ、無変更ファイルが毎起動再アップロードされる（実際に起きたバグ・2026-06-08 修正。`docs/09-DEFERRED.md` 参照）。pull の内容一致時の DB 最新化（`Downloader.markSynced`）もローカル stat 実値を記録する。SHA ゲートは、過去に秒精度で汚染された既存 DB も初回スキャンの「hash 1 回 → mtime 修復のみ」で自己回復させる安全網を兼ねる。
+「拡張 = 第 3 のデバイス」方式: 拡張は S3 とマニフェストだけを読み書きし、アプリの DB / tmp には
+触れない。多端末の整合はマニフェスト RMW 内の 3-way 判定（`decideUpload`）が一元的に裁く。
 
-### 並列度と順序
+## FP 取り込み経路（S3 → ローカル）
 
-- フルスキャンのファイルウォーク: シングルスレッド（メモリ消費抑制）
-- ハッシュ計算: 現実装はウォーク内で直列（SHA ゲート含む。遅ければ有界並列化は将来タスク）
-- アップロード: 並列度 5（ネットワーク帯域とのバランス）
-- 削除: 並列度 5
+### RemoteChangeSignaler（アプリ側・変化検知）
 
-順序の保証は不要（並列実行 OK）。
+`Tide/Core/RemoteChangeSignaler.swift`（@MainActor・@Observable）。
 
-## 通常運転（FSEvents 駆動）
+- `.tide/index.json` の **HEAD ETag** をポーリング間隔（`ConfigStore.pollingIntervalSeconds`・
+  既定 180 秒・下限 30 秒クランプ）+ 起動時 / wake / ネットワーク復帰の即時契機で比較し、
+  変化時のみ `FileProviderController.signalRemoteChanges()`（coalesce は FP 側）。
+- 増分取り込みの本体は拡張の `enumerateChanges` が担うため、アプリの仕事は通知だけ
+  （HEAD 1 発 ≒ 数十バイト/周期）。
+- **不変条件**: ① DB / `shard_state` 非接触（構造的に依存を持たない = folderSync 凍結資産を進めない）
+  ② index 不在（未セットアップ / 空バケット）は無反応・ベースラインも作らない ③ HEAD 失敗は保持
+  ETag を進めない（一過性エラーで変化を取りこぼさない）④ 初回チェックはベースライン確立 +
+  無条件 1 回 signal（停止中に溜まった変化の取り込み保険）。詳細は `docs/08`「FP-only 稼働モード B-0」節。
 
-```
-[FSEvents イベント発生]
-   │
-   ▼
-[FileWatcher.events ストリーム]
-   │
-   ▼
-[ハードコード除外フィルタ]
-   │  .DS_Store, .Trashes, .Spotlight-V100, .fseventsd, Thumbs.db
-   │  → 除外対象なら破棄
-   ▼
-[DebounceQueue（パスごとに 2 秒）]
-   │  同じパスのイベントを集約
-   ▼
-[SyncEngine.handleChange(event)]
-   │
-   ▼
-[操作種別判定]
-   │
-   ├─ ファイルが存在する（create / modify）
-   │     │
-   │     ├─ path が今ディレクトリ（種別変化の検出 / Issue #52）
-   │     │     ├─ DB エントリなし → 何もしない（通常のディレクトリイベント）
-   │     │     └─ DB エントリあり → 追跡中ファイルがディレクトリへ置換された
-   │     │        → 旧ファイルの delete キューへ（.replace ＝誤分類済み upload 行を潰す）
-   │     │        → フルスキャン発火（`mv 既存dir path` の置換は子のイベントが出ないため配下はスキャンで拾う）
-   │     ▼
-   │   [DB の files テーブル参照]
-   │     │
-   │     ├─ DB エントリなし → 新規 → ハッシュ計算 → upload キューへ
-   │     ├─ size, mtime 一致 → 何もしない
-   │     └─ size または mtime 異なる
-   │         │
-   │         ▼
-   │       [SHA-256 再計算]
-   │         │
-   │         ├─ ハッシュ一致 → DB の mtime のみ更新
-   │         └─ ハッシュ異なる → upload キューへ
-   │
-   └─ ファイルが存在しない（delete）
-        │
-        ▼
-      [DB の files テーブル参照]
-        │
-        ├─ DB エントリなし → 何もしない（既に削除済み or 元から無視対象）
-        └─ DB エントリあり → delete キューへ
-```
+### 拡張の列挙と世代キャッシュ
 
-## アップロード処理の詳細
+列挙はマニフェスト駆動で DB 非依存: `ManifestSnapshotLoader`（index + 全シャード読み・書込ゼロ）→
+`ManifestTree`（パスツリー化）→ `ManifestGenerationCache`（世代 = SyncAnchor 付き TTL キャッシュ）。
+`enumerateItems` / `item(for:)` / `fetchContents` は TTL 内キャッシュを使い、signal 応答
+（`enumerateChanges`）だけ TTL を待たずリフレッシュする（変更前キャッシュで「変更なし」と誤答して
+signal を消費しない）。世代の系譜は `ManifestGenerationLog`（App Group Caches）が持ち、未知 anchor は
+`syncAnchorExpired` でシステムに全再列挙させる。
 
-```swift
-func processUpload(_ queueItem: UploadQueueRecord) async throws {
-    let path = queueItem.path
-    let fullURL = syncRoot.appendingPathComponent(path)
-    
-    // 1. ファイル読み込み
-    let data = try Data(contentsOf: fullURL)
-    let size = data.count
-    let mtime = try fullURL.resourceValues(forKeys: [.contentModificationDateKey])
-                            .contentModificationDate!
-                            .timeIntervalSince1970
-    let sha256 = SHA256.hash(data: data).hex
-    
-    // 2. S3 にアップロード
-    // ※ 現行実装は object metadata に sha256 を載せない（CreateMultipartUpload 時点で
-    //    未確定なため。整合性の真実は ManifestFileEntry.sha256 に置く）。metadata は mtime/device/size のみ。
-    let metadata = [
-        "mtime": ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: mtime)),
-        "device": deviceId,
-        "size": String(size)
-    ]
-    let s3Key = "files/\(path)"
-    let result = try await s3Client.putObject(
-        key: s3Key,
-        data: data,
-        metadata: metadata
-    )
-    
-    // 3. マニフェスト更新（楽観的ロック）
-    let shardId = ShardSharding.shardId(for: path)
-    try await updateShard(shardId: shardId) { shard in
-        shard.files[path] = ManifestFileEntry(
-            size: Int64(size),
-            mtime: mtime,
-            sha256: sha256,
-            s3VersionId: result.versionId,
-            etag: result.etag,
-            deviceId: deviceId,
-            uploadedAt: Date()
-        )
-    }
-    
-    // 4. ローカル DB 更新（トランザクション）
-    try await database.write { db in
-        try FileRecord(
-            path: path,
-            size: Int64(size),
-            mtime: mtime,
-            sha256: sha256,
-            s3VersionId: result.versionId,
-            s3Etag: result.etag,
-            lastSyncedAt: Date().timeIntervalSince1970,
-            updatedAt: Date().timeIntervalSince1970
-        ).save(db)
-        
-        try UploadQueueRecord                       // L6: path ではなく id 基準（後述）
-            .filter(Column("id") == queueItem.id)
-            .deleteAll(db)
-        
-        try SyncLog.insert(db, type: "upload", path: path, message: "Uploaded \(size) bytes")
-    }
-}
-```
+### enumerateChanges（増分配信）
 
-### 大きいファイル（M3: マルチパート + 1 ファイル上限）
+起点世代（呼び出し元 anchor）と現行世代の **`ManifestTreeDiff`** を `didUpdate` / `didDeleteItems` で
+配信し、anchor を前進させる。
 
-M1 の 100MiB ハード上限（`maxSizeM1`）は M3 で撤廃した。`Uploader.processUpload` はサイズで経路を分岐する。
+- item identifier は **kind 織り込み形式**（ファイル = `f:<path>` / ディレクトリ = `d:<path>`・
+  M5 Phase 5-1）。種別変化（file ⇄ dir）は「旧 kind ノードの delete + 新 kind ノードの update」=
+  別 id の独立した 2 変化になり、fileproviderd の同一 id ingest 合成問題を構造的に回避する（後述）。
+- 実体化バッジ（Issue #65）は anchor 意味論と独立の eventual オーバーレイとして working set の
+  enumerateChanges（**唯一の報告点**）に合流する。詳細は `docs/08`「FP 実体化連動バッジ」節。
 
-- **シングルパート**（`≤ 16 MiB`、`PartPlan.shouldUseMultipart` が false）: O_NOFOLLOW の単一 FD から 1 回読んだバッファでハッシュも本体も賄い（M5: 2 回 open を畳む）、`putObject` で送る。
-- **マルチパート**（`> 16 MiB`）: `MultipartUploader` が単一 FD から順次読込しつつ SHA-256 を逐次更新し、読み終えたパートを**有界並列（最大 3）で UploadPart**。アダプティブパートサイズ（`PartPlan`）: 目標パート数 9,000 基準値を `[5MiB, 64MiB]` にクランプ（常駐メモリ抑制）、10,000 パートに収まらない超巨大ファイルのみ必要分まで partSize を上げる（MiB 境界切り上げで `partCount ≤ 10,000`）。瞬断は**パート単位リトライ**で吸収し、恒久失敗は best-effort `abort` → throw（ファイル単位リトライへ）。`UploadId` の永続化・再起動またぎ再開はサブタスク D（別チャンク）。**再開時の stale UploadId**（前回 complete 済みでクラッシュ／7 日ライフサイクル失効）は `NoSuchUpload` で空振りするので、complete 時は `headObject` で本体を確認し存在 & サイズ一致なら identity を回収して成功扱い、回収不能なら checkpoint を破棄してフル再開に委ねる（Issue #33。`docs/09` 据え置き (a) / `docs/08`）。
+### fetchContents（materialize・読み取りの本丸）
 
-**1 ファイルあたりのアップロード上限**は `ConfigStore.uploadSizeLimitBytes`（Settings で変更、既定 1GiB、`-1` = 無制限）。上限はアップロード方向のみに適用し、ダウンロード（復元のローカル書き戻し）は常に許可する（例外: fpOnly の **S3 内復元**は再アップロードを本質的に伴うため、上限を **DL 前**に適用して `fileTooLarge` で拒否する — M5 Track B-2・`docs/08` B-2 節）。上限超過は**黙ってスキップせず** `SyncError.fileTooLarge` を投げ、`SyncEngine.handleProcessingFailure` がリトライせずに `recentIssues` へ明示（分類サマリ + 行動指針）+ `sync_log` の `error` 記録 + キュー除去する（「このファイルはバックアップされていない」を可視化）。
+dataless プレースホルダを開いた瞬間に呼ばれる。
 
-```swift
-let limit = config.uploadSizeLimitBytes   // 既定 1GiB、-1 = 無制限
-guard PartPlan.isWithinUploadLimit(size: size, limitBytes: limit) else {
-    throw SyncError.fileTooLarge(path: path, size: size)  // → recentIssues に明示、リトライしない
-}
-```
+1. キャッシュ済みツリーから該当 entry（size / sha256 / s3VersionId）を引く
+2. **マニフェストが指す versionId を第一候補**で `streamObject`（enumerate と fetch の間に最新版が
+   変わっても、提示済み itemVersion と中身が食い違わない）。その版が失効している場合のみ最新版へ
+   フォールバック（内容の同一性は次の SHA ゲートが保証）
+3. ドメイン用 tmp へ streaming 書込しつつ SHA-256 を逐次計算
+4. **commit 前検証**: 実書込サイズ == `entry.size` かつ SHA-256 == `entry.sha256`。不一致は
+   `noSuchItem` では**なく** I/O エラー（item を消させず後で再試行可能に）。`noSuchItem` は
+   「最新版も無い = 本当に消えている」時だけ（デーモンがプレースホルダごと item を削除するため）
+
+## FP 書込経路（ローカル → S3）
+
+### 書込コールバックと ExtensionWriter
+
+`createItem` / `modifyItem` / `deleteItem`（+ rename / reparent = `modifyItem` の
+filename / parent 変化）を `TideFileProvider/ExtensionWriter.swift` が処理する。
+
+- **内容書込**（`modifyFileContents`）: 本体を PUT（16 MiB 超はマルチパート）→
+  `ManifestUpdater.updateFileEntry(for:base:newEntry:)` で確定。3-way ベース `base` は
+  **FP の `baseVersion`（= itemVersion に符号化した sha256）**から取る（DB 不要）。
+  新規作成（createItem）は `base: nil` で `decideUpload` の三分岐（作成 / 冪等 / 競合）に合流する。
+- **削除**: 単発 = `removeFileEntry(for:base:)`、ディレクトリ再帰削除 = `removeFileEntries` の
+  シャード単位バッチ RMW（往復はシャード数で有界 ≤256）。順序は**マニフェスト除去 → deleteObject
+  （delete marker）**で、権威判定点は RMW 内・ベース不一致は拒否側。
+- **rename / reparent**: `S3Client.copyObject`（**versionId 固定・最新版フォールバック禁止**）+
+  `moveFileEntries` の二相バッチ RMW（全 add → remove・中間状態は常に両存側）。
+  詳細は `docs/08`「FP 双方向書込」「rename / reparent」節。
+- 書込確定後は世代キャッシュを invalidate + 自己 signal（自世代 append で bounce 防止）。
+- 現行の書き手は S3 オブジェクトに**ユーザーメタデータ（`x-amz-meta-*`）を付けない**。整合性の
+  真実は `ManifestFileEntry.sha256`（folderSync 世代の metadata 規約は `docs/04a` / `docs/02`）。
+
+### 大きいファイル（マルチパート + 1 ファイル上限）
+
+サイズで経路を分岐する（`PartPlan` は FP / folderSync 共有の純粋ロジック）。
+
+- **シングルパート**（`≤ 16 MiB`、`PartPlan.shouldUseMultipart` が false）: 単一 FD から読んだ
+  バッファでハッシュも本体も賄い、`putObject` で送る。
+- **マルチパート**（`> 16 MiB`）: `MultipartUploader` が単一 FD から順次読込しつつ SHA-256 を
+  逐次更新し、読み終えたパートを**有界並列（最大 3）で UploadPart**。アダプティブパートサイズ
+  （`PartPlan`）: 目標パート数 9,000 基準値を `[5MiB, 64MiB]` にクランプ、10,000 パートに
+  収まらない超巨大ファイルのみ必要分まで partSize を上げる。瞬断はパート単位リトライで吸収し、
+  恒久失敗は best-effort `abort` → throw（リトライは fileproviderd の再試行が担う）。
+  folderSync 世代の checkpoint 永続化・stale UploadId 回収は `docs/04a` / `docs/08`。
+
+**1 ファイルあたりのアップロード上限**は `ConfigStore.uploadSizeLimitBytes`（Settings で変更、
+既定 1GiB、`-1` = 無制限・判定は `PartPlan.isWithinUploadLimit`）。上限はアップロード方向のみに
+適用し、ダウンロード（materialize）は常に許可する。例外: **S3 内復元**（`S3RestoreService`・
+M5 Track B-2）は再アップロードを本質的に伴うため、上限を **DL 前**に適用して
+`SyncError.fileTooLarge` で拒否する（`docs/08` B-2 節）。
 
 ## マニフェスト更新の実装
 
-楽観的ロックでシャードを更新する関数:
+書込は全経路が **`ManifestUpdater`**（`TideCore/S3/Uploader.swift`）の共有チョークポイントを通る:
+`updateFileEntry(for:base:newEntry:)` / `removeFileEntry(for:base:)` /
+`removeFileEntries(expecting:)` / `moveFileEntries(_:)`。呼び出し元は FP 拡張（`ExtensionWriter`）と
+アプリの `S3RestoreService`・`.syncignore` seed（folderSync 世代では `Uploader` 本体）。
 
-```swift
-func updateShard(shardId: String, transform: (inout ManifestShard) -> Void) async throws {
-    // リトライは ConditionalRetryPolicy（Issue #91 でポリシー化）:
-    //   shard 用 = 5 回・100ms 起点 ×2 逓増・上限 1.6s / index 用 = 8 回・上限 2s
-    //   バックオフには ±25% ジッタ（同位相の再衝突を崩す）
-    let policy = ConditionalRetryPolicy.shard
-    var lastError: Error?
-    
-    for attempt in 0..<policy.attempts {
-        do {
-            // 1. 現在のシャードを取得（実 API は getShard が ManifestFetch を返し .etag を含む）
-            let fetched = try await s3Client.getShard(shardId)
-            let currentShard = fetched?.value ?? ManifestShard.empty(id: shardId)
-            let currentETag = fetched?.etag
-            
-            // 2. 変換適用
-            var newShard = currentShard
-            transform(&newShard)
-            newShard.updatedAt = Date()
-            
-            // 3. 楽観的ロックで PUT（実 API は putShard(_:ifMatch:) -> String）
-            let newETag = try await s3Client.putShard(
-                newShard,
-                ifMatch: currentETag  // nil の場合は If-None-Match: * を付ける
-            )
-            
-            // 4. index.json も更新（index 用ポリシーで同様にリトライ）
-            try await updateIndex(shardId: shardId, newETag: newETag, count: newShard.files.count)
-            
-            return  // 成功
-            
-        } catch let error where error.isPreconditionFailed || error.isConditionalConflict {
-            // 412 PreconditionFailed（他プロセスが更新済み）/ 409 ConditionalRequestConflict
-            // （同一キーへの並行条件付き PUT 衝突）→ 再取得してリトライ
-            lastError = error
-            try await Task.sleep(nanoseconds: policy.delayNanos(forAttempt: attempt))
-            continue
-        }
-    }
-    
-    throw lastError ?? SyncError.manifestUpdateFailed
-}
-```
+楽観的ロック（CAS）の骨格:
+
+1. 権威シャードを `getShard`（`ManifestFetch` = 値 + ETag）で取得
+2. RMW 内で 3-way 判定（`decideUpload` / 削除ベースガード）→ 変換適用
+3. `putShard(_:ifMatch:)` で条件付き PUT（新規シャードは `If-None-Match: *`）
+4. index.json を `IndexUpdateCoalescer`（プロセス内 actor）経由で更新 — 呼び出し側は自分の
+   transform を含む putIndex の確定を await してから戻る（**shard + index 双方確定時のみ成功**。
+   この確定点を崩す遅延集約は禁止 = `docs/08`「バースト RMW 競合の恒久対処」）
+
+- リトライは **`ConditionalRetryPolicy`**（Issue #91 でポリシー化）: shard 用 = 5 回・100ms 起点
+  ×2 逓増・上限 1.6s / index 用 = 8 回・上限 2s。バックオフには ±25% ジッタ。
+  **再試行対象は 412 PreconditionFailed / 409 ConditionalRequestConflict のみ・`SyncError` は素通し**
+  （`uploadConflict` をリトライに飲ませない）。412/409 再フェッチ時は同 retry 内で 3-way を再評価
+  = 無音上書きの窓は実質ゼロ。
+- **部分完了 marker（#91）**: シャード書込**確定後**の index 失敗は
+  `SyncError.indexUpdateFailedAfterCommit` / 削除系 outcome `.removedIndexStale` で区別され、
+  FP 拡張はこの場合**のみ** delete marker を発行してよい（シャード未確定の失敗で marker を打つと
+  live オブジェクトへの marker = 不整合）。marker 発行後もエラー返却は維持する
+  （fileproviderd 再試行 = stale index の治癒ドライバを殺さない）。
 
 ### シャード削除のケース
 
-ファイル削除でシャードが空になった場合の扱い:
-
-```swift
-if newShard.files.isEmpty {
-    // S3 からシャードファイルを削除
-    try await s3Client.deleteObject(key: ".tide/shards/\(shardId).json")
-    
-    // index からエントリ削除
-    try await updateIndex(removingShardId: shardId)
-} else {
-    // 通常更新
-    try await s3Client.putShard(newShard, expectedETag: currentETag)
-    try await updateIndex(shardId: shardId, newETag: newETag, count: newShard.files.count)
-}
-```
-
-## 削除処理
-
-```swift
-func processDelete(_ queueItem: UploadQueueRecord) async throws {
-    let path = queueItem.path
-    let s3Key = "files/\(path)"
-    
-    // 1. S3 で delete marker を付ける（versioning 有効なので物理削除されない）
-    try await s3Client.deleteObject(key: s3Key)
-    
-    // 2. マニフェストから削除
-    let shardId = ShardSharding.shardId(for: path)
-    try await updateShard(shardId: shardId) { shard in
-        shard.files.removeValue(forKey: path)
-    }
-    
-    // 3. ローカル DB から削除
-    try await database.write { db in
-        try FileRecord.deleteOne(db, key: path)
-        try UploadQueueRecord                       // L6: path ではなく id 基準（後述）
-            .filter(Column("id") == queueItem.id)
-            .deleteAll(db)
-        try SyncLog.insert(db, type: "delete", path: path, message: "Deleted")
-    }
-}
-```
-
-> **キュー行は id 基準で消す（L6・2026-06-09）**: 上記 4. / 3. の `upload_queue` 削除は、`path` ではなく **処理したこの行 (`queueItem.id`)** を対象にする。アップロード/削除の処理中に同 path へ新イベントが届くと、enqueue 側の `INSERT OR REPLACE`（`UNIQUE(path)`）で**新しい AUTOINCREMENT id の行に置換**される（＝「完全版を上げ直せ」という正当な指示）。完了/失敗処理を `path` 基準で消すとその新行まで巻き込み、ローカル≠DB≠リモートの**無エラー乖離**が次回フルスキャンまで残る。id 基準なら旧行の完了/失敗は新行に触れず、次周回で再処理されて自己修復する。同じ理由で `handleProcessingFailure` の retry 更新・give-up 削除・size-limit 削除もすべて `id` 基準。
-
-> **torn read を“コミット”しない安定化ゲート（L6・A-detect・2026-06-09）**: アップロードは単一 `O_NOFOLLOW` FD から読むが、読込中にローカルが書き換えられると torn（千切れ）な内容を S3 にコミットし得る。**読み終えた後に同 FD を再 `fstat`** し、開始時の (size, mtime) と size 変化 or mtime 前進があれば「不安定」とみなす（純粋関数 `StabilityCheck.isStable`）。シングルパートは上記 2. の `putObject` の**前**に判定し、不安定なら **PUT しない**（現行 S3 オブジェクトを torn で上書きしない）。マルチパートは `completeMultipartUpload` の**前**に判定し、不安定なら **abort +（resume 時）checkpoint クリア**（complete しないので現行版は無傷・新 mtime でフル再開）。いずれも `SyncError.fileChangedDuringUpload` を投げる。加えてマルチパートは **read ループ内で逐次 early-bail**（読了量が開始時 size 超過＝成長／`reader.info()` の mtime 前進＝in-place 書換）し、次パートを PUT する前に throw する＝成長/変化し続ける大ファイルで「満額 PUT → 全 abort」を毎リトライ繰り返す PUT 課金・帯域の浪費を避ける。
->
-> 書込が落ち着くまで安定しないファイル（ログ/DB 等）は、`handleProcessingFailure` が `fileChangedDuringUpload` を **give-up カウント（`attempts`）に載せず**、`LocalDatabase.deferUnstableQueueItem` で安定するまで延期する（再検査間隔は保留経過に比例・上限 300s、`enqueuedAt`/`attempts` は保持）。一定時間（30s）安定しなければ「まだバックアップされていない」を `recentIssues`/`sync_log` に **1 回だけ**可視化する（＝torn を出さず、取りこぼしも黙らせない）。
-
-## リトライ戦略
-
-エラー発生時、指数バックオフでリトライ:
-
-```swift
-func computeNextRetryDelay(attempts: Int) -> TimeInterval {
-    // 1s, 2s, 4s, 8s, 16s, 32s, 64s, ...
-    let base = pow(2.0, Double(attempts))
-    // ± 25% のジッタ
-    let jitter = Double.random(in: 0.75...1.25)
-    let delay = base * jitter
-    return min(delay, 300)  // 上限 5 分
-}
-
-func handleUploadError(_ item: UploadQueueRecord, error: Error) async throws {
-    let newAttempts = item.attempts + 1
-    
-    if newAttempts >= 5 {
-        // 諦める。エラーログに残してキューから削除
-        try await database.write { db in
-            try UploadQueueRecord.deleteOne(db, key: item.id!)
-            try SyncLog.insert(
-                db, type: "error", path: item.path,
-                message: "Upload failed after 5 attempts: \(error)"
-            )
-        }
-        return
-    }
-    
-    let delay = computeNextRetryDelay(attempts: newAttempts)
-    let nextRetry = Date().addingTimeInterval(delay)
-    
-    try await database.write { db in
-        var updated = item
-        updated.attempts = newAttempts
-        updated.nextRetryAt = nextRetry.timeIntervalSince1970
-        updated.lastError = String(describing: error)
-        try updated.update(db)
-    }
-}
-```
-
-## 起動時のキュー復旧
-
-アプリ再起動時、前回の未完了キューを復旧:
-
-```swift
-func resumeQueue() async throws {
-    let pending = try await database.read { db in
-        try UploadQueueRecord
-            .filter(Column("attempts") < 5)
-            .fetchAll(db)
-    }
-    
-    for item in pending {
-        await processingQueue.enqueue(item)
-    }
-}
-```
-
-## 除外ルール（M1）
-
-M1 では `.syncignore` 対応はしない。ハードコードの除外のみ（下記は M1 当時のスケッチ）:
-
-> ※ 現行の `HardcodedIgnoreRules`（`Tide/Core/IgnoreRules.swift`）は機密網として大幅に拡張済み。
-> プロパティは `exactNames`（OS ジャンク + `.tide` + `.aws`/`.ssh`/`id_rsa` 等の機密 dotfile）、
-> `prefixPatterns`、`suffixPatterns`（`.pem`/`.key`/`.p12`/`.pfx`/`.keystore`）に分かれ、判定メソッドは
-> `shouldIgnore(relativePath:)`。新しい dotfile/拡張子で機密が紛れ込みそうなら即追加する運用（CLAUDE.md 参照）。
-
-```swift
-struct HardcodedIgnoreRules {
-    // ↓ M1 当時のスケッチ。現行のシグネチャ・除外集合は IgnoreRules.swift を正とする
-    static let exactNames: Set<String> = [
-        ".DS_Store", "Thumbs.db", ".Spotlight-V100", ".Trashes", ".fseventsd", ".TemporaryItems",
-        // ... 加えて .tide / 各種機密 dotfile（.aws / .ssh / id_rsa 等）
-    ]
-    static let prefixPatterns = [".DocumentRevisions-V100" /* 他 */]
-    static let suffixPatterns = [".pem", ".key", ".p12", ".pfx", ".keystore"]
-
-    static func shouldIgnore(relativePath: String) -> Bool {
-        let components = relativePath.split(separator: "/")
-        for component in components {
-            let name = String(component)
-            if exactNames.contains(name) { return true }
-            if prefixPatterns.contains(where: { name.hasPrefix($0) }) { return true }
-            if suffixPatterns.contains(where: { name.hasSuffix($0) }) { return true }
-        }
-        return false
-    }
-}
-```
-
-## `.syncignore` 除外ルール（M3）
-
-M3 で `<syncRoot>/.syncignore`（gitignore 構文の一般的サブセット）対応を追加した。
-詳細な確定仕様は `docs/07-M3-IMPLEMENTATION-GUIDE.md` サブタスク B と `docs/08-IMPLEMENTATION-NOTES.md` を参照。要点:
-
-- `HardcodedIgnoreRules`（機密網）は**常に最優先**で効く。`.syncignore` の否定 `!` でも覆せない。
-- `.syncignore` のユーザパターンは**新規ファイルにのみ**適用する（gitignore 純正）。
-  既に同期済み（`FileRecord.lastSyncedAt != nil`）のファイルは触らない。S3 からも勝手に消さない。
-  バックアップから外したい時はローカル削除 → 通常の削除伝播で消す。
-- `.syncignore` 自身は同期対象に含める（S3 経由で全デバイス・復旧後にも除外設定が伝わる）。
-- **新規バケットのセットアップ時のみ**、`SyncIgnoreMatcher.defaultTemplate`（`node_modules/` 等の再生成可能な開発ジャンク）を `<syncRoot>/.syncignore` に自動生成する（`AppEnvironment.completeSetup`）。ローカルに既にある／リモートにマニフェストがある（既存バケット）場合は作らない。`.git/` は含めない（復旧目的で同期対象のまま）。
-- スキップ判定は純粋関数 `IgnoreDecision.shouldSkip(relativePath:isAlreadyTracked:matcher:)` に集約し、
-  ローカル列挙（`performFullScan`）/ ローカルイベント（`processEventToQueue`）/ リモート取り込み
-  （`reconcileRemoteEntry`）の 3 経路すべてで通す。
-
-## エッジケース
-
-### ファイルが読み込み中に削除された
-
-```swift
-do {
-    let data = try Data(contentsOf: fullURL)
-    // ...
-} catch CocoaError.fileReadNoSuchFile {
-    // 読み込み中に削除された → delete として処理し直す
-    try await database.write { db in
-        var item = item
-        item.operation = "delete"
-        try item.update(db)
-    }
-    return
-}
-```
-
-### ファイルが同名ディレクトリへ置換された（種別変化 / Issue #52）
-
-`rm x.txt && mkdir x.txt && echo hi > x.txt/inner.txt` のような置換は、放置すると
-「イベントが置換後のディレクトリを upload に誤分類 → read が EISDIR で 5 回 give-up →
-旧ファイルの S3 delete 未発行 → マニフェストに `x.txt`（ファイル）と `x.txt/inner.txt` が両立 →
-pull 側がディレクトリを `(local copy …)` へ退避してファイルを復元 → 配下の DL が
-『親名がファイルで塞がっている』（POSIX 17）で毎 pull 失敗」という復元不能ループになる。
-三層で防ぐ（2026-07-04）:
-
-1. **FileWatcher はディレクトリイベントを落とさない**。rm + mkdir が latency 窓内で合流すると
-   FSEvents はフラグを OR 合成する（ItemIsFile|ItemIsDir が両立し得る）ため、watcher で IsDir を
-   弾くと検出が timing 依存になる。種別判定は `processEventToQueue` の実 stat に委ねる
-   （symlink イベントの skip は従来どおり）。
-2. **イベント分類で種別変化を検出**（`processEventToQueue`）: path が今ディレクトリなら通常の
-   ファイル処理に進ませない。追跡中（`FileRecord` あり）なら旧ファイルの delete を
-   `.replace` で enqueue（誤分類済みの upload 行も潰す）→ フルスキャンを発火して配下を拾う。
-   未追跡なら no-op（通常のディレクトリイベント）。**同 path の delete 行が既にあれば再入 no-op**
-   （S3 障害中の dir イベント再着火が `.replace` で attempts を毎回リセットし、バックオフ /
-   give-up を無効化するのを防ぐ。PR #53 レビュー #7。`triggerFullScan` 自体も実行中の再要求を
-   pending に coalesce する）。
-3. **Uploader の防衛**: `processUpload` は「path がもはや通常ファイルを指せない」open 失敗＝
-   **ENOENT（削除）/ EISDIR（ディレクトリ化・`NoFollowFileReader` init の fstat が `.isDirectory`
-   として先に判別）/ ENOTDIR（祖先のファイル化）** をまとめて **delete へ変換**する
-   （スキャン enqueue 済み行・既存の stale 行の救済。ENOTDIR は PR #53 レビュー #5）。
-
-**鏡像 = ディレクトリ → 同名ファイル置換**（PR #53 レビュー #3）も同経路で検出する:
-path が今 regular file で DB に `path/` 配下の追跡行が残っていれば、子孫の delete を
-enqueue してから通常の upload 処理へ進む（`enqueueDescendantDeletes` = PK の範囲比較
-`>= "p/" AND < "p0"` で配下を列挙。**既に delete 行がある子孫はスキップ** = 親分岐の
-再入ガードと同型で、S3 障害中のイベント再着火が `.replace` でリトライ状態を巻き戻さない。
-PR #53 再レビュー）。`mv x.dir /outside && cp f x.dir` は子のイベントが
-出ないため、放置するとマニフェストに「x.dir（ファイル）+ x.dir/…（配下）」の鏡像不整合が残り、
-ピア側は子 DL の ENOTDIR 失敗 →（削除が来ないため）再 arm の毎 pull 再試行が恒久化する。
-
-付随ガード: イベント処理の stat 失敗（イベント〜処理の間に消えた）から delete への
-フォールバックは**追跡中パスに限定**する（`.deleted` 分岐と対称。debounce 窓内に生成・消滅する
-一過性ディレクトリ等で、未 pull のリモート追跡ファイルを消し得る無条件 delete を発行しない。
-PR #53 レビュー #1）。フルスキャンは **削除検出 → upload 候補の順で enqueue** する（走査中の
-逐次 enqueue だと、起動時スキャンが検出した種別変化で子 upload が delete より先に処理され得る。
-PR #53 レビュー #6。同一バッチ内の並列処理までは順序保証せず、残る伝播窓は pull 側の再 arm が受ける）。
-
-pull 側もローカル適用のブロック失敗でシャードキャッシュを再 arm し、置換の伝播窓で 2 台目が
-取り残されないようにする（下記 Downloader 節）。
-配線テストは `ScanEventWiringTests` / `UploaderTypeChangeTests` / `NoFollowFileReaderTests` /
-`DownloaderTests`。
-
-### アトミック書き込み（テキストエディタ等）
-
-多くのエディタは「一時ファイル作成 → リネーム」でアトミック書き込みする。これは FSEvents 的には:
-- 一時ファイル `foo.txt.swp` の create
-- `foo.txt.swp` → `foo.txt` の rename（移動として通知される）
-
-`kFSEventStreamCreateFlagFileEvents` を有効にしていれば、`kFSEventStreamEventFlagItemRenamed` フラグで判別できる。M1 ではシンプルに「rename も create/delete として扱う」で十分。デバウンスにより最終状態だけ拾えればよい。
-
-### ファイル名がプラットフォーム依存
-
-macOS は NFD（分解形式）でファイル名を返す。S3 にはこれをそのまま渡す。NFC（合成形式）に正規化したくなる誘惑があるが、**しない**。ローカルの実態と一致させる方が安全。
-
-ただし、別 OS（Windows / Linux）から見るときに見えにくくなる可能性はある。これは M3 以降で議論。
-
----
-
-# M2: ダウンロード / 復元 / 定期ポーリング
-
-M2 で **S3 → ローカルの取り込み** が追加された。ローカル → S3（M1）の経路は維持しつつ、`SyncEngine` に **リモート pull ループ** を統合する形で実装している。
-
-## 全体像
-
-```
-[起動] / [3 分ごと] / [スリープ復帰] / [ネットワーク復帰]
-   │
-   ▼
-[SyncEngine.triggerRemotePull()]
-   │
-   ▼
-[ManifestReader.read()]
-   ├─ index.json を GET（最大 16 MiB に制限）
-   ├─ shard_state テーブルの etag キャッシュと突き合わせ
-   ├─ 変化したシャードのみ並列 GET（最大 8 並列、各 16 MiB 制限）
-   └─ 変化なしシャードのファイルはローカル DB から補完
-   │
-   ▼
-[全リモートファイル × 5 並列で reconcileRemoteEntry]
-   │  各 path に対して:
-   │  ├─ PathValidator で path / shardId を検証（攻撃面の遮断）
-   │  ├─ stat ゲート: ローカル stat == DB かつ DB がリモートを反映（sha/etag/versionId 一致）
-   │  │    → 完全スキップ（hash も DB write もしない・steady-state の大半／ChangeDetector.reconcileIsNoop）
-   │  ├─ ローカル無し / 未追跡 or SHA != remote → ダウンロード
-   │  ├─ ローカル無し / SHA = DB = remote → 取得しない（ローカル削除の伝播待ち・#68）
-   │  ├─ ローカルあり / SHA 一致 → markSynced（DB メタデータのみ最新化＝mtime/etag ドリフト修復・ゲートを抜けた分だけ）
-   │  ├─ ローカルあり / SHA != remote / DB と一致 → ローカル未編集 → ダウンロード（上書き）
-   │  └─ ローカルあり / SHA != remote / DB とも違う → コンフリクト
-   │       └─ Downloader.renameLocalForConflict → リモートをダウンロード
-   ▼
-[リモート削除の反映]
-   │  「更新があったシャード」に属していたが remoteMap にない path を抽出
-   │  各 path に対して Downloader.applyRemoteDeletion
-   │  └─ ローカル SHA が DB 記録と一致するときのみ削除（触られていれば残す）
-   ▼
-[lastRemoteCheckedAt 更新]
-```
-
-> **実装ノート（2026-06-16・pull コスト削減＝M4 perf）**: 未変化シャードのファイルは entry が**ローカル DB から再合成**される（上図「変化なしシャードのファイルはローカル DB から補完」）ため、steady-state では「ローカル == DB == リモート」なのに毎 pull（最短 3 分毎）で全ファイルを 2 回ハッシュ（`ThreeWayMerge` 用 + `download()` 早期 return 用）＋全行 DB write していた。さらに reconcile は `@MainActor` 上でハッシュしていた（`processEventToQueue` だけ `Task.detached` で逃がしていた）。これを `reconcileRemoteEntry` 入口の **stat ゲート**で解消した: 純粋関数 **`ChangeDetector.reconcileIsNoop`**（`preDecision == .skip`＝ローカル stat が DB の size/mtime と一致、かつ DB が entry を sha/etag/versionId そのまま反映）が真なら、`markSynced` が書く値と timestamp 以外完全一致するので**証明可能な no-op**としてスキップ（ハッシュも DB write もしない）。ゲートを抜けた `.localMatchesRemote`（実際に mtime/etag ドリフトの修復が要るケースだけ残る）は専用 `Downloader.markSynced` で DB を最新化（`download()` の二度目ハッシュを排除）。残るハッシュは `Task.detached(priority:.utility)` で off-main 化（pull 中のメインスレッドブロック解消）。ゲートは既存 SHA ゲートと同じ「size+mtime 一致 → 内容不変とみなす」前提を流用するので新たな取りこぼし窓は作らない。詳細は `docs/08-IMPLEMENTATION-NOTES.md`「reconcile 入口の stat ゲート」。
-
-## トリガー
-
-`SyncEngine.start()` で 3 つのオブザーバを起動する:
-
-1. **periodic poll**: `ConfigStore.pollingIntervalSeconds` で定期実行（既定 180 秒、最小 30 秒で clamp）
-2. **wake 復帰**: `NSWorkspace.didWakeNotification` を購読
-3. **network 復帰**: `NWPathMonitor` で `unsatisfied → satisfied` を検出
-
-これら 3 つに加え、起動時 pull（`start()`）とメニューの「S3 から取得」も含め、**すべて `triggerRemotePull(reason:)` の単一ゲート（`RemoteOpGate`）を通って直列化される**（並行 pull を構造的に禁止＝同一ファイルの並行ダウンロードによる共有 tmp 破損を防ぐ）。`reason` はログ用で、ゲート通過後にのみ出力する。
-
-**このゲートは復元（`SyncEngine.restore`）とも共有する**（#34 / D5）。pull は `tryAcquire`（busy ならドロップ）、復元は `acquire`（FIFO 待機）で取得するので、復元の atomic move と pull の reconcile / 削除反映が同一 path に同時に触れる窓が構造的に閉じる（復元は in-flight pull / 先行復元の完了を待ってから書き戻す）。`isRemotePulling` は UI 表示専用（pull 中のみ true）に残す。詳細は `docs/08`「リモート pull の単一ゲート化」。
-
-pull 進行中の再入は原則ドロップだが、**手動（`reason == .manual`）だけは pending 化し、現 pull 終了後にもう 1 周する**（coalescing・PR #9 レビュー ④。長い復元 pull 中の押下でも「最新を取得したい」意図が確実に反映される。reason は `.manualCoalesced`＝ログには `manual-coalesced`）。`reason` は coalescing の分岐条件を持ったため `SyncEngine.PullReason` enum（ログは rawValue）。poll/wake/network は次の周期が必ず来るので従来どおりドロップ。coalesced ラウンドは `running && !Task.isCancelled` も条件に含み、**`stop()` 後や呼び元タスク cancel 後に新ラウンドを開始しない**（in-flight の 1 周は走り切る）。`isRemotePulling` は `@Observable` な公開状態で、メニューバーの「Pull from S3」ボタンが pull 中はスピナー + 「Pulling…」表示に切り替わる（ボタンは enabled のまま＝押下が coalescing の入口）。
-
-## ManifestReader: 変更差分の効率取得
-
-`Tide/S3/ManifestReader.swift` が中心。
-
-```swift
-struct ReadResult {
-    var files: [String: ManifestFileEntry]  // 現在のリモート全ファイル
-    var updatedShards: Set<String>          // 今回新規 GET したシャード
-    var removedShards: Set<String>          // index から消えたシャード（=配下削除）
-}
-```
-
-- `index.json` だけ毎回取得（軽量）
-- 各シャードの etag を `shard_state` テーブルにキャッシュ
-- 差分のあるシャードだけ並列 GET
-- **変化なしシャードのファイル**はローカル DB の `files` テーブルから「最後に同期した状態」として補完する。シャード自体は再取得しない。
-
-## Downloader: 単一ファイル取得
-
-`Tide/S3/Downloader.swift` の `download(relativePath:entry:)`:
-
-```
-1. PathValidator.resolveForWrite で path 検証 + syncRoot 配下確認（祖先ディレクトリの symlink 経由のルート脱出も拒否 / F2）
-2. 既存ローカルファイル（最終コンポーネント）がシンボリックリンクなら拒否（実体書換防止）
-3. ローカル SHA == manifest SHA ならスキップ（DB のみ最新化）
-4. 中断・再開（サブ D-D3）: 決定的 tmp（dl-<sha(path)>.part）を使う。transfer_state の download 行があり
-   expected_etag == entry.etag かつ tmp が 0 < size < entry.size なら、その既存プレフィクスを読み直して
-   hasher に前置きし resumeFrom = size とする。無効（行なし / etag 不一致 / サイズ不整合）なら tmp を作り直し begin
-5. streamObject(rangeStart:)（resumeFrom > 0 なら Range: bytes=resumeFrom-）で tmp へ追記しつつ SHA-256 を逐次更新。
-   sink で受信累積長を entry.size と突合し、超過は tooLarge で破棄（M7 の DoS ガード）
-6. SHA-256 検証（manifest と byte 不一致なら tmp を破棄し行をクリアして abort＝壊れた内容を再開し続けない）
-7. mtime をマニフェストの値で復元
-8. 親ディレクトリ作成（SHA 検証後＝不一致で捨てるとき空ディレクトリの litter を残さない）
-9. DL 先が**転送中にディレクトリ化していたら中断**（-16。removeItem は再帰削除なので置換後の
-   新ディレクトリのツリーを競合退避なしに消してしまう。PR #53 レビュー #8）。そうでなければ
-   既存ファイルを removeItem → moveItem で atomic に置換
-   （replaceItemAt は .sb-* 中間ファイルを作って FSEvents を汚すので使わない）
-   ※ 8–9 の**ローカル適用のブロック失敗**（下記注記）は shard_state を再 arm してから tmp と行を
-   破棄し、次回 pull に再試行させる（Issue #52）
-10. transfer_state の行をクリア + DB を更新 + sync_log 記録
-```
-
-> ストリーミング途中のネットワーク失敗は **部分 tmp と transfer_state 行を保持**し、次回 pull で同じ tmp を `Range: bytes=N-` で再開する（N は実際の tmp サイズ＝プロセス kill 後も確実）。さらに **当該シャードの `shard_state` を sentinel 化（空 etag・`LocalDatabase.invalidateShardCache`）** する。`ManifestReader` は fetch 時点（DL 完了前）でシャードを「取得済み」記録するため、これを欠くと同一セッション中の poll/wake/network-up pull が当該シャードをキャッシュ済み扱いし、再開経路に到達しない（PR #9 レビュー ②）。**破棄系のうち SHA 不一致 / 実サイズ不一致 / サイズ超過 / 404 は再 arm しない**（決定的に再失敗するためリトライストームを避け、リモートのシャード etag 変化による自然回復に委ねる）。例外は**ローカル適用（親ディレクトリ作成 → move）の「種別置換ブロック」失敗**（Issue #52・2026-07-04）: 種別置換の伝播窓では「祖先名が既存エントリで塞がれる」ため決定的に失敗するが、塞ぐ旧エントリは後続 pull の削除反映/競合退避で除かれて**その後の再試行は成功する**ので再 arm する（再 arm を欠くと、`FileRecord` の無い端末＝初回取得側では DB 再合成にも乗らず、エラーの無いまま恒久的に取り残される）。再 arm するエラーは `Downloader.isBlockedByPathTypeChange`＝**POSIX EEXIST/ENOTDIR・Cocoa 516・自ドメイン -16（転送中ディレクトリ化）に限定**し、EACCES/ENOSPC 等の非自己回復失敗は従来どおり行/tmp 保持のまま伝播する（無差別再 arm はバックオフ機構の無い pull 側で毎 pull フル再 DL を無期限化する。PR #53 レビュー #4）。順序は [prune 順序] と同じ **invalidate 成功 → 行/tmp 破棄**（逆順だと invalidate 失敗/直後クラッシュで「行なし + 実 etag」が残り沈黙恒久停止が再発。失敗時は行/tmp を温存して次回起動の prune に委ねる。PR #53 レビュー #2）。実 DB + フェイク `RangedDownloadClient` での結合的ユニットテストは `DownloaderTests`。
->
-> 起動時の掃除（`SyncEngine.pruneOrphanTransfers`）も同じ sentinel 化を行う: resumable な download 行（tmp あり・新しい）は行と tmp を温存して invalidate のみ（再 arm）、clear する行（tmp 消失 / 7 日超 stale）も**行を落とす前に**必ず invalidate する（これを欠くと FileRecord 無し + 実 etag のままで当該ファイルが永久に再 DL されない。受け入れテスト §6-2 で発見・2026-06-07 修正）。invalidate に失敗したら行を消さず次回起動の prune に委ねる（自己回復）。prune の「分岐 → 実 I/O」配線は `TransferPruneTests`（実 DB）で回帰固定。
+ファイル削除でシャードが空になった場合は、S3 のシャードオブジェクトを `deleteShard` で消し、
+index からもエントリを除去する（空シャードは作らない）。空にならない通常更新は
+`putShard(_:ifMatch:)` + index 更新。
 
 ## 競合解決（3-way merge）
 
-M3 サブ C で **ベース / ローカル / リモートの 3 SHA による 3-way merge として形式化**した（2026-06-04）。判定は純粋関数 `ThreeWayMerge.decide(base:local:remote:) -> MergeDecision` に集約され、`SyncEngine.reconcileRemoteEntry`（pull 側）と `Downloader.applyRemoteDeletion`（削除側）の両方がこれを通す。**ベースは「最後にローカル DB へ記録した SHA」(`FileRecord.sha256`)** で、マニフェスト schema は拡張していない。挙動は下表（旧 M2 ルール）と一致し（1 点だけ後述の unreadable の扱いを安全側に厳格化）、全分岐は `ThreeWayMergeTests` で網羅する。
+M3 サブ C で **ベース / ローカル / リモートの 3 SHA による 3-way merge として形式化**した
+（2026-06-04）。判定は純粋関数 `ThreeWayMerge`（`TideCore/Core/ThreeWayMerge.swift`）に集約する。
 
-ローカル状態は `LocalState`（`.absent` / `.unreadable` / `.present(sha)`）で表す。下表の「あり」は SHA が取れた `.present`。
+> **現行の到達点**: fpOnly で生きた呼び出し元は **`decideUpload`（`ManifestUpdater.updateFileEntry`
+> 内）のみ**。pull 側判定 `decide(base:local:remote:)` の呼び出し元
+> （`SyncEngine.reconcileRemoteEntry` / `Downloader.applyRemoteDeletion`）は folderSync 世代の
+> デッドコードで、**到達は git revert による folderSync 復帰時のみ**（配線の記録は `docs/04a`）。
+> 判定表は共有純粋ロジック（回帰 = `ThreeWayMergeTests`）としてここに残す。
+
+ローカル状態は `LocalState`（`.absent` / `.unreadable` / `.present(sha)`）で表す。
+下表の「あり」は SHA が取れた `.present`。ベースは「最後に同期した時点の SHA」
+（folderSync = `FileRecord.sha256` / FP = `baseVersion` の sha）。
 
 | ローカル状態 | リモート状態 | 動作 | `MergeDecision` |
 |---|---|---|---|
 | 無 / DB 記録なし（未追跡）or SHA != remote | あり | ダウンロード（クリーンインストール復旧・再セットアップ / 削除後にリモートが変化＝リモート勝ち） | `.download` |
-| 無 / SHA = DB（前回 sync 時）= remote | あり | **取得しない**（ローカル削除の伝播待ち。削除は scan / event 側の enqueueDelete に委ねる。Issue #68） | `.awaitLocalDeletePropagation` |
-| あり / SHA = remote | あり | スキップ + DB 最新化（mtime は**ローカル stat 実値**を記録。マニフェストの秒精度値で上書きするとフルスキャンの mtime 比較が外れ毎起動再アップロードになる） | `.localMatchesRemote` |
-| あり / SHA != remote / SHA = DB（前回 sync 時） | あり | ダウンロード（remote が新しいと判断） | `.download` |
-| あり / SHA != remote / SHA != DB（or DB 記録なし） | あり | **コンフリクト**: `<stem> (local copy YYYY-MM-DD HH-MM-SS).<ext>` にリネーム → remote をダウンロード。リネーム後のファイルは FSEvents 経由で M1 アップロードキューに乗る | `.conflictThenDownload` |
-| あり / SHA = DB | 無 | ローカル削除（リモート削除の反映） | `.deleteLocal` |
-| あり / SHA != DB（or DB 記録なし） | 無 | **温存** + `sync_log` に warning（ユーザがローカルで編集中とみなす） | `.keepLocalRemoteDeleted` |
+| 無 / SHA = base（前回 sync 時）= remote | あり | **取得しない**（ローカル削除の伝播待ち。Issue #68） | `.awaitLocalDeletePropagation` |
+| あり / SHA = remote | あり | スキップ + メタデータのみ最新化 | `.localMatchesRemote` |
+| あり / SHA != remote / SHA = base | あり | ダウンロード（remote が新しいと判断） | `.download` |
+| あり / SHA != remote / SHA != base（or 記録なし） | あり | **コンフリクト**: `<stem> (local copy YYYY-MM-DD HH-MM-SS).<ext>` へ退避 → remote を取得 | `.conflictThenDownload` |
+| あり / SHA = base | 無 | ローカル削除（リモート削除の反映） | `.deleteLocal` |
+| あり / SHA != base（or 記録なし） | 無 | **温存**（ユーザがローカルで編集中とみなす） | `.keepLocalRemoteDeleted` |
 | 無 | 無 | 何もしない | `.noop` |
 
-**`.unreadable`（ファイルは在るが SHA を計算できない＝権限/I-O エラー等）の扱い**: 乖離の有無を確認できないので**データ安全側へ倒す**。リモートあり（pull）→ 無確認で上書きせず `.conflictThenDownload`（ローカルをコンフリクトコピーへ退避してから取得）／リモート無（削除）→ `.keepLocalRemoteDeleted`（温存）。旧 M2 は pull 側のハッシュ失敗を無確認 download に倒していた（＝乖離ローカルを失い得た）が、サブ C で `LocalState` に持ち上げてこの 1 点だけ厳格化した（PR #3 レビュー指摘 1）。
-
-「両方が同じ方向に変化」（ベースから local も remote も同一内容へ）は `local == remote` なので `.localMatchesRemote`（fast-forward）に入る。リネーム規則は `ConflictNamer.localCopyRelativePath(for:at:)`。dotfile / 拡張子なしも対応。
-
-**`.awaitLocalDeletePropagation`（ローカル削除の伝播待ち・Issue #68・2026-07-18）**: 追跡済みファイルをローカルで削除した直後、その削除がマニフェストへ伝播する**前に**定期 pull（既定 3 分間隔）が走ると、旧実装は「ローカル欠落 / リモートあり」を無条件 `.download` に倒していたためファイルを再ダウンロードして**復活**させていた。削除イベントの検知〜delete marker 書込が pull より遅れると必ず負ける構造だった。修正では `local == .absent && remote != nil` を base で分岐する — **`base == remote`（前回同期からリモート不変・ローカルだけ欠落）は「削除の伝播待ち」として取得しない**（`.awaitLocalDeletePropagation`。pull 側 `reconcileRemoteEntry` では info ログのみの no-op）。`base == nil`（未追跡＝クリーンインストール復旧・再セットアップ）と `base != remote`（削除後にリモートが変化＝リモート勝ち）は従来どおり `.download`。オフライン中 / アプリ停止中のローカル削除は起動時フルスキャン（`FileRecord` と実ファイルの突合）が削除検出を担うため、この変更で取りこぼしは生じない。**FileRecord は温存する**（削除しない）— scan の削除検出が record vs 実ファイルの突合である以上、record を消すとフルスキャンでも削除を検出できなくなるため。関連: 再セットアップ直後の採用未了ウィンドウ（base 自体がまだ無い）は **#69 で解消（2026-07-18）** — event `.deleted` は record 不在でも「直近 pull のリモート既知集合（`SyncEngine.remoteKnownPaths`・シャード単位マージ）掲載 ∧ ignore 非該当」なら delete を enqueue し（`shouldPropagateDeletion`）、pull 側は「record 無し × ローカル不在 × 同 path の delete 行 pending」を取得しない（`hasPendingDelete` ガード＝enqueue と in-flight pull の逆転レースを閉じる）。残余 = 初回 read() 完了前の数秒窓・採用途中の再起動後（`remoteKnownPaths` は非永続）・採用未了ウィンドウ中の **dir 単位削除**（dir rename は子のイベントが出ず、dir path はマニフェスト非掲載のため黙殺継続 — PR #71 レビュー観察 2）は従来どおり黙殺 → 一度復活 → 再削除で収束（versioning 90 日で可逆。ただし dir 単位の再削除〈Finder ゴミ箱〉は復活後も event で拾えないため「再削除 + 次回フルスキャン」で収束・`rm -rf` なら event 即収束 — 追跡済み dir 削除の従来挙動と同一）。回帰は `ThreeWayMergeTests`（判定表）と `ReconcileWiringTests`（配線 = 非取得 / FileRecord 温存 / base != remote は取得 / #69 ガード 3 件）と `ScanEventWiringTests`（`shouldPropagateDeletion` 真理値表 + `mergedRemoteKnownPaths` マージ規則 3 点）。
+**`.unreadable`（在るが SHA を計算できない）の扱い**: 乖離の有無を確認できないので**データ安全側**へ
+倒す — リモートあり → `.conflictThenDownload`（退避してから取得）/ リモート無 →
+`.keepLocalRemoteDeleted`（温存）。リネーム規則は `ConflictNamer.localCopyRelativePath(for:at:)`
+（時系列ソート可能書式・dotfile / 拡張子なし対応）。`.awaitLocalDeletePropagation`（#68）と
+再セットアップ採用未了ウィンドウ（#69）の folderSync 側配線は `docs/04a` を参照
+（fpOnly ではローカル削除が `deleteItem` コールバックで同期的に伝播するため、この pull レース自体が
+存在しない）。
 
 ### アップロード側の並行更新検出（last-writer-wins 解消・Issue #25 / A・2026-06-23）
 
-競合検出を **アップロード側にも対称適用**した（旧「既知の制限」を解消）。並行更新は常に「2 番目の書き手」で検出される（1 番目は書込時 remote == base なので無競合）。
+競合検出はアップロード側にも対称適用されており、**FP 拡張の書込もこの経路を通る**（現行の主経路）。
+並行更新は常に「2 番目の書き手」で検出される（1 番目は書込時 remote == base なので無競合）。
 
-- **判定**: 純粋関数 `ThreeWayMerge.decideUpload(base:uploading:remote:) -> UploadMergeDecision{proceed, alreadyUpToDate, conflict}`。`base = FileRecord.sha256`、`uploading` = 今アップロードした sha、`remote` = 権威シャードの `shard.files[path]?.sha256`。`remote==nil`→`proceed`（再作成）、`remote==uploading`→`alreadyUpToDate`（別書き手が同一内容を確定済み・書込不要）、`remote==base`→`proceed`（通常）、それ以外→`conflict`。
-- **検出**: `Uploader.ManifestUpdater.updateFileEntry` が `withConditionalRetry` 内のフェッチ済みシャードから権威 entry を読み（追加 GET なし）判定。`.conflict` は `SyncError.uploadConflict(path:remoteEntry:)` を投げて RMW を安全中断（412/409 クラシファイアにマッチせず即伝播）。412/409 再フェッチ時は同 retry 内で再評価＝無音上書きの窓は実質ゼロ。`.alreadyUpToDate` は put せず DB をリモート版 identity（etag/versionId）へ合わせて次回 pull を no-op に。
-- **解決（pull 側 `.conflictThenDownload` と対称）**: `SyncEngine.resolveUploadConflict`（回復可能順序）。① キュー行を **item.id 基準で除去**（give-up 加算なし）→ ② ローカル編集を `(local copy …)` へ退避（`renameLocalForConflict`）→ ③ リモート版を **versionId 指定**で正規パスへ取得（`Downloader.download(versionId:clearQueueByPath:false)`。本体 PUT が「最新」を自分の内容に変えているため最新取得では相手版を取れない）→ ④ `.conflictCopyCreated` を通知。退避コピーは新規ファイルとして再アップロードされる。
-- **回復可能性**: リネームはキュー行除去を決して上回らない（さもないと canonical 欠落 + 行残存で再処理が delete-marker を打つ）。rename/download が失敗しても次回 pull が `.conflictThenDownload` / `local-absent→download` で自己回復する。
-- **残存レース / orphan version（いずれも data loss でない・versioning backstop）**: 本体 PUT は判定の前に走るため、`.conflict`／`.alreadyUpToDate` のどちらでも自分の PUT 版がマニフェスト未参照の orphan S3 version として残る（`.conflict` は捨てた版に帯域を消費・`.alreadyUpToDate` は内容同一なので無害）。さらに DB 失敗フォールスルー（行除去に失敗して generic backoff へ落ちる経路）ではリトライのたびに再 PUT＝orphan が増える。いずれも**すべての読みは manifest の versionId 経由**なので orphan は決して配信されず、ライフサイクルの incomplete-multipart / noncurrent version 失効で回収される。事前 GET（＋ TOCTOU 窓）を避けるための設計トレードオフ。加えて 2 台同時 `.conflict` は互いのコピーができ得る（稀・自己収束）。
+- **判定**: 純粋関数 `ThreeWayMerge.decideUpload(base:uploading:remote:) ->
+  UploadMergeDecision{proceed, alreadyUpToDate, conflict}`。`base` = 最後に同期した sha
+  （FP = `baseVersion` / folderSync = `FileRecord.sha256`）、`uploading` = 今アップロードした sha、
+  `remote` = 権威シャードの現 entry sha。`remote==nil`→`proceed`（作成）、
+  `remote==uploading`→`alreadyUpToDate`（別書き手が同一内容を確定済み・書込不要）、
+  `remote==base`→`proceed`（通常）、それ以外→`conflict`。
+- **検出**: `ManifestUpdater.updateFileEntry` が RMW 内のフェッチ済みシャードから権威 entry を読み
+  （追加 GET なし）判定。`.conflict` は `SyncError.uploadConflict(path:remoteEntry:)` を投げて RMW を
+  安全中断（412/409 クラシファイアにマッチさせず即伝播）。
+- **解決（FP 側・現行）**: `ExtensionWriter.modifyFileContents` が `uploadConflict` を捕捉し、
+  ローカル編集内容を **conflict copy の別 path**（`ConflictNamer.localCopyRelativePath`）として
+  上げ直す（`base: nil` で entry 確定）。**正規パスはリモート版が勝つ**（pull 側
+  `.conflictThenDownload` と対称の意味論）。folderSync 側の解決
+  （`SyncEngine.resolveUploadConflict` = キュー行除去 → リネーム退避 → versionId 指定 DL）は
+  `docs/04a`。
+- **残存レース / orphan version（いずれも data loss でない・versioning backstop）**: 本体 PUT は
+  判定の前に走るため、`.conflict` / `.alreadyUpToDate` のどちらでも自分の PUT 版がマニフェスト
+  未参照の orphan S3 version として残る。**すべての読みは manifest の versionId 経由**なので
+  orphan は決して配信されず、ライフサイクルの noncurrent 失効で回収される（事前 GET + TOCTOU 窓を
+  避けるための設計トレードオフ）。2 台同時 `.conflict` は互いのコピーができ得る（稀・自己収束）。
 
-全分岐は `ThreeWayMergeTests`（`decideUpload` テーブル）と `UploaderConflictTests`（解決の結合）で固定する。
+全分岐は `ThreeWayMergeTests`（`decideUpload` テーブル）で固定する。
 
-## セキュリティゲート
+## 除外ルール
 
-- マニフェスト由来の `relativePath` / `shardId` は **すべて** `PathValidator` を通す（`..` / 絶対パス / NUL / バックスラッシュ等を拒否し、解決後 URL が syncRoot 配下にあることまで確認）
-- マニフェスト系の `getObject` は `maxBytes` 16 MiB（OOM 自己防衛）。通常ファイルの DL は `streamObject` でチャンク・ストリーミング書込（メモリ有界）。旧 200MiB インメモリ cap は撤廃。**復元の DoS ガード（M7）は `Downloader` 側**: streaming の sink で受信累積長を**マニフェストの真実サイズ `entry.size`** と突合し、超過は破棄して仕切り直す（巨大本文によるローカルディスク枯渇を復元経路でも防ぐ＝M4 を復元でも維持）。アップロード上限とは別物（復元のローカル書き戻し方向はユーザ上限を適用しない。fpOnly の S3 内復元だけは再アップロードを伴うため上限を DL 前に適用 — M5 Track B-2）
-- フルスキャンはシンボリックリンクを追従しない。走査は再帰下降（`walkSyncTree`・#64）で symlink（dir リンク含む）を**スタックへ push しない**＝構造的に降りない。`.syncignore` の discovery 走査（`loadLayeredIgnore`・pull 末尾専用）は enumerator ベースのままで、symlink item は `continue` のみ（deep enumeration は symlink へそもそも再帰しない。**symlink item で `skipDescendants()` を呼んではならない** — 無関係な隣接ディレクトリへの再帰がスキップされ、実在する追跡ファイルが削除検出に乗って S3 へ誤 delete される。Issue #54）
-- Downloader の書き込み先（最終コンポーネント）がシンボリックリンクなら拒否
-- 書込・削除経路（Downloader の `download` / `applyRemoteDeletion` / `renameLocalForConflict`）は `PathValidator.resolveForWrite` を通し、**祖先ディレクトリの symlink 経由のルート脱出**も拒否する（F2 / M6）
-- **Uploader は `O_NOFOLLOW` の単一 FD で open し、最終コンポーネントが symlink なら ELOOP で拒否してキューから外す。ハッシュ計算と本体読込/パート送信は同一 FD から行うので、「ハッシュ用 open → 本体用 open」の 2 回 open に存在した TOCTOU 窓を解消した（M5 / F3 / L9）**。祖先 symlink は対象外で `resolveSafely` の字句検証とスキャンの skip に委ねる
+### ハードコード除外（機密網）
 
-詳細は `security/critical.md` の C1 / C2、`security/medium.md` の M3 / M4 / M5 / M6、`security/low.md` の L9 を参照。
+`HardcodedIgnoreRules`（`TideCore/Core/IgnoreRules.swift`）。プロパティは `exactNames`
+（OS ジャンク + `.tide` + `.aws`/`.ssh`/`id_rsa` 等の機密 dotfile）、`prefixPatterns`、
+`suffixPatterns`（`.pem`/`.key`/`.p12`/`.pfx`/`.keystore`）、判定メソッドは
+`shouldIgnore(relativePath:)`。**常に最優先**で効き、`.syncignore` の否定 `!` でも覆せない。
+新しい dotfile / 拡張子で機密が紛れ込みそうなら即追加する運用（CLAUDE.md 参照）。
+
+### `.syncignore`（ユーザ除外・M3）
+
+gitignore 構文の一般的サブセット。詳細な確定仕様は `docs/07-M3-IMPLEMENTATION-GUIDE.md`
+サブタスク B と `docs/08` を参照。要点:
+
+- ユーザパターンは**新規ファイルにのみ**適用する（gitignore 純正）。既に同期済みのファイルは
+  触らない。バックアップから外したい時はローカル削除 → 通常の削除伝播で消す。
+- `.syncignore` 自身は同期対象に含める（S3 経由で全デバイスに伝わる）。ネスト `.syncignore` は
+  git 風の階層適用（浅い→深い順に合成・深い層が上書き）。
+- **seed（#97 で S3 直書き化）**: 新規バケットのセットアップ時のみ、`SyncIgnoreMatcher.defaultTemplate`
+  を **S3 の `files/.syncignore` へ直接 PUT** し `ManifestUpdater.updateFileEntry(base: nil)` で
+  entry を確定する（`AppEnvironment.seedDefaultSyncIgnoreIfNewBucket`・best-effort 非致命）。
+  「新規バケット」判定は `getIndex() == nil` に加え、**損傷バケット検出の 2 段プローブ**
+  （`.tide/shards/` と `files/` の `listObjectVersions` に何か見えたら seed しない — 生存カスタム
+  `.syncignore` の置換や孤児化 index の新造を防ぐ）付き。呼び出しは FP ドメイン `enable()` より
+  **前**（拡張の先行書込による新規バケット誤判定の防止）。
+- **現行の適用点（fpOnly）は 2 つ**: ① FP 拡張の **`createItem`**（新規流入口）が
+  `IgnoreDecision.shouldSkip(relativePath:isAlreadyTracked:matcher:)`（folderSync 3 経路と同一関数・
+  同一優先順位）で判定し、該当は `NSFileProviderError(.excludedFromSync)` = ローカル温存・S3 非汚染。
+  ② **`modifyItem` の move（rename/reparent）経路**も独立の適用点 — ファイルは**新 path** に
+  `shouldSkip` を適用し、該当時は後始末予約 `exclusionCleanups.add(旧 path)` を積んだうえで
+  `.excludedFromSync` を返す（追跡済みファイルを ignore 対象名へリネームすると S3 側は旧 path の
+  後始末で収束・ローカルは温存）。dir は `layered.evaluate(新 path + "/") == .ignored` で判定
+  （`FileProviderExtension` の move 処理・後始末予約の永続化は `docs/03`「fpOnly の永続状態」の
+  `fileprovider-exclusion-cleanups.json`）。
+  matcher の構築はローカルフォルダが無いため**マニフェスト経由**: `ManifestIgnoreCache` が同期済み
+  `.syncignore` 群を **versionId 固定 + sha 検証**で取得し `LayeredSyncIgnore` を組む
+  （`security/low.md` L17）。folderSync 世代の 3 適用点（scan / event / reconcile）は `docs/04a`。
+
+## エッジケース
+
+### 種別変化（file ⇄ dir）
+
+FP 経路では item identifier の kind 織り込み（`f:`/`d:`・M5 Phase 5-1）により「旧 kind の delete +
+新 kind の update」= 別 id の独立変化として配信され、fileproviderd の同一 id ingest 合成問題は
+構造的に存在しない。folderSync 世代の同名置換バグと三層防御（**ファイルが同名ディレクトリへ
+置換された** / Issue #52）の記録は `docs/04a` を参照（コア修正は温存コードに残存・回帰は
+`ScanEventWiringTests` 等）。
+
+### ファイル名がプラットフォーム依存
+
+macOS は NFD（分解形式）でファイル名を返す。S3 にはこれをそのまま渡す。NFC（合成形式）への正規化は
+**しない**。ローカルの実態と一致させる方が安全。
+
+## セキュリティゲート（fpOnly）
+
+- リモート（マニフェスト / fileproviderd）由来の `relativePath` / `shardId` は **すべて**
+  `PathValidator` を通す。FP 拡張には syncRoot が無いため**字句検証**
+  （`validateRelativePath` = `..` / 絶対パス / NUL / バックスラッシュ / 空コンポーネント拒否）を
+  S3 キー組み立て前に全件適用する（パス合成は `FileProviderWritePolicy.childPath` 経由）。
+- マニフェスト系の `getObject` は `maxBytes` 16 MiB（OOM 自己防衛）。本体 DL は `streamObject` で
+  チャンク・ストリーミング（メモリ有界）+ 受信累積長を `entry.size` と突合（超過破棄 = DoS ガード）。
+- アップロードは **`NoFollowFileReader`（`open(O_RDONLY | O_NOFOLLOW)`）の単一 FD** で行い、
+  最終コンポーネントが symlink なら拒否。ハッシュ計算と本体読込 / パート送信が同一 FD なので
+  2 回 open の TOCTOU 窓は無い（M5 / F3 / L9）。
+- FP `createItem` の除外強制（機密網 / symlink / `.syncignore`）は上記「除外ルール」のとおり。
+- folderSync 世代のゲート（スキャン走査の symlink 非追従 / `resolveForWrite` の祖先 symlink 拒否 /
+  Downloader の書込先検証）は `docs/04a` と `security/` 各票を参照。
+
+詳細は `security/critical.md` C1 / C2、`security/medium.md` M3–M6、`security/low.md` L9 / L17。

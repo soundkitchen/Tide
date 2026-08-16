@@ -4,7 +4,7 @@ import Foundation
 /// `IgnoreDecision` / `ThreeWayMerge` と同じく副作用なしの純粋関数に切り出し、
 /// `ChangeDetectorTests` で全分岐を固定する。
 ///
-/// docs/04-SYNC-LOGIC.md の仕様（size/mtime 不一致 → SHA 再計算 → ハッシュ一致なら
+/// docs/04a-SYNC-LOGIC-FOLDERSYNC.md の仕様（size/mtime 不一致 → SHA 再計算 → ハッシュ一致なら
 /// mtime のみ DB 更新・アップロードしない）を実装する two-step 構成:
 /// 1. `preDecision`: stat 値だけで「スキップ / enqueue / hash 検証が必要」を判定
 /// 2. `postHash`: 計算した SHA と DB 記録の SHA を比較し「mtime 修復のみ / enqueue」を判定
