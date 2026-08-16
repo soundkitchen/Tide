@@ -243,15 +243,17 @@ final class AppEnvironment {
         let initialStatus = await FileProviderController.domainStatus()
         if initialStatus != .enabled {
             AppLogger.ui.info("FP-only mode: File Provider domain is not active (status: \(String(describing: initialStatus), privacy: .public)); syncing is paused until it is enabled")
-        } else {
-            // 有効で立ち上がるときは stale な「Tide is not syncing」通知を掃除する（#103 受け入れ
-            // 2026-08-16 で発見）: 復帰がウィザード（completeSetup）経由だと signaler がここで
-            // 作り直されるため、無効状態を保持していた旧 signaler の復帰エッジ（撤去の通常経路）が
-            // 発火しない。アプリ再起動をまたいだ復帰も同様（新プロセスの signaler は無効状態を
-            // 引き継がない）。撤去は冪等（不在の識別子は no-op）なので enabled 起動で常に呼んでよい。
-            notifications.removeDelivered(
-                identifier: NotificationPolicy.content(for: .fileProviderDisabled).identifier)
         }
+        // stale な「Tide is not syncing」通知の掃除は**無条件**（#103 受け入れ 2026-08-16 で発見・
+        // 無条件化は PR #109 再レビュー指摘）: 復帰がウィザード（completeSetup）経由だと signaler
+        // がここで作り直されるため、無効状態を保持していた旧 signaler の復帰エッジ（撤去の通常
+        // 経路）が発火しない。アプリ再起動をまたいだ復帰も同様。enabled 限定だと取得失敗
+        // （nil = fileproviderd 無応答）の起動で漏れ、以後の通常経路でも回収できない（新 signaler
+        // は false 始まりのため enabled 観測はどちらのエッジも成立しない）。撤去は冪等で、本当に
+        // 無効な起動でも直後の初回 checkOnce が無効エッジで同一 identifier の通知を再発行する
+        // （従来から毎起動で置換再発行）ため、可視挙動は退行しない。
+        notifications.removeDelivered(
+            identifier: NotificationPolicy.content(for: .fileProviderDisabled).identifier)
 
         let signaler = RemoteChangeSignaler(
             intervalSeconds: config.pollingIntervalSeconds,

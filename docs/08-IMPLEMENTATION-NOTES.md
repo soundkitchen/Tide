@@ -1023,8 +1023,10 @@ Keep Downloaded（#40 の残フェーズ）の対向操作。
   **撤去はエッジ経路だけでは足りない（受け入れ 2026-08-16 で発見）**: 復帰がウィザード
   （completeSetup）経由だと signaler が作り直され、無効状態を保持していた旧 signaler の
   復帰エッジが発火しない（アプリ再起動をまたいだ復帰も同様）。このため
-  `launchFPOnlySignalerFromCurrentConfig` は **enabled で立ち上がるとき常に配達済みを掃除**する
-  （冪等・不在なら no-op）。さらに **in-flight post と復帰エッジのレース**（PR #109 レビュー
+  `launchFPOnlySignalerFromCurrentConfig` は **起動時に無条件で配達済みを掃除**する
+  （冪等・不在なら no-op。enabled 限定だと取得失敗〈nil〉の起動で漏れて以後回収不能 =
+  PR #109 再レビュー指摘。本当に無効な起動でも初回 checkOnce の無効エッジが同一 identifier で
+  再発行するため可視挙動は退行しない）。さらに **in-flight post と復帰エッジのレース**（PR #109 レビュー
   指摘 1: post は許可プロンプト応答待ち等で長く suspend し得るため、復帰エッジの撤去が未配達
   no-op になった後に stale が配達され得る）は、**post 完了後に現在の観測
   （`signaler.fpDomainDisabled`）を再読し、もう無効でなければ即撤去**で閉じる。
