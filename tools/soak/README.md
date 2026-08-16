@@ -57,6 +57,15 @@ fpOnly（`ConfigStore.syncMode`）ではアプリが DB / 同期フォルダに�
 `--fp-only` は突合面を S3 側だけに縮退する。切替後ライブ soak（#40 事後ゲート =
 persistent DRIFT ゼロの実績）の観測係として `--watch` / cron で定期実行する。
 
+> **`tide.syncMode` は「外部ツール契約キー」（v0.3.0 #96・2026-08-08）**: アプリの boot は
+> このキーを**読まない**（無条件 fpOnly + bootstrap / completeSetup の正規化書込で恒久 fpOnly）。
+> キーが残る理由は本スクリプトの 4 参照 — ① 突合ガード（下記 exit 2）② DB 凍結見張りの武装条件
+> ③ `mode:switched` WARN ④ `mode:config-mismatch` WARN — であり、キー廃止は観測の静かな縮退に
+> なるため不可。正規化により保存値は恒久 fpOnly = スクリプト・Makefile・launchd 常駐は**無変更・
+> 再インストール不要**（例外 = factoryReset はキーを一時削除する → 再セットアップ完了後に
+> `make soak-agent-restart` で基準を取り直す）。なお #98（2026-08-17）で旧同期フォルダ・凍結 DB は
+> 消滅済みのため、通常スコープ（`--fp-only` 無し）は現環境では成立しない（突合ガードが exit 2 で守る）。
+
 - **残す**: index ↔ shards 構造整合 / マニフェスト ↔ S3 実体（孤児含む）/
   Caches tmp 残骸 / リソース観測（本体 + FP 拡張）。
 - **落とす**: DB 系すべて（DB↔マニフェスト・ローカル↔DB・shard_state・`transfer_state`・

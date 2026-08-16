@@ -32,10 +32,10 @@ macOS のクリーンインストール後の復旧を主目的とした、Dropb
 
 - macOS 専用、Swift + SwiftUI、メニューバー常駐アプリ
 - 単一同期フォルダ → 単一 S3 バケットの双方向同期
-- 全ファイルをローカル保持（FSEvents モード。**M5 でファイルオンデマンド = File Provider モードを追加中** — dataless プレースホルダをオンラインのみ実体化する `~/Library/CloudStorage/Tide` ドメイン。既存 FSEvents モードと opt-in 並走。進捗は `09-DEFERRED.md` M5 節）
+- ファイルオンデマンド（File Provider モード = **唯一の稼働モード**。dataless プレースホルダをオンラインのみ実体化する `~/Library/CloudStorage/Tide` ドメイン。**v0.3.0 でユーザー目線から旧 FSEvents（folderSync）モードを削除** — boot 固定 #96 / ウィザード fpOnly ネイティブ化 #97 / 旧同期フォルダ削除 #98。コード本体はデッドコード温存 = 物理撤去は 2 台 soak 後。経緯は `09-DEFERRED.md` M5 節・v0.3.0 節）
 - 暗号化なし（クライアント側暗号化なし、S3 側暗号化は AWS デフォルトに従う）
-- ローカル変更は FSEvents + デバウンスで即時アップロード
-- リモート変更は起動時・スリープ復帰時・ネットワーク復帰時・定期ポーリング（デフォルト3分）で検知
+- ローカル変更は File Provider 拡張の書込コールバックが S3 へ直接反映（旧 FSEvents + デバウンス方式は v0.3.0 で到達不能化・コード温存）
+- リモート変更は `RemoteChangeSignaler`（index HEAD の ETag 比較・既定 3 分間隔）で検知し FP ドメインへ signal
 - 3-way merge による双方向同期
 - 競合時は両方保持してリネーム
 - S3 バージョニング有効化必須、ライフサイクルルール自動投入
@@ -109,8 +109,9 @@ macOS のクリーンインストール後の復旧を主目的とした、Dropb
 
 当初「対象外」としていたファイルオンデマンドを対象に昇格した（v0.2.0 出荷後・2026-07-02 ユーザ決定）。
 `NSFileProviderReplicatedExtension` により `~/Library/CloudStorage/Tide` ドメインへ dataless
-プレースホルダを列挙し、開いた瞬間に S3 から実体化する。**既存 FSEvents モードは残して opt-in 並走**
-（未ソークの新モードが既存バックアップ経路を汚さない）。3 ターゲット構成（`TideCore` framework +
+プレースホルダを列挙し、開いた瞬間に S3 から実体化する。当初は**既存 FSEvents モードと opt-in 並走**
+（未ソークの新モードが既存バックアップ経路を汚さない）で開発し、その後 FP-only 稼働へ切替（2026-07-25）→
+v0.3.0 でユーザー目線から folderSync を削除した（下記）。3 ターゲット構成（`TideCore` framework +
 `Tide` app + `TideFileProvider.appex`）。設計・進捗・フェーズ分割の詳細は `09-DEFERRED.md` の M5 節、
 確定した実装判断は `08-IMPLEMENTATION-NOTES.md` を参照。
 
@@ -127,9 +128,14 @@ macOS のクリーンインストール後の復旧を主目的とした、Dropb
   ドメイン identifier `"poc"` → `"main"`（bootstrap の自動作り直し移行付き）
 - ✅ FP 一本化・切替前の前提整備（Track A・2026-07-21）: #69（採用未了ウィンドウの削除黙殺・PR #71）と
   #67（pull 削除反映の空 dir 殻・PR #72）を修正、soak 負荷注入スクリプト（`tools/soak/churn.py`・PR #73）を整備
-- ⏸ 以降: **1 台加速 soak**（2 台 soak が当面不可のため #40 の代替ゲートとする・ユーザ確定 2026-07-18）→
-  **FP-only 稼働モード実装**（FSEvents コードは温存・モード可逆）→ 切替。
-  コード撤去（真の一本化）は FP-only 無事故実績 + 2 台 soak 後の将来段階。詳細は `docs/09` の #40 節・M5 節
+- ✅ FP-only 稼働モードへ切替（2026-07-25）: Track B（`ConfigStore.syncMode` + `RemoteChangeSignaler` +
+  S3 内復元 + UI 縮退 + `soak-check --fp-only`）実装 → 切替ランブック実施 → launchd 常駐 soak 監視（#84）
+- ✅ #40 の 1 週間ライブ soak 判定合格（2026-08-03・persistent DRIFT ゼロ）
+- ✅ **v0.3.0: ユーザー目線からの folderSync 削除**（設計 2026-08-06 → 完了 2026-08-17）:
+  #96 boot fpOnly 固定 + Sync mode UI 撤去（2026-08-08）/ #97 ウィザード fpOnly ネイティブ化（2026-08-11）/
+  #98 旧同期フォルダ `~/Tide` 削除 + docs 反映（2026-08-17）。設計原本 = `docs/09`「v0.3.0」節
+- ⏸ FSEvents コードの物理撤去（真の一本化）は FP-only 無事故実績 + 2 台 soak 後の将来段階（据え置き）。
+  詳細は `docs/09` の #40 節・M5 節
 
 ## 技術スタック
 
@@ -139,7 +145,7 @@ macOS のクリーンインストール後の復旧を主目的とした、Dropb
 - **AWS SDK**: AWS SDK for Swift（公式）
   - マルチパート / レンジダウンロードは**自前ラッパ方式**で実装。`aws-sdk-swift-s3-transfer-manager` は不採用（上記 M3 サブ A・D を参照）
 - **SQLite**: GRDB.swift
-- **ファイル監視**: CoreServices (FSEvents)
+- **変更検知**: File Provider 書込コールバック + `RemoteChangeSignaler`（index HEAD ETag 比較。旧 CoreServices/FSEvents 監視は v0.3.0 で到達不能のデッドコード温存）
 - **認証情報保管**: Keychain (Security framework)
 - **ビルド**: Xcode + Swift Package Manager
 - **配布**: 自分のマシンに `xcodebuild` でビルドして `~/Applications/` に配置

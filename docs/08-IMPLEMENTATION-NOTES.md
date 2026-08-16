@@ -138,6 +138,11 @@ FP ドメイン内のファイル編集（`modifyItem` の .contents）と削除
 > **v0.3.0 #96（2026-08-08）で更新**: bootstrap のモード分岐と「既定 folderSync」は撤廃 —
 > boot は無条件 fpOnly・`ConfigStore.syncMode` は外部ツール契約キーへ転生（下記 #96 節）。
 > 本節のモード分岐まわりの記述は当時の記録。`RemoteChangeSignaler` の仕様は現行のまま有効。
+>
+> **v0.3.0 #98（2026-08-17）で追記**: 本節の「凍結温存 = モード可逆性の要」は**既に成立していない** —
+> 凍結 DB / `shard_state` は #97 受け入れ（2026-08-11）の factoryReset → fpOnly ネイティブ再セットアップで
+> 消滅し、旧同期フォルダ `~/Tide` も #98 で削除した。folderSync へ戻す手段は git revert +
+> `docs/09`「revert 復帰ランブック」の**推奨経路（クリーン再セットアップ）のみ**（増分復帰は資産消滅により不能）。
 
 FP 一本化（切替前 soak ゲート撤廃 = `docs/09` #40 節・2026-07-22 ユーザ確定）の Track B 第 1 段。
 
@@ -188,6 +193,7 @@ FP 一本化（切替前 soak ゲート撤廃 = `docs/09` #40 節・2026-07-22 �
 > **v0.3.0 #96（2026-08-08）で更新**: 「Sync mode」セクションと folderSync 側フォールバック
 > （「Open Sync Folder」）は撤去（下記 #96 節）。fpOnly 側の表示縮退（fpOnlyHeader / 状態カード /
 > Sync Activity・Version History の扱い）は現行のまま有効。
+> なお本節が言う「凍結温存中の同期フォルダ」（旧 `~/Tide`）は **#98（2026-08-17）で削除済み**。
 
 - **設定画面「Sync mode」セクション**: radioGroup の Picker（Folder sync / File Provider only）。
   他設定と同じ @State write-through（`ConfigStore.syncMode` へ即保存）だが**適用は次回起動から**
@@ -348,9 +354,13 @@ fpOnly ではアプリが DB / syncRoot に触れない（凍結温存）ため�
 
 #### FP-only 稼働モード B-4 = 切替ランブック実施（M5 Track B・2026-07-25 全項目パス）
 
+> **v0.3.0 #98（2026-08-17）で追記**: 「旧同期フォルダは凍結温存」はこの時点の運用 —
+> その後 #97 受け入れの factoryReset で凍結 DB / `shard_state` が消滅し、旧同期フォルダ
+> `~/Tide` 自体も #98 で削除した（下記「v0.3.0: ユーザー目線からの folderSync 削除」節）。
+
 切替ランブック（tmp 使い捨て・実施後削除）を実施し、**FP-only 稼働モードへ切替済み・ライブ
 soak 開始**。以後この Mac の同期は FP レプリカ（`~/Library/CloudStorage/Tide`・実体
-`Tide-Tide`）が唯一の作業面で、旧同期フォルダは凍結温存。
+`Tide-Tide`）が唯一の作業面で、旧同期フォルダは凍結温存（当時）。
 
 - **事前整備**: soak-watch 非稼働確認・切替前ベースライン `make soak-check` 整合 OK
   （manifest/db/s3 = 327・local 329・INFO は `.DS_Store` 2 件のみ）。
@@ -1075,6 +1085,48 @@ Keep Downloaded（#40 の残フェーズ）の対向操作。
 - **副次知見**: メニューバーアイコンの通常（なめらかな波）と異常（ギザギザ波）の差は 18px
   実寸では気づきにくい（受け入れ中のユーザ指摘）。検出機構（本 Issue）のスコープ外 —
   差別化の改善（色 / 記号バッジ等）が要るなら別 Issue。
+
+#### v0.3.0: ユーザー目線からの folderSync 削除 = 総括 + #98 実施記録（2026-08-17）
+
+設計原本 = `docs/09`「v0.3.0: ユーザー目線からの folderSync 削除」節（危険知見・確定方針・
+revert 復帰ランブックを含む）。実施 3 段の記録は本ファイルに分散しているため、ここに集約する:
+
+- **#96 boot fpOnly 固定 + Sync mode 設定 UI 撤去**（2026-08-08・PR #100）= 上記「boot fpOnly 固定 +
+  Sync mode 設定 UI 撤去」節
+- **#97 ウィザード fpOnly ネイティブ化**（2026-08-11・PR #101）= 上記「ウィザード fpOnly
+  ネイティブ化」節（受け入れ発見バグは #102 / #103 として個別解消済み = 各節）
+- **#98 旧同期フォルダ `~/Tide` 削除 + docs/security 反映**（2026-08-17）= 本節（下記）
+
+`MARKETING_VERSION` は #98 と同一コミットで 0.3.0 へ（`project.yml`）。FSEvents コード本体の
+物理撤去は従来ゲート（FP-only 無事故実績 + 2 台 soak 後）のまま据え置き。
+
+**#98 実施記録（2026-08-17・全項目パス）**:
+
+- **前提確認**: #96 / #97 マージ済み・マージ後 main ビルド稼働・`soak-check-fp` 整合 OK
+  （manifest 5625 = s3 5625）。soak 常駐 agent が**未インストール**だったため再インストール
+  （観測は 8/15 で停止していた = 約 2 日の観測空白。再開後の初周回 drift 0 / warn 0）。
+- **付随修正**: `soak_watch_agent.sh` の status 表示が**未インストール時のみ** bash の多バイト
+  パース（`"$PLIST）"` = 変数名直後の全角閉じ括弧を変数名に飲み込む・bash 3.2 / 5.3 両方で再現）で
+  `unbound variable` エラー終了していた → `${PLIST}` の波括弧化で修正（インストール済み運用では
+  踏まないため #84 導入以来無症状だった）。
+- **スナップショット**: `tar` で `~/tmp/Tide-frozen-20260817.tgz`（731MB）へ取得（任意項目・
+  ユーザ指定で保存先を `~/tmp` に変更）。
+- **削除**: `rm -rf ~/Tide`（759MB・`.DS_Store` 除く 327 ファイル）。ゴミ箱経由禁止の根拠 =
+  `syncRootBookmark` のファイル ID 追跡（Issue #98 本文・`docs/09` 参照）— ただし下記のとおり
+  当該キーは既に存在しなかった（防御として手順は維持した）。
+- **温存対象の消滅（事前想定との差分・最重要の記録**）: Issue #98 が「温存（触らない）」と
+  していた **凍結 DB（`db.sqlite`/`-wal`）・`shard_state`・group defaults の `syncRootPath` /
+  `syncRootBookmark` キーは、#98 実施時点で既に存在しなかった**。#97 受け入れ（2026-08-11）の
+  factoryReset → fpOnly ネイティブウィザード再セットアップが App Group コンテナ・defaults・
+  Keychain を消し、新ウィザードは folderSync 系キーを書かないため（実測: group defaults は
+  `bucketName` / `region` / `deviceId` / `setupCompleted` / `syncMode` / `fileProviderDomainEpoch`
+  の 6 キーのみ）。よって **revert 復帰の「増分復帰」経路（凍結 DB + etag 差分）は実行不能**になり、
+  folderSync へ戻す手段は git revert + 推奨経路（factoryReset → folderSync ビルドで
+  クリーン再セットアップ）のみ（`docs/09` ランブックに同旨を反映済み）。削除の安全根拠
+  （FP レプリカ全件突合 + S3 版履歴 90 日）は DB に依存しないため影響なし。
+- **事後確認**: `soak-check-fp` 整合 OK・watch JSONL 新規 WARN なし（削除 + 再起動後の周回
+  drift 0 / warn 0）・アプリ再起動 → `Launched in FP-only mode` + signaler baseline 確立 +
+  拡張の domain epoch 捕捉をログで確認。
 
 ### バースト RMW 競合の恒久対処（Issue #91・2026-07-26）
 

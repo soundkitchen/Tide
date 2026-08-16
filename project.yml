@@ -168,7 +168,10 @@ targets:
         #   設定 export-import / 削除一覧キャッシュ / 配線結合テスト / NoFollow / dedupe / stale UploadId /
         #   pull-restore 直列化）を着地。#29(a) CopyObject はマニフェスト再設計前提で "not planned"。
         #   #33 等で省いた per-task patch bump はここで吸収（version はタスク数と 1:1 ではない）。
-        MARKETING_VERSION: "0.2.0"
+        # 0.3.0: 「ユーザー目線からの folderSync 削除」完了の節目（minor）。#96（boot fpOnly 固定 +
+        #   Sync mode UI 撤去）/ #97（ウィザード fpOnly ネイティブ化）/ #98（旧同期フォルダ削除 +
+        #   docs 反映）を着地。設計原本 = docs/09「v0.3.0」節。
+        MARKETING_VERSION: "0.3.0"
         CURRENT_PROJECT_VERSION: "1"
     dependencies:
       - target: TideCore
