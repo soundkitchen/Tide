@@ -59,6 +59,12 @@ struct ExtensionServices: Sendable {
     /// **再導入しないこと** — 22ms 差の別セッションでも ingest 合成で delete が update を打ち消す
     /// ことを実機確定済み（Phase 5-1。kind 変化は id 分離で解決済み・docs/08 参照）。
     let signalWorkingSet: @Sendable () -> Void
+    /// rename/reparent 後の版スタンプ自動治癒（Issue #93）: 指定ファイル（相対 POSIX パス）の
+    /// 内容再取得をダエモンへ要求する（`requestDownloadForItem`）。acknowledge 後、ダエモンが
+    /// 都合のよい最速タイミングで `fetchContents` を呼び、生 sha の版スタンプを再刻印する
+    /// （= rebind で固着した stale スタンプの治癒。SDK ヘッダ明記の契約）。
+    /// 返値 nil = acknowledge 成功。エラーの解釈（noSuchItem リトライ等）は呼び出し側が担う。
+    let requestContentRefetch: @Sendable (String) async -> (any Error)?
 
     /// live 集合を観測し直し、報告済みと食い違えば working set を signal する（Issue #65）。
     /// `materializedItemsDidChange`（materialize / evict の通知）と、enumerateChanges の
@@ -118,6 +124,19 @@ struct ExtensionServices: Sendable {
                     if let error {
                         AppLogger.fileProvider.error("Self-signal failed: \(String(describing: error), privacy: .private)")
                     }
+                }
+            }
+            let requestContentRefetch: @Sendable (String) async -> (any Error)? = { path in
+                guard let manager = NSFileProviderManager(for: boxedDomain.value) else {
+                    return NSFileProviderError(.providerNotFound)
+                }
+                do {
+                    try await manager.requestDownloadForItem(
+                        withIdentifier: NSFileProviderItemIdentifier(
+                            tideRelativePath: path, isDirectory: false))
+                    return nil
+                } catch {
+                    return error
                 }
             }
             let cache = ManifestGenerationCache(
@@ -203,7 +222,8 @@ struct ExtensionServices: Sendable {
                 queryMaterializedFilePaths: {
                     await MaterializedSetQuery.filePaths(domain: boxedDomain.value)
                 },
-                signalWorkingSet: signalWorkingSet
+                signalWorkingSet: signalWorkingSet,
+                requestContentRefetch: requestContentRefetch
             )
         } catch {
             AppLogger.fileProvider.error("Extension: failed to construct S3 client: \(String(describing: error), privacy: .private)")

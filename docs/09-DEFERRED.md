@@ -136,9 +136,13 @@ fpOnly 運用中、rename したファイルに実体化チェックバッジ（
   内容・sha 不変のまま治癒。往復直後にダエモンが fetchContents して生 sha を再刻印）。ユーザ操作なら
   「開いて保存し直す」だけ（次の通常編集でも自然治癒）。**touch（mtime のみ）はダエモンに握りつぶされ
   拡張へ届かず治らない**。
-- **恒久対処候補 = Issue #93 で追跡**: ① move 後の自動治癒トリガー（アプリが FPEventLog の move イベント
-  契機で `requestDownloadForItem` 等の内容往復を誘発・API 実挙動は要実証）② 参考 = 安定 id 化（rename を
-  rebind にしない構造対処・大工事・据え置き）。
+- **恒久対処 = ① move 後の自動治癒トリガーを実装（2026-08-25・実機受け入れ待ち）**: 原案の
+  「アプリが FPEventLog の move イベント契機で誘発」ではなく、**拡張の自己ヒール**（modifyItem の
+  move 成功直後に拡張自身が `requestDownloadForItem` → ダエモンの `fetchContents` で生 sha 再刻印）
+  へ設計変更（ユーザ確定 2026-08-25 — 拡張が move 完了点と自己 signal パターンを既に持ち、監視
+  インフラ新設が不要）。対象 = 実体化済みファイルのみ（file + dir move 両対応・サイズ上限なし）。
+  詳細 = `docs/08`「rename 後の版スタンプ自動治癒」節。② 参考 = 安定 id 化（rename を
+  rebind にしない構造対処・大工事）は引き続き据え置き。
 
 ## v0.3.0: ユーザー目線からの folderSync 削除（設計確定 2026-08-06・✅ **完了 2026-08-17** = #96 / #97 / #98 全実施 + `MARKETING_VERSION` 0.3.0）
 

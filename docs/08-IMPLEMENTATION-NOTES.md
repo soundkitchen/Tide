@@ -114,6 +114,35 @@ FP ドメイン内のファイル編集（`modifyItem` の .contents）と削除
 - **capabilities**: file/dir に `.allowsRenaming` + `.allowsReparenting` を解放（root は不可）。capabilities 変更のため既存レプリカはドメイン作り直しが必要（5-3 知見①のとおり・受け入れで実施）。
 - **実機受け入れ**（2026-07-09〜11・dev バケット）: ファイル rename（ターミナル/Finder）+ id rebind + materialized 温存 / reparent（ターミナル mv / Finder ドラッグ）/ dir rename（copy 2 + 二相 RMW・旧 dir 非復活）/ 除外名 rename（予約 → 後始末 deleteItem 受理 → 旧 entry 除去・ローカル温存・非復元）/ 仮想フォルダ rename（レジストリ追従）/ すべてアプリ pull への伝播まで確認・sync_log エラー 0。
 
+#### rename 後の版スタンプ自動治癒（Issue #93・2026-08-25 実装）
+
+- **背景**: settle 済み（アップロード完了・生 sha 刻印済み）ファイルの rename / reparent（= id rebind）
+  後、fileproviderd がローカル内容の版スタンプを再刻印しない（OS 側挙動・実機確定 2026-07-31）ため、
+  `isMostRecentVersionDownloaded = 0` が固着し実体化チェックバッジとクラウドアイコンが併存する
+  （実害は表示のみ・症状と実験の全容 = `docs/09` の #93 節）。内容往復 = `fetchContents` が走ると
+  生 sha が再刻印され治ることは実証済み。
+- **対処 = 拡張の自己ヒール（ユーザ確定 2026-08-25）**: modifyItem の move 成功（`.moved`）直後に、
+  拡張自身が `NSFileProviderManager.requestDownloadForItem`（`ExtensionServices.requestContentRefetch`）
+  で新 id への内容再取得を要求 → ダエモンが `fetchContents` を呼び生 sha を再刻印（SDK ヘッダ明記の
+  契約 =「acknowledge 後、都合のよい最速タイミングで fetchContents」）。Issue 原案の「アプリ側
+  FPEventLog 監視」は、拡張が move 完了点と自己 signal パターンを既に持つため不採用（監視インフラ
+  新設が不要な分単純）。
+- **対象選定 = 実体化済みファイルのみ**（`FileProviderWritePolicy.moveRestampTargets`・純粋関数 =
+  `FileProviderWritePolicyTests` で固定）: dataless は症状が可視化されず、download 要求すると勝手に
+  実体化してしまうため撃たない。file move は当該 1 件、dir move は配下ファイル全件を候補にゲート
+  （既知の癖「dir move の配下実体化消失」が起きる環境では live 集合から外れ自然スキップ = 無駄撃ち
+  しない）。ゲート集合はダエモン live 問い合わせ（`queryMaterializedFilePaths`）を正とし、失敗時のみ
+  報告済みレジストリへフォールバック。from / to の**両建て判定**（観測タイミングで旧パス集合・
+  新パス集合のどちらが見えるか揺れるため）。
+- **タイミングとリトライ**: completion 返却（= rebind の acknowledge）後の detached Task で、初回
+  1 秒の猶予 → 要求 → `noSuchItem`（ingest 前に撃った race）は 2 秒待って一度だけ再試行。それでも
+  失敗なら諦める =「次の編集 or 開いて保存で自然治癒」の従来挙動に戻るだけ（安全側）。progress の
+  cancellation には巻き込ませない（治癒は move 成立後の独立作業）。
+- **コスト**: 治癒 1 件 = 対象ファイルサイズ分の S3 GET。**サイズ上限なし**（ユーザ確定 2026-08-25 —
+  実体化済みファイルの rename は低頻度・GET は PUT より安価・表示一貫性を優先）。内容変更同伴の
+  move でも撃つ（冗長 GET の可能性より治癒の確実性を優先）。Sync Activity には `.info`
+  「Refreshing cloud status after move」を 1 件残し、直後の Download イベントの説明にする。
+
 #### 並走 UI の本実装化（M5・2026-07-12）
 
 - Phase 5 完了（書込系コールバック全対応）を受けて、PoC 世代の UI/命名を正式化した。**既定化判断は #40 soak 後**のまま（FSEvents モードとの opt-in 並走は不変）。

@@ -168,4 +168,54 @@ final class FileProviderWritePolicyTests: XCTestCase {
         XCTAssertNil(FileProviderWritePolicy.childPath(parentPath: "docs", filename: "/a.txt"))
         XCTAssertNil(FileProviderWritePolicy.childPath(parentPath: "docs", filename: "a\0.txt"))
     }
+
+    // MARK: - 版スタンプ自動治癒の対象選定（Issue #93）
+
+    /// 実体化済み（旧パス掲載）のファイルだけが治癒対象。dataless は撃たない
+    /// （download 要求すると勝手に実体化してしまう）。
+    func testMoveRestampTargetsGatesOnMaterialized() {
+        let targets = FileProviderWritePolicy.moveRestampTargets(
+            moves: [
+                (from: "docs/a.txt", to: "docs/b.txt"),
+                (from: "docs/dataless.txt", to: "docs/dataless2.txt"),
+            ],
+            materialized: ["docs/a.txt"]
+        )
+        XCTAssertEqual(targets, ["docs/b.txt"])
+    }
+
+    /// 観測タイミングにより実体化集合が新パス側（rebind / renameSubtree 後）で見える場合も
+    /// 治癒対象に拾う（from / to の両建てゲート）。
+    func testMoveRestampTargetsAcceptsNewPathMembership() {
+        let targets = FileProviderWritePolicy.moveRestampTargets(
+            moves: [(from: "old/a.txt", to: "new/a.txt")],
+            materialized: ["new/a.txt"]
+        )
+        XCTAssertEqual(targets, ["new/a.txt"])
+    }
+
+    /// 実体化ファイルなし（dataless のみ / 空集合）は治癒対象なし = 無駄撃ちしない。
+    func testMoveRestampTargetsEmptyWhenNothingMaterialized() {
+        XCTAssertTrue(
+            FileProviderWritePolicy.moveRestampTargets(
+                moves: [(from: "a", to: "b")], materialized: []
+            ).isEmpty
+        )
+        XCTAssertTrue(
+            FileProviderWritePolicy.moveRestampTargets(moves: [], materialized: ["a"]).isEmpty
+        )
+    }
+
+    /// dir move（複数ファイル）は入力順を保持して返す（ログ・リトライの追跡性）。
+    func testMoveRestampTargetsPreservesOrder() {
+        let targets = FileProviderWritePolicy.moveRestampTargets(
+            moves: [
+                (from: "d/1.txt", to: "e/1.txt"),
+                (from: "d/2.txt", to: "e/2.txt"),
+                (from: "d/3.txt", to: "e/3.txt"),
+            ],
+            materialized: ["d/3.txt", "d/1.txt"]
+        )
+        XCTAssertEqual(targets, ["e/1.txt", "e/3.txt"])
+    }
 }
