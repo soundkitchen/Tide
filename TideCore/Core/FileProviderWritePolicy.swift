@@ -74,9 +74,10 @@ public enum FileProviderWritePolicy {
 
     /// rename/reparent 後の版スタンプ自動治癒（Issue #93）の対象選定。move された各ファイル
     /// （from = 旧相対パス, to = 新相対パス）のうち、**実体化済みのものだけ**を治癒対象
-    /// （`requestDownloadForItem` を撃つ新パス）として返す。
+    /// （`reimportItems(below:)` を要求する新パス）として返す。
     /// - 実体化ゲートの理由: dataless ファイルは症状（バッジとクラウドアイコンの併存）が
-    ///   可視化されず、download 要求すると勝手に実体化してしまう（ユーザ確定 2026-08-25）。
+    ///   可視化されず、次の materialize（fetchContents）で自然に再刻印されるため治癒不要
+    ///   （ユーザ確定 2026-08-25）。
     /// - `materialized` は from / to どちらの掲載でも実体化とみなす: 観測タイミングにより
     ///   旧パス集合（rebind 前の live / renameSubtree 前の reported）と新パス集合
     ///   （rebind 後 / renameSubtree 後）のどちらを見るかが揺れるため、両建てで取りこぼしを防ぐ。

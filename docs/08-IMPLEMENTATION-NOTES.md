@@ -122,26 +122,41 @@ FP ドメイン内のファイル編集（`modifyItem` の .contents）と削除
   （実害は表示のみ・症状と実験の全容 = `docs/09` の #93 節）。内容往復 = `fetchContents` が走ると
   生 sha が再刻印され治ることは実証済み。
 - **対処 = 拡張の自己ヒール（ユーザ確定 2026-08-25）**: modifyItem の move 成功（`.moved`）直後に、
-  拡張自身が `NSFileProviderManager.requestDownloadForItem`（`ExtensionServices.requestContentRefetch`）
-  で新 id への内容再取得を要求 → ダエモンが `fetchContents` を呼び生 sha を再刻印（SDK ヘッダ明記の
-  契約 =「acknowledge 後、都合のよい最速タイミングで fetchContents」）。Issue 原案の「アプリ側
-  FPEventLog 監視」は、拡張が move 完了点と自己 signal パターンを既に持つため不採用（監視インフラ
-  新設が不要な分単純）。
+  拡張自身が `NSFileProviderManager.reimportItems(below:)`（`ExtensionServices.requestReimport`）で
+  新 id の reimport を要求 → ダエモンがディスク上表現を再スキャンし createItem(mayAlreadyExist) で
+  問い直し → 拡張が**同一 sha ファストパス**（下記）で生 sha 版 item を返し、ダエモンの帳簿
+  （版スタンプ）が再構築されて治る（実機実証 2026-08-25・rename → 約 2 秒で
+  `isMostRecentVersionDownloaded = 1` / 生 sha 64 バイト復帰・bounce コピーなし・内容 sha 不変）。
+  Issue 原案の「アプリ側 FPEventLog 監視」は、拡張が move 完了点と自己 signal パターンを既に持つため
+  不採用（監視インフラ新設が不要な分単純）。
+- **⚠️ `requestDownloadForItem` は不成立（否定的実証 2026-08-25・再挑戦しないこと）**: 実体化済み
+  item への要求は acknowledge（エラー nil）されるだけで、`isDownloadRequested` も立たず
+  fetchContents も来ない（フル DL センチネル `NSMakeRange(NSNotFound, 0)` 明示でも同じ・7 分以上
+  放置でも不発）= ダエモンは「内容が既にある item への download 要求」を no-op 扱いする。
+  Issue #93 起案時の第一候補だったが、この API では治癒できない。
+- **同一 sha ファストパス（`ExtensionWriter.modifyFileContents` の createItem 分岐）**: base nil かつ
+  ツリー現行 entry が同一パスに同一 sha（`sha256NoFollow` = O_NOFOLLOW・ストリーミング・定数メモリ）
+  を宣言済みなら、**S3 もマニフェストも書かず**既存 identity を `.unchanged` で返す（呼び出し側は
+  アップロード系イベントを記録しない）。reimport の問い直しとクラッシュ後リプレイが該当 — 従来は
+  同一バイトを PUT してから RMW の `.alreadyUpToDate` で識別しており、orphan version と紛らわしい
+  「Created」イベントを量産していた（実験で実測）。治癒コスト = **S3 非接触**（ローカルハッシュのみ）。
+  判定はキャッシュ済みツリーだが安全側（一致 = 宣言済み内容の再提示・リモートが進んでいれば次の
+  enumerateChanges で通常のリモート更新として届く）。通常の新規作成（entry 不在）はガードで即抜け =
+  追加読取なし。modifyItem（base あり）はこの分岐を通らない =「同一バイト書き戻し」の実証済み手動
+  ランブックの挙動は不変。
 - **対象選定 = 実体化済みファイルのみ**（`FileProviderWritePolicy.moveRestampTargets`・純粋関数 =
-  `FileProviderWritePolicyTests` で固定）: dataless は症状が可視化されず、download 要求すると勝手に
-  実体化してしまうため撃たない。file move は当該 1 件、dir move は配下ファイル全件を候補にゲート
-  （既知の癖「dir move の配下実体化消失」が起きる環境では live 集合から外れ自然スキップ = 無駄撃ち
-  しない）。ゲート集合はダエモン live 問い合わせ（`queryMaterializedFilePaths`）を正とし、失敗時のみ
-  報告済みレジストリへフォールバック。from / to の**両建て判定**（観測タイミングで旧パス集合・
-  新パス集合のどちらが見えるか揺れるため）。
+  `FileProviderWritePolicyTests` で固定）: dataless は症状が可視化されず（クラウドアイコンは dataless
+  の正しい表示）、次の materialize（fetchContents）で自然に再刻印されるため治癒不要。file move は
+  当該 1 件、dir move は配下ファイル全件を候補にゲート（既知の癖「dir move の配下実体化消失」が
+  起きる環境では live 集合から外れ自然スキップ = 無駄撃ちしない）。ゲート集合はダエモン live
+  問い合わせ（`queryMaterializedFilePaths`）を正とし、失敗時のみ報告済みレジストリへフォールバック。
+  from / to の**両建て判定**（観測タイミングで旧パス集合・新パス集合のどちらが見えるか揺れるため）。
 - **タイミングとリトライ**: completion 返却（= rebind の acknowledge）後の detached Task で、初回
-  1 秒の猶予 → 要求 → `noSuchItem`（ingest 前に撃った race）は 2 秒待って一度だけ再試行。それでも
-  失敗なら諦める =「次の編集 or 開いて保存で自然治癒」の従来挙動に戻るだけ（安全側）。progress の
-  cancellation には巻き込ませない（治癒は move 成立後の独立作業）。
-- **コスト**: 治癒 1 件 = 対象ファイルサイズ分の S3 GET。**サイズ上限なし**（ユーザ確定 2026-08-25 —
-  実体化済みファイルの rename は低頻度・GET は PUT より安価・表示一貫性を優先）。内容変更同伴の
-  move でも撃つ（冗長 GET の可能性より治癒の確実性を優先）。Sync Activity には `.info`
-  「Refreshing cloud status after move」を 1 件残し、直後の Download イベントの説明にする。
+  1 秒の猶予 → 要求 → `noSuchItem`（ingest 前に撃った race / 直前 import 未了）は 2 秒待って一度だけ
+  再試行。それでも失敗なら諦める =「次の編集 or 開いて保存で自然治癒」の従来挙動に戻るだけ（安全側）。
+  progress の cancellation には巻き込ませない（治癒は move 成立後の独立作業）。Sync Activity には
+  `.info`「Refreshing cloud status after move」を 1 件残す（実書込イベントは出ない = 実際に何も
+  書いていない）。
 
 #### 並走 UI の本実装化（M5・2026-07-12）
 

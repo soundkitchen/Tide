@@ -22,6 +22,11 @@ struct ExtensionWriter: Sendable {
     enum ModifyOutcome {
         /// 書込成功（または別書き手が同一内容を確定済み）。entry は正規パスの確定 identity。
         case written(ManifestFileEntry)
+        /// createItem（base nil）の冪等リプレイ: ツリー現行 entry と同一内容だったため
+        /// **S3 もマニフェストも書かず**既存 identity を返した（#93 の reimport 問い直し・
+        /// クラッシュ後の再送が該当。2026-08-25 ユーザ確定）。呼び出し側はアップロード系の
+        /// イベントを記録しないこと（実際には何も書いていない）。
+        case unchanged(ManifestFileEntry)
         /// 並行更新と競合: ローカル編集は copyPath へ退避済み・リモートが正規パスで勝つ
         /// （FSEvents 側 `resolveUploadConflict` と対称）。
         case conflict(remote: ManifestFileEntry, copyPath: String, copyEntry: ManifestFileEntry)
@@ -81,6 +86,27 @@ struct ExtensionWriter: Sendable {
         path: String, contentsURL: URL?, baseSha: String?, contentModified: Date?
     ) async throws -> ModifyOutcome {
         try PathValidator.validateRelativePath(path)
+        // createItem（base nil）の同一 sha ファストパス（#93・2026-08-25 ユーザ確定）:
+        // ツリー現行 entry が同一パスに同一内容を既に宣言しているなら、アップロードも RMW も
+        // せず既存 identity を返す。該当ケースは reimportItems の問い直し（createItem
+        // (mayAlreadyExist)・#93 の版スタンプ治癒）とクラッシュ後リプレイ — 従来は同一バイトを
+        // PUT してから `.alreadyUpToDate` で識別しており、orphan version と紛らわしい
+        // 「Created」イベントを量産していた。
+        // - 判定はキャッシュ済みツリー（stale の可能性）だが安全側: 一致 = 「宣言済み内容の
+        //   再提示」なので、返す identity はその時点の正規 identity。読み違えても新規データは
+        //   失われない（リモートが進んでいれば通常のリモート更新として次の enumerateChanges が
+        //   届く）。不一致・ハッシュ失敗・entry 不在は従来どおり upload → RMW（競合検出は
+        //   権威シャード側で従来どおり働く）。
+        // - modifyItem（base あり）はこの分岐を通らない — 「同一バイト書き戻し」の実証済み
+        //   治癒ランブック（modifyItem 往復）の挙動を変えない。
+        // - ハッシュは `sha256NoFollow`（O_NOFOLLOW・ストリーミング・定数メモリ）。通常の
+        //   新規作成（ツリーに entry 無し）はガードで即抜ける = 追加読取なし。
+        if baseSha == nil, let contentsURL,
+           case .file(_, let current)? = try await cache.current().tree.node(at: path),
+           let localSha = try? HashCalculator.sha256NoFollow(of: contentsURL),
+           localSha == current.sha256 {
+            return .unchanged(current)
+        }
         let entry = try await uploadObject(
             path: path, contentsURL: contentsURL, contentModified: contentModified
         )
