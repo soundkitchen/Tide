@@ -59,6 +59,16 @@ struct ExtensionServices: Sendable {
     /// **再導入しないこと** — 22ms 差の別セッションでも ingest 合成で delete が update を打ち消す
     /// ことを実機確定済み（Phase 5-1。kind 変化は id 分離で解決済み・docs/08 参照）。
     let signalWorkingSet: @Sendable () -> Void
+    /// rename/reparent 後の版スタンプ自動治癒（Issue #93）: 指定ファイル（相対 POSIX パス）の
+    /// reimport をダエモンへ要求する（`reimportItems(below:)`）。ダエモンがディスク上表現を
+    /// 再スキャンし createItem(mayAlreadyExist) で問い直してくるので、拡張は同一 sha
+    /// ファストパス（`ModifyOutcome.unchanged`・S3 非接触）で生 sha 版 item を返し、
+    /// ダエモンの帳簿（版スタンプ）が再構築される = rebind で固着した stale スタンプの治癒。
+    /// **`requestDownloadForItem` を使わないこと** — 実体化済み item への要求は acknowledge
+    /// されるだけで `isDownloadRequested` も立たず fetchContents も来ない（no-op 扱い）ことを
+    /// 実機確定（2026-08-25・フル DL センチネル明示でも同じ。docs/08 #93 節）。
+    /// 返値 nil = acknowledge 成功。エラーの解釈（noSuchItem リトライ等）は呼び出し側が担う。
+    let requestReimport: @Sendable (String) async -> (any Error)?
 
     /// live 集合を観測し直し、報告済みと食い違えば working set を signal する（Issue #65）。
     /// `materializedItemsDidChange`（materialize / evict の通知）と、enumerateChanges の
@@ -118,6 +128,19 @@ struct ExtensionServices: Sendable {
                     if let error {
                         AppLogger.fileProvider.error("Self-signal failed: \(String(describing: error), privacy: .private)")
                     }
+                }
+            }
+            let requestReimport: @Sendable (String) async -> (any Error)? = { path in
+                guard let manager = NSFileProviderManager(for: boxedDomain.value) else {
+                    return NSFileProviderError(.providerNotFound)
+                }
+                do {
+                    try await manager.reimportItems(
+                        below: NSFileProviderItemIdentifier(
+                            tideRelativePath: path, isDirectory: false))
+                    return nil
+                } catch {
+                    return error
                 }
             }
             let cache = ManifestGenerationCache(
@@ -203,7 +226,8 @@ struct ExtensionServices: Sendable {
                 queryMaterializedFilePaths: {
                     await MaterializedSetQuery.filePaths(domain: boxedDomain.value)
                 },
-                signalWorkingSet: signalWorkingSet
+                signalWorkingSet: signalWorkingSet,
+                requestReimport: requestReimport
             )
         } catch {
             AppLogger.fileProvider.error("Extension: failed to construct S3 client: \(String(describing: error), privacy: .private)")

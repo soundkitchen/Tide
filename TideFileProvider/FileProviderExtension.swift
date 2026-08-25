@@ -460,6 +460,14 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             completion.value(
                 FileProviderItem(node: .file(path: path, entry: entry), materialized: true),
                 [], false, nil)
+        case .unchanged(let entry):
+            // 冪等リプレイ（reimport の問い直し = #93 治癒・クラッシュ後再送）: 何も書いて
+            // いないのでアップロードイベントは記録しない（「Created」を出すと Sync Activity が
+            // 実書込と区別できない）。identity 返却だけでダエモンの帳簿が再構築される。
+            AppLogger.fileProvider.notice("createItem: unchanged (idempotent replay): \(path, privacy: .private)")
+            completion.value(
+                FileProviderItem(node: .file(path: path, entry: entry), materialized: true),
+                [], false, nil)
         case .conflict(_, let copyPath, let copyEntry):
             // 並行作成の衝突（リモートが同 path を先に確定）: ローカル新規内容は conflict copy と
             // して上げ済みなので、作成 item を copy に束ねる（ローカル実体 = copy の内容そのもの・
@@ -593,6 +601,13 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     completion.value(
                         FileProviderItem(node: .file(path: path, entry: entry), materialized: true),
                         [], false, nil)
+                case .unchanged(let entry):
+                    // base 不明（rebind 直後等）× ツリー現行と同一内容 = 何も書いていない。
+                    // イベントなしで identity 返却のみ（completeCreate の .unchanged と同じ扱い）。
+                    AppLogger.fileProvider.notice("modifyItem: unchanged (idempotent replay): \(path, privacy: .private)")
+                    completion.value(
+                        FileProviderItem(node: .file(path: path, entry: entry), materialized: true),
+                        [], false, nil)
                 case .conflict(let remote, let copyPath, _):
                     // 正規パスはリモート版が勝つ（FSEvents 側と対称）。shouldFetchContent=true で
                     // システムにリモート内容を取り直させる。ローカル編集は conflict copy として
@@ -699,6 +714,13 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                             await services.events.append(
                                 type: .upload, path: oldPath,
                                 message: "Uploaded (\(entry.size) bytes)")
+                            completion.value(
+                                FileProviderItem(
+                                    node: .file(path: oldPath, entry: entry), materialized: true),
+                                [], false, nil)
+                        case .unchanged(let entry):
+                            // base 不明 × 同一内容の冪等リプレイ（イベントなし・identity 返却のみ）。
+                            AppLogger.fileProvider.notice("modifyItem(move noop): unchanged (idempotent replay): \(oldPath, privacy: .private)")
                             completion.value(
                                 FileProviderItem(
                                     node: .file(path: oldPath, entry: entry), materialized: true),
@@ -825,6 +847,9 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                                 node: .directory(path: newPath, mtime: oldMtime),
                                 materialized: wasChecked),
                             [], false, nil)
+                        Self.scheduleVersionRestamp(
+                            moves: descendants.map { (from: $0.from, to: $0.to) },
+                            services: services)
                     case .destinationOccupied:
                         completion.value(nil, [], false, NSFileProviderError(.filenameCollision))
                     case .sourceChanged(let path, _):
@@ -893,6 +918,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                             node: .file(path: newPath, entry: entry),
                             materialized: wasMaterialized),
                         [], false, nil)
+                    Self.scheduleVersionRestamp(
+                        moves: [(from: oldPath, to: newPath)], services: services)
                 case .destinationOccupied:
                     completion.value(nil, [], false, NSFileProviderError(.filenameCollision))
                 case .sourceChanged(let path, _):
@@ -911,6 +938,87 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         }
         progress.cancellationHandler = { task.cancel() }
         return progress
+    }
+
+    /// 版スタンプ自動治癒（Issue #93）の待ち時間。初回猶予 = ダエモンが completion 返却
+    /// （rebind）を ingest するまでの経験的マージン、再試行待ち = ingest 遅延時の一度きりの
+    /// 追い猶予（値は実機受け入れで妥当性を確認する）。
+    private static let restampInitialDelay: Duration = .seconds(1)
+    private static let restampRetryDelay: Duration = .seconds(2)
+
+    /// rename/reparent 直後の版スタンプ自動治癒（Issue #93）。fileproviderd は rebind
+    /// （modifyItem 返却 item での id 変更）時にローカル内容の版スタンプを再刻印しない
+    /// （OS 側挙動・実機確定 2026-07-31）ため、settle 済みファイルの move 後は
+    /// `isMostRecentVersionDownloaded = 0` が固着し、実体化バッジとクラウドアイコンが併存する
+    /// （実害は表示のみ）。move 完了直後に拡張自身が `reimportItems(below:)` を要求すると、
+    /// ダエモンがディスク上表現を再スキャン → createItem(mayAlreadyExist) の問い直しに拡張が
+    /// 同一 sha ファストパス（`.unchanged`）で生 sha 版 item を返し、帳簿が再構築されて治る
+    /// （実機実証 2026-08-25・S3 非接触。`requestDownloadForItem` は実体化済み item に no-op で
+    /// 不成立 — `ExtensionServices.requestReimport` のコメント参照）。
+    ///
+    /// - 対象は**実体化済みファイルのみ**（`FileProviderWritePolicy.moveRestampTargets`）:
+    ///   dataless は症状が可視化されず（クラウドアイコンは dataless の正しい表示）、次の
+    ///   materialize（fetchContents）で自然に再刻印されるため治癒不要。
+    ///   ゲート集合はダエモン live 問い合わせを正とし、失敗時のみ報告済みレジストリへ
+    ///   フォールバック（バッジと同じ「live 優先・reported は近似」の姿勢）。
+    /// - completion 返却（= rebind の acknowledge）後に独立で走らせる detached Task —
+    ///   modifyItem の progress cancellation に巻き込ませない（治癒は move 成立後の独立作業）。
+    /// - `noSuchItem`（rebind ingest 前に撃った race / 直前 import 未了）は該当分を集め、
+    ///   ingest 猶予を**全件共有で一度だけ**待ってからまとめて再試行（per-file 直列待ちだと
+    ///   dir move N 件でワーストケース N×2 秒に伸びる。PR #113 レビュー #2）。それでも失敗なら
+    ///   諦める（「次の編集 or 開いて保存で自然治癒」の従来挙動に戻るだけ・安全側）。
+    private static func scheduleVersionRestamp(
+        moves: [(from: String, to: String)], services: ExtensionServices
+    ) {
+        Task.detached(priority: .utility) {
+            try? await Task.sleep(for: restampInitialDelay)
+            let gate: Set<String>
+            if let live = await services.queryMaterializedFilePaths() {
+                gate = live
+            } else {
+                gate = await services.materializedReported.snapshot()
+            }
+            let targets = FileProviderWritePolicy.moveRestampTargets(
+                moves: moves, materialized: gate)
+            guard !targets.isEmpty else {
+                // 実体化済みの対象なし = 治癒不要（dataless に症状は出ない）。スキップも痕跡を
+                // 残す — 無音だと「発火しない」の切り分けが log からできない（2026-08-25 実踏:
+                // dir move の配下実体化消失でここに来たケースの診断に手間取った）。
+                AppLogger.fileProvider.notice("move restamp: no materialized targets among \(moves.count) moved file(s) (skip)")
+                return
+            }
+            AppLogger.fileProvider.notice("move restamp: requesting reimport for \(targets.count) file(s)")
+            await services.events.append(
+                type: .info, path: targets.count == 1 ? targets[0] : nil,
+                message: targets.count == 1
+                    ? "Refreshing cloud status after move"
+                    : "Refreshing cloud status after move (\(targets.count) files)")
+            func logOutcome(_ error: Error?, path: String) {
+                if let error {
+                    AppLogger.fileProvider.error("move restamp failed (self-heals on next edit): \(String(describing: error), privacy: .private) path=\(path, privacy: .private)")
+                } else {
+                    // acknowledge 成功の痕跡（実機診断用・#93）: これが出ているのに fetchContents が
+                    // 走らない場合、要求はダエモンへ届いた上で握りつぶされている（呼出し側の問題でない）。
+                    AppLogger.fileProvider.notice("move restamp: acknowledged: \(path, privacy: .private)")
+                }
+            }
+            var retryTargets: [String] = []
+            for path in targets {
+                let error = await services.requestReimport(path)
+                if let fpError = error as? NSFileProviderError, fpError.code == .noSuchItem {
+                    retryTargets.append(path)
+                } else {
+                    logOutcome(error, path: path)
+                }
+            }
+            if !retryTargets.isEmpty {
+                // 待ちの意味は「ダエモンの ingest 完了待ち」なので全件共有の一度きりで足りる。
+                try? await Task.sleep(for: restampRetryDelay)
+                for path in retryTargets {
+                    logOutcome(await services.requestReimport(path), path: path)
+                }
+            }
+        }
     }
 
     func deleteItem(

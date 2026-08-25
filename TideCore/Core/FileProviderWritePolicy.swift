@@ -72,6 +72,23 @@ public enum FileProviderWritePolicy {
             ?? baseSha(fromContentVersion: metadataVersion)
     }
 
+    /// rename/reparent 後の版スタンプ自動治癒（Issue #93）の対象選定。move された各ファイル
+    /// （from = 旧相対パス, to = 新相対パス）のうち、**実体化済みのものだけ**を治癒対象
+    /// （`reimportItems(below:)` を要求する新パス）として返す。
+    /// - 実体化ゲートの理由: dataless ファイルは症状（バッジとクラウドアイコンの併存）が
+    ///   可視化されず、次の materialize（fetchContents）で自然に再刻印されるため治癒不要
+    ///   （ユーザ確定 2026-08-25）。
+    /// - `materialized` は from / to どちらの掲載でも実体化とみなす: 観測タイミングにより
+    ///   旧パス集合（rebind 前の live / renameSubtree 前の reported）と新パス集合
+    ///   （rebind 後 / renameSubtree 後）のどちらを見るかが揺れるため、両建てで取りこぼしを防ぐ。
+    /// - 順序は入力順を保持（dir move の複数ファイルでログ・リトライの追跡がしやすい）。
+    public static func moveRestampTargets(
+        moves: [(from: String, to: String)], materialized: Set<String>
+    ) -> [String] {
+        moves.filter { materialized.contains($0.from) || materialized.contains($0.to) }
+            .map(\.to)
+    }
+
     /// createItem（M5 Phase 5-3）の「親ディレクトリ相対パス + filename」→ 相対 POSIX パス。
     /// filename はデーモン供給値だがパス合成の入口なので構造的に検証する:
     /// 空 / "." / ".." / `/` 含み（ネスト注入）/ NUL 含みは nil = 合成不能。

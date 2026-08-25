@@ -114,6 +114,61 @@ FP ドメイン内のファイル編集（`modifyItem` の .contents）と削除
 - **capabilities**: file/dir に `.allowsRenaming` + `.allowsReparenting` を解放（root は不可）。capabilities 変更のため既存レプリカはドメイン作り直しが必要（5-3 知見①のとおり・受け入れで実施）。
 - **実機受け入れ**（2026-07-09〜11・dev バケット）: ファイル rename（ターミナル/Finder）+ id rebind + materialized 温存 / reparent（ターミナル mv / Finder ドラッグ）/ dir rename（copy 2 + 二相 RMW・旧 dir 非復活）/ 除外名 rename（予約 → 後始末 deleteItem 受理 → 旧 entry 除去・ローカル温存・非復元）/ 仮想フォルダ rename（レジストリ追従）/ すべてアプリ pull への伝播まで確認・sync_log エラー 0。
 
+#### rename 後の版スタンプ自動治癒（Issue #93・2026-08-25 実装）
+
+- **背景**: settle 済み（アップロード完了・生 sha 刻印済み）ファイルの rename / reparent（= id rebind）
+  後、fileproviderd がローカル内容の版スタンプを再刻印しない（OS 側挙動・実機確定 2026-07-31）ため、
+  `isMostRecentVersionDownloaded = 0` が固着し実体化チェックバッジとクラウドアイコンが併存する
+  （実害は表示のみ・症状と実験の全容 = `docs/09` の #93 節）。内容往復 = `fetchContents` が走ると
+  生 sha が再刻印され治ることは実証済み。
+- **対処 = 拡張の自己ヒール（ユーザ確定 2026-08-25）**: modifyItem の move 成功（`.moved`）直後に、
+  拡張自身が `NSFileProviderManager.reimportItems(below:)`（`ExtensionServices.requestReimport`）で
+  新 id の reimport を要求 → ダエモンがディスク上表現を再スキャンし createItem(mayAlreadyExist) で
+  問い直し → 拡張が**同一 sha ファストパス**（下記）で生 sha 版 item を返し、ダエモンの帳簿
+  （版スタンプ）が再構築されて治る（実機実証 2026-08-25・rename → 約 2 秒で
+  `isMostRecentVersionDownloaded = 1` / 生 sha 64 バイト復帰・bounce コピーなし・内容 sha 不変）。
+  Issue 原案の「アプリ側 FPEventLog 監視」は、拡張が move 完了点と自己 signal パターンを既に持つため
+  不採用（監視インフラ新設が不要な分単純）。
+- **⚠️ `requestDownloadForItem` は不成立（否定的実証 2026-08-25・再挑戦しないこと）**: 実体化済み
+  item への要求は acknowledge（エラー nil）されるだけで、`isDownloadRequested` も立たず
+  fetchContents も来ない（フル DL センチネル `NSMakeRange(NSNotFound, 0)` 明示でも同じ・7 分以上
+  放置でも不発）= ダエモンは「内容が既にある item への download 要求」を no-op 扱いする。
+  Issue #93 起案時の第一候補だったが、この API では治癒できない。
+- **同一 sha ファストパス（`ExtensionWriter.modifyFileContents` の createItem 分岐）**: base nil かつ
+  ツリー現行 entry が同一パスに同一 sha（`sha256NoFollow` = O_NOFOLLOW・ストリーミング・定数メモリ）
+  を宣言済みなら、**S3 もマニフェストも書かず**既存 identity を `.unchanged` で返す（呼び出し側は
+  アップロード系イベントを記録しない）。reimport の問い直しとクラッシュ後リプレイが該当 — 従来は
+  同一バイトを PUT してから RMW の `.alreadyUpToDate` で識別しており、orphan version と紛らわしい
+  「Created」イベントを量産していた（実験で実測）。治癒コスト = **S3 非接触**（ローカルハッシュのみ）。
+  判定はキャッシュ済みツリーだが安全側（一致 = 宣言済み内容の再提示・リモートが進んでいれば次の
+  enumerateChanges で通常のリモート更新として届く）。通常の新規作成（entry 不在）はガードで即抜け =
+  追加読取なし。modifyItem（base あり）はこの分岐を通らない =「同一バイト書き戻し」の実証済み手動
+  ランブックの挙動は不変。
+- **対象選定 = 実体化済みファイルのみ**（`FileProviderWritePolicy.moveRestampTargets`・純粋関数 =
+  `FileProviderWritePolicyTests` で固定）: dataless は症状が可視化されず（クラウドアイコンは dataless
+  の正しい表示）、次の materialize（fetchContents）で自然に再刻印されるため治癒不要。file move は
+  当該 1 件、dir move は配下ファイル全件を候補にゲート（既知の癖「dir move の配下実体化消失」が
+  起きる環境では live 集合から外れ自然スキップ = 無駄撃ちしない）。ゲート集合はダエモン live
+  問い合わせ（`queryMaterializedFilePaths`）を正とし、失敗時のみ報告済みレジストリへフォールバック。
+  from / to の**両建て判定**（観測タイミングで旧パス集合・新パス集合のどちらが見えるか揺れるため）。
+- **タイミングとリトライ**: completion 返却（= rebind の acknowledge）後の detached Task で、初回
+  1 秒の猶予 → 全対象へ要求 → `noSuchItem`（ingest 前に撃った race / 直前 import 未了）の該当分を
+  集め、2 秒の ingest 猶予を**全件共有で一度だけ**待ってからまとめて再試行（per-file 直列待ちだと
+  dir move N 件でワーストケース N×2 秒に伸びる・PR #113 レビュー #2）。それでも失敗なら諦める =
+  「次の編集 or 開いて保存で自然治癒」の従来挙動に戻るだけ（安全側）。
+  progress の cancellation には巻き込ませない（治癒は move 成立後の独立作業）。Sync Activity には
+  `.info`「Refreshing cloud status after move」を 1 件残す（実書込イベントは出ない = 実際に何も
+  書いていない）。
+- **実機受け入れ（2026-08-25・全項目パス）**: file rename 治癒（約 2 秒で `isMostRecentVersionDownloaded
+  = 1` / 生 sha 64 バイト復帰・ファストパス = S3 非接触で「Created / Uploaded」イベント無し・内容 sha
+  不変）/ dataless rename は全件スキップ（無駄撃ちなし・勝手に実体化しない）/ dir rename は今回の OS では
+  既知の癖「配下実体化消失」が発生し配下全件が live 集合から外れ自然スキップ = ゲート正動作（dataless 化
+  後も版スタンプは生 sha で健全 = 症状なし）/ file reparent でも治癒 / Sync Activity は `.info` 1 件のみ /
+  治癒後の編集は通常アップロード（新 sha 生形式刻印・競合なし）/ `make soak-check-fp` 整合 OK /
+  Finder 目視でバッジ・クラウドアイコン併存の解消を確認。未カバー = 「配下実体化が温存される dir move」の
+  N 件同時治癒（今回の OS で再現せず・機構は file 単発と同一の per-file reimport のため許容）と
+  `noSuchItem` リトライ経路（race 未発生・任意項目）。
+
 #### 並走 UI の本実装化（M5・2026-07-12）
 
 - Phase 5 完了（書込系コールバック全対応）を受けて、PoC 世代の UI/命名を正式化した。**既定化判断は #40 soak 後**のまま（FSEvents モードとの opt-in 並走は不変）。
