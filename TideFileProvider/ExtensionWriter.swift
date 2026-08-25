@@ -101,8 +101,12 @@ struct ExtensionWriter: Sendable {
         //   治癒ランブック（modifyItem 往復）の挙動を変えない。
         // - ハッシュは `sha256NoFollow`（O_NOFOLLOW・ストリーミング・定数メモリ）。通常の
         //   新規作成（ツリーに entry 無し）はガードで即抜ける = 追加読取なし。
+        // - snapshot ロードも非致命（`try?`）: 失敗はファストパスを諦めて従来の upload → RMW へ
+        //   フォールスルー。機会的最適化なので、従来 snapshot ロードなしで到達できた base nil
+        //   書込（modifyItem .contents / move noop）に新しい失敗面を作らない（RMW は権威シャード
+        //   1 枚しか読まないため、無関係シャードの持続故障を致命化しない。PR #113 レビュー #1）。
         if baseSha == nil, let contentsURL,
-           case .file(_, let current)? = try await cache.current().tree.node(at: path),
+           case .file(_, let current)? = (try? await cache.current())?.tree.node(at: path),
            let localSha = try? HashCalculator.sha256NoFollow(of: contentsURL),
            localSha == current.sha256 {
             return .unchanged(current)

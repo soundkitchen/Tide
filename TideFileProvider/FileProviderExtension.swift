@@ -963,9 +963,10 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
     ///   フォールバック（バッジと同じ「live 優先・reported は近似」の姿勢）。
     /// - completion 返却（= rebind の acknowledge）後に独立で走らせる detached Task —
     ///   modifyItem の progress cancellation に巻き込ませない（治癒は move 成立後の独立作業）。
-    /// - `noSuchItem`（rebind ingest 前に撃った race / 直前 import 未了）は一度だけ待って再試行。
-    ///   それでも失敗なら諦める（「次の編集 or 開いて保存で自然治癒」の従来挙動に戻るだけ・
-    ///   安全側）。
+    /// - `noSuchItem`（rebind ingest 前に撃った race / 直前 import 未了）は該当分を集め、
+    ///   ingest 猶予を**全件共有で一度だけ**待ってからまとめて再試行（per-file 直列待ちだと
+    ///   dir move N 件でワーストケース N×2 秒に伸びる。PR #113 レビュー #2）。それでも失敗なら
+    ///   諦める（「次の編集 or 開いて保存で自然治癒」の従来挙動に戻るだけ・安全側）。
     private static func scheduleVersionRestamp(
         moves: [(from: String, to: String)], services: ExtensionServices
     ) {
@@ -992,18 +993,29 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 message: targets.count == 1
                     ? "Refreshing cloud status after move"
                     : "Refreshing cloud status after move (\(targets.count) files)")
-            for path in targets {
-                var lastError = await services.requestReimport(path)
-                if let fpError = lastError as? NSFileProviderError, fpError.code == .noSuchItem {
-                    try? await Task.sleep(for: restampRetryDelay)
-                    lastError = await services.requestReimport(path)
-                }
-                if let lastError {
-                    AppLogger.fileProvider.error("move restamp failed (self-heals on next edit): \(String(describing: lastError), privacy: .private) path=\(path, privacy: .private)")
+            func logOutcome(_ error: Error?, path: String) {
+                if let error {
+                    AppLogger.fileProvider.error("move restamp failed (self-heals on next edit): \(String(describing: error), privacy: .private) path=\(path, privacy: .private)")
                 } else {
                     // acknowledge 成功の痕跡（実機診断用・#93）: これが出ているのに fetchContents が
                     // 走らない場合、要求はダエモンへ届いた上で握りつぶされている（呼出し側の問題でない）。
                     AppLogger.fileProvider.notice("move restamp: acknowledged: \(path, privacy: .private)")
+                }
+            }
+            var retryTargets: [String] = []
+            for path in targets {
+                let error = await services.requestReimport(path)
+                if let fpError = error as? NSFileProviderError, fpError.code == .noSuchItem {
+                    retryTargets.append(path)
+                } else {
+                    logOutcome(error, path: path)
+                }
+            }
+            if !retryTargets.isEmpty {
+                // 待ちの意味は「ダエモンの ingest 完了待ち」なので全件共有の一度きりで足りる。
+                try? await Task.sleep(for: restampRetryDelay)
+                for path in retryTargets {
+                    logOutcome(await services.requestReimport(path), path: path)
                 }
             }
         }

@@ -171,8 +171,8 @@ final class FileProviderWritePolicyTests: XCTestCase {
 
     // MARK: - 版スタンプ自動治癒の対象選定（Issue #93）
 
-    /// 実体化済み（旧パス掲載）のファイルだけが治癒対象。dataless は撃たない
-    /// （download 要求すると勝手に実体化してしまう）。
+    /// 実体化済み（旧パス掲載）のファイルだけが治癒対象。dataless は症状が可視化されず、
+    /// 次の materialize（fetchContents）で自然に再刻印されるため撃たない（無駄撃ち防止）。
     func testMoveRestampTargetsGatesOnMaterialized() {
         let targets = FileProviderWritePolicy.moveRestampTargets(
             moves: [

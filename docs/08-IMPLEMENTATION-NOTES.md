@@ -152,8 +152,10 @@ FP ドメイン内のファイル編集（`modifyItem` の .contents）と削除
   問い合わせ（`queryMaterializedFilePaths`）を正とし、失敗時のみ報告済みレジストリへフォールバック。
   from / to の**両建て判定**（観測タイミングで旧パス集合・新パス集合のどちらが見えるか揺れるため）。
 - **タイミングとリトライ**: completion 返却（= rebind の acknowledge）後の detached Task で、初回
-  1 秒の猶予 → 要求 → `noSuchItem`（ingest 前に撃った race / 直前 import 未了）は 2 秒待って一度だけ
-  再試行。それでも失敗なら諦める =「次の編集 or 開いて保存で自然治癒」の従来挙動に戻るだけ（安全側）。
+  1 秒の猶予 → 全対象へ要求 → `noSuchItem`（ingest 前に撃った race / 直前 import 未了）の該当分を
+  集め、2 秒の ingest 猶予を**全件共有で一度だけ**待ってからまとめて再試行（per-file 直列待ちだと
+  dir move N 件でワーストケース N×2 秒に伸びる・PR #113 レビュー #2）。それでも失敗なら諦める =
+  「次の編集 or 開いて保存で自然治癒」の従来挙動に戻るだけ（安全側）。
   progress の cancellation には巻き込ませない（治癒は move 成立後の独立作業）。Sync Activity には
   `.info`「Refreshing cloud status after move」を 1 件残す（実書込イベントは出ない = 実際に何も
   書いていない）。
