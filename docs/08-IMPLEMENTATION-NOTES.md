@@ -157,6 +157,15 @@ FP ドメイン内のファイル編集（`modifyItem` の .contents）と削除
   progress の cancellation には巻き込ませない（治癒は move 成立後の独立作業）。Sync Activity には
   `.info`「Refreshing cloud status after move」を 1 件残す（実書込イベントは出ない = 実際に何も
   書いていない）。
+- **実機受け入れ（2026-08-25・全項目パス）**: file rename 治癒（約 2 秒で `isMostRecentVersionDownloaded
+  = 1` / 生 sha 64 バイト復帰・ファストパス = S3 非接触で「Created / Uploaded」イベント無し・内容 sha
+  不変）/ dataless rename は全件スキップ（無駄撃ちなし・勝手に実体化しない）/ dir rename は今回の OS では
+  既知の癖「配下実体化消失」が発生し配下全件が live 集合から外れ自然スキップ = ゲート正動作（dataless 化
+  後も版スタンプは生 sha で健全 = 症状なし）/ file reparent でも治癒 / Sync Activity は `.info` 1 件のみ /
+  治癒後の編集は通常アップロード（新 sha 生形式刻印・競合なし）/ `make soak-check-fp` 整合 OK /
+  Finder 目視でバッジ・クラウドアイコン併存の解消を確認。未カバー = 「配下実体化が温存される dir move」の
+  N 件同時治癒（今回の OS で再現せず・機構は file 単発と同一の per-file reimport のため許容）と
+  `noSuchItem` リトライ経路（race 未発生・任意項目）。
 
 #### 並走 UI の本実装化（M5・2026-07-12）
 
