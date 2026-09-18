@@ -449,7 +449,7 @@ ETag は GCS が MD5/`-n` を保証しない（CRC32C）が、**Tide は sha256 
   （PR #101 四次レビュー指摘 5）。**ウィザード seed の発火点は八次レビュー指摘 4 で解消済み**
   （seed 前に `.tide/shards/` の空プローブ = 損傷バケットでは seed しない）— 残る書き手
   （FP 拡張 / Uploader / S3RestoreService）の既存挙動と復旧手順整備が本バックログの対象。
-- **`ManifestFileEntry` 生成の共通ファクトリ**: 「PutObjectResult → entry」の同型フィールド詰め
+- ✅ **`ManifestFileEntry` 生成の共通ファクトリ**（**解消 2026-09-19・Issue #118**: `TideCore/S3/ManifestFileEntryFactory.swift` の `ManifestFileEntry.uploaded(size:sha256:mtime:put:deviceId:uploadedAt:)` / `.copied(from:copy:deviceId:uploadedAt:)` へ 6 箇所〈Uploader / S3RestoreService / ExtensionWriter × 3〈本体 / 空ファイル / copyObject〉/ ウィザード seed〉を集約。`ManifestReader` の DB キャッシュ再構成は S3 書込結果でないため対象外。契約は `ManifestFileEntryFactoryTests` で固定）: 「PutObjectResult → entry」の同型フィールド詰め
   （sha256 / mtime / versionId / etag / deviceId / uploadedAt）が `Uploader` / `S3RestoreService` /
   `ExtensionWriter`（×2）/ ウィザード seed の計 5 箇所に複製されている。entry 契約変更時の手動
   反映漏れ = 無音のマニフェスト乖離になるため、TideCore へファクトリ（例:

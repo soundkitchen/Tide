@@ -175,14 +175,12 @@ public struct S3RestoreService: Sendable {
         // 8. マニフェスト合流（共有チョークポイント）。mtime は復元時刻 = now（ユーザ確定
         //    2026-07-23・folderSync 復元 = ローカル書き戻し後の再アップロードが stat 実値 =
         //    復元時刻を記録するのと対称）。競合（uploadConflict）はそのまま伝播する。
-        let entry = ManifestFileEntry(
+        let entry = ManifestFileEntry.uploaded(
             size: info.size,
-            mtime: ISO8601.format(Date()),
             sha256: uploadedSha,
-            s3VersionId: putResult.versionId,
-            etag: putResult.etag,
-            deviceId: updater.deviceId,
-            uploadedAt: ISO8601.now()
+            mtime: Date(),
+            put: putResult,
+            deviceId: updater.deviceId
         )
         let outcome = try await updater.updateFileEntry(
             for: relativePath, base: baseSha, newEntry: entry
