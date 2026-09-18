@@ -20,6 +20,27 @@ settings:
     SWIFT_EMIT_LOC_STRINGS: YES
     GCC_WARN_INHIBIT_ALL_WARNINGS: NO
     CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER: YES
+    # バージョンは build settings を唯一のソースにし、各ターゲットの Info.plist は
+    # $(MARKETING_VERSION) / $(CURRENT_PROJECT_VERSION) を参照する（plist 側に数値を二重定義しない）。
+    # プロジェクトレベルに置く理由（Issue #112）: app extension の CFBundleShortVersionString は
+    # 親 app と一致必須（不一致は build warning・配布/公証では検証エラーに格上げされ得る）。
+    # Tide ターゲット限定にしていた時期は TideFileProvider.appex が xcodegen 既定の 1.0 に落ちていた。
+    #
+    # バージョン運用ルール: docs / 計画のみのコミットでは上げない。
+    # v0.2.0 タスク（GitHub #25〜#34）の実コード変更を最初に着地させるコミットで
+    # MARKETING_VERSION を 0.1.1 に上げ、以降はタスク消化に応じて patch を刻む。
+    # 機能セットが揃った節目で 0.2.0（minor）。リリースのタグはこの値を唯一のソースとする。
+    # 0.1.1: #25 / A（アップロード側の並行更新検出）を着地（v0.2.0 タスクの最初の実コード）。
+    # 0.1.2: #26 / B（HTTPS 強制バケットポリシー）を着地。
+    # 0.2.0: v0.2.0 機能セット完了の節目（minor）。#27〜#34（ネスト .syncignore / 復元ピッカー /
+    #   設定 export-import / 削除一覧キャッシュ / 配線結合テスト / NoFollow / dedupe / stale UploadId /
+    #   pull-restore 直列化）を着地。#29(a) CopyObject はマニフェスト再設計前提で "not planned"。
+    #   #33 等で省いた per-task patch bump はここで吸収（version はタスク数と 1:1 ではない）。
+    # 0.3.0: 「ユーザー目線からの folderSync 削除」完了の節目（minor）。#96（boot fpOnly 固定 +
+    #   Sync mode UI 撤去）/ #97（ウィザード fpOnly ネイティブ化）/ #98（旧同期フォルダ削除 +
+    #   docs 反映）を着地。設計原本 = docs/09「v0.3.0」節。
+    MARKETING_VERSION: "0.3.0"
+    CURRENT_PROJECT_VERSION: "1"
 
 packages:
   AWSSwiftSDK:
@@ -67,6 +88,9 @@ targets:
       path: TideFileProvider/Info.plist
       properties:
         CFBundleDisplayName: Tide File Provider
+        # 版は親 app と一致必須（Issue #112）。プロジェクトレベル settings の値を参照する。
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         # NSExtension の中身は Xcode の macOS File Provider テンプレートに合わせる。
         # DocumentGroup（App Group 指定）と SupportsEnumeration が無いと、システムが
         # replicated 拡張として認識せず NSFileProviderManager.add が
@@ -158,21 +182,8 @@ targets:
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         ENABLE_PREVIEWS: YES
         COMBINE_HIDPI_IMAGES: YES
-        # バージョン運用ルール: docs / 計画のみのコミットでは上げない。
-        # v0.2.0 タスク（GitHub #25〜#34）の実コード変更を最初に着地させるコミットで
-        # MARKETING_VERSION を 0.1.1 に上げ、以降はタスク消化に応じて patch を刻む。
-        # 機能セットが揃った節目で 0.2.0（minor）。リリースのタグはこの値を唯一のソースとする。
-        # 0.1.1: #25 / A（アップロード側の並行更新検出）を着地（v0.2.0 タスクの最初の実コード）。
-        # 0.1.2: #26 / B（HTTPS 強制バケットポリシー）を着地。
-        # 0.2.0: v0.2.0 機能セット完了の節目（minor）。#27〜#34（ネスト .syncignore / 復元ピッカー /
-        #   設定 export-import / 削除一覧キャッシュ / 配線結合テスト / NoFollow / dedupe / stale UploadId /
-        #   pull-restore 直列化）を着地。#29(a) CopyObject はマニフェスト再設計前提で "not planned"。
-        #   #33 等で省いた per-task patch bump はここで吸収（version はタスク数と 1:1 ではない）。
-        # 0.3.0: 「ユーザー目線からの folderSync 削除」完了の節目（minor）。#96（boot fpOnly 固定 +
-        #   Sync mode UI 撤去）/ #97（ウィザード fpOnly ネイティブ化）/ #98（旧同期フォルダ削除 +
-        #   docs 反映）を着地。設計原本 = docs/09「v0.3.0」節。
-        MARKETING_VERSION: "0.3.0"
-        CURRENT_PROJECT_VERSION: "1"
+        # バージョン（MARKETING_VERSION / CURRENT_PROJECT_VERSION）はプロジェクトレベル settings で
+        # 全ターゲット共有（Issue #112）。ここには置かない。
     dependencies:
       - target: TideCore
       # File Provider 拡張（M5 Phase 3〜）。PlugIns/ へ埋め込む。
