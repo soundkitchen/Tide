@@ -113,7 +113,7 @@ DB ロック・JSON 破損等、すべての実行時例外）。cron / loop で
 ```sh
 make soak-agent-install     # LaunchAgent 導入 + 開始（既定 300 秒間隔・再実行 = 再インストール）
 make soak-agent-status      # state / PID / 直近 JSONL 1 行
-make soak-agent-restart     # 再起動（モード切替ランブックの「watch 再起動」の正規手段）
+make soak-agent-restart     # 再起動（再 soak 時のモード切替後に使用。常駐運用は 2026-09-19 終了）
 make soak-agent-uninstall   # 解除（bootout + plist 削除）
 ```
 

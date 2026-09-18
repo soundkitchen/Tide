@@ -121,7 +121,7 @@ soak-agent-uninstall: ## soak launchd 常駐を解除（bootout + plist 削除�
 	bash tools/soak/soak_watch_agent.sh uninstall
 
 .PHONY: soak-agent-restart
-soak-agent-restart: ## soak launchd 常駐を再起動（モード切替後の正規手順）（#84）
+soak-agent-restart: ## soak launchd 常駐を再起動（再 soak 時のモード切替後に使用・常駐運用は 2026-09-19 終了）（#84）
 	bash tools/soak/soak_watch_agent.sh restart
 
 .PHONY: soak-agent-status
