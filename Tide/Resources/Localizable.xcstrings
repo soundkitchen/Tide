@@ -2392,6 +2392,61 @@
           }
         }
       }
+    },
+    "Startup" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "起動"
+          }
+        }
+      }
+    },
+    "Launch at login" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ログイン時に起動"
+          }
+        }
+      }
+    },
+    "Approval required — turn on Tide under Login Items in System Settings." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "承認が必要です — システム設定の「ログイン項目」で Tide をオンにしてください。"
+          }
+        }
+      }
+    },
+    "The login item points to a Tide.app that no longer exists. Turn the switch off and on again to re-register from the current location." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ログイン項目が存在しない Tide.app を指しています。スイッチをいったんオフにしてからオンにすると、現在の場所で再登録されます。"
+          }
+        }
+      }
+    },
+    "Starts Tide when you log in so the menu bar status, notifications, and remote change checks are available right away. macOS runs the File Provider extension on its own, so files keep syncing even while the app is closed." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ログイン時に Tide を起動し、メニューバーの状態表示・通知・リモート変更の確認をすぐ使えるようにします。File Provider 拡張は macOS が単独で動かすため、アプリが閉じていてもファイルの同期は続きます。"
+          }
+        }
+      }
     }
   },
   "version" : "1.1"

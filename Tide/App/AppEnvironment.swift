@@ -141,6 +141,8 @@ final class AppEnvironment {
             AppLogger.ui.info("Setup not completed; awaiting wizard.")
             return
         }
+        // 既存インストールへの既定 ON 適用（Issue #116）: セットアップ済みなら一度だけ登録。
+        registerLoginItemIfFirstTime()
         do {
             try await launchEngineFromCurrentConfig()
         } catch {
@@ -152,6 +154,22 @@ final class AppEnvironment {
 
     /// nil または空文字を「未設定」とみなす（必須設定の検証用）。
     private static func isBlank(_ s: String?) -> Bool { s?.isEmpty ?? true }
+
+    /// ログイン時自動起動の既定 ON を**一度だけ**適用する（Issue #116・ユーザ確定 = 既定 ON +
+    /// 設定でトグル + 既存インストールは次回起動時に一度だけ）。呼び出し点は bootstrap
+    /// （`setupCompleted` 確認後）と completeSetup（`setupCompleted = true` 直後）の 2 つで、
+    /// どちらも `launchAtLoginMigrated` フラグで冪等。フラグは**登録成功時のみ**立てる
+    /// （失敗は次回起動で再試行・非致命）。フラグ済みなら以後はユーザのトグル / システム設定の
+    /// 選択（OFF を含む）を尊重して再登録しない。
+    func registerLoginItemIfFirstTime() {
+        guard !config.launchAtLoginMigrated else { return }
+        do {
+            try LoginItemController.register()
+            config.launchAtLoginMigrated = true
+        } catch {
+            AppLogger.ui.error("Login item register failed: \(String(describing: error), privacy: .private)")
+        }
+    }
 
     func launchEngineFromCurrentConfig() async throws {
         // v0.3.0（#96）: boot は syncMode を読まず常に fpOnly。folderSync（FSEvents エンジン）への
@@ -634,6 +652,8 @@ final class AppEnvironment {
         config.bucketName = bucket
         config.region = region
         config.setupCompleted = true
+        // 既定 ON（Issue #116）: 初回のみ。フラグ済み（再セットアップ）ならユーザの選択を尊重して触らない。
+        registerLoginItemIfFirstTime()
 
         // 新規バケットのときだけ既定 .syncignore を S3 へ直接 seed（既存バケット参加時は作らない）。
         // enable より**前**に行う（PR #101 再レビュー指摘 4）: 後ろだと live になった拡張の先行
@@ -763,6 +783,13 @@ final class AppEnvironment {
 
         // File Provider ドメインも外す（残すと CloudStorage 側に空ドメインが孤児化する）
         try? await FileProviderController.disable()
+        // ログイン項目も外す（Issue #116）。フラグは下の config リセットで消え、次回セットアップ
+        // 完了時に再登録される。`make reset`（アプリ外）はここに届かない（docs/06）。
+        do {
+            try LoginItemController.unregister()
+        } catch {
+            AppLogger.ui.error("Login item unregister failed during factoryReset: \(String(describing: error), privacy: .private)")
+        }
 
         // App Group コンテナ配下の DB ファイル一式（M5 Phase 2 以降の正位置）
         if let groupSupport = try? TideAppGroup.supportDirectoryURL() {
