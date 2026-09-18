@@ -297,15 +297,8 @@ struct ExtensionWriter: Sendable {
             AppLogger.fileProvider.error("moveFile: pinned source version missing: \(from, privacy: .private)")
             throw MoveError.sourceVersionMissing(path: from)
         }
-        return ManifestFileEntry(
-            size: entry.size,
-            mtime: entry.mtime,  // 内容不変 = mtime 維持（[mtime 不変条件] と整合）
-            sha256: entry.sha256,
-            s3VersionId: copied.versionId,
-            etag: copied.etag,
-            deviceId: deviceId,
-            uploadedAt: ISO8601.now()
-        )
+        // 内容不変 = size / mtime / sha256 は元 entry を維持（[mtime 不変条件] と整合）— ファクトリ側の契約
+        return ManifestFileEntry.copied(from: entry, copy: copied, deviceId: deviceId)
     }
 
     /// move の共通テール: 二相 RMW → marker → キャッシュ無効化。
@@ -393,14 +386,12 @@ struct ExtensionWriter: Sendable {
     ) async throws -> ManifestFileEntry {
         guard let contentsURL else {
             let put = try await s3.putObject(key: "files/\(path)", data: Data())
-            return ManifestFileEntry(
+            return ManifestFileEntry.uploaded(
                 size: 0,
-                mtime: ISO8601.format(contentModified ?? Date()),
                 sha256: HashCalculator.hex(SHA256.hash(data: Data())),
-                s3VersionId: put.versionId,
-                etag: put.etag,
-                deviceId: deviceId,
-                uploadedAt: ISO8601.now()
+                mtime: contentModified ?? Date(),
+                put: put,
+                deviceId: deviceId
             )
         }
         let reader = try NoFollowFileReader(path: contentsURL.path)
@@ -427,14 +418,12 @@ struct ExtensionWriter: Sendable {
             put = try await s3.putObject(key: key, data: data)
             sha256 = hash
         }
-        return ManifestFileEntry(
+        return ManifestFileEntry.uploaded(
             size: info.size,
-            mtime: ISO8601.format(contentModified ?? Date()),
             sha256: sha256,
-            s3VersionId: put.versionId,
-            etag: put.etag,
-            deviceId: deviceId,
-            uploadedAt: ISO8601.now()
+            mtime: contentModified ?? Date(),
+            put: put,
+            deviceId: deviceId
         )
     }
 }

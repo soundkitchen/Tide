@@ -1572,3 +1572,22 @@ Info ログが揮発済みで事後確認不能 = 設計上フラグ済みなら
 項目 9（factoryReset → 解除 → ウィザード完了で再登録）は dev-tide への再セットアップを避けて
 **未実施**（コードレビューで担保・次回 factoryReset 機会に確認）。
 
+### `ManifestFileEntry` 生成の共通ファクトリ（Issue #118・2026-09-19）
+
+「S3 書込結果 → `ManifestFileEntry`」のフィールド詰めが app（`Uploader` / ウィザード seed）・
+core（`S3RestoreService`）・FP 拡張（`ExtensionWriter` × 3）に複製されていた（PR #101 四次レビュー
+指摘 6）。entry 契約変更時の反映漏れ = 無音のマニフェスト乖離になるため、
+`TideCore/S3/ManifestFileEntryFactory.swift` に集約した。
+
+- `ManifestFileEntry.uploaded(size:sha256:mtime:put:deviceId:uploadedAt:)`: 単発 PUT / MPU complete の
+  `TideS3Client.PutObjectResult` から。`mtime` は **Date で受けて** ISO8601 UTC 秒精度へ符号化
+  （呼び出し側の規約は不変: アップロード = stat 実値・復元 = 復元時刻・FP = `contentModified ?? now`・
+  seed = now）。`uploadedAt` 既定 = 今。
+- `ManifestFileEntry.copied(from:copy:deviceId:uploadedAt:)`: `copyObject`（rename / reparent）から。
+  内容不変なので size / mtime / sha256 は元 entry を維持（[mtime 不変条件]）し、versionId / etag と
+  deviceId / uploadedAt だけ新しくする。
+- **規約: S3 書込結果から entry を作る経路は必ずこのファクトリを通す**（CLAUDE.md §7）。素の `init`
+  直呼びは `ManifestReader` の DB キャッシュ再構成（S3 書込結果でない）に限る。
+- 挙動不変のリファクタ。契約は `ManifestFileEntryFactoryTests`（全フィールド写像 / ISO8601 秒精度 /
+  uploadedAt 既定 / nil versionId 伝播 / copied の内容維持）で固定。617 テストパス。
+

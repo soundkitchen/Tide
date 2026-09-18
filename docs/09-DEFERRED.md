@@ -449,12 +449,12 @@ ETag は GCS が MD5/`-n` を保証しない（CRC32C）が、**Tide は sha256 
   （PR #101 四次レビュー指摘 5）。**ウィザード seed の発火点は八次レビュー指摘 4 で解消済み**
   （seed 前に `.tide/shards/` の空プローブ = 損傷バケットでは seed しない）— 残る書き手
   （FP 拡張 / Uploader / S3RestoreService）の既存挙動と復旧手順整備が本バックログの対象。
-- **`ManifestFileEntry` 生成の共通ファクトリ**: 「PutObjectResult → entry」の同型フィールド詰め
-  （sha256 / mtime / versionId / etag / deviceId / uploadedAt）が `Uploader` / `S3RestoreService` /
-  `ExtensionWriter`（×2）/ ウィザード seed の計 5 箇所に複製されている。entry 契約変更時の手動
-  反映漏れ = 無音のマニフェスト乖離になるため、TideCore へファクトリ（例:
-  `ManifestFileEntry.forUploadedData(_:put:deviceId:)`）を切って app / core / FP 拡張で共用する
-  （PR #101 四次レビュー指摘 6・follow-up 合意）。
+- ✅ **`ManifestFileEntry` 生成の共通ファクトリ**（**解消 2026-09-19・Issue #118**: `TideCore/S3/ManifestFileEntryFactory.swift` の `ManifestFileEntry.uploaded(size:sha256:mtime:put:deviceId:uploadedAt:)` / `.copied(from:copy:deviceId:uploadedAt:)` へ 6 箇所〈Uploader / S3RestoreService / ExtensionWriter × 3〈本体 / 空ファイル / copyObject〉/ ウィザード seed〉を集約。`ManifestReader` の DB キャッシュ再構成は S3 書込結果でないため対象外。契約は `ManifestFileEntryFactoryTests` で固定）。**元の問題**: 「PutObjectResult → entry」の
+  同型フィールド詰め（sha256 / mtime / versionId / etag / deviceId / uploadedAt）が `Uploader` /
+  `S3RestoreService` / `ExtensionWriter` / ウィザード seed に複製されていた（起票時の見立ては 5 箇所・
+  実装時の精査で `ExtensionWriter` の copyObject 経路を含む 6 箇所と確定）。entry 契約変更時の手動
+  反映漏れ = 無音のマニフェスト乖離になるため、TideCore へファクトリを切って app / core / FP 拡張で
+  共用した（PR #101 四次レビュー指摘 6・follow-up 合意 → Issue #118 / PR #119 で実施）。
 - **pending-add フラグの宣言的リファクタ（「望ましい FP 状態」+ 単一 reconcile 化）**:
   `migrationPendingAddKey` の書き手/消し手が `enable()`（add 前 set・成功後 clear）/
   `disableForRecreation()`（remove 前 set）/ `disable()`（remove 前 clear）+ 消費者

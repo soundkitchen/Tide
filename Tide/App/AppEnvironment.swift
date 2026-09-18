@@ -714,13 +714,12 @@ final class AppEnvironment {
 
             let data = Data(SyncIgnoreMatcher.defaultTemplate.utf8)
             let put = try await s3.putObject(key: "files/.syncignore", data: data)
-            let now = ISO8601.now()
-            let entry = ManifestFileEntry(
+            let now = Date()
+            let entry = ManifestFileEntry.uploaded(
                 size: Int64(data.count),
-                mtime: now,
                 sha256: HashCalculator.hex(SHA256.hash(data: data)),
-                s3VersionId: put.versionId,
-                etag: put.etag,
+                mtime: now,
+                put: put,
                 deviceId: deviceId,
                 uploadedAt: now
             )

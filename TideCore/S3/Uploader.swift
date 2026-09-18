@@ -192,14 +192,12 @@ public struct Uploader: Sendable {
         let base = try await db.pool.read { db in
             try FileRecord.fetchOne(db, key: path)?.sha256
         }
-        let newEntry = ManifestFileEntry(
+        let newEntry = ManifestFileEntry.uploaded(
             size: size,
-            mtime: ISO8601.format(mtimeDate),
             sha256: sha256,
-            s3VersionId: result.versionId,
-            etag: result.etag,
-            deviceId: deviceId,
-            uploadedAt: ISO8601.now()
+            mtime: mtimeDate,
+            put: result,
+            deviceId: deviceId
         )
         let outcome = try await manifestUpdater.updateFileEntry(
             for: path, base: base, newEntry: newEntry
