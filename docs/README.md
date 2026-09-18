@@ -140,6 +140,7 @@ macOS のクリーンインストール後の復旧を主目的とした、Dropb
 - ✅ FP-only 稼働モードへ切替（2026-07-25）: Track B（`ConfigStore.syncMode` + `RemoteChangeSignaler` +
   S3 内復元 + UI 縮退 + `soak-check --fp-only`）実装 → 切替ランブック実施 → launchd 常駐 soak 監視（#84）
 - ✅ #40 の 1 週間ライブ soak 判定合格（2026-08-03・persistent DRIFT ゼロ）
+- ✅ 常駐 soak 監視の終了（2026-09-19・合格後 1,980 周回 persistent DRIFT ゼロ → 以後は節目の `make soak-check-fp` スポットチェックのみ）
 - ✅ **v0.3.0: ユーザー目線からの folderSync 削除**（設計 2026-08-06 → 完了 2026-08-17）:
   #96 boot fpOnly 固定 + Sync mode UI 撤去（2026-08-08）/ #97 ウィザード fpOnly ネイティブ化（2026-08-11）/
   #98 旧同期フォルダ `~/Tide` 削除 + docs 反映（2026-08-17）。設計原本 = `docs/09`「v0.3.0」節

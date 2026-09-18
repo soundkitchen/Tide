@@ -113,7 +113,7 @@ soak-watch-fp: ## soak 常時観測（FP-only スコープ・ターミナル常�
 	python3 tools/soak/consistency_check.py --fp-only --watch 300
 
 .PHONY: soak-agent-install
-soak-agent-install: ## soak 常時観測を launchd 常駐化（標準運用・再起動後も自動再開）（#84）
+soak-agent-install: ## soak 常時観測を launchd 常駐化（常駐運用は 2026-09-19 終了・再 soak 時のみ導入）（#84）
 	bash tools/soak/soak_watch_agent.sh install
 
 .PHONY: soak-agent-uninstall
