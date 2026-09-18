@@ -467,6 +467,10 @@ soak 開始**。以後この Mac の同期は FP レプリカ（`~/Library/Cloud
   （長期キー切替案より通知案を採用）— soak 監視は「唯一のバックアップ化」判断までの
   **フェーズ限定の足場**であり、認証運用（約 12 時間ごとの `aws login`）は継続する前提。
   詳細 = `tools/soak/README.md`「watch 健全性通知」節。
+- **常駐 soak 監視の終了（2026-09-19・ユーザ確定）**: #40 合格判定後も 1,980 周回で persistent
+  DRIFT ゼロを確認し、launchd 常駐（#84）の運用を終了。以後は節目の `make soak-check-fp`
+  手動スポットチェックのみ（本節の運用ルール「常駐監視」「モード切替時の `soak-agent-restart`」
+  は失効）。ツール（`make soak-agent-*` / churn）は再 soak 用に温存。経緯・根拠 = `docs/09` #40 節。
 - **既存事象の記録（切替起因でない）**: 毎起動の `enforceTLSBucketPolicy on launch failed
   (non-fatal)` は、dev-tide に TLS 強制ポリシー（`TideDenyInsecureTransport`）が**適用済み**の
   まま、アプリの IAM 資格情報にポリシー読取権限が無いための自己修復チェック失敗（aws CLI で
