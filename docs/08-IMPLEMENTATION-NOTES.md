@@ -1556,3 +1556,14 @@ revert 復帰ランブックを含む）。実施 3 段の記録は本ファイ�
 - テスト: `ConfigStoreTests` にフラグの既定 false / 往復 / `reset()` で消える契約を追加
   （`SMAppService` 自体はユニットで叩かない）。
 
+**実機受け入れ（2026-09-19・全項目パス・項目 9 = factoryReset 再登録はスキップ）**: 既存インストール
+での新ビルド初回起動でログイン項目に Tide が登録（`sfltool dumpbtm` = Disposition
+`enabled, allowed, notified`・URL = `build/Build/Products/Debug/Tide.app`・フラグ
+`tide.launchAtLoginMigrated` = 1）/ Settings「Launch at login」ON 表示 / トグル OFF → システム設定から
+消える・ON → 戻る / システム設定側 OFF → Settings 再表示でトグルが OFF に追随 /
+**ログアウト → ログインで自動起動**（Tide の親 pid = 1 = launchd 起点・ログイン直後の起動時刻を
+確認 = `make run` 起動でないことの裏取り）。項目 8（`Login item registered` ログが 1 回のみ）は
+Info ログが揮発済みで事後確認不能 = 設計上フラグ済みなら `register()` に到達しないことで代替。
+項目 9（factoryReset → 解除 → ウィザード完了で再登録）は dev-tide への再セットアップを避けて
+**未実施**（コードレビューで担保・次回 factoryReset 機会に確認）。
+
