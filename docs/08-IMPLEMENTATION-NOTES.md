@@ -1542,7 +1542,12 @@ revert 復帰ランブックを含む）。実施 3 段の記録は本ファイ�
   乖離する）。Settings の「Startup」セクションは表示のたびに `status()` を読み直し、トグル変更は
   `applyLaunchAtLogin` で現状と異なるときだけ register / unregister（`loadStateFromConfig` の
   同期書き戻しで XPC を走らせない）。失敗はメッセージ表示 + システム値へ戻す。
-  `requiresApproval` = 承認誘導 + Open System Settings、`notFound` = OFF→ON で現在地から再登録を案内。
+  `requiresApproval` = 承認誘導 + Open System Settings、`notFound` = トグル ON で現在地から再登録を案内
+  （この状態ではトグルは既に OFF 表示・PR #117 指摘 2）。**再表示時の stale 解消（PR #117 指摘 1）**:
+  単一・常駐 Window は閉じても `@State` が生存し `.onAppear` が再発火しない（#102）ため、
+  `NSWindow.didBecomeKeyNotification` を受けるたびに `loadLoginItemState()` を再実行
+  （Settings の再表示 / システム設定から戻った瞬間に追随。`status()` はローカル読みで安価・
+  書き戻しは同値 guard で XPC に到達しない）。
 - **既定 ON の適用点 = `AppEnvironment.registerLoginItemIfFirstTime()`**: 呼び出しは bootstrap
   （`setupCompleted` 確認後・XCTest ガードの内側 = テストでは到達しない）と completeSetup
   （`setupCompleted = true` 直後）の 2 つ。冪等マーカー = `ConfigStore.launchAtLoginMigrated`

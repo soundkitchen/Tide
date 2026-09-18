@@ -2426,13 +2426,13 @@
         }
       }
     },
-    "The login item points to a Tide.app that no longer exists. Turn the switch off and on again to re-register from the current location." : {
+    "The login item points to a Tide.app that no longer exists. Turn the switch on to re-register from the current location." : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "ログイン項目が存在しない Tide.app を指しています。スイッチをいったんオフにしてからオンにすると、現在の場所で再登録されます。"
+            "value" : "ログイン項目が存在しない Tide.app を指しています。スイッチをオンにすると、現在の場所で再登録されます。"
           }
         }
       }

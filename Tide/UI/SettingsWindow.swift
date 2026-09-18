@@ -130,7 +130,8 @@ struct SettingsWindow: View {
                     Button("Open System Settings") { LoginItemController.openSystemSettings() }
                 case .notFound:
                     // 登録記録はあるがバンドル不在（リポジトリ移動 / build/ 削除）: 現在地から再登録を促す。
-                    Text("The login item points to a Tide.app that no longer exists. Turn the switch off and on again to re-register from the current location.")
+                    // この状態ではトグルは既に OFF 表示なので「オンにする」だけを案内する（PR #117 指摘 2）。
+                    Text("The login item points to a Tide.app that no longer exists. Turn the switch on to re-register from the current location.")
                         .textSelection(.enabled)
                         .font(.caption)
                         .foregroundStyle(.orange)
@@ -285,6 +286,14 @@ struct SettingsWindow: View {
         }
         .onChange(of: launchAtLogin) { _, newValue in
             applyLaunchAtLogin(newValue)
+        }
+        // ログイン項目の真の状態はシステム側にあり、単一・常駐 Window は閉じても @State が生存して
+        // `.onAppear` の再発火に頼れない（#102 実踏）。Settings の再表示 / システム設定から戻って
+        // きた瞬間（= ウィンドウがキーになる）に読み直して stale 表示（システム設定側で OFF /
+        // 承認済みなのに旧表示）を解消する（PR #117 指摘 1）。`status()` はローカル読みで安価・
+        // 書き戻しは `applyLaunchAtLogin` の同値 guard で XPC に到達しない。
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
+            loadLoginItemState()
         }
         .onChange(of: noLimit) { _, _ in persistLimit() }
         .onChange(of: limitGB) { _, _ in persistLimit() }

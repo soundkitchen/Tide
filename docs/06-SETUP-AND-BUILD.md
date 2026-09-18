@@ -226,7 +226,7 @@ Tide は **`SMAppService.mainApp` でアプリ自身をログイン項目へ登�
 
 - 登録されるのは**現在のバンドルパス**。開発ビルドは `build/Build/Products/Debug/Tide.app`
   なので、同じ場所へ再ビルドすればそのまま有効。リポジトリを移動 / `build/` を消すと
-  ログイン項目は「見つからない」状態になる → Settings のトグルを OFF → ON で現在地から再登録。
+  ログイン項目は「見つからない」状態になる（トグルは OFF 表示）→ Settings のトグルを ON にすると現在地から再登録。
 - 登録直後にシステムがユーザ承認を求める場合がある（Settings に「承認が必要」と表示 →
   「Open System Settings」で「ログイン項目」を開いて ON にする）。
 - `factoryReset` はログイン項目も外す。**`make reset`（アプリ外）は外せない**ため、
