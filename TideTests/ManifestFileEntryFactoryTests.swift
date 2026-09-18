@@ -2,7 +2,7 @@ import XCTest
 import TideCore
 
 /// `ManifestFileEntry` 生成ファクトリ（Issue #118）の契約を固定する。
-/// 5 箇所に複製されていたフィールド詰めを集約したので、ここが崩れると全書き手が一斉に乖離する。
+/// 6 箇所に複製されていたフィールド詰めを集約したので、ここが崩れると全書き手が一斉に乖離する。
 final class ManifestFileEntryFactoryTests: XCTestCase {
     private let put = TideS3Client.PutObjectResult(etag: "etag-1", versionId: "v-1")
 
