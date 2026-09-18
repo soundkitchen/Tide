@@ -35,6 +35,12 @@ struct SettingsWindow: View {
     /// 通知トグル（既定 on）。ConfigStore は @Observable でないので他の設定と同じ @State write-through。
     @State private var notificationsEnabled: Bool = true
 
+    /// ログイン時自動起動（Issue #116）。真の状態はシステム側（`SMAppService`）なので、表示のたびに
+    /// `LoginItemController.status()` から読み直す（システム設定で外された場合に追随）。
+    @State private var launchAtLogin: Bool = false
+    @State private var loginItemStatus: LoginItemController.Status = .notRegistered
+    @State private var loginItemMessage: String?
+
     /// FP ドメインの状態（#82 / #103）。nil = 取得中 or 取得失敗（不明）。
     @State private var fileProviderStatus: FileProviderController.DomainStatus?
     @State private var fileProviderMessage: String?
@@ -109,6 +115,36 @@ struct SettingsWindow: View {
             Section("Notifications") {
                 Toggle("Notify about conflicts and backup problems", isOn: $notificationsEnabled)
                 Text("Shows a notification when a sync conflict happens or a file can’t be backed up. macOS notification settings still apply.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Section("Startup") {
+                Toggle("Launch at login", isOn: $launchAtLogin)
+                switch loginItemStatus {
+                case .requiresApproval:
+                    // 登録はしたがユーザ承認待ち: アプリ内では完了できないためシステム設定へ誘導。
+                    Text("Approval required — turn on Tide under Login Items in System Settings.")
+                        .textSelection(.enabled)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                    Button("Open System Settings") { LoginItemController.openSystemSettings() }
+                case .notFound:
+                    // 登録記録はあるがバンドル不在（リポジトリ移動 / build/ 削除）: 現在地から再登録を促す。
+                    // この状態ではトグルは既に OFF 表示なので「オンにする」だけを案内する（PR #117 指摘 2）。
+                    Text("The login item points to a Tide.app that no longer exists. Turn the switch on to re-register from the current location.")
+                        .textSelection(.enabled)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                case .enabled, .notRegistered:
+                    EmptyView()
+                }
+                if let loginItemMessage {
+                    Text(loginItemMessage)
+                        .textSelection(.enabled)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Text("Starts Tide when you log in so the menu bar status, notifications, and remote change checks are available right away. macOS runs the File Provider extension on its own, so files keep syncing even while the app is closed.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -248,6 +284,17 @@ struct SettingsWindow: View {
         .onChange(of: notificationsEnabled) { _, newValue in
             env.config.notificationsEnabled = newValue
         }
+        .onChange(of: launchAtLogin) { _, newValue in
+            applyLaunchAtLogin(newValue)
+        }
+        // ログイン項目の真の状態はシステム側にあり、単一・常駐 Window は閉じても @State が生存して
+        // `.onAppear` の再発火に頼れない（#102 実踏）。Settings の再表示 / システム設定から戻って
+        // きた瞬間（= ウィンドウがキーになる）に読み直して stale 表示（システム設定側で OFF /
+        // 承認済みなのに旧表示）を解消する（PR #117 指摘 1）。`status()` はローカル読みで安価・
+        // 書き戻しは `applyLaunchAtLogin` の同値 guard で XPC に到達しない。
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
+            loadLoginItemState()
+        }
         .onChange(of: noLimit) { _, _ in persistLimit() }
         .onChange(of: limitGB) { _, _ in persistLimit() }
         .onChange(of: noUploadBwLimit) { _, _ in persistBandwidth() }
@@ -284,6 +331,35 @@ struct SettingsWindow: View {
         }
         loadBandwidth()
         notificationsEnabled = env.config.notificationsEnabled
+        loadLoginItemState()
+    }
+
+    /// ログイン項目の状態をシステムから読み直して @State へ反映する（Issue #116）。
+    private func loadLoginItemState() {
+        loginItemStatus = LoginItemController.status()
+        launchAtLogin = loginItemStatus.isEnabled
+    }
+
+    /// トグル変更をシステムへ適用する。`loadLoginItemState()` による同期書き戻し（現状と同値）は
+    /// no-op にする（さもないと表示のたびに register の XPC が走る）。失敗時はメッセージを出して
+    /// 状態をシステム値へ戻す（トグルとシステムの乖離を作らない）。
+    private func applyLaunchAtLogin(_ enabled: Bool) {
+        let current = LoginItemController.status()
+        guard enabled != current.isEnabled else {
+            loginItemStatus = current
+            return
+        }
+        do {
+            if enabled {
+                try LoginItemController.register()
+            } else {
+                try LoginItemController.unregister()
+            }
+            loginItemMessage = nil
+        } catch {
+            loginItemMessage = String(describing: error)
+        }
+        loadLoginItemState()
     }
 
     /// config のバイト/秒値を (無制限フラグ, MB/s クランプ値) に変換する（`<= 0` = 無制限）。

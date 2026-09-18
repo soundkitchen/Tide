@@ -209,14 +209,28 @@ v0.3.0 以降、セットアップは **File Provider ネイティブ**（同期
   「This setup will recreate the Tide folder. Changes not yet uploaded will be discarded.」を
   表示する。未アップロードの変更は破棄されるため、必要なら先に退避する。
 
-## 自動起動の設定
+## 自動起動の設定（ログイン時に起動・Issue #116）
 
-macOS のログイン項目に登録するには:
+Tide は **`SMAppService.mainApp` でアプリ自身をログイン項目へ登録**する（2026-09-19〜）。
+既定は ON で、次のタイミングで一度だけ自動登録される:
 
-1. アプリ起動状態で `System Settings` > `General` > `Login Items`
-2. `+` ボタンで `Tide.app` を追加
+- セットアップウィザード完了時（`completeSetup`）
+- 既存インストールでは、対応ビルドの**初回起動時**（`setupCompleted` 済みの場合のみ）
 
-または、`SMAppService` API を使ってアプリ内から設定する機能を追加（M4 で検討）。
+以後は Settings →「Startup」→「Launch at login」トグル、またはシステム設定 →「一般」→
+「ログイン項目と機能拡張」で ON / OFF できる。**真の状態はシステム側**で、アプリは設定値を
+二重保存しない（システム設定で外せばトグルも OFF に追随する）。一度自動登録した後は、
+ユーザが OFF にした選択を再セットアップでも上書きしない。
+
+注意:
+
+- 登録されるのは**現在のバンドルパス**。開発ビルドは `build/Build/Products/Debug/Tide.app`
+  なので、同じ場所へ再ビルドすればそのまま有効。リポジトリを移動 / `build/` を消すと
+  ログイン項目は「見つからない」状態になる（トグルは OFF 表示）→ Settings のトグルを ON にすると現在地から再登録。
+- 登録直後にシステムがユーザ承認を求める場合がある（Settings に「承認が必要」と表示 →
+  「Open System Settings」で「ログイン項目」を開いて ON にする）。
+- `factoryReset` はログイン項目も外す。**`make reset`（アプリ外）は外せない**ため、
+  未セットアップの Tide がログイン時に起動してウィザードを出す。不要ならシステム設定から外す。
 
 ## デバッグ Tips
 

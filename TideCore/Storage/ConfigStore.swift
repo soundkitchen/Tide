@@ -18,6 +18,7 @@ public final class ConfigStore: @unchecked Sendable {
         static let syncRootBookmark = "tide.syncRootBookmark"
         static let syncMode = "tide.syncMode"
         static let fileProviderDomainEpoch = "tide.fileProviderDomainEpoch"
+        static let launchAtLoginMigrated = "tide.launchAtLoginMigrated"
     }
 
     /// 稼働モードの列挙。**v0.3.0（#96）以降、アプリはこの値で分岐しない**（boot は無条件
@@ -48,7 +49,7 @@ public final class ConfigStore: @unchecked Sendable {
         Key.uploadSizeLimitBytes,
         Key.uploadBandwidthBytesPerSec, Key.downloadBandwidthBytesPerSec,
         Key.notificationsEnabled, Key.syncRootBookmark,
-        Key.syncMode
+        Key.syncMode, Key.launchAtLoginMigrated
     ]
 
     /// セットアップ完了フラグの defaults キー（`LegacyStateMigrator` の移行要否判定用）。
@@ -140,6 +141,16 @@ public final class ConfigStore: @unchecked Sendable {
             return defaults.bool(forKey: Key.notificationsEnabled)
         }
         set { defaults.set(newValue, forKey: Key.notificationsEnabled) }
+    }
+
+    /// ログイン時自動起動（Issue #116）の「既定 ON を一度適用済み」フラグ。
+    /// ログイン項目の**真の状態はシステム側**（`SMAppService.mainApp.status`）にあり、ここには
+    /// 保存しない。このフラグは「セットアップ完了時 / 既存インストールの次回起動時に一度だけ
+    /// 自動登録する」ための冪等マーカーで、立った後はユーザのトグル / システム設定の選択を尊重して
+    /// 再登録しない。`reset()` で消える（factoryReset → 再セットアップ完了で再登録）。
+    public var launchAtLoginMigrated: Bool {
+        get { defaults.bool(forKey: Key.launchAtLoginMigrated) }
+        set { defaults.set(newValue, forKey: Key.launchAtLoginMigrated) }
     }
 
     /// 同期フォルダの security-scoped bookmark（App Sandbox 下での再アクセス手段・M5 Phase 2）。

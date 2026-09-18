@@ -20,6 +20,23 @@ final class ConfigStoreTests: XCTestCase {
         ConfigStore(defaults: makeDefaults())
     }
 
+    // MARK: - ログイン時自動起動フラグ（Issue #116）
+
+    func testLaunchAtLoginMigratedDefaultsFalseAndRoundTrips() {
+        let config = makeStore()
+        XCTAssertFalse(config.launchAtLoginMigrated, "既定は未適用（false）")
+        config.launchAtLoginMigrated = true
+        XCTAssertTrue(config.launchAtLoginMigrated)
+    }
+
+    func testResetClearsLaunchAtLoginMigrated() {
+        // reset で消える = factoryReset → 再セットアップ完了時に既定 ON が再適用される契約。
+        let config = makeStore()
+        config.launchAtLoginMigrated = true
+        config.reset()
+        XCTAssertFalse(config.launchAtLoginMigrated)
+    }
+
     func testUploadSizeLimitDefaultsTo1GiB() {
         let config = makeStore()
         XCTAssertEqual(config.uploadSizeLimitBytes, ConfigStore.defaultUploadSizeLimitBytes)

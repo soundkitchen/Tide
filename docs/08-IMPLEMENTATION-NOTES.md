@@ -1521,3 +1521,54 @@ revert 復帰ランブックを含む）。実施 3 段の記録は本ファイ�
 - **書込の直列化とタイムスタンプ確定（#47 レビュー #3/#4）**: 全キャッシュ書込は 1 本の `cacheSaveTask` チェーン（前の `.value` を待つ FIFO）で直列化＝scan 完了 save と restore 後 save の last-writer-wins を防ぐ。`advanceTimestamp` のときは**書込成功後に** `deletedCacheUpdatedAt`/`deletedCacheBucket` を確定（失敗時に Last updated だけ進む齟齬を作らない）。保存 bucket は走査/読込時に確定した `deletedCacheBucket` を使う（#47 レビュー #2＝表示中の bucket 変更で旧一覧を新キーへ汚染しない）。
 - **読込タイミング**: `VersionHistoryWindow` の `.task`（オープン時 1 回）で `loadDeletedCache`。未スキャン・一覧が空・`deletedCacheUpdatedAt == nil` のときだけ反映＝ライブなスキャン結果を後追いで潰さない。実 IO（読込/保存）は `Task.detached` で main から外し、state 更新は MainActor 継承 Task 上で行う。
 - **UI**: キャッシュありなら「Last updated …（相対時刻・自動更新）」+ ボタンは Refresh、未列挙なら従来どおり「Search deleted files」。純粋部分（encode/decode/validate）は `DeletedFilesCacheTests` で固定。
+
+### ログイン時の自動起動（SMAppService・Issue #116・2026-09-19）
+
+**背景**: `make run` 起動のみでログイン項目 / launchd に未登録だったため、マシン再起動後に
+アプリが立ち上がらない（2026-09-18 の再起動で失念 → 翌日まで未起動）。同期本体は FP 拡張
+（fileproviderd がホスト）なのでローカル書込は S3 へ届き続けるが、メニューバー表示・通知
+（#103 の FP OFF 検出等）・`RemoteChangeSignaler` はアプリ不在中は止まる。`docs/06` に
+「`SMAppService` でアプリ内から設定（M4 で検討）」として据え置かれていた項目の実装。
+
+**設計（ユーザ確定 2026-09-19）**: 方式 = `SMAppService.mainApp`（ServiceManagement・サンドボックス
+対応・追加 entitlement 不要・システム設定「ログイン項目」に表示）/ 既定 ON + Settings でトグル /
+既存インストールは次回起動時に一度だけ自動登録。
+
+- **`LoginItemController`**（`Tide/Core/`・app-bound）: `status()`（`SMAppService.Status` を
+  `enabled / notRegistered / requiresApproval / notFound` に縮約）/ `register()` / `unregister()`
+  （いずれも現状と同値なら no-op = XPC を省く）/ `openSystemSettings()`
+  （`SMAppService.openSystemSettingsLoginItems()`）。
+- **真の状態はシステム側**: アプリは ON/OFF を保存しない（保存すると「システム設定で外した」と
+  乖離する）。Settings の「Startup」セクションは表示のたびに `status()` を読み直し、トグル変更は
+  `applyLaunchAtLogin` で現状と異なるときだけ register / unregister（`loadStateFromConfig` の
+  同期書き戻しで XPC を走らせない）。失敗はメッセージ表示 + システム値へ戻す。
+  `requiresApproval` = 承認誘導 + Open System Settings、`notFound` = トグル ON で現在地から再登録を案内
+  （この状態ではトグルは既に OFF 表示・PR #117 指摘 2）。**再表示時の stale 解消（PR #117 指摘 1）**:
+  単一・常駐 Window は閉じても `@State` が生存し `.onAppear` が再発火しない（#102）ため、
+  `NSWindow.didBecomeKeyNotification` を受けるたびに `loadLoginItemState()` を再実行
+  （Settings の再表示 / システム設定から戻った瞬間に追随。`status()` はローカル読みで安価・
+  書き戻しは同値 guard で XPC に到達しない）。
+- **既定 ON の適用点 = `AppEnvironment.registerLoginItemIfFirstTime()`**: 呼び出しは bootstrap
+  （`setupCompleted` 確認後・XCTest ガードの内側 = テストでは到達しない）と completeSetup
+  （`setupCompleted = true` 直後）の 2 つ。冪等マーカー = `ConfigStore.launchAtLoginMigrated`
+  （**登録成功時のみ**立てる = 失敗は次回起動で再試行・非致命）。立った後はユーザのトグル /
+  システム設定の選択（OFF 含む）を尊重し、再セットアップでも再登録しない。
+- **factoryReset**: `LoginItemController.unregister()` を FP ドメイン disable の直後に実行。
+  フラグは `migratableKeys` 経由で `reset()` が消すため、再セットアップ完了で再登録される。
+  `make reset`（アプリ外）はログイン項目に届かない（`docs/06` に明記）。
+- **登録対象は現在のバンドルパス**（開発ビルド = `build/Build/Products/Debug/Tide.app`）。同一
+  パスへの再ビルドは有効のまま・パス消失は `notFound`。
+- テスト: `ConfigStoreTests` にフラグの既定 false / 往復 / `reset()` で消える契約を追加
+  （`SMAppService` 自体はユニットで叩かない）。
+
+**実機受け入れ（2026-09-19・全項目パス・項目 9 = factoryReset 再登録はスキップ）**: 既存インストール
+での新ビルド初回起動でログイン項目に Tide が登録（`sfltool dumpbtm` = Disposition
+`enabled, allowed, notified`・URL = `build/Build/Products/Debug/Tide.app`・フラグ
+`tide.launchAtLoginMigrated` = 1）/ Settings「Launch at login」ON 表示 / トグル OFF → システム設定から
+消える・ON → 戻る / システム設定側 OFF → Settings 再表示でトグルが OFF に追随 /
+**ログアウト → ログインで自動起動**（Tide の親 pid = 1 = launchd 起点・ログイン直後の起動時刻を
+確認 = `make run` 起動でないことの裏取り）。項目 8（`Login item registered` ログが 1 回のみ）は
+Info ログが揮発済みで事後確認不能 = 設計上フラグ済みなら `register()` に到達しないことで代替。
+項目 9（factoryReset → 解除 → ウィザード完了で再登録）は dev-tide への再セットアップを避けて
+**未実施**（コードレビューで担保・次回 factoryReset 機会に確認）。
+
