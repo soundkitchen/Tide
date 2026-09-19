@@ -472,7 +472,17 @@ ETag は GCS が MD5/`-n` を保証しない（CRC32C）が、**Tide は sha256 
 
 ---
 
-## deviceId のバケット変更時再生成（2026-08-12・Issue 化せず本メモで追跡）
+## deviceId のバケット変更時再生成（2026-08-12 起票 → ✅ **解消 2026-09-19・Issue #121**）
+
+> **解消**: `ConfigStore.regenerateDeviceId()` + 純粋判定 `ConfigStore.shouldRotateDeviceId(previousBucket:newBucket:)`
+> を追加し、`completeSetup` の Keychain 保存直後・`config.bucketName` 上書きの直前で「旧 bucketName が既知かつ
+> 異なる」ときだけ再生成する。留意点 1・2 はそのまま実装。留意点 3（ウィザード表示）は精査の結果、Device ID
+> を表示するのは **done 画面のみ**（`completeSetup` 完了後に `env.config.deviceId` を読む）で確認ステップには
+> 無く、再生成後の値がそのまま表示されるため追加対応不要。判定は `ConfigStoreTests` で固定。以下は起票時の記録。
+> **前提の限界（PR #122 レビュー・Low）**: 「名義がゼロから始まる」は新規バケット移行にしか成立せず、この Mac が
+> 既に書いた履歴を持つバケットへ戻す / 往復する場合も ID が刷新されて過去 entry が別デバイス名義に見える（名義の
+> 二重化）。deviceId は比較に使われないメタデータなので同期挙動への影響はないが、将来 deviceId を自己書込判定に
+> 使うなら要再設計（詳細 = `docs/08` 該当節）。
 
 `ConfigStore.deviceId` は初回アクセス時に「当時のコンピュータ名（`Host.current().localizedName`・
 スペースはハイフン化）+ UUID 先頭 8 文字」で一度だけ生成し UserDefaults へ永続保存する

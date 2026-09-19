@@ -649,6 +649,17 @@ final class AppEnvironment {
         }
 
         try keychain.save(credentials)
+        // deviceId のバケット変更時再生成（Issue #121）: 判定は FP ドメイン作り直しと同じ「旧 bucketName
+        // が既知かつ異なる」（同一バケットの再セットアップは名義維持）。**`config.bucketName` 上書きと
+        // `seedDefaultSyncIgnoreIfNewBucket`（`config.deviceId` を読む）より前**に置く — 遅いと旧 ID が
+        // 新バケットの初回書込に使われる。throw し得る処理（Keychain 保存）の後ろ・bucketName 書込の
+        // 直前に置き、「再生成したのにバケットは旧のまま」の窓を同期処理 1 行分に閉じる。
+        // ウィザードの Device ID 表示は done 画面（completeSetup 完了後に読む）のみなので再生成後の値が出る。
+        if ConfigStore.shouldRotateDeviceId(previousBucket: config.bucketName, newBucket: bucket) {
+            let previous = config.deviceId
+            config.regenerateDeviceId()
+            AppLogger.ui.info("Rotated deviceId on bucket change: \(previous, privacy: .private) -> \(self.config.deviceId, privacy: .private)")
+        }
         config.bucketName = bucket
         config.region = region
         config.setupCompleted = true

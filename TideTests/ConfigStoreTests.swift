@@ -20,6 +20,34 @@ final class ConfigStoreTests: XCTestCase {
         ConfigStore(defaults: makeDefaults())
     }
 
+    // MARK: - deviceId のバケット変更時再生成（Issue #121）
+
+    func testDeviceIdIsStableAcrossAccesses() {
+        let config = makeStore()
+        let first = config.deviceId
+        XCTAssertFalse(first.isEmpty)
+        XCTAssertEqual(config.deviceId, first, "一度生成した deviceId は不変")
+        XCTAssertEqual(first.split(separator: "-").last?.count, 8, "末尾は UUID 先頭 8 文字")
+    }
+
+    func testRegenerateDeviceIdProducesNewPersistentValue() {
+        let defaults = makeDefaults()
+        let config = ConfigStore(defaults: defaults)
+        let before = config.deviceId
+        config.regenerateDeviceId()
+        XCTAssertNil(defaults.string(forKey: "tide.deviceId"), "キーは削除される（次アクセスで再生成）")
+        let after = config.deviceId
+        XCTAssertNotEqual(after, before)
+        XCTAssertEqual(ConfigStore(defaults: defaults).deviceId, after, "再生成後の値は永続化される")
+    }
+
+    func testShouldRotateDeviceIdOnlyWhenBucketActuallyChanges() {
+        XCTAssertTrue(ConfigStore.shouldRotateDeviceId(previousBucket: "old-bucket", newBucket: "new-bucket"))
+        XCTAssertFalse(ConfigStore.shouldRotateDeviceId(previousBucket: "same", newBucket: "same"), "同一バケットの再セットアップは名義維持")
+        XCTAssertFalse(ConfigStore.shouldRotateDeviceId(previousBucket: nil, newBucket: "b"), "旧値なし（factoryReset 後）は対象外")
+        XCTAssertFalse(ConfigStore.shouldRotateDeviceId(previousBucket: "", newBucket: "b"), "空文字は未設定扱い")
+    }
+
     // MARK: - ログイン時自動起動フラグ（Issue #116）
 
     func testLaunchAtLoginMigratedDefaultsFalseAndRoundTrips() {
