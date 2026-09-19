@@ -219,6 +219,10 @@ public final class ConfigStore: @unchecked Sendable {
     /// 呼ぶのは **バケットが実際に変わるセットアップ**のみ（判定は `shouldRotateDeviceId`）—
     /// 同一バケット内で名義を変えると「別デバイスからの書込」に見える（ライフサイクル途中の
     /// 再生成をしない設計・docs/09）。バケット変更 = マニフェスト名義がゼロから始まる唯一の機会。
+    /// **前提は新規バケットへの移行**: この Mac が既に書いた履歴を持つバケットへ戻す / 往復する場合も
+    /// 判定は「名前が変わった」だけで真になり、過去 entry が別デバイス名義に見える（名義の二重化）。
+    /// deviceId は比較に使われないメタデータなので同期挙動には影響しないが、将来 deviceId を自己書込
+    /// 判定に使うならこの往復ケースを再設計すること（PR #122 レビュー・docs/08）。
     public func regenerateDeviceId() {
         defaults.removeObject(forKey: Key.deviceId)
     }
