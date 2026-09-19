@@ -1591,3 +1591,20 @@ core（`S3RestoreService`）・FP 拡張（`ExtensionWriter` × 3）に複製さ
 - 挙動不変のリファクタ。契約は `ManifestFileEntryFactoryTests`（全フィールド写像 / ISO8601 秒精度 /
   uploadedAt 既定 / nil versionId 伝播 / copied の内容維持）で固定。617 テストパス。
 
+### deviceId のバケット変更時再生成（Issue #121・2026-09-19）
+
+`ConfigStore.deviceId` は初回アクセス時に「当時のコンピュータ名 + UUID 先頭 8 文字」で一度だけ生成し
+永続保存（以降不変・`reset()` でも温存）。ライフサイクル途中で変えるとマニフェスト上「別デバイスからの
+書込」に見えるため再生成しない設計だが、**バケット変更 = マニフェスト名義がゼロから始まる唯一の機会**
+なので、そのときだけ現行コンピュータ名で刷新する（ユーザ合意 2026-08-12・`docs/09` 該当節）。
+
+- `ConfigStore.regenerateDeviceId()`: キー削除 → 次アクセスで再生成。
+- `ConfigStore.shouldRotateDeviceId(previousBucket:newBucket:)`（純粋判定）: 旧 bucketName が**既知かつ非空
+  かつ新バケットと異なる**ときだけ true。同一バケットの再セットアップ（認証情報の再設定等）と旧値なし
+  （factoryReset 後 = `resetIncludingDeviceId` で既に消えている）は false。
+- 呼び出し点 = `completeSetup` の **Keychain 保存直後・`config.bucketName` 上書きの直前**（`seedDefault
+  SyncIgnoreIfNewBucket` が `config.deviceId` を読むより前）。throw し得る処理の後ろに置き、「再生成したのに
+  バケットは旧のまま」の窓を同期処理 1 行に閉じる。
+- ウィザードの Device ID 表示は done 画面のみ（完了後に読む）で再生成後の値が出る。Settings / 診断
+  エクスポートも都度 `config.deviceId` を読むため追随する。
+
