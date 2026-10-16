@@ -261,6 +261,30 @@ final class SyncIgnoreMatcherTests: XCTestCase {
         XCTAssertEqual(m(glob(stars: SyncIgnoreMatcher.maxWildcardsPerPattern + 1)).sourceLines.count, 0)
     }
 
+    func testHasNegatedPattern() {
+        XCTAssertFalse(SyncIgnoreMatcher.parse("node_modules/\n*.pyc").hasNegatedPattern)
+        XCTAssertTrue(SyncIgnoreMatcher.parse("*.log\n!keep.log").hasNegatedPattern)
+        // コメント・空行は否定にならない
+        XCTAssertFalse(SyncIgnoreMatcher.parse("# !not-negation\n\n*.tmp").hasNegatedPattern)
+    }
+
+    func testLayeredHasNegatedPatternOnlyForAncestorAndSelfLayers() {
+        let lay = LayeredSyncIgnore(matchers: [
+            "": SyncIgnoreMatcher.parse("*.log"),
+            "a": SyncIgnoreMatcher.parse("!x.log"),
+            "b": SyncIgnoreMatcher.parse("*.tmp")
+        ])
+        // 祖先（a）の否定
+        XCTAssertTrue(lay.hasNegatedPattern(applyingTo: "a/node_modules"))
+        // 自身（a）の層も含む
+        XCTAssertTrue(lay.hasNegatedPattern(applyingTo: "a"))
+        // 兄弟（b 配下）には a の否定は効かない
+        XCTAssertFalse(lay.hasNegatedPattern(applyingTo: "b/node_modules"))
+        // 名前の前方一致（"ab"）は a の配下ではない
+        XCTAssertFalse(lay.hasNegatedPattern(applyingTo: "ab/node_modules"))
+        XCTAssertFalse(LayeredSyncIgnore.empty.hasNegatedPattern(applyingTo: "x"))
+    }
+
     func testOverlongPatternLineDropped() {
         let longLine = String(repeating: "a", count: SyncIgnoreMatcher.maxPatternLength + 1)
         XCTAssertEqual(m(longLine).sourceLines.count, 0)

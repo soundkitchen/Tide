@@ -315,9 +315,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         if contentType?.conforms(to: .directory) == true {
             // 機密網ディレクトリ（.aws / .ssh 等）は subtree ごとローカル温存。単発の
             // ExcludedFromSync で配下の個別 createItem 評価も生じない（FSEvents スキャンの
-            // 機密網 dir skipDescendants と対称）。ユーザ `.syncignore` の dir 単位除外は
-            // **意図的にしない** — `!` 再包含（同層否定）の再現は per-file 評価が担う
-            //（スキャン側も dir prune はしない）。
+            // 機密網 dir skipDescendants と対称）。ツリーを引かずに即決する（オフラインでも拒否）。
+            // ユーザ `.syncignore` の dir 単位除外は下の Task 内（ツリーと層が要る・#120）。
             if HardcodedIgnoreRules.shouldIgnore(relativePath: path) {
                 AppLogger.fileProvider.notice("createItem: hardcoded-ignored directory excluded: \(path, privacy: .private)")
                 Task {
@@ -335,9 +334,10 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             // 同一 item に収束する。
             //
             // 同 path にマニフェスト **file** が実在する kind 衝突は意図的にチェックしない
-            // （PR #59 レビュー #2）: ツリー参照（cache.current()）を挟むと cold 時に S3 往復が
-            // 要り「フォルダ作成 = S3 非接触・オフラインでも成功」の利点を失う。並存した場合は
-            // 別 id（`d:` と `f:`）の同名 item となり、システムの名前衝突バウンスが解消する。
+            // （PR #59 レビュー #2）: 並存した場合は別 id（`d:` と `f:`）の同名 item となり、
+            // システムの名前衝突バウンスが解消する。#120 以降はフォルダ単位除外の判定のために
+            // ツリー（cache.current()）を引く（cold 時は S3 往復）が、取得に失敗したら受理へ倒す
+            // ので「フォルダ作成はオフラインでも成功」は維持している。
             //
             // 仮想 dir の mtime 規約（PR #59 レビュー #3・三経路で共通）: **作成時のみテンプレート
             // 値を載せ、再照会（item(for:) / dir メタデータ modifyItem）は nil** — mtime は
@@ -349,6 +349,15 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             let dirCompletion = UncheckedSendableBox(value: completionHandler)
             let task = Task {
                 defer { progress.completedUnitCount = progress.totalUnitCount }
+                // ユーザ `.syncignore` のフォルダ単位除外（#120）: 配下を 1 ファイルずつ除外すると
+                // fileproviderd の除外記録がファイル数だけ積もり、拡張の更新のたびに全件再送される。
+                if await Self.excludesDirectoryAsWhole(path: path, services: services) {
+                    AppLogger.fileProvider.notice("createItem: directory excluded as a whole: \(path, privacy: .private)")
+                    await services.events.append(
+                        type: .info, path: path, message: "Excluded folder from sync (kept local)")
+                    dirCompletion.value(nil, [], false, NSFileProviderError(.excludedFromSync))
+                    return
+                }
                 // レジストリ登録 = item(for:) / enumerator の合成 dir 温存の根拠（M5 Phase 5-4）
                 await services.virtualDirs.add(path)
                 dirCompletion.value(
@@ -443,6 +452,27 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         return progress
     }
 
+    /// 新規フォルダをユーザ `.syncignore` でフォルダごと除外するか（createItem 用・#120）。
+    /// 判定本体は `IgnoreDecision.shouldExcludeDirectory`。ツリーか `.syncignore` の取得に
+    /// 失敗したら false（= 従来どおり受理し、配下は 1 ファイルずつ判定）= オフラインでも
+    /// フォルダ作成は成功する。
+    private static func excludesDirectoryAsWhole(
+        path: String, services: ExtensionServices
+    ) async -> Bool {
+        do {
+            let current = try await services.cache.current()
+            let layered = try await services.ignore.layeredIgnore(
+                tree: current.tree, anchor: current.anchor)
+            return IgnoreDecision.shouldExcludeDirectory(
+                relativePath: path,
+                hasTrackedDescendants: current.tree.node(at: path) != nil,
+                matcher: layered)
+        } catch {
+            AppLogger.fileProvider.error("createItem: directory exclusion check failed (accepting): \(String(describing: error), privacy: .private)")
+            return false
+        }
+    }
+
     /// createItem の書込結果 → completion 変換（内容あり/なしの 2 経路で共用）。
     /// FP 版 Sync Activity（Issue #83）のイベント記録もここに合流させる。
     private static func completeCreate(
@@ -522,12 +552,33 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             let task = Task {
                 defer { progress.completedUnitCount = progress.totalUnitCount }
                 do {
-                    let tree = try await services.cache.current().tree
+                    let current = try await services.cache.current()
+                    let tree = current.tree
                     let node = tree.node(at: path)
                     if let node, !node.isDirectory {
                         // kind 不一致（stale dir id・実体はファイル）= その dir はもう無い
                         completion.value(nil, [], false, NSFileProviderError(.noSuchItem))
                         return
+                    }
+                    // 受理済みの仮想フォルダを後からフォルダ単位で除外する（#120・既存分の畳み込み）:
+                    // #120 以前に受理され配下が 1 ファイルずつ除外されているフォルダは、`touch` 等の
+                    // メタデータ変更を契機にここで ExcludedFromSync を返すと、fileproviderd が配下の
+                    // 除外記録をフォルダ 1 件に畳む（rename 経路での実機確認 2026-10-16）。システムは
+                    // 続けて後始末の deleteItem を送るが、追跡済みファイルが無い（node == nil）ので
+                    // S3 非接触の仮想フォルダ削除として完了する。ローカルの実体は残る。
+                    // `.syncignore` の取得失敗は判定を諦めて従来どおり受理する（メタデータ変更を
+                    // エラーにすると fileproviderd が再試行を続ける）。
+                    if node == nil,
+                       let layered = try? await services.ignore.layeredIgnore(
+                           tree: tree, anchor: current.anchor) {
+                        if IgnoreDecision.shouldExcludeDirectory(
+                            relativePath: path, hasTrackedDescendants: false, matcher: layered) {
+                            AppLogger.fileProvider.notice("modifyItem(dir metadata): directory excluded as a whole: \(path, privacy: .private)")
+                            await services.events.append(
+                                type: .info, path: path, message: "Excluded folder from sync (kept local)")
+                            completion.value(nil, [], false, NSFileProviderError(.excludedFromSync))
+                            return
+                        }
                     }
                     if let node {
                         // 実体化バッジ（Issue #65）: チェック中の dir をプレーンで返すと

@@ -185,6 +185,11 @@ public struct SyncIgnoreMatcher: Sendable {
         evaluate(relativePath) == .ignored
     }
 
+    /// 否定パターン（`!` 再包含）を 1 行でも持つか（フォルダ単位除外の安全条件・#120）。
+    public var hasNegatedPattern: Bool {
+        patterns.contains { $0.negated }
+    }
+
     // MARK: - glob → tokens
 
     /// グロブを `/` 区切りパス向けのトークン列へ変換する。`globToRegex` の旧ロジックと 1:1 対応:
@@ -389,6 +394,16 @@ public struct LayeredSyncIgnore: Sendable {
             }
         }
         return verdict
+    }
+
+    /// `relativePath` に効く層（祖先ディレクトリと自身の `.syncignore`）のどれかが否定パターン
+    /// （`!`）を持つか（#120）。フォルダ単位除外の安全条件 — 否定があると配下の一部が再包含され
+    /// うるため、呼び出し側は 1 ファイルずつの判定へ戻す。どの否定が配下に一致しうるかまでは
+    /// 見ない（保守側に倒す・2026-10-16 ユーザ確定）。
+    public func hasNegatedPattern(applyingTo relativePath: String) -> Bool {
+        orderedDirs.contains { dir in
+            Self.relativize(relativePath, under: dir) != nil && matchers[dir]!.hasNegatedPattern
+        }
     }
 
     /// ディレクトリ深さ（`"" = 0`、`"a" = 1`、`"a/b" = 2`）。同深さ内の順序は判定に影響しない
