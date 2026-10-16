@@ -281,7 +281,13 @@ FP 拡張の書込（deleteItem / modifyItem / createItem / move）は `Extensio
   ローカルに残るが S3 へは決して上がらない。symlink も同様に除外（同期しない不変条件の FP 側適用）。
   ユーザ `.syncignore` も FSEvents モードと同一の `IgnoreDecision.shouldSkip`（未追跡のみ・
   `.syncignore` 自身は除外しない）で適用 — `.syncignore` 本体はマニフェスト宣言の versionId 固定 +
-  全バイト SHA-256 検証で取得する（`ManifestIgnoreCache`・改ざんされた層構成で除外判定しない）
+  全バイト SHA-256 検証で取得する（`ManifestIgnoreCache`・改ざんされた層構成で除外判定しない）。
+  **2026-10-16（#120）**: ユーザパターンもフォルダそのものに一致すれば subtree ごと拒否する
+  （`IgnoreDecision.shouldExcludeDirectory`）。除外は「同期しない」側へ倒すだけなので S3 への露出は
+  増えない。データ損失側の境界 = 配下に追跡済みファイルがあるフォルダは対象外（後始末の deleteItem が
+  S3 から消すのを防ぐ）。判定から後始末の deleteItem までの間に追跡済みファイルが現れる窓（PR #123
+  レビュー B1）は、除外の予約（`fileprovider-dir-exclusion-holds.json`）で塞ぐ = 予約つきの後始末は
+  S3 非接触。`.syncignore` の取得失敗時は受理（従来の per-file 判定）へ倒す
 - **rename/reparent（M5 Phase 5-4・2026-07-11）も同一ゲート**: 新 path は `childPath` +
   `validateRelativePath`・除外判定は新 path へ再適用（除外名への改名 = `ExcludedFromSync` +
   後始末予約 `PersistedPathSet` — 読み替えは「予約済み path かつ base が両 version から

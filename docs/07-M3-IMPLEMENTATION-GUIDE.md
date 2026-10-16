@@ -126,6 +126,7 @@ M1 で導入した「100 MB を超えたら `sync_log` にエラーを残して�
 
 ### 既知の制限 / 将来タスク
 - 親ディレクトリが除外された配下のファイルを `!` で再包含する gitignore の挙動は厳密には再現しない（同一階層・別階層の否定は正しく動く）。
+  - **FP 拡張のフォルダ単位除外（#120・2026-10-16〜）**: FP 拡張は、ユーザパターンがフォルダそのものに一致し、効いている層に `!` が 1 行も無く、配下に追跡済みファイルが無いときだけ、フォルダを subtree ごと除外する（この場合、フォルダ内の `.syncignore` も同期しない = git が除外ディレクトリ内の `.gitignore` を読まないのと同じ）。`!` があれば従来どおり 1 ファイルずつ判定するので、上記の否定の挙動は変わらない。詳細 = `docs/08`「ユーザ `.syncignore` のフォルダ単位除外」節。
 - ~~**ReDoS の構造的解消（F1 / L8）は将来タスク**~~ → ✅ **完了（2026-06-04）**。`NSRegularExpression` を廃し、グロブをトークン列へコンパイルして reachable-set DP で評価する線形時間照合へ置換した（`**` / 否定 / アンカー / dirOnly のセマンティクスを移植）。`SyncIgnoreMatcherTests` の既存意味論テストを回帰オラクルに維持し、旧 regex 実装との differential fuzz（`testLinearMatcherMatchesReferenceRegex`）で同値を確認。
 - マッチングは case-sensitive（gitignore 既定）。
 - `ManifestReader` には ignore 判定を入れず、ダウンロード可否は `reconcileRemoteEntry` で gate する（削除検出が完全な remoteMap に依存するため）。

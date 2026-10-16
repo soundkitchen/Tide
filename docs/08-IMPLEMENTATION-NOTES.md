@@ -94,12 +94,12 @@ FP ドメイン内のファイル編集（`modifyItem` の .contents）と削除
 
 - **createItem（ファイル）は「base nil の書込」**: 本体 upload → `ManifestUpdater.updateFileEntry(base: nil)`。`decideUpload(base: nil)` が三分岐を裁く — リモート不在 = 作成（`.proceed`）/ 同一 sha = 冪等（`.alreadyUpToDate`・mayAlreadyExist の再取り込みもここへ合流）/ 別内容 = 並行作成の衝突（`.conflict`）。衝突は modifyItem 競合と対称に **conflict copy へ上げ直し、作成 item を copy に束ねる**（ローカル実体 = copy の内容そのもの・再取得不要。正規パスのリモート版は次の enumerateChanges が新 item として配る = 正規パスはリモート勝ち・データ損失ゼロ）。`ExtensionWriter.modifyFileContents` を createItem と共用（`contentsURL: nil` = 内容なし作成 → 空ファイル PUT）。`NSFileProviderCreateItemDeletionConflicted`（working set 削除 vs ローカル編集）も同経路 — マニフェスト不在なら編集内容で再作成（pull 側 `keepLocalRemoteDeleted` と同じ側）。**root 孤児 UX（Phase 3 の既知の癖）はこれで解消** — 既存孤児も pending 再試行が createItem に到達した時点で取り込まれる。
 - **パス合成の構造検証**: 親 dir id の path + `itemTemplate.filename` → `FileProviderWritePolicy.childPath`（空 / `.` / `..` / `/` 含み / NUL は nil）→ `PathValidator.validateRelativePath`。検証不能な名前（バックスラッシュ等）は `ExcludedFromSync` = ローカル温存・S3 非汚染（FSEvents モードが検証不能パスを同期しないのと同じ側）。
-- **除外 = `NSFileProviderError(.excludedFromSync)`**（SDK 正規の意味論 = **ローカルに残して同期しない** + メタデータ変化時に再評価の createItem が来る。FSEvents モードの「除外はローカル温存」と完全対称）: ① 機密網 `HardcodedIgnoreRules`（ファイル + **ディレクトリは subtree ごと**単発拒否 = スキャンの機密網 dir `skipDescendants` と対称）② symlink（同期しない不変条件の FP 側適用）③ ユーザ `.syncignore`（未追跡のみ・`.syncignore` 自身は除外しない = FSEvents と同一の `IgnoreDecision.shouldSkip`）。**ユーザパターンの dir 単位除外は意図的にしない** — `!` 再包含（同層否定）の意味論は per-file 評価が担う（スキャン側も dir prune はハードコード網のみ）。
+- **除外 = `NSFileProviderError(.excludedFromSync)`**（SDK 正規の意味論 = **ローカルに残して同期しない** + メタデータ変化時に再評価の createItem が来る。FSEvents モードの「除外はローカル温存」と完全対称）: ① 機密網 `HardcodedIgnoreRules`（ファイル + **ディレクトリは subtree ごと**単発拒否 = スキャンの機密網 dir `skipDescendants` と対称）② symlink（同期しない不変条件の FP 側適用）③ ユーザ `.syncignore`（未追跡のみ・`.syncignore` 自身は除外しない = FSEvents と同一の `IgnoreDecision.shouldSkip`）。~~ユーザパターンの dir 単位除外は意図的にしない~~ → **#120（2026-10-16）で方針変更**: ユーザパターンがフォルダそのものに一致し、安全条件（効いている層に `!` が無い・配下に追跡済みファイルが無い）を満たすときは subtree ごと単発拒否する。`!` がある場合は従来どおり per-file 評価が再包含を担う。詳細 = 下記「ユーザ `.syncignore` のフォルダ単位除外」節。
 - **`.syncignore` の FP 適用 = `ManifestIgnoreCache`**（TideCore・案 B = FSEvents モードと同挙動・2026-07-09 ユーザ確定）: 拡張にはローカルフォルダが無いので、真実 = マニフェスト宣言の同期済み `.syncignore` 群（= アプリが pull 後にローカルで読むもの）。世代アンカーをキーに `LayeredSyncIgnore` をキャッシュ（single-flight 合流）+ **(path, sha) メモ化**で世代が進んでも不変の `.syncignore` は再取得しない（定常コスト実質ゼロ）。取得は versionId 固定 + 全バイト SHA-256 検証（改ざんされた層構成で除外判定しない）・pinned 消失は最新版フォールバック・両振りは層スキップ（除外しない安全側）・`maxFiles` 打ち切りは浅い層優先。fetch 失敗は throw = createItem が一時エラーで再試行（アップロード自体に S3 が要るので可用性は悪化しない）。回帰は `ManifestIgnoreCacheTests`。
-- **空フォルダ = ローカル仮想受理**（S3 非接触・2026-07-09 ユーザ確定）: マニフェストにディレクトリエントリは無い（dir はファイルパスから合成）ため、フォルダ createItem は何も書かずに成功で返す。配下にファイルが入った時点で合成 dir として実体化・同期される。空のままなら他デバイスへ伝播せず、ドメイン作り直しで消える（FSEvents モードの「空ディレクトリは同期しない」と整合）。`d:<path>` の path 決定的 id により仮想フォルダと実体化後の合成 dir は同一 item に収束。**支持配線**: `item(for:)` はマニフェスト外の dir id に合成 dir を返して温存（noSuchItem を返すとデーモンがローカルフォルダごと掃除する。kind 不一致 = 実体がファイルの場合は従来どおり noSuchItem = 5-1 意味論維持）、enumerator はマニフェスト外 dir を**空列挙**で返す（エラーだと列挙失敗の再試行ループ。削除の伝播は working set の didDeleteItems が権威）。
+- **空フォルダ = ローカル仮想受理**（S3 非接触・2026-07-09 ユーザ確定）: マニフェストにディレクトリエントリは無い（dir はファイルパスから合成）ため、フォルダ createItem は何も書かずに成功で返す（**例外（#120〜）**: 機密網、またはユーザパターンのフォルダ単位除外〈`IgnoreDecision.shouldExcludeDirectory`〉に当たるフォルダは、仮想フォルダとして登録せずに `excludedFromSync` を返す = 下記「ユーザ `.syncignore` のフォルダ単位除外」節）。配下にファイルが入った時点で合成 dir として実体化・同期される。空のままなら他デバイスへ伝播せず、ドメイン作り直しで消える（FSEvents モードの「空ディレクトリは同期しない」と整合）。`d:<path>` の path 決定的 id により仮想フォルダと実体化後の合成 dir は同一 item に収束。**支持配線**: `item(for:)` はマニフェスト外の dir id に合成 dir を返して温存（noSuchItem を返すとデーモンがローカルフォルダごと掃除する。kind 不一致 = 実体がファイルの場合は従来どおり noSuchItem = 5-1 意味論維持）、enumerator はマニフェスト外 dir を**空列挙**で返す（エラーだと列挙失敗の再試行ループ。削除の伝播は working set の didDeleteItems が権威）。
 - **kind 衝突（同 path にリモート dir が実在）= `NSFileProviderError(.filenameCollision)`**: システムが片方をバウンス（リネーム）して createItem を再試行する（SDK 契約）。チェックはキャッシュ済みツリー基準 — RMW はファイル entry しか見ない（dir は合成物でシャード横断）ため、直後にリモートで dir が生える狭いレースは残る（既知の記録レースと同クラス・`ManifestTree` は directory-wins で破綻しない）。
 - **ディレクトリ削除 = シャード単位バッチ RMW**（`ManifestUpdater.removeFileEntries`）: deleteItem は「数秒以内」がシステム契約のため、往復をファイル数ではなく**シャード数（≤256）で有界化**。dir の baseVersion（"dir"）は per-file ガードに使えないので、ベース = キャッシュ済みツリーの各ファイル sha（システムが直近に見ている世代と同源）。ガードは RMW 内（412 リトライごとにシャード内全対象を再評価）。**「拒否で即中断」**（2026-07-09 ユーザ確定）: 1 件でもベース不一致（リモート先行）が出たらそのシャードからは何も除去せず以降も中断し、`NSFileProviderError(.directoryNotEmpty)` を返す（SDK 契約: 再帰削除で消せない子がいる場合の正規コード。システムが dir を最新メタデータから再作成し、除去済み分の削除は次の enumerateChanges が配る）。非再帰削除で中身がある場合も同コード。除去成功分の delete marker は限定並列（4）で発行（失敗はログのみ = 単発 deleteFile と同じ規約）。追跡ファイルゼロ（仮想フォルダ / 消滅済み）は S3 非接触の冪等成功。回帰は `ManifestUpdaterTests` の removeFileEntries 系。
-- **dir のメタデータのみ modifyItem は黙って受理**（マニフェストに保存先が無い・remainingFields に残すと永久再試行 = ファイル側と同じ理由）。**capabilities**: dir に `.allowsAddingSubItems` + `.allowsDeleting`（root は削除不可）を解放。改名/移動（`.allowsRenaming`/`.allowsReparenting`）は 5-4。
+- **dir のメタデータのみ modifyItem は黙って受理**（マニフェストに保存先が無い・remainingFields に残すと永久再試行 = ファイル側と同じ理由）。**例外（#120〜）**: ツリーに無い仮想フォルダがフォルダ単位除外（`IgnoreDecision.shouldExcludeDirectory`）に当たれば `excludedFromSync` を返す（下記「ユーザ `.syncignore` のフォルダ単位除外」節）。**capabilities**: dir に `.allowsAddingSubItems` + `.allowsDeleting`（root は削除不可）を解放。改名/移動（`.allowsRenaming`/`.allowsReparenting`）は 5-4。
 - **実機受け入れ**（2026-07-09・dev バケット）: 作成各種（通常/空/ターミナル/⌘D 複製 = dataless→materialize→createItem 複合）+ pull 反映 / 20MB マルチパートの SHA-256 往復一致 / 空フォルダ仮想受理 → ファイル投入で実体化収束（bounce ゼロ）/ 除外 4 種（`.env`・`.aws` subtree 単発・symlink・`*.pyc` = `ManifestIgnoreCache` 実動作）の非同期 + ローカル温存 + Finder バッジなし / ターミナル `rm -r`・Finder 削除の両方で `deleteItem(dir)` シャードバッチ → 伝播 / 受け入れ全期間 sync_log エラー 0。**受け入れ知見**: ① capabilities 変更は既存レプリカへ自動反映されない（root は working set 非掲載 + itemVersion 不変）→ ドメイン作り直し必須・5-4 でも再発する。② 作り直しの正規手順 = アプリ設定の Disable/Enable ボタン（`removeAllDomains()`）。システム設定のファイルプロバイダトグルは実行可否のみでレプリカを消さない。③ フォルダ改名（5-4 未実装）はローカル表示名だけ変わり item id = 同期パスは旧名のまま（配下の新規ファイルは旧名パスで上がる）。詳細は `docs/09` M5 節の 5-3 項。
 
 #### rename / reparent（M5 Phase 5-4・2026-07-11）
@@ -168,6 +168,84 @@ FP ドメイン内のファイル編集（`modifyItem` の .contents）と削除
   Finder 目視でバッジ・クラウドアイコン併存の解消を確認。未カバー = 「配下実体化が温存される dir move」の
   N 件同時治癒（今回の OS で再現せず・機構は file 単発と同一の per-file reimport のため許容）と
   `noSuchItem` リトライ経路（race 未発生・任意項目）。
+
+#### ユーザ `.syncignore` のフォルダ単位除外（Issue #120・2026-10-16）
+
+- **背景（除外の再送嵐）**: fileproviderd は `excludedFromSync` で拒否したアイテムを 1 件ずつ記録し、
+  **拡張バイナリが更新されるたび（コード変更なしの再署名でも）**、ローカルにだけある除外アイテム全件へ
+  createItem を再送する。送り方は fileproviderd 側のペース（16 件ずつ・7〜9 秒休み）で、拡張は律速では
+  ない。再送が終わるまで新規書込は後ろで待たされる。実測（2026-10-16・dev）: 異なるパス 66,576 件の
+  再送に約 88 分、その間に作ったファイルは S3 到達まで約 86 分遅延。ユーザパターン（`node_modules/` 等）
+  は従来 per-file で拒否していたため、除外の件数 = 配下のファイル数になっていた。
+- **嵐の大きさを決めるもの**: fileproviderd の reconciliation 表で「ローカルのみ（FP 側 unknown）」の
+  生存アイテム数。throttling 表の除外エントリ数ではない（削除済みアイテムの残骸が残るが再送されない）。
+  計測 = `fileproviderctl dump org.izukawa.Tide.FileProvider` の reconciliation 節で
+  `<fp:✅  <unknown>>` の行を数える（全プロバイダの dump は数百 MB になるので Tide に絞る）。
+- **対処 = フォルダ単位の除外**: 判定は純粋関数 `IgnoreDecision.shouldExcludeDirectory`
+  （`IgnoreDecisionTests` で固定）。順に ① 配下に追跡済みファイルがある（マニフェストのツリーに
+  そのパスのノードがある）→ しない（後始末の deleteItem が S3 から追跡済みファイルを消すため）
+  ② 機密網 → する ③ 効いている層（祖先 + 自身）に `!` が 1 行でもある → しない
+  （`LayeredSyncIgnore.hasNegatedPattern(applyingTo:)`。どの否定が配下に一致しうるかは見ない保守側）
+  ④ `<dir>/` が ignored → する。ファイル向けパターン（`*.pyc`）はフォルダに一致しないので従来どおり。
+  - **createItem（新規フォルダ）**: 機密網は従来どおりツリーを引かずに即決。ユーザパターンは
+    ツリーと `.syncignore` 層を引いて判定し、**取得失敗（オフライン等）は受理へ倒す**
+    （配下は per-file 判定に任せる = フォルダ作成はオフラインでも成功、を維持）。
+  - **modifyItem（既存フォルダのメタデータ変更）**: ツリーに無い（= 受理済みの仮想フォルダ）フォルダが
+    判定に当たれば `excludedFromSync` を返す。fileproviderd は配下の除外記録をフォルダ 1 件に畳み、
+    後始末の deleteItem（dir）を送る。ローカルの実体は残る。
+    `.syncignore` の取得失敗は受理へ倒す（メタデータ変更をエラーにすると再試行が続く）。
+  - **除外の予約（PR #123 レビュー B1）**: 後始末の deleteItem は判定から数十分遅れて届くことがあり
+    （下記の受け入れで 15〜55 分）、deleteItem（dir）はその時点のツリーで削除対象を作り直す。間に他端末が
+    配下へファイルを上げていると、「追跡ゼロ」を根拠にした除外の後始末がそれを S3 から消してしまう。
+    そこで除外を返す前に path を `dirExclusionHolds`（`PersistedPathSet`・
+    `fileprovider-dir-exclusion-holds.json`・ドメイン epoch で破棄）へ積み、deleteItem（dir）は
+    **自身か祖先に予約があれば追跡数に関わらず S3 非接触**で完了して予約を消す（判定 =
+    `FileProviderWritePolicy.directoryDeletePlan` / `pathAndAncestors`。祖先も見るのは、以前に受理した
+    配下の仮想フォルダ単位でも後始末が届くため）。予約を積めない（上限 1,000 件超過）ときは除外を
+    返さず受理する（保証の無い除外はしない）。予約が残ったまま後でユーザがフォルダを消しても、
+    S3 は温存される側に倒れる（除外 = ローカル温存の意味論で、配下は判定時点で追跡ゼロ）。
+    仮想フォルダの登録（`virtualDirs`）は modifyItem では消さない — 後始末までの間に `item(for:)` が
+    noSuchItem を返すと、デーモンがローカルのフォルダごと掃除しうる。登録の掃除は後始末が行う。
+    実機確認（2026-10-16）: 受理済みの仮想フォルダにネストの `.syncignore` で一致させて `touch` →
+    予約が積まれ、約 35 秒後の後始末で `exclusion cleanup completed (S3 untouched)`・予約は空に戻り、
+    ローカルの中身は温存・S3 は非接触（版・削除マーカーとも 0）。
+  - rename 経路は従来から `<newPath>/` でフォルダ単位に判定しており、今回は変えていない。
+- **意味論の変化**: フォルダごと除外すると、その中に置いた `.syncignore` も同期しない（git が除外
+  ディレクトリ内の `.gitignore` を読まないのと同じ・2026-10-16 ユーザ確定。機密網フォルダ内の
+  `.syncignore` が同期されないのと同型）。`!` がある構成では従来の per-file 判定のままなので、
+  否定の挙動は変わらない。
+- **既存分の畳み込み手順（一度きり）**: #120 以前に受理されたフォルダは、fileproviderd から
+  問い合わせが来ない限り畳まれない。A 入りのビルドで嵐が抜けた後、対象フォルダの最上位だけを
+  `touch` してメタデータ変更（modifyItem）を起こす:
+  `find ~/Library/CloudStorage/Tide-Tide -type d \( -name node_modules -o -name .venv … \) -prune -exec touch {} +`。
+  `touch` は更新日時を変えるだけで、対象外のフォルダを触っても拡張が従来どおり受理するだけ（無害）。
+  フォルダの `touch` で modifyItem が届くことは実機で確認済み（下記の受け入れ）。
+  - 畳み込みはすぐには終わらない: fileproviderd は除外の後始末（`materialize-ignored-item` →
+    `ignore-children`、いずれも background 優先度）を列に積み、フォルダの行は
+    `delete:ignored … ⧗safelyMaterialized` で順番を待つ。嵐の直後は後始末の列が数万件たまっており、
+    全件が畳まれるまで 1 フォルダでも約 15 分、29 フォルダ・約 6.5 万件では約 55 分かかった。
+  - 後始末の deleteItem（d: の仮想フォルダ・追跡ゼロ）は S3 非接触の分岐で、受け入れ時点のビルドでは
+    拡張のログが出なかった。B1 の対処後は、予約つきの後始末で
+    `deleteItem(dir): exclusion cleanup completed (S3 untouched)` を残す（追跡済みファイルが現れていた
+    場合は `… kept N tracked files on S3`）。fileproviderd 側は `delete-item` の `done executing` で追える。
+- **実機受け入れ（2026-10-16・dev-tide・全項目パス）**:
+  1. 新規の `node_modules/`（配下 100 ファイル）: 除外イベントはフォルダ 1 件（"Excluded folder from sync"）
+     だけで、ファイル単位のイベントは 0 件。
+  2. 既存フォルダ 1 件（`__pycache__`・40 ファイル）を `touch`: modifyItem が届いて拡張がフォルダ単位の
+     除外を返し、約 15 分後に「ローカルのみ」から配下 40 件が消えた（65,645 → 65,606）。ローカルの
+     ファイルは温存、S3 は非接触（版・削除マーカーとも 0）。
+  3. 残り 28 フォルダ（追跡済み 0 を事前確認）を `touch`: 28/28 で除外を返し、「ローカルのみ」は
+     65,606 → **58 件**（フォルダ 30 = 対象 29 + 実験 1、ファイル 28 = `.dSYM` パッケージと機密網の
+     ファイル）。29 フォルダとも S3 は非接触。仮想フォルダの登録簿は 1,000 件（飽和）→ 61 件。
+     `make soak-check-fp` は OK（warn 0・manifest 40,032 = S3 40,032）。
+  4. コード変更なしの再ビルド: 除外の再送は 58 件で、再起動から 1 分以内に終了（前回は約 8.5 万件・約 88 分）。
+     再ビルド直後に作ったファイルの S3 到達は約 5 分 16 秒（前回は約 86 分）、平常時は約 2 秒。
+     残る数分の遅れは除外の再送とは別で、更新直後の fileproviderd がローカルの変更を取り込むまでの遅れ
+     （その間は Spotlight の再索引 約 3 万件が走っていたが、因果は未確認）。
+  - 畳み込みの直後に、拡張の `item(for:)` が `noSuchItem` を 39 件返した。登録簿から溢れていた
+    配下の仮想フォルダへの問い合わせと見られ、S3 への書込はない（無害）。
+- 知見: `excludedFromSync` 済みのアイテムをローカルで削除（`rm -rf`）しても、throttling 表の
+  エントリは残る（再送はされない）。
 
 #### 並走 UI の本実装化（M5・2026-07-12）
 
@@ -906,7 +984,8 @@ Issue #97 本文のチェックリスト（9 項目 + 追補 7b〜7d）を dev �
 - **対処 = ドメイン epoch（レジストリ削除ではなく世代マーカー・ユーザ確定 2026-08-12）**:
   アプリがドメイン除去（= レプリカ破棄）のたびに group defaults の
   `ConfigStore.fileProviderDomainEpoch`（ランダム UUID）を `bumpFileProviderDomainEpoch()` で
-  進め、拡張のレジストリ 3 本（実体化バッジ報告済み / 仮想フォルダ温存 / 除外後始末予約）は
+  進め、拡張のレジストリ（実体化バッジ報告済み / 仮想フォルダ温存 / 除外後始末予約。#120 で
+  フォルダ除外予約が加わり 4 本）は
   **構築時に capture した epoch** で payload をスタンプ・読込時に現行値と不一致なら全体破棄
   （bucket 不一致と同じ安全側 = 空集合）。schemaVersion は 1 → 2（epoch フィールド追加）。
   - **capture 意味論が load-bearing**: アプリの bump 後に生き残りの旧拡張プロセスが遅延

@@ -101,4 +101,40 @@ public enum FileProviderWritePolicy {
         }
         return parentPath.isEmpty ? filename : "\(parentPath)/\(filename)"
     }
+
+    /// フォルダの deleteItem の進め方（M5 Phase 5-3・#120 レビュー B1）。
+    public enum DirectoryDeletePlan: Equatable, Sendable {
+        /// S3 に触れず、ローカル側の掃除（仮想フォルダ登録など）だけで成功を返す
+        case localOnly
+        /// 非再帰の削除で中身がある → DirectoryNotEmpty（SDK 契約）
+        case notEmpty
+        /// 配下の追跡済みファイルを S3 から消す（RMW ガード付き）
+        case deleteRemote
+    }
+
+    /// フォルダの deleteItem を S3 へ伝えるかを決める。
+    /// - `hasExclusionHold`: そのフォルダ（か祖先）を「追跡ゼロを根拠にフォルダ単位で除外した」
+    ///   予約がある。後始末の deleteItem は判定時点から数十分遅れて届くことがあり（#120 実機）、
+    ///   その間に他端末が配下へ上げたファイルを消さないよう、**予約があれば追跡数に関わらず
+    ///   S3 非接触**にする（除外はローカル温存の意味論 = ユーザは削除を意図していない）。
+    public static func directoryDeletePlan(
+        trackedCount: Int, hasExclusionHold: Bool, recursive: Bool
+    ) -> DirectoryDeletePlan {
+        if hasExclusionHold || trackedCount == 0 { return .localOnly }
+        return recursive ? .deleteRemote : .notEmpty
+    }
+
+    /// パス自身と祖先（深い → 浅い順・ルート "" は含まない）。`a/b/c` → `[a/b/c, a/b, a]`。
+    /// 除外の予約は除外したフォルダの path で積まれるが、後始末の deleteItem は配下の
+    /// 仮想フォルダ（以前に受理済みの `d:` item）単位でも届くため、祖先まで照合する。
+    public static func pathAndAncestors(_ path: String) -> [String] {
+        var result: [String] = []
+        var current = Substring(path)
+        while !current.isEmpty {
+            result.append(String(current))
+            guard let slash = current.lastIndex(of: "/") else { break }
+            current = current[..<slash]
+        }
+        return result
+    }
 }

@@ -38,6 +38,11 @@ struct ExtensionServices: Sendable {
     /// 付き削除**として受理する根拠にする。除外以外の deleteItem は従来どおり itemVersion 由来
     /// ベースで裁く（「根拠なしに消さない」の維持）。
     let exclusionCleanups: PersistedPathSet
+    /// フォルダ単位除外の予約（#120 レビュー B1）。仮想フォルダのメタデータ変更（modifyItem）で
+    /// 「配下に追跡済みファイルが無い」ことを根拠に `ExcludedFromSync` を返した path を登録し、
+    /// 後から届く後始末の deleteItem（dir）を **S3 非接触**で完了させる根拠にする。判定から
+    /// 後始末までの間に他端末が配下へ上げたファイルを、後始末が S3 から消さないため。
+    let dirExclusionHolds: PersistedPathSet
     /// 実体化バッジ（Issue #65）: Finder へ最後に報告した実体化済みファイルパス集合（永続）。
     /// 前進（replace）させるのは **working set の enumerateChanges のみ**（単一の報告点 —
     /// コンテナ enumerator や書込コールバックが消費すると、working set 経由の差分配信が
@@ -193,11 +198,14 @@ struct ExtensionServices: Sendable {
                 filename: "fileprovider-exclusion-cleanups.json")
             let materializedURL = try? PersistedPathSet.defaultURL(
                 filename: "fileprovider-materialized.json")
-            if virtualDirsURL == nil || cleanupsURL == nil || materializedURL == nil {
+            let dirHoldsURL = try? PersistedPathSet.defaultURL(
+                filename: "fileprovider-dir-exclusion-holds.json")
+            if virtualDirsURL == nil || cleanupsURL == nil || materializedURL == nil
+                || dirHoldsURL == nil {
                 AppLogger.fileProvider.error("Extension: path-set registry URL unavailable (persisting disabled)")
             }
             // ドメイン epoch（Issue #104）: アプリがドメイン除去のたびに進める世代値をここで
-            // 一度だけ capture し、レジストリ 3 本の payload スタンプ / 読込検証に使う。
+            // 一度だけ capture し、レジストリ 4 本の payload スタンプ / 読込検証に使う。
             // ドメイン作り直しを跨いだ stale レジストリ（バッジ永久不点灯・消えた dir の合成・
             // 無意味な削除受理予約）は epoch 不一致で読込時に全体破棄される。プロセス生存中に
             // アプリが bump しても capture 値は変えない — 遅延 persist は旧 epoch でスタンプされ
@@ -218,6 +226,8 @@ struct ExtensionServices: Sendable {
                     bucket: bucket, fileURL: virtualDirsURL, epoch: domainEpoch),
                 exclusionCleanups: PersistedPathSet(
                     bucket: bucket, fileURL: cleanupsURL, epoch: domainEpoch),
+                dirExclusionHolds: PersistedPathSet(
+                    bucket: bucket, fileURL: dirHoldsURL, epoch: domainEpoch),
                 materializedReported: PersistedPathSet(
                     bucket: bucket, fileURL: materializedURL, epoch: domainEpoch,
                     maxEntries: Self.materializedBadgeCap),

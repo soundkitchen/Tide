@@ -69,4 +69,68 @@ final class IgnoreDecisionTests: XCTestCase {
         XCTAssertFalse(IgnoreDecision.shouldSkip(relativePath: "report.pdf", isAlreadyTracked: false, matcher: m))
         XCTAssertFalse(IgnoreDecision.shouldSkip(relativePath: "report.pdf", isAlreadyTracked: true, matcher: m))
     }
+
+    // MARK: - フォルダ単位除外（#120）
+
+    private func excludesDir(
+        _ path: String, tracked: Bool = false, _ m: LayeredSyncIgnore
+    ) -> Bool {
+        IgnoreDecision.shouldExcludeDirectory(
+            relativePath: path, hasTrackedDescendants: tracked, matcher: m)
+    }
+
+    func testDirectoryPatternExcludesDirectoryAsWhole() {
+        // 末尾 `/`（ディレクトリ限定）も素の名前も、フォルダそのものに一致すればフォルダ単位で除外
+        let m = root("node_modules/\n.venv\n/dist/")
+        XCTAssertTrue(excludesDir("node_modules", m))
+        XCTAssertTrue(excludesDir("a/b/node_modules", m))
+        XCTAssertTrue(excludesDir("proj/.venv", m))
+        XCTAssertTrue(excludesDir("dist", m))
+        // 先頭 `/` アンカーはルート直下のみ
+        XCTAssertFalse(excludesDir("sub/dist", m))
+        XCTAssertFalse(excludesDir("src", m))
+    }
+
+    func testFilePatternDoesNotExcludeDirectory() {
+        // ファイル向けパターンはフォルダに一致しない = 従来どおり 1 ファイルずつ
+        XCTAssertFalse(excludesDir("src", root("*.pyc")))
+        // 配下の一部だけに一致するパターン（`build/*.o`）はフォルダ自身を除外しない
+        XCTAssertFalse(excludesDir("build", root("build/*.o")))
+        // `build/*` は配下すべてに一致する（照合は子孫にも及ぶ）ので、フォルダごと除外しても
+        // 1 ファイルずつの判定と結果が変わらない
+        XCTAssertTrue(excludesDir("build", root("build/*")))
+        XCTAssertTrue(root("build/*").isIgnored("build/sub/deep.txt"))
+    }
+
+    func testTrackedDescendantsBlockDirectoryExclusion() {
+        // 配下に追跡済みファイルがあれば、ユーザパターンでも機密網でもフォルダ単位で除外しない
+        //（後始末の deleteItem が S3 から追跡済みファイルを消すため）
+        XCTAssertFalse(excludesDir("node_modules", tracked: true, root("node_modules/")))
+        XCTAssertFalse(excludesDir(".ssh", tracked: true, LayeredSyncIgnore.empty))
+    }
+
+    func testHardcodedDirectoryExcludedAsWhole() {
+        // 機密網はユーザパターンが無くても、否定があってもフォルダ単位で除外
+        XCTAssertTrue(excludesDir(".ssh", LayeredSyncIgnore.empty))
+        XCTAssertTrue(excludesDir("sub/.aws", LayeredSyncIgnore.empty))
+        XCTAssertTrue(excludesDir(".ssh", root("!.ssh/")))
+    }
+
+    func testNegationInEffectiveLayerFallsBackToPerFile() {
+        // ルートに否定が 1 行でもあれば、その否定が配下に一致しなくても 1 ファイルずつへ戻す（保守側）
+        XCTAssertFalse(excludesDir("node_modules", root("node_modules/\n!keep.txt")))
+        // 祖先のネスト層の否定も同じ
+        let nested = LayeredSyncIgnore(matchers: [
+            "": SyncIgnoreMatcher.parse("node_modules/"),
+            "app": SyncIgnoreMatcher.parse("!*.lock")
+        ])
+        XCTAssertFalse(excludesDir("app/node_modules", nested))
+        // 祖先でない層（兄弟ディレクトリ）の否定は効かない
+        XCTAssertTrue(excludesDir("web/node_modules", nested))
+    }
+
+    func testReincludedDirectoryNotExcluded() {
+        // フォルダそのものが否定で再包含されている（否定があるので判定以前に戻る）
+        XCTAssertFalse(excludesDir("build", root("build/\n!build/")))
+    }
 }
