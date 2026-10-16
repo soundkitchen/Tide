@@ -123,7 +123,7 @@ public actor ManifestGenerationCache {
         )
         payload = newPayload
         // 永続化は「世代が増えた or shard etag が実際に動いた」ときだけ。無変化リフレッシュの
-        // たびに最大 8 世代分の全 files map を atomic 書出しするのは無駄で、永続側 fetchedAt は
+        // たびに最新世代の全 files map + 逆差分（Issue #128）を atomic 書出しするのは無駄で、永続側 fetchedAt は
         // 誰も読まない情報値（PR #51 レビュー #5。ログは消えても自己回復する設計なので安全側）。
         if let logURL, appended || previousEtags != snapshot.shardEtags {
             do {

@@ -23,7 +23,7 @@ final class ManifestGenerationLogTests: XCTestCase {
             to: nil, bucket: "b1"
         )
         XCTAssertTrue(appended)
-        XCTAssertEqual(payload.generations.map(\.anchor), ["g1"])
+        XCTAssertEqual(payload.anchors, ["g1"])
         XCTAssertEqual(payload.bucket, "b1")
     }
 
@@ -40,9 +40,9 @@ final class ManifestGenerationLogTests: XCTestCase {
             to: first, bucket: "b1"
         )
         XCTAssertFalse(appended)
-        XCTAssertEqual(second.generations.map(\.anchor), ["g1"])
-        XCTAssertEqual(second.generations.last?.shardEtags, ["ab": "e2"])
-        XCTAssertEqual(second.generations.last?.fetchedAt, Date(timeIntervalSince1970: 200))
+        XCTAssertEqual(second.anchors, ["g1"])
+        XCTAssertEqual(second.latest.shardEtags, ["ab": "e2"])
+        XCTAssertEqual(second.latest.fetchedAt, Date(timeIntervalSince1970: 200))
     }
 
     func testChangedFilesAppendNewGeneration() {
@@ -57,7 +57,7 @@ final class ManifestGenerationLogTests: XCTestCase {
             to: first, bucket: "b1"
         )
         XCTAssertTrue(appended)
-        XCTAssertEqual(second.generations.map(\.anchor), ["g1", "g2"])
+        XCTAssertEqual(second.anchors, ["g1", "g2"])
         // 旧世代は anchor で引ける（enumerateChanges の diff 起点）
         XCTAssertEqual(
             ManifestGenerationLog.generation(anchor: "g1", in: second)?.files["a.txt"]?.sha256, "1"
@@ -74,7 +74,7 @@ final class ManifestGenerationLogTests: XCTestCase {
                 to: payload, bucket: "b1", maxGenerations: 3
             )
         }
-        XCTAssertEqual(payload?.generations.map(\.anchor), ["g9", "g10", "g11"])
+        XCTAssertEqual(payload?.anchors, ["g9", "g10", "g11"])
         XCTAssertNil(ManifestGenerationLog.generation(anchor: "g0", in: payload), "落ちた世代は引けない = syncAnchorExpired 行き")
     }
 
@@ -92,7 +92,7 @@ final class ManifestGenerationLogTests: XCTestCase {
         )
         XCTAssertTrue(appended)
         XCTAssertEqual(second.bucket, "b2")
-        XCTAssertEqual(second.generations.map(\.anchor), ["g-new"])
+        XCTAssertEqual(second.anchors, ["g-new"])
     }
 
     func testEncodeDecodeRoundTrip() throws {
@@ -106,8 +106,11 @@ final class ManifestGenerationLogTests: XCTestCase {
     }
 
     func testDecodeRejectsUnsupportedSchemaVersion() throws {
-        var payload = ManifestGenerationLog.Payload(schemaVersion: 999, bucket: "b1", generations: [])
-        payload.schemaVersion = 999
+        let payload = ManifestGenerationLog.Payload(
+            schemaVersion: 999, bucket: "b1",
+            latest: ManifestGenerationLog.Generation(
+                anchor: "g1", fetchedAt: Date(timeIntervalSince1970: 100), shardEtags: [:], files: [:]),
+            history: [])
         let data = try JSONEncoder().encode(payload)
         XCTAssertThrowsError(try ManifestGenerationLog.decode(data))
     }
@@ -146,16 +149,95 @@ final class ManifestGenerationLogTests: XCTestCase {
         let tampered = ManifestGenerationLog.Payload(
             schemaVersion: ManifestGenerationLog.currentSchemaVersion,
             bucket: "b1",
-            generations: [ManifestGenerationLog.Generation(
+            latest: ManifestGenerationLog.Generation(
                 anchor: "g1", fetchedAt: Date(timeIntervalSince1970: 100),
                 shardEtags: ["ab": "e1"],
                 files: [
                     "ok.txt": entry(sha: "1"),
                     "../escape.txt": entry(sha: "2"),
                 ]
-            )]
+            ),
+            history: []
         )
         try ManifestGenerationLog.save(tampered, url: url)
         XCTAssertNil(ManifestGenerationLog.load(bucket: "b1", url: url), "不正パス混入は全破棄")
+    }
+
+    func testLoadRejectsUnsafePathsInHistory() throws {
+        // 古い世代は逆差分のパスから組み立てられるので、restored / removed の両方も検証する（#128）
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gen-log-unsafe-hist-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("log.json")
+        let latest = ManifestGenerationLog.Generation(
+            anchor: "g2", fetchedAt: Date(timeIntervalSince1970: 200),
+            shardEtags: [:], files: ["ok.txt": entry(sha: "1")])
+        for delta in [
+            ManifestGenerationLog.ReverseDelta(
+                anchor: "g1", fetchedAt: Date(timeIntervalSince1970: 100),
+                restored: ["../escape.txt": entry(sha: "2")], removed: []),
+            ManifestGenerationLog.ReverseDelta(
+                anchor: "g1", fetchedAt: Date(timeIntervalSince1970: 100),
+                restored: [:], removed: ["/abs.txt"]),
+        ] {
+            let tampered = ManifestGenerationLog.Payload(
+                schemaVersion: ManifestGenerationLog.currentSchemaVersion, bucket: "b1",
+                latest: latest, history: [delta])
+            try ManifestGenerationLog.save(tampered, url: url)
+            XCTAssertNil(ManifestGenerationLog.load(bucket: "b1", url: url), "逆差分の不正パスも全破棄")
+        }
+    }
+
+    // MARK: - 差分保存（Issue #128）
+
+    func testOldGenerationsAreReconstructedFromReverseDeltas() {
+        // 追加・変更・削除が混ざった 4 世代を積み、どの anchor からも元のファイルマップが戻ること
+        let maps: [[String: ManifestFileEntry]] = [
+            ["a.txt": entry(sha: "1"), "b.txt": entry(sha: "1")],
+            ["a.txt": entry(sha: "2"), "b.txt": entry(sha: "1"), "c.txt": entry(sha: "1")],
+            ["a.txt": entry(sha: "2"), "c.txt": entry(sha: "2")],
+            ["a.txt": entry(sha: "3"), "b.txt": entry(sha: "9"), "d/e.txt": entry(sha: "1")],
+        ]
+        var payload: ManifestGenerationLog.Payload?
+        for (i, files) in maps.enumerated() {
+            (payload, _) = ManifestGenerationLog.appending(
+                snapshot: snapshot(files: files, etags: ["ab": "e\(i)"]),
+                anchor: "g\(i)", fetchedAt: Date(timeIntervalSince1970: Double(i)),
+                to: payload, bucket: "b1"
+            )
+        }
+        XCTAssertEqual(payload?.anchors, ["g0", "g1", "g2", "g3"])
+        for (i, files) in maps.enumerated() {
+            let generation = ManifestGenerationLog.generation(anchor: "g\(i)", in: payload)
+            XCTAssertEqual(generation?.files, files, "g\(i)")
+            XCTAssertEqual(generation?.fetchedAt, Date(timeIntervalSince1970: Double(i)))
+        }
+        // shardEtags は最新世代だけが持つ（増分ロードの前回値）
+        XCTAssertEqual(ManifestGenerationLog.latest(of: payload)?.shardEtags, ["ab": "e3"])
+        XCTAssertEqual(ManifestGenerationLog.generation(anchor: "g0", in: payload)?.shardEtags, [:])
+    }
+
+    func testHistoryHoldsOnlyChangedEntries() {
+        // 古い世代は全件を複製せず、変わったパスだけを持つ（135MB 肥大の再発防止）
+        var files: [String: ManifestFileEntry] = [:]
+        for i in 0..<100 { files["f\(i).txt"] = entry(sha: "1") }
+        let (first, _) = ManifestGenerationLog.appending(
+            snapshot: snapshot(files: files), anchor: "g1",
+            fetchedAt: Date(timeIntervalSince1970: 100), to: nil, bucket: "b1")
+        files["f0.txt"] = entry(sha: "2")
+        files["new.txt"] = entry(sha: "1")
+        let (second, _) = ManifestGenerationLog.appending(
+            snapshot: snapshot(files: files), anchor: "g2",
+            fetchedAt: Date(timeIntervalSince1970: 200), to: first, bucket: "b1")
+        XCTAssertEqual(second.history.count, 1)
+        XCTAssertEqual(second.history[0].restored, ["f0.txt": entry(sha: "1")])
+        XCTAssertEqual(second.history[0].removed, ["new.txt"])
+    }
+
+    func testDecodeRejectsV1Payload() throws {
+        // v1（世代ごとの全件複製）は読めない = cold 扱い（更新後に一度だけ全再列挙・ユーザ確定）
+        let v1 = #"{"bucket":"b1","generations":[{"anchor":"g1","fetchedAt":"2026-10-16T00:00:00Z","files":{},"shardEtags":{}}],"schemaVersion":1}"#
+        XCTAssertThrowsError(try ManifestGenerationLog.decode(Data(v1.utf8)))
     }
 }
