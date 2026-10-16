@@ -226,6 +226,11 @@ FP ドメイン内のファイル編集（`modifyItem` の .contents）と削除
     外すのが改名経路の意図した挙動（5-4・2026-07-09 ユーザ確定）。
   - 改名するフォルダ自身の `.syncignore` はツリー上では旧パスにあるので見ない（フォルダごと除外した
     フォルダの中の `.syncignore` を読まないのと同じ扱い）。
+  - 実機確認（2026-10-17・dev-tide・全項目パス）: ネストの `.syncignore` に `build/` + `!build/keep.txt` を
+    置き、追跡済みの `src/`（`keep.txt` / `foo.o`）を `build` へ改名 → `dir moved (2 files)`・S3 は
+    `build/` の 2 件が現行版、`src/` の 2 件は削除マーカー。改名後に作った `build/bar.o` は
+    `createItem: excluded from sync`（S3 に上がらない）。対照（`build/` のみ・`!` なし）の改名は従来どおり
+    `dir excluded`・後始末で旧 path に削除マーカー・ローカルは温存。`make soak-check-fp` は OK。
 - **意味論の変化**: フォルダごと除外すると、その中に置いた `.syncignore` も同期しない（git が除外
   ディレクトリ内の `.gitignore` を読まないのと同じ・2026-10-16 ユーザ確定。機密網フォルダ内の
   `.syncignore` が同期されないのと同型）。`!` がある構成では従来の per-file 判定のままなので、
