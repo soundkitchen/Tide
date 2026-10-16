@@ -157,7 +157,6 @@ public enum ManifestGenerationLog {
                 schemaVersion: currentSchemaVersion, bucket: bucket,
                 latest: newGeneration, history: []), true)
         }
-        next.schemaVersion = currentSchemaVersion
         if next.latest.files == snapshot.files {
             next.latest.shardEtags = snapshot.shardEtags
             next.latest.fetchedAt = fetchedAt
@@ -211,10 +210,21 @@ public enum ManifestGenerationLog {
     /// 改ざん/破損しうる**ため、読込時にも同じゲートを再適用する。素通りさせると持ち越し経路
     /// （`load(previous:)` は「検証済み」前提で無検証コピー）から不正パスが item identifier と
     /// S3 キー組み立てに到達する（PR #51 レビュー #3・security/low.md L16）。
-    public static func load(bucket: String, url: URL) -> Payload? {
+    ///
+    /// history が上限（`maxGenerations - 1`）より長い場合は、古い側から切り詰める（改ざん・破損や、
+    /// 将来 `defaultMaxGenerations` を減らした後の旧ログで、組み立てに当てる逆差分の数が上限を
+    /// 超えないようにする・PR #129 レビュー N2）。逆差分は新しい世代から順に当てるので、古い側を
+    /// 落としても残りの世代は正しく組み立てられる。
+    public static func load(
+        bucket: String, url: URL, maxGenerations: Int = defaultMaxGenerations
+    ) -> Payload? {
         guard let data = try? Data(contentsOf: url),
-              let payload = try? decode(data),
+              var payload = try? decode(data),
               payload.bucket == bucket else { return nil }
+        let keep = max(maxGenerations - 1, 0)
+        if payload.history.count > keep {
+            payload.history.removeFirst(payload.history.count - keep)
+        }
         // 最新世代の全件と、逆差分に現れるパス（戻すときに置く / 消す）をすべて検証する。
         // 古い世代はこの 3 種のパスからしか組み立てられないので、これで全世代を覆う。
         func allSafe<S: Sequence>(_ paths: S) -> Bool where S.Element == String {

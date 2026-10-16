@@ -240,4 +240,50 @@ final class ManifestGenerationLogTests: XCTestCase {
         let v1 = #"{"bucket":"b1","generations":[{"anchor":"g1","fetchedAt":"2026-10-16T00:00:00Z","files":{},"shardEtags":{}}],"schemaVersion":1}"#
         XCTAssertThrowsError(try ManifestGenerationLog.decode(Data(v1.utf8)))
     }
+
+    func testV1LogOnDiskRecoversAsColdThenSavesV2() throws {
+        // 回復経路（PR #129 レビュー N3）: v1 のファイルは load で nil（cold）→ 次の appending
+        // （前回なし = 新世代）+ save で v2 が書かれ、以後は読める
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gen-log-v1-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("log.json")
+        let v1 = #"{"bucket":"b1","generations":[{"anchor":"g1","fetchedAt":"2026-10-16T00:00:00Z","files":{"a.txt":{"size":1,"mtime":"2026-07-04T00:00:00Z","sha256":"1","etag":"e","device_id":"d","uploaded_at":"2026-07-04T00:00:00Z"}},"shardEtags":{}}],"schemaVersion":1}"#
+        try Data(v1.utf8).write(to: url)
+
+        let loaded = ManifestGenerationLog.load(bucket: "b1", url: url)
+        XCTAssertNil(loaded, "v1 は cold 扱い")
+        let (payload, appended) = ManifestGenerationLog.appending(
+            snapshot: snapshot(files: ["a.txt": entry(sha: "1")]),
+            anchor: "g-new", fetchedAt: Date(timeIntervalSince1970: 100),
+            to: loaded, bucket: "b1")
+        XCTAssertTrue(appended, "cold からの新世代 = signal 契機")
+        try ManifestGenerationLog.save(payload, url: url)
+        let reloaded = ManifestGenerationLog.load(bucket: "b1", url: url)
+        XCTAssertEqual(reloaded, payload)
+        XCTAssertEqual(reloaded?.schemaVersion, 2)
+    }
+
+    func testLoadTruncatesOverlongHistory() throws {
+        // 上限を超える history は古い側から切り詰め、残った世代は正しく組み立てられる（N2）
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gen-log-long-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("log.json")
+        var payload: ManifestGenerationLog.Payload?
+        for i in 0..<6 {
+            (payload, _) = ManifestGenerationLog.appending(
+                snapshot: snapshot(files: ["a.txt": entry(sha: "\(i)")]),
+                anchor: "g\(i)", fetchedAt: Date(timeIntervalSince1970: Double(i)),
+                to: payload, bucket: "b1", maxGenerations: 6)
+        }
+        try ManifestGenerationLog.save(payload!, url: url)
+        let loaded = ManifestGenerationLog.load(bucket: "b1", url: url, maxGenerations: 3)
+        XCTAssertEqual(loaded?.anchors, ["g3", "g4", "g5"])
+        XCTAssertEqual(
+            ManifestGenerationLog.generation(anchor: "g3", in: loaded)?.files["a.txt"]?.sha256, "3")
+        XCTAssertNil(ManifestGenerationLog.generation(anchor: "g2", in: loaded))
+    }
 }
