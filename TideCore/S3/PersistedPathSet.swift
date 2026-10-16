@@ -34,6 +34,8 @@ import Foundation
 ///
 /// - 上限 `maxEntries`（init 注入・既定 1000）: 超過 add は無視（notice ログ）。溢れた分は
 ///   温存保証/バッジを失うだけ（安全側）。
+/// - 保存の失敗はログのみで、`add` した分は集合に残る（プロセス生存中は効く）。再起動を跨ぐ
+///   保証が要る用途（フォルダ単位除外の予約）は `addDurably` で保存の成否を確かめる（#120 F1）。
 public actor PersistedPathSet {
     public static let maxEntries = 1_000
     // v2: epoch フィールド追加（Issue #104）。v1 payload は schemaVersion 不一致で一度だけ
@@ -94,6 +96,31 @@ public actor PersistedPathSet {
         }
         paths.insert(path)
         persist()
+    }
+
+    /// `path` を加え、ディスクにも保存できたときだけ true を返す（#120 F1・フォルダ単位除外の
+    /// 予約用）。拡張の再起動を跨いで効く保証が要る用途のための `add`:
+    /// - 上限超過・保存先の無い縮退時（fileURL nil）は加えずに false
+    /// - 保存に失敗したら**加えた分をメモリからも取り消して** false（呼び出し側は除外せず受理
+    ///   するので、メモリにだけ残ると受理したフォルダに予約が残留する = F2 と同じ害になる）
+    /// - 既に入っている path は true（取り消さない = 先行する除外の後始末がまだ届いていない
+    ///   予約を消さない）。このレジストリへの追加を `addDurably` だけで行う限り、メモリにある
+    ///   path は読込由来か保存に成功した追加のどちらかで、ディスクにも載っている（後の保存が
+    ///   失敗しても `.atomic` 書出なのでディスクには前の集合が残る・PR #127 レビュー N1）。
+    public func addDurably(_ path: String) -> Bool {
+        loadIfNeeded()
+        guard fileURL != nil else { return false }
+        guard !paths.contains(path) else { return true }
+        guard paths.count < maxEntries else {
+            AppLogger.fileProvider.notice("persisted path set full; new entry dropped (preservation/cleanup guarantee lost for it)")
+            return false
+        }
+        paths.insert(path)
+        guard persist() else {
+            paths.remove(path)
+            return false
+        }
+        return true
     }
 
     /// 現在の集合のスナップショット（実体化バッジ・Issue #65: フラグ判定の一括参照用）。
@@ -196,15 +223,24 @@ public actor PersistedPathSet {
         paths = validated
     }
 
-    private func persist() {
-        guard let fileURL else { return }
+    /// 集合をディスクへ書き出す。戻り値は保存できたか（fileURL が nil の縮退時は false）。
+    /// 失敗はログのみ — 呼び出し側の多くは「プロセス生存中は効く」ベストエフォートで足りる
+    /// （再起動を跨ぐ保証が要るのは `addDurably` だけ）。
+    @discardableResult
+    private func persist() -> Bool {
+        guard let fileURL else { return false }
         let payload = Payload(
             schemaVersion: Self.currentSchemaVersion, bucket: bucket, epoch: epoch,
             paths: paths.sorted())
         do {
             try JSONEncoder().encode(payload).write(to: fileURL, options: .atomic)
+            return true
         } catch {
-            AppLogger.fileProvider.error("persisted path set save failed: \(String(describing: error), privacy: .private)")
+            // どのレジストリの失敗かを切り分けられるようファイル名を出す（PR #127 レビュー N3 —
+            // 予約の除去が保存できないと、拡張の再起動で予約が復活する）。ファイル名は固定の
+            // レジストリ名で機密性なし。
+            AppLogger.fileProvider.error("persisted path set save failed (\(fileURL.lastPathComponent, privacy: .public)): \(String(describing: error), privacy: .private)")
+            return false
         }
     }
 }

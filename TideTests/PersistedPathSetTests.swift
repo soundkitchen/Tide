@@ -243,4 +243,78 @@ final class PersistedPathSetTests: XCTestCase {
         let hasStale = await reader.contains("stale")
         XCTAssertFalse(hasStale)
     }
+
+    // MARK: - 保存の成否を確かめる add（#120 F1）
+
+    /// 書き込めない場所（存在しないディレクトリの下）を指す URL。
+    private func unwritableURL() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("vdr-missing-\(UUID().uuidString)")
+            .appendingPathComponent("holds.json")
+    }
+
+    func testAddDurablySucceedsAndPersists() async {
+        let url = tempURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let registry = PersistedPathSet(bucket: "b", fileURL: url, epoch: nil)
+        let ok = await registry.addDurably("a/node_modules")
+        XCTAssertTrue(ok)
+        // 既に入っていて保存も成功している path は true のまま
+        let again = await registry.addDurably("a/node_modules")
+        XCTAssertTrue(again)
+        let reloaded = PersistedPathSet(bucket: "b", fileURL: url, epoch: nil)
+        let persisted = await reloaded.contains("a/node_modules")
+        XCTAssertTrue(persisted)
+    }
+
+    func testAddDurablyWithoutFileURLIsRejected() async {
+        // 保存先の無い縮退時は再起動を跨ぐ保証が無いので加えない
+        let registry = PersistedPathSet(bucket: "b", fileURL: nil, epoch: nil)
+        let ok = await registry.addDurably("a")
+        let has = await registry.contains("a")
+        XCTAssertFalse(ok)
+        XCTAssertFalse(has)
+    }
+
+    func testAddDurablyRollsBackOnSaveFailure() async {
+        // 保存に失敗したら、加えた分をメモリからも取り消す（受理したフォルダに予約を残さない）
+        let registry = PersistedPathSet(bucket: "b", fileURL: unwritableURL(), epoch: nil)
+        let ok = await registry.addDurably("a")
+        let has = await registry.contains("a")
+        XCTAssertFalse(ok)
+        XCTAssertFalse(has)
+    }
+
+    func testAddDurablyKeepsExistingEntryAfterUnrelatedSaveFailure() async throws {
+        // 保存済みの予約 a がある状態で、別の path の保存が失敗しても、a は取り消さず true のまま
+        //（.atomic 書出なのでディスクには a を含む前の集合が残る・PR #127 レビュー N1 / N2）
+        let url = tempURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let registry = PersistedPathSet(bucket: "b", fileURL: url, epoch: nil)
+        let first = await registry.addDurably("a")
+        XCTAssertTrue(first)
+        // 以降の保存を失敗させる: 保存先をディレクトリ（中身あり）にすり替える
+        try FileManager.default.removeItem(at: url)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        try Data("x".utf8).write(to: url.appendingPathComponent("blocker"))
+        let second = await registry.addDurably("b")
+        XCTAssertFalse(second)
+        let hasB = await registry.contains("b")
+        XCTAssertFalse(hasB)
+        // 失敗の後でも、既にある a は true（失敗の状態を引きずらない）
+        let again = await registry.addDurably("a")
+        let hasA = await registry.contains("a")
+        XCTAssertTrue(again)
+        XCTAssertTrue(hasA)
+    }
+
+    func testAddDurablyOverCapIsRejected() async {
+        let url = tempURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let registry = PersistedPathSet(bucket: "b", fileURL: url, epoch: nil, maxEntries: 1)
+        let first = await registry.addDurably("a")
+        let second = await registry.addDurably("b")
+        XCTAssertTrue(first)
+        XCTAssertFalse(second)
+    }
 }
