@@ -236,7 +236,9 @@ gitignore 構文の一般的サブセット。詳細な確定仕様は `docs/07-
 - ユーザパターンは**新規ファイルにのみ**適用する（gitignore 純正）。既に同期済みのファイルは
   触らない。バックアップから外したい時はローカル削除 → 通常の削除伝播で消す。
 - `.syncignore` 自身は同期対象に含める（S3 経由で全デバイスに伝わる）。ネスト `.syncignore` は
-  git 風の階層適用（浅い→深い順に合成・深い層が上書き）。
+  git 風の階層適用（浅い→深い順に合成・深い層が上書き）。**例外**: フォルダごと除外したフォルダ
+  （機密網フォルダと、下記 ③ のフォルダ単位除外）の中の `.syncignore` は同期しない（git が除外
+  ディレクトリ内の `.gitignore` を読まないのと同じ）。
 - **seed（#97 で S3 直書き化）**: 新規バケットのセットアップ時のみ、`SyncIgnoreMatcher.defaultTemplate`
   を **S3 の `files/.syncignore` へ直接 PUT** し `ManifestUpdater.updateFileEntry(base: nil)` で
   entry を確定する（`AppEnvironment.seedDefaultSyncIgnoreIfNewBucket`・best-effort 非致命）。
@@ -244,7 +246,7 @@ gitignore 構文の一般的サブセット。詳細な確定仕様は `docs/07-
   （`.tide/shards/` と `files/` の `listObjectVersions` に何か見えたら seed しない — 生存カスタム
   `.syncignore` の置換や孤児化 index の新造を防ぐ）付き。呼び出しは FP ドメイン `enable()` より
   **前**（拡張の先行書込による新規バケット誤判定の防止）。
-- **現行の適用点（fpOnly）は 2 つ**: ① FP 拡張の **`createItem`**（新規流入口）が
+- **現行の適用点（fpOnly）は 3 つ**: ① FP 拡張の **`createItem`**（新規流入口）が
   `IgnoreDecision.shouldSkip(relativePath:isAlreadyTracked:matcher:)`（folderSync 3 経路と同一関数・
   同一優先順位）で判定し、該当は `NSFileProviderError(.excludedFromSync)` = ローカル温存・S3 非汚染。
   ② **`modifyItem` の move（rename/reparent）経路**も独立の適用点 — ファイルは**新 path** に
@@ -253,6 +255,13 @@ gitignore 構文の一般的サブセット。詳細な確定仕様は `docs/07-
   後始末で収束・ローカルは温存）。dir は `layered.evaluate(新 path + "/") == .ignored` で判定
   （`FileProviderExtension` の move 処理・後始末予約の永続化は `docs/03`「fpOnly の永続状態」の
   `fileprovider-exclusion-cleanups.json`）。
+  ③ **フォルダ単位の除外（#120）**: 新規フォルダの `createItem` と、ツリーに無い仮想フォルダの
+  メタデータ変更 `modifyItem` で `IgnoreDecision.shouldExcludeDirectory` を判定し、該当すれば
+  フォルダごと `.excludedFromSync` を返す（配下は fileproviderd がフォルダ 1 件に畳む）。判定の順序は
+  「配下に追跡済みファイルがある → しない / 機密網 → する / 効いている層（祖先 + 自身）に `!` が
+  1 行でもある → しない / `<dir>/` が ignored → する」。ツリーや `.syncignore` の取得に失敗したら
+  **受理へ倒す**（配下は ① の 1 ファイルずつの判定に任せる）。詳細 = `docs/08`「ユーザ `.syncignore`
+  のフォルダ単位除外」節。
   matcher の構築はローカルフォルダが無いため**マニフェスト経由**: `ManifestIgnoreCache` が同期済み
   `.syncignore` 群を **versionId 固定 + sha 検証**で取得し `LayeredSyncIgnore` を組む
   （`security/low.md` L17）。folderSync 世代の 3 適用点（scan / event / reconcile）は `docs/04a`。
