@@ -287,7 +287,10 @@ FP 拡張の書込（deleteItem / modifyItem / createItem / move）は `Extensio
   増えない。データ損失側の境界 = 配下に追跡済みファイルがあるフォルダは対象外（後始末の deleteItem が
   S3 から消すのを防ぐ）。判定から後始末の deleteItem までの間に追跡済みファイルが現れる窓（PR #123
   レビュー B1）は、除外の予約（`fileprovider-dir-exclusion-holds.json`）で塞ぐ = 予約つきの後始末は
-  S3 非接触。`.syncignore` の取得失敗時は受理（従来の per-file 判定）へ倒す
+  S3 非接触。`.syncignore` の取得失敗時は受理（従来の per-file 判定）へ倒す。
+  **2026-10-17（#124）**: rename 経路の dir 判定も、効いている層に `!` があれば除外せず改名を受理する
+  （`IgnoreDecision.shouldExcludeDirectoryOnRename`）。受理は「追跡済みファイルを新しいパスで同期し続ける」
+  側なので、機密網（常に除外）を除き S3 への新たな露出は無い
 - **rename/reparent（M5 Phase 5-4・2026-07-11）も同一ゲート**: 新 path は `childPath` +
   `validateRelativePath`・除外判定は新 path へ再適用（除外名への改名 = `ExcludedFromSync` +
   後始末予約 `PersistedPathSet` — 読み替えは「予約済み path かつ base が両 version から

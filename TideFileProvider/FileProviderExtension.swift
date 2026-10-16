@@ -704,7 +704,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
     /// - 除外対象名への改名は `ExcludedFromSync` = ローカルで改名成立 + 同期対象外へ
     ///   （システムが続けて旧 id の deleteItem を発行 → 旧 entry が S3 から外れる =
     ///   FSEvents モードの「旧 path 削除伝播 + 新 path 非同期」と対称・2026-07-09 ユーザ確定）。
-    /// - dir move の除外判定は**新 dir パス単位のみ**（機密網 + ユーザパターンの dir 一致）。
+    /// - dir move の除外判定は**新 dir パス単位のみ**（機密網 + ユーザパターンの dir 一致。
+    ///   効いている層に `!` があれば除外しない = #124）。
     ///   子ごとの新 path パターン一致は意図的に適用しない — FP では旧 id の削除配信が
     ///   ローカル実体も消すため、「ローカル温存で非同期」を per-child に再現できない
     ///   （dir 単位の ExcludedFromSync なら実体温存で全体が同期外 = 損失ゼロ）。docs/08 参照。
@@ -836,6 +837,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     }
                     // 除外判定: 検証不能な新名 / 機密網（component 一致）/ ユーザパターンの
                     // dir 一致（`<dir>/` 評価）→ subtree ごと同期対象外（実体はローカル温存）。
+                    // 効いている層に否定（`!`）があれば除外せず改名を受理する（#124・判定は
+                    // `IgnoreDecision.shouldExcludeDirectoryOnRename`）。機密網はツリーを引かずに即決。
                     let excluded: Bool
                     if let newPath = validNewPath {
                         if HardcodedIgnoreRules.shouldIgnore(relativePath: newPath) {
@@ -843,7 +846,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                         } else {
                             let layered = try await services.ignore.layeredIgnore(
                                 tree: current.tree, anchor: current.anchor)
-                            excluded = layered.evaluate(newPath + "/") == .ignored
+                            excluded = IgnoreDecision.shouldExcludeDirectoryOnRename(
+                                relativePath: newPath, matcher: layered)
                         }
                     } else {
                         excluded = true

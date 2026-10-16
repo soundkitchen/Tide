@@ -58,6 +58,34 @@ public enum IgnoreDecision {
         if hasTrackedDescendants {
             return false
         }
+        return excludesDirectoryAsWhole(relativePath: relativePath, matcher: matcher)
+    }
+
+    /// 改名・移動の先のフォルダを subtree ごと同期対象外にするか（FP 拡張の rename 経路・#124）。
+    ///
+    /// `shouldExcludeDirectory` の判定 2〜4 だけを使う。判定 1（配下に追跡済みあり → しない）は
+    /// 見ない — 追跡済みファイルを含むフォルダを除外名へ改名して、旧パスの後始末で S3 から外すのが
+    /// 改名経路の意図した挙動のため（FSEvents モードの「旧 path 削除伝播 + 新 path 非同期」と対称）。
+    ///
+    /// 効いている層に否定（`!`）があれば除外しない = 改名を受理する（2026-10-17 ユーザ確定）。
+    /// 配下の追跡済みファイルは新しいパスへ移って追跡が続き（ユーザパターンは未追跡にだけ効く）、
+    /// 改名後に新しく作るファイルは 1 ファイルずつ判定される。新規作成の経路と同じく、`!` で再包含
+    /// したファイルが改名を機に S3 から外れることはない。
+    ///
+    /// 改名するフォルダ自身の `.syncignore` はツリー上では旧パスにあるので、ここでは見ない
+    ///（フォルダごと除外したフォルダの中の `.syncignore` を読まないのと同じ扱い）。
+    public static func shouldExcludeDirectoryOnRename(
+        relativePath: String,
+        matcher: LayeredSyncIgnore
+    ) -> Bool {
+        excludesDirectoryAsWhole(relativePath: relativePath, matcher: matcher)
+    }
+
+    /// フォルダ単位除外の判定 2〜4（機密網 → 否定あり → `<dir>/` の照合）。
+    private static func excludesDirectoryAsWhole(
+        relativePath: String,
+        matcher: LayeredSyncIgnore
+    ) -> Bool {
         if HardcodedIgnoreRules.shouldIgnore(relativePath: relativePath) {
             return true
         }
