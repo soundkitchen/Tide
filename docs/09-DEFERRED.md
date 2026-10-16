@@ -205,6 +205,13 @@ fpOnly 運用中、rename したファイルに実体化チェックバッジ（
   （`!`）を見ていなかった（`evaluate(newPath + "/")` のみ）。`IgnoreDecision.shouldExcludeDirectoryOnRename` を
   追加し、効いている層に `!` があれば除外せず改名を受理する形にそろえた（追跡済みの有無は見ない = 改名経路の
   意図を維持）。詳細 = `docs/08`「ユーザ `.syncignore` のフォルダ単位除外」節の「rename 経路の否定パターン」。
+  既知の限界（PR #126 レビュー N1 / N2・いずれも PR 前と同じ挙動・ローカルは温存・S3 の版も残る）:
+  - 改名するフォルダ自身の `.syncignore` にある `!` は見ない（例: ルートに `build/`、`src/.syncignore` に
+    `!keep.txt`、追跡済みの `src/keep.txt` → `src` を `build` へ改名するとフォルダごと除外され、後始末で
+    keep.txt が S3 から外れる）。フォルダごと除外したフォルダの中の `.syncignore` を読まない扱いと同じ。
+  - フォルダの改名とファイル単体の移動で結果がずれる（`build/` + `!keep.txt` のとき、フォルダ `src` を
+    `build` へ改名すると `build/foo.o` は追跡が続くが、追跡済みの `src/foo.o` を単体で `build/foo.o` へ
+    移すと新 path では未追跡として除外され、後始末で S3 から外れる）。ファイル単体の移動は既存の挙動。
 - **副次の観測**: ① 仮想フォルダの登録簿（`fileprovider-virtual-dirs.json`）が上限 1,000 件で
   飽和していた（大半が `.venv` / `node_modules` 配下）→ 既存分の畳み込みで **61 件に解消**（2026-10-16）。
   ② レプリカ直下の `.Trash/` が `ESTALE` で読めない（未対処）。③ 拡張起動時に
