@@ -205,8 +205,29 @@ FP ドメイン内のファイル編集（`modifyItem` の .contents）と削除
   `touch` してメタデータ変更（modifyItem）を起こす:
   `find ~/Library/CloudStorage/Tide-Tide -type d \( -name node_modules -o -name .venv … \) -prune -exec touch {} +`。
   `touch` は更新日時を変えるだけで、対象外のフォルダを触っても拡張が従来どおり受理するだけ（無害）。
-  **フォルダの `touch` で modifyItem が届くかは実機受け入れで確認する**（届かなければ
-  `reimportItems(below:)` を契機にする方式へ切り替える）。
+  フォルダの `touch` で modifyItem が届くことは実機で確認済み（下記の受け入れ）。
+  - 畳み込みはすぐには終わらない: fileproviderd は除外の後始末（`materialize-ignored-item` →
+    `ignore-children`、いずれも background 優先度）を列に積み、フォルダの行は
+    `delete:ignored … ⧗safelyMaterialized` で順番を待つ。嵐の直後は後始末の列が数万件たまっており、
+    全件が畳まれるまで 1 フォルダでも約 15 分、29 フォルダ・約 6.5 万件では約 55 分かかった。
+  - 後始末の deleteItem（d: の仮想フォルダ・追跡ゼロ）は S3 非接触の分岐で、拡張のログは出ない。
+    確認は fileproviderd のログ（`delete-item` の `done executing`）か dump で行う。
+- **実機受け入れ（2026-10-16・dev-tide・全項目パス）**:
+  1. 新規の `node_modules/`（配下 100 ファイル）: 除外イベントはフォルダ 1 件（"Excluded folder from sync"）
+     だけで、ファイル単位のイベントは 0 件。
+  2. 既存フォルダ 1 件（`__pycache__`・40 ファイル）を `touch`: modifyItem が届いて拡張がフォルダ単位の
+     除外を返し、約 15 分後に「ローカルのみ」から配下 40 件が消えた（65,645 → 65,606）。ローカルの
+     ファイルは温存、S3 は非接触（版・削除マーカーとも 0）。
+  3. 残り 28 フォルダ（追跡済み 0 を事前確認）を `touch`: 28/28 で除外を返し、「ローカルのみ」は
+     65,606 → **58 件**（フォルダ 30 = 対象 29 + 実験 1、ファイル 28 = `.dSYM` パッケージと機密網の
+     ファイル）。29 フォルダとも S3 は非接触。仮想フォルダの登録簿は 1,000 件（飽和）→ 61 件。
+     `make soak-check-fp` は OK（warn 0・manifest 40,032 = S3 40,032）。
+  4. コード変更なしの再ビルド: 除外の再送は 58 件で、再起動から 1 分以内に終了（前回は約 8.5 万件・約 88 分）。
+     再ビルド直後に作ったファイルの S3 到達は約 5 分 16 秒（前回は約 86 分）、平常時は約 2 秒。
+     残る数分の遅れは除外の再送とは別で、更新直後の fileproviderd がローカルの変更を取り込むまでの遅れ
+     （その間は Spotlight の再索引 約 3 万件が走っていたが、因果は未確認）。
+  - 畳み込みの直後に、拡張の `item(for:)` が `noSuchItem` を 39 件返した。登録簿から溢れていた
+    配下の仮想フォルダへの問い合わせと見られ、S3 への書込はない（無害）。
 - 知見: `excludedFromSync` 済みのアイテムをローカルで削除（`rm -rf`）しても、throttling 表の
   エントリは残る（再送はされない）。
 
