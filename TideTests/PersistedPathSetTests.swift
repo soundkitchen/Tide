@@ -285,14 +285,27 @@ final class PersistedPathSetTests: XCTestCase {
         XCTAssertFalse(has)
     }
 
-    func testAddDurablyKeepsExistingEntryAfterSaveFailure() async {
-        // 先に入っていた path は、保存に失敗していても取り消さない（先行する予約を消さない）
-        let registry = PersistedPathSet(bucket: "b", fileURL: unwritableURL(), epoch: nil)
-        await registry.add("a")
-        let ok = await registry.addDurably("a")
-        let has = await registry.contains("a")
-        XCTAssertFalse(ok)
-        XCTAssertTrue(has)
+    func testAddDurablyKeepsExistingEntryAfterUnrelatedSaveFailure() async throws {
+        // 保存済みの予約 a がある状態で、別の path の保存が失敗しても、a は取り消さず true のまま
+        //（.atomic 書出なのでディスクには a を含む前の集合が残る・PR #127 レビュー N1 / N2）
+        let url = tempURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let registry = PersistedPathSet(bucket: "b", fileURL: url, epoch: nil)
+        let first = await registry.addDurably("a")
+        XCTAssertTrue(first)
+        // 以降の保存を失敗させる: 保存先をディレクトリ（中身あり）にすり替える
+        try FileManager.default.removeItem(at: url)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        try Data("x".utf8).write(to: url.appendingPathComponent("blocker"))
+        let second = await registry.addDurably("b")
+        XCTAssertFalse(second)
+        let hasB = await registry.contains("b")
+        XCTAssertFalse(hasB)
+        // 失敗の後でも、既にある a は true（失敗の状態を引きずらない）
+        let again = await registry.addDurably("a")
+        let hasA = await registry.contains("a")
+        XCTAssertTrue(again)
+        XCTAssertTrue(hasA)
     }
 
     func testAddDurablyOverCapIsRejected() async {
