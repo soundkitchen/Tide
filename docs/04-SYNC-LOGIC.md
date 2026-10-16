@@ -252,8 +252,10 @@ gitignore 構文の一般的サブセット。詳細な確定仕様は `docs/07-
   ② **`modifyItem` の move（rename/reparent）経路**も独立の適用点 — ファイルは**新 path** に
   `shouldSkip` を適用し、該当時は後始末予約 `exclusionCleanups.add(旧 path)` を積んだうえで
   `.excludedFromSync` を返す（追跡済みファイルを ignore 対象名へリネームすると S3 側は旧 path の
-  後始末で収束・ローカルは温存）。dir は `layered.evaluate(新 path + "/") == .ignored` で判定
-  （`FileProviderExtension` の move 処理・後始末予約の永続化は `docs/03`「fpOnly の永続状態」の
+  後始末で収束・ローカルは温存）。dir は `IgnoreDecision.shouldExcludeDirectoryOnRename` で判定 =
+  機密網 → する / 効いている層に `!` が 1 行でもある → しない（改名を受理・#124）/ `<新 path>/` が
+  ignored → する。③ と違って配下の追跡済みファイルの有無は見ない（追跡済みごと除外名へ改名し、旧 path の
+  後始末で S3 から外すのが意図した挙動）（`FileProviderExtension` の move 処理・後始末予約の永続化は `docs/03`「fpOnly の永続状態」の
   `fileprovider-exclusion-cleanups.json`）。
   ③ **フォルダ単位の除外（#120）**: 新規フォルダの `createItem` と、ツリーに無い仮想フォルダの
   メタデータ変更 `modifyItem` で `IgnoreDecision.shouldExcludeDirectory` を判定し、該当すれば

@@ -133,4 +133,38 @@ final class IgnoreDecisionTests: XCTestCase {
         // フォルダそのものが否定で再包含されている（否定があるので判定以前に戻る）
         XCTAssertFalse(excludesDir("build", root("build/\n!build/")))
     }
+
+    // MARK: - 改名先のフォルダ単位除外（#124）
+
+    private func excludesDirOnRename(_ path: String, _ m: LayeredSyncIgnore) -> Bool {
+        IgnoreDecision.shouldExcludeDirectoryOnRename(relativePath: path, matcher: m)
+    }
+
+    func testRenameToDirectoryPatternExcludesAsWhole() {
+        // `!` が無ければ従来どおりフォルダごと除外（追跡済みの有無は見ない = 改名で S3 から外す意図）
+        XCTAssertTrue(excludesDirOnRename("build", root("build/")))
+        XCTAssertTrue(excludesDirOnRename("a/node_modules", root("node_modules/")))
+        XCTAssertFalse(excludesDirOnRename("src", root("build/")))
+        XCTAssertFalse(excludesDirOnRename("src", root("*.pyc")))
+    }
+
+    func testRenameWithNegationIsAccepted() {
+        // Issue #124 の例: 新規作成と同じく、`!` があればフォルダ単位で除外しない
+        let m = root("build/\n!build/keep.txt")
+        XCTAssertFalse(excludesDirOnRename("build", m))
+        XCTAssertEqual(excludesDirOnRename("build", m), excludesDir("build", m))
+        // 祖先のネスト層の否定も同じ・兄弟の層の否定は効かない
+        let nested = LayeredSyncIgnore(matchers: [
+            "": SyncIgnoreMatcher.parse("build/"),
+            "app": SyncIgnoreMatcher.parse("!*.lock")
+        ])
+        XCTAssertFalse(excludesDirOnRename("app/build", nested))
+        XCTAssertTrue(excludesDirOnRename("web/build", nested))
+    }
+
+    func testRenameToHardcodedDirectoryAlwaysExcluded() {
+        // 機密網は否定があってもフォルダごと除外
+        XCTAssertTrue(excludesDirOnRename(".ssh", LayeredSyncIgnore.empty))
+        XCTAssertTrue(excludesDirOnRename("sub/.aws", root("!.aws/")))
+    }
 }

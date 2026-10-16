@@ -109,7 +109,7 @@ FP ドメイン内のファイル編集（`modifyItem` の .contents）と削除
 - **rebind item の baseVersion は contentVersion がローカル版スタンプに差し替わる（実機確定 2026-07-11）**: rebind で生まれた item への**次の操作**（削除・再 move・内容編集）では、システムが渡す baseVersion.contentVersion が sha 形でない。対処は二層: ① **`FileProviderWritePolicy.baseSha(contentVersion:metadataVersion:)` の metadataVersion フォールバック** — Tide の file item は metadataVersion == contentVersion（同じ sha）で発行しており、システムは metadataVersion を保持していることを実機確認（rebind 後の削除・編集が本来のベースガードのまま正常化）。**file の metadataVersion = sha は load-bearing**（変えると rebind 後の全書込操作が壊れる・`FileProviderItem.itemVersion` のコメント参照）。② **ファイル move の remove ベースは itemVersion でなくツリー現行 entry の sha**（dir move と同方式）— move は「同一内容の add」と対の remove なのでツリーベースでもデータ損失は構造的に起きない（失敗 = 両存側・並行編集は RMW 再評価が弾く）。①の前に②を先行導入したのは、move が baseUnknown で**恒久リトライループ**になり後続操作（同 dir の削除等）まで詰まらせることを実機で踏んだため。
 - **completion へ渡すエラーは SDK 規約ドメインへ包む**（`wrapForCompletion`）: NSCocoaErrorDomain / NSFileProviderErrorDomain 以外の Swift エラー（SyncError / MoveError 等）を素通しすると fileproviderd が CRIT fault を吐く（挙動は同じ一時エラー扱いだが規約違反・実機で観測）。規約外は NSXPCConnectionReplyInvalid + NSUnderlyingErrorKey で運ぶ（SDK ヘッダの指示どおり）。全コールバックの catch に適用。
 - **`.sourceChanged`（リモート先行）は自動 rollback せず一時エラー返却** — copy は毎試行ツリー現行 entry から引き直すため、リモート変化が届いて baseVersion が追いつけば再試行の move が「進んだ後の内容」で自己回復する（stale 内容を運ばない）。`.destinationOccupied` は `FilenameCollision` でシステムに名前バウンスさせる。
-- **除外名への改名 = 後始末予約方式（2026-07-09 ユーザ確定 + 実機で設計修正）**: 新 path が除外対象（検証不能名 / 機密網 / ユーザ `.syncignore`）なら `ExcludedFromSync` を返す。**マニフェストはその場では触らない** — SDK は除外時に「内容をダウンロードしてから deleteItem を発行」する契約で、先に entry を消すと dataless の item が materialize できない殻になる（実機で確定・初期実装の先回り除去は撤回）。ただしシステムの後始末 deleteItem は **baseVersion が sha 形でない**（ローカル保留変更の版スタンプとみられる・実機観測）ため、除外した path を **`PersistedPathSet`（後始末予約）** に登録し、deleteItem 側で「予約済み path かつ **base が両 version から復元不能（nil）のときだけ**、ツリー現行 sha をベースに RMW ガード付きで受理」する（PR #60 レビュー #1: metadataVersion フォールバックで sha が取れる deleteItem は本来のベースガードが常に優先 = 予約が残留しても正当な削除のガードを弱めない）。dir の除外は subtree ごと `ExcludedFromSync`（後始末の dir deleteItem は元々ツリー sha ベースなので予約不要）。結果 = FSEvents の「旧 path 削除伝播 + 新 path 非同期・ローカル温存」と対称。
+- **除外名への改名 = 後始末予約方式（2026-07-09 ユーザ確定 + 実機で設計修正）**: 新 path が除外対象（検証不能名 / 機密網 / ユーザ `.syncignore`）なら `ExcludedFromSync` を返す。**マニフェストはその場では触らない** — SDK は除外時に「内容をダウンロードしてから deleteItem を発行」する契約で、先に entry を消すと dataless の item が materialize できない殻になる（実機で確定・初期実装の先回り除去は撤回）。ただしシステムの後始末 deleteItem は **baseVersion が sha 形でない**（ローカル保留変更の版スタンプとみられる・実機観測）ため、除外した path を **`PersistedPathSet`（後始末予約）** に登録し、deleteItem 側で「予約済み path かつ **base が両 version から復元不能（nil）のときだけ**、ツリー現行 sha をベースに RMW ガード付きで受理」する（PR #60 レビュー #1: metadataVersion フォールバックで sha が取れる deleteItem は本来のベースガードが常に優先 = 予約が残留しても正当な削除のガードを弱めない）。dir の除外は subtree ごと `ExcludedFromSync`（後始末の dir deleteItem は元々ツリー sha ベースなので予約不要）。dir の判定は `IgnoreDecision.shouldExcludeDirectoryOnRename`（効いている層に `!` があれば除外せず受理 = #124。下記「ユーザ `.syncignore` のフォルダ単位除外」節の「rename 経路の否定パターン」）。結果 = FSEvents の「旧 path 削除伝播 + 新 path 非同期・ローカル温存」と対称。
 - **仮想フォルダの温存は `PersistedPathSet`（レジストリ）に限定（5-3 の設計修正）**: 5-3 の「マニフェスト外の dir id へ無条件に合成 dir を返す」は、dir move の reconcile 中の照会で**消えたはずの旧 dir を空フォルダとして復活させる**ことが実機で確定。`item(for:)` / enumerator が合成 dir を返すのは「createItem で仮想受理した = レジストリ登録済み」のパスだけに変更（レジストリ外は noSuchItem）。レジストリは App Group Caches の JSON（世代ログと同格・bucket キー・読込時 `validateRelativePath` 再適用・壊れは全体破棄 = 温存保証を失うだけ・上限 1000）。createItem(dir) で追加 / 配下ファイルの実体化で祖先を除去 / dir 削除・除外で subtree 除去 / rename で subtree 追従。
 - **capabilities**: file/dir に `.allowsRenaming` + `.allowsReparenting` を解放（root は不可）。capabilities 変更のため既存レプリカはドメイン作り直しが必要（5-3 知見①のとおり・受け入れで実施）。
 - **実機受け入れ**（2026-07-09〜11・dev バケット）: ファイル rename（ターミナル/Finder）+ id rebind + materialized 温存 / reparent（ターミナル mv / Finder ドラッグ）/ dir rename（copy 2 + 二相 RMW・旧 dir 非復活）/ 除外名 rename（予約 → 後始末 deleteItem 受理 → 旧 entry 除去・ローカル温存・非復元）/ 仮想フォルダ rename（レジストリ追従）/ すべてアプリ pull への伝播まで確認・sync_log エラー 0。
@@ -211,7 +211,26 @@ FP ドメイン内のファイル編集（`modifyItem` の .contents）と削除
     実機確認（2026-10-16）: 受理済みの仮想フォルダにネストの `.syncignore` で一致させて `touch` →
     予約が積まれ、約 35 秒後の後始末で `exclusion cleanup completed (S3 untouched)`・予約は空に戻り、
     ローカルの中身は温存・S3 は非接触（版・削除マーカーとも 0）。
-  - rename 経路は従来から `<newPath>/` でフォルダ単位に判定しており、今回は変えていない。
+  - rename 経路は従来から `<newPath>/` でフォルダ単位に判定しており、#120 では変えていない。
+    `!` を見ていなかった点は #124 で直した（下記「rename 経路の否定パターン」）。
+- **rename 経路の否定パターン（#124・2026-10-17 ユーザ確定）**: フォルダの改名・移動の先が除外名でも、
+  効いている層（改名先の祖先）に `!` が 1 行でもあればフォルダごとは除外せず、改名を受理する
+  （`IgnoreDecision.shouldExcludeDirectoryOnRename`・機密網は従来どおり常に除外）。以前は
+  `evaluate(<newPath>/)` だけを見ていたため、`build/` + `!build/keep.txt` のとき、新規作成した `build/` では
+  keep.txt が同期されるのに、既存フォルダを `build` へ改名すると keep.txt ごと S3 から外れていた。
+  - 受理後の配下: 追跡済みファイルは新しいパスへ移って追跡が続く（ユーザパターンは未追跡にだけ効く
+    = `build/foo.o` も同期が続く・安全側）。改名後に新しく作るファイルは 1 ファイルずつ判定される。
+  - パターンに当たる追跡済みファイルだけを外す案は採らない: 旧 id の削除でローカルの実体も消える
+    （5-4 で dir 単位の除外にした理由と同じ）。
+  - 追跡済みの有無（判定 1）は見ない: 追跡済みファイルごと除外名へ改名して旧 path の後始末で S3 から
+    外すのが改名経路の意図した挙動（5-4・2026-07-09 ユーザ確定）。
+  - 改名するフォルダ自身の `.syncignore` はツリー上では旧パスにあるので見ない（フォルダごと除外した
+    フォルダの中の `.syncignore` を読まないのと同じ扱い）。
+  - 実機確認（2026-10-17・dev-tide・全項目パス）: ネストの `.syncignore` に `build/` + `!build/keep.txt` を
+    置き、追跡済みの `src/`（`keep.txt` / `foo.o`）を `build` へ改名 → `dir moved (2 files)`・S3 は
+    `build/` の 2 件が現行版、`src/` の 2 件は削除マーカー。改名後に作った `build/bar.o` は
+    `createItem: excluded from sync`（S3 に上がらない）。対照（`build/` のみ・`!` なし）の改名は従来どおり
+    `dir excluded`・後始末で旧 path に削除マーカー・ローカルは温存。`make soak-check-fp` は OK。
 - **意味論の変化**: フォルダごと除外すると、その中に置いた `.syncignore` も同期しない（git が除外
   ディレクトリ内の `.gitignore` を読まないのと同じ・2026-10-16 ユーザ確定。機密網フォルダ内の
   `.syncignore` が同期されないのと同型）。`!` がある構成では従来の per-file 判定のままなので、
