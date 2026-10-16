@@ -31,8 +31,15 @@ public actor ManifestGenerationCache {
     private let minRefreshInterval: TimeInterval
     private let onNewGeneration: @Sendable () -> Void
 
-    private var payload: ManifestGenerationLog.Payload?
+    private var payload: ManifestGenerationLog.Payload? {
+        // 中身が変われば、組み立て済みの古い世代は使えない
+        didSet { reconstructed = nil }
+    }
     private var payloadLoaded = false
+    /// 直近に逆差分から組み立てた古い世代（Issue #128 / PR #129 レビュー N1）。signal の直後は
+    /// working set と開いているフォルダの列挙者が同じ古い anchor から `enumerateChanges` を呼ぶので、
+    /// そのたびに全件マップの複製と逆差分の適用をやり直さないよう 1 件だけ覚えておく。
+    private var reconstructed: ManifestGenerationLog.Generation?
     private var cached: (current: Current, fetchedAt: Date)?
     /// 進行中の S3 ロードと**その開始時刻**。開始時刻を task と束ねて持つことで、合流者が
     /// `await` 後に共有可変状態を読んで開始時刻を取り違える窓（PR #58 レビュー #4）を塞ぐ。
@@ -84,7 +91,15 @@ public actor ManifestGenerationCache {
     /// anchor の世代（diff の起点）。世代落ち・未知 anchor は nil（= `.syncAnchorExpired` 行き）。
     public func generation(anchor: String) -> ManifestGenerationLog.Generation? {
         loadPayloadIfNeeded()
-        return ManifestGenerationLog.generation(anchor: anchor, in: payload)
+        if let reconstructed, reconstructed.anchor == anchor {
+            return reconstructed
+        }
+        let generation = ManifestGenerationLog.generation(anchor: anchor, in: payload)
+        // 最新世代は payload をそのまま返すだけなので覚えない（古い世代だけが組み立てを伴う）
+        if let generation, generation.anchor != payload?.latest.anchor {
+            reconstructed = generation
+        }
+        return generation
     }
 
     /// - Parameter minStartedAt: 使用する S3 ロードは「これ以降に開始したもの」であることを保証する
@@ -123,7 +138,7 @@ public actor ManifestGenerationCache {
         )
         payload = newPayload
         // 永続化は「世代が増えた or shard etag が実際に動いた」ときだけ。無変化リフレッシュの
-        // たびに最大 8 世代分の全 files map を atomic 書出しするのは無駄で、永続側 fetchedAt は
+        // たびに最新世代の全 files map + 逆差分（Issue #128）を atomic 書出しするのは無駄で、永続側 fetchedAt は
         // 誰も読まない情報値（PR #51 レビュー #5。ログは消えても自己回復する設計なので安全側）。
         if let logURL, appended || previousEtags != snapshot.shardEtags {
             do {

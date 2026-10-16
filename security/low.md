@@ -257,10 +257,10 @@ symlink を辿り、リンク先（例: `~/.ssh/id_rsa`）の中身を S3 へ送
 **重要度:** Low（攻撃者前提なし。本人の App Group コンテナ配下に派生データを置くだけ。新規の機密露出は無し）。
 
 **境界と対策:**
-- **含まない**: AWS 認証情報。`ManifestGenerationLog.Payload` は `schemaVersion` / `bucket` / `[Generation]`（anchor / fetchedAt / shardEtags / files = マニフェスト由来メタデータ）のみ。`deviceId` フィールドはマニフェスト側の書込元表示値（`ManifestFileEntry.deviceId`）の写しで、Keychain 秘匿対象の端末 ID とは別物。
+- **含まない**: AWS 認証情報。`ManifestGenerationLog.Payload` は `schemaVersion` / `bucket` / `latest`（anchor / fetchedAt / shardEtags / files = マニフェスト由来メタデータ）/ `history`（逆差分 = anchor / fetchedAt / restored〈同じメタデータ〉/ removed〈パス〉・Issue #128）のみ。`deviceId` フィールドはマニフェスト側の書込元表示値（`ManifestFileEntry.deviceId`）の写しで、Keychain 秘匿対象の端末 ID とは別物。
 - **at-rest 場所**: App Group コンテナ内 `Library/Caches/Tide/`。派生データ＝S3 マニフェストからいつでも再生成可能。消えても anchor 未知 → `.syncAnchorExpired` → 全再列挙で自己回復。`factoryReset` が group Caches を削除・`make reset` は GROUP_CONTAINER ごと削除。
 - **bucket キー**: `load(bucket:)` は現 bucket 一致時のみ採用（別バケットの世代で diff しない）。スキーマ不一致・壊れは nil（cold 扱い）。
-- **取り込みゲート**: 世代へ入るデータは `ManifestSnapshotLoader` が `validateShardId` / `validateRelativePath` を通した後のもののみ（`ManifestReader.read` と同一のセキュリティゲート）。さらに**読込時（`ManifestGenerationLog.load`）にも全世代の path を `validateRelativePath` で再検証**し、1 件でも不正なら全体を破棄（cold 扱い）— ディスク上のファイルはプロセス外で改ざん/破損しうるため、書込み時ゲートだけでは持ち越し経路（`load(previous:)` は検証済み前提の無検証コピー）を保証できない（PR #51 レビュー #3・2026-07-04）。
+- **取り込みゲート**: 世代へ入るデータは `ManifestSnapshotLoader` が `validateShardId` / `validateRelativePath` を通した後のもののみ（`ManifestReader.read` と同一のセキュリティゲート）。さらに**読込時（`ManifestGenerationLog.load`）にも全世代の path を `validateRelativePath` で再検証**し（2026-10-17 Issue #128 のスキーマ v2 = 差分保存以降は、最新世代の全 path と逆差分の restored / removed の全 path。古い世代はこの 3 種からしか組み立てられないので全世代を覆う）、1 件でも不正なら全体を破棄（cold 扱い）— ディスク上のファイルはプロセス外で改ざん/破損しうるため、書込み時ゲートだけでは持ち越し経路（`load(previous:)` は検証済み前提の無検証コピー）を保証できない（PR #51 レビュー #3・2026-07-04）。
 
 ## L17. File Provider 書込経路のゲート（M5 Phase 5-2〜5-4）
 
