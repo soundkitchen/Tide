@@ -186,6 +186,44 @@ final class ManifestGenerationCacheTests: XCTestCase {
         XCTAssertNotEqual(try Data(contentsOf: url), bytesAfterFirst, "変化したら書く")
     }
 
+    /// 組み立てた古い世代の記憶（Issue #128 / PR #129 レビュー N1）: 同じ anchor の連続照会は
+    /// 同じ中身を返し、別の anchor へ切り替えても正しく、世代が上限を超えて落ちた anchor は
+    /// 記憶が残っていても引けない（= `.syncAnchorExpired` 行き）。
+    func testReconstructedGenerationMemoIsCorrectAndDroppedWithRing() async throws {
+        let source = MutableSource(files: ["a.txt": entry(sha: "0")])
+        let cache = ManifestGenerationCache(
+            loader: ManifestSnapshotLoader(source: source), bucket: "b", logURL: nil,
+            maxAge: 0, minRefreshInterval: 0
+        )
+        var anchors: [String] = []
+        anchors.append(try await cache.current().anchor)
+        source.set(files: ["a.txt": entry(sha: "1"), "new.txt": entry(sha: "1")])
+        anchors.append(try await cache.current().anchor)
+        source.set(files: ["a.txt": entry(sha: "2")])
+        anchors.append(try await cache.current().anchor)
+
+        // 同じ古い anchor を 2 回 → 同じ中身（2 回目は記憶から）
+        let g0 = await cache.generation(anchor: anchors[0])
+        let g0Again = await cache.generation(anchor: anchors[0])
+        XCTAssertEqual(g0?.files, ["a.txt": entry(sha: "0")])
+        XCTAssertEqual(g0Again, g0)
+        // 別の古い anchor へ切り替え → その世代の中身
+        let g1 = await cache.generation(anchor: anchors[1])
+        XCTAssertEqual(g1?.files, ["a.txt": entry(sha: "1"), "new.txt": entry(sha: "1")])
+        // 最新世代は payload そのまま
+        let latest = await cache.generation(anchor: anchors[2])
+        XCTAssertEqual(latest?.files, ["a.txt": entry(sha: "2")])
+
+        // anchors[0] を記憶させた状態で世代を上限（8）まで積み、anchors[0] を落とす
+        _ = await cache.generation(anchor: anchors[0])
+        for i in 3..<(3 + ManifestGenerationLog.defaultMaxGenerations) {
+            source.set(files: ["a.txt": entry(sha: "\(i)")])
+            _ = try await cache.current()
+        }
+        let dropped = await cache.generation(anchor: anchors[0])
+        XCTAssertNil(dropped, "上限を超えて落ちた世代は、記憶が残っていても返さない")
+    }
+
     func testUnknownAnchorResolvesNil() async throws {
         let source = MutableSource(files: ["a.txt": entry(sha: "1")])
         let cache = ManifestGenerationCache(
