@@ -263,7 +263,7 @@ gitignore 構文の一般的サブセット。詳細な確定仕様は `docs/07-
   「配下に追跡済みファイルがある → しない / 機密網 → する / 効いている層（祖先 + 自身）に `!` が
   1 行でもある → しない / `<dir>/` が ignored → する」。ツリーや `.syncignore` の取得に失敗したら
   **受理へ倒す**（配下は ① の 1 ファイルずつの判定に任せる）。modifyItem で除外するときは予約
-  （`fileprovider-dir-exclusion-holds.json`）を積み、後から届く後始末の deleteItem（dir）を
+  （`fileprovider-dir-exclusion-holds.json`）を積み（ディスクに保存できなければ除外せず受理・#120 F1）、後から届く後始末の deleteItem（dir）を
   **S3 非接触**で完了させる（判定から後始末までの間に他端末が配下へ上げたファイルを消さない）。詳細 = `docs/08`「ユーザ `.syncignore`
   のフォルダ単位除外」節。
   matcher の構築はローカルフォルダが無いため**マニフェスト経由**: `ManifestIgnoreCache` が同期済み

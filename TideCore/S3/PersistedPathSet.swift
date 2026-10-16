@@ -34,6 +34,8 @@ import Foundation
 ///
 /// - 上限 `maxEntries`（init 注入・既定 1000）: 超過 add は無視（notice ログ）。溢れた分は
 ///   温存保証/バッジを失うだけ（安全側）。
+/// - 保存の失敗はログのみで、`add` した分は集合に残る（プロセス生存中は効く）。再起動を跨ぐ
+///   保証が要る用途（フォルダ単位除外の予約）は `addDurably` で保存の成否を確かめる（#120 F1）。
 public actor PersistedPathSet {
     public static let maxEntries = 1_000
     // v2: epoch フィールド追加（Issue #104）。v1 payload は schemaVersion 不一致で一度だけ
@@ -56,6 +58,10 @@ public actor PersistedPathSet {
     private let maxEntries: Int
     private var paths: Set<String> = []
     private var loaded = false
+    /// 直近の保存が成功したか（= ディスクがメモリの集合と一致しているか・`addDurably` 用）。
+    /// 読込直後はディスクと一致しているので true から始める。fileURL が nil の縮退時は保存自体を
+    /// しないので意味を持たない（`addDurably` が先に false を返す）。
+    private var lastPersistSucceeded = true
 
     /// - Parameter fileURL: nil = 永続化なし（構築失敗時の縮退。プロセス生存中のみ有効）。
     /// - Parameter epoch: ドメイン世代 epoch（`ConfigStore.fileProviderDomainEpoch` を構築時に
@@ -94,6 +100,30 @@ public actor PersistedPathSet {
         }
         paths.insert(path)
         persist()
+    }
+
+    /// `path` を加え、ディスクにも保存できたときだけ true を返す（#120 F1・フォルダ単位除外の
+    /// 予約用）。拡張の再起動を跨いで効く保証が要る用途のための `add`:
+    /// - 上限超過・保存先の無い縮退時（fileURL nil）は加えずに false
+    /// - 保存に失敗したら**加えた分をメモリからも取り消して** false（呼び出し側は除外せず受理
+    ///   するので、メモリにだけ残ると受理したフォルダに予約が残留する = F2 と同じ害になる）
+    /// - 既に入っている path は、直近の保存が成功していれば true（取り消さない = 先行する
+    ///   除外の後始末がまだ届いていない予約を消さない）
+    public func addDurably(_ path: String) -> Bool {
+        loadIfNeeded()
+        guard fileURL != nil else { return false }
+        guard !paths.contains(path) else { return lastPersistSucceeded }
+        guard paths.count < maxEntries else {
+            AppLogger.fileProvider.notice("persisted path set full; new entry dropped (preservation/cleanup guarantee lost for it)")
+            return false
+        }
+        paths.insert(path)
+        persist()
+        if !lastPersistSucceeded {
+            paths.remove(path)
+            return false
+        }
+        return true
     }
 
     /// 現在の集合のスナップショット（実体化バッジ・Issue #65: フラグ判定の一括参照用）。
@@ -203,7 +233,9 @@ public actor PersistedPathSet {
             paths: paths.sorted())
         do {
             try JSONEncoder().encode(payload).write(to: fileURL, options: .atomic)
+            lastPersistSucceeded = true
         } catch {
+            lastPersistSucceeded = false
             AppLogger.fileProvider.error("persisted path set save failed: \(String(describing: error), privacy: .private)")
         }
     }

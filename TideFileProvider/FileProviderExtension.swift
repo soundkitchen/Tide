@@ -569,8 +569,10 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     // deleteItem を送るが、それは数十分遅れて届くことがあり、その時点のツリーで
                     // 削除対象を作り直すと、間に他端末が配下へ上げたファイルを S3 から消してしまう
                     // （PR #123 レビュー B1）。そこで除外を返す前に予約（`dirExclusionHolds`）を積み、
-                    // 後始末の deleteItem を S3 非接触で完了させる。予約を積めない（上限超過）ときは
-                    // 除外を返さず従来どおり受理する（保証の無い除外はしない）。ローカルの実体は残る。
+                    // 後始末の deleteItem を S3 非接触で完了させる。予約を積めない（上限超過）か
+                    // ディスクに保存できない（保存失敗・保存先の無い縮退時 = 再起動で予約が消えうる・
+                    // #120 F1）ときは、除外を返さず従来どおり受理する（保証の無い除外はしない）。
+                    // ローカルの実体は残る。
                     // `.syncignore` の取得失敗は判定を諦めて従来どおり受理する（メタデータ変更を
                     // エラーにすると fileproviderd が再試行を続ける）。
                     // 仮想フォルダの登録はここでは消さない: 後始末までの間に
@@ -581,8 +583,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                            tree: tree, anchor: current.anchor),
                        IgnoreDecision.shouldExcludeDirectory(
                            relativePath: path, hasTrackedDescendants: false, matcher: layered) {
-                        await services.dirExclusionHolds.add(path)
-                        if await services.dirExclusionHolds.contains(path) {
+                        if await services.dirExclusionHolds.addDurably(path) {
                             AppLogger.fileProvider.notice("modifyItem(dir metadata): directory excluded as a whole: \(path, privacy: .private)")
                             await services.events.append(
                                 type: .info, path: path, message: "Excluded folder from sync (kept local)")
