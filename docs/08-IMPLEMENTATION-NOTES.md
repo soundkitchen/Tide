@@ -192,9 +192,23 @@ FP ドメイン内のファイル編集（`modifyItem` の .contents）と削除
     （配下は per-file 判定に任せる = フォルダ作成はオフラインでも成功、を維持）。
   - **modifyItem（既存フォルダのメタデータ変更）**: ツリーに無い（= 受理済みの仮想フォルダ）フォルダが
     判定に当たれば `excludedFromSync` を返す。fileproviderd は配下の除外記録をフォルダ 1 件に畳み、
-    後始末の deleteItem（追跡ゼロ = S3 非接触の仮想フォルダ削除）を送る。ローカルの実体は残る。
-    畳み込みは rename 経路（除外名への改名）で実機確認済み（200 件 → 1 件・2026-10-16 スパイク）。
+    後始末の deleteItem（dir）を送る。ローカルの実体は残る。
     `.syncignore` の取得失敗は受理へ倒す（メタデータ変更をエラーにすると再試行が続く）。
+  - **除外の予約（PR #123 レビュー B1）**: 後始末の deleteItem は判定から数十分遅れて届くことがあり
+    （下記の受け入れで 15〜55 分）、deleteItem（dir）はその時点のツリーで削除対象を作り直す。間に他端末が
+    配下へファイルを上げていると、「追跡ゼロ」を根拠にした除外の後始末がそれを S3 から消してしまう。
+    そこで除外を返す前に path を `dirExclusionHolds`（`PersistedPathSet`・
+    `fileprovider-dir-exclusion-holds.json`・ドメイン epoch で破棄）へ積み、deleteItem（dir）は
+    **自身か祖先に予約があれば追跡数に関わらず S3 非接触**で完了して予約を消す（判定 =
+    `FileProviderWritePolicy.directoryDeletePlan` / `pathAndAncestors`。祖先も見るのは、以前に受理した
+    配下の仮想フォルダ単位でも後始末が届くため）。予約を積めない（上限 1,000 件超過）ときは除外を
+    返さず受理する（保証の無い除外はしない）。予約が残ったまま後でユーザがフォルダを消しても、
+    S3 は温存される側に倒れる（除外 = ローカル温存の意味論で、配下は判定時点で追跡ゼロ）。
+    仮想フォルダの登録（`virtualDirs`）は modifyItem では消さない — 後始末までの間に `item(for:)` が
+    noSuchItem を返すと、デーモンがローカルのフォルダごと掃除しうる。登録の掃除は後始末が行う。
+    実機確認（2026-10-16）: 受理済みの仮想フォルダにネストの `.syncignore` で一致させて `touch` →
+    予約が積まれ、約 35 秒後の後始末で `exclusion cleanup completed (S3 untouched)`・予約は空に戻り、
+    ローカルの中身は温存・S3 は非接触（版・削除マーカーとも 0）。
   - rename 経路は従来から `<newPath>/` でフォルダ単位に判定しており、今回は変えていない。
 - **意味論の変化**: フォルダごと除外すると、その中に置いた `.syncignore` も同期しない（git が除外
   ディレクトリ内の `.gitignore` を読まないのと同じ・2026-10-16 ユーザ確定。機密網フォルダ内の
@@ -210,8 +224,10 @@ FP ドメイン内のファイル編集（`modifyItem` の .contents）と削除
     `ignore-children`、いずれも background 優先度）を列に積み、フォルダの行は
     `delete:ignored … ⧗safelyMaterialized` で順番を待つ。嵐の直後は後始末の列が数万件たまっており、
     全件が畳まれるまで 1 フォルダでも約 15 分、29 フォルダ・約 6.5 万件では約 55 分かかった。
-  - 後始末の deleteItem（d: の仮想フォルダ・追跡ゼロ）は S3 非接触の分岐で、拡張のログは出ない。
-    確認は fileproviderd のログ（`delete-item` の `done executing`）か dump で行う。
+  - 後始末の deleteItem（d: の仮想フォルダ・追跡ゼロ）は S3 非接触の分岐で、受け入れ時点のビルドでは
+    拡張のログが出なかった。B1 の対処後は、予約つきの後始末で
+    `deleteItem(dir): exclusion cleanup completed (S3 untouched)` を残す（追跡済みファイルが現れていた
+    場合は `… kept N tracked files on S3`）。fileproviderd 側は `delete-item` の `done executing` で追える。
 - **実機受け入れ（2026-10-16・dev-tide・全項目パス）**:
   1. 新規の `node_modules/`（配下 100 ファイル）: 除外イベントはフォルダ 1 件（"Excluded folder from sync"）
      だけで、ファイル単位のイベントは 0 件。
@@ -968,7 +984,8 @@ Issue #97 本文のチェックリスト（9 項目 + 追補 7b〜7d）を dev �
 - **対処 = ドメイン epoch（レジストリ削除ではなく世代マーカー・ユーザ確定 2026-08-12）**:
   アプリがドメイン除去（= レプリカ破棄）のたびに group defaults の
   `ConfigStore.fileProviderDomainEpoch`（ランダム UUID）を `bumpFileProviderDomainEpoch()` で
-  進め、拡張のレジストリ 3 本（実体化バッジ報告済み / 仮想フォルダ温存 / 除外後始末予約）は
+  進め、拡張のレジストリ（実体化バッジ報告済み / 仮想フォルダ温存 / 除外後始末予約。#120 で
+  フォルダ除外予約が加わり 4 本）は
   **構築時に capture した epoch** で payload をスタンプ・読込時に現行値と不一致なら全体破棄
   （bucket 不一致と同じ安全側 = 空集合）。schemaVersion は 1 → 2（epoch フィールド追加）。
   - **capture 意味論が load-bearing**: アプリの bump 後に生き残りの旧拡張プロセスが遅延

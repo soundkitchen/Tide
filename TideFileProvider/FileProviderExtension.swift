@@ -317,6 +317,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             // ExcludedFromSync で配下の個別 createItem 評価も生じない（FSEvents スキャンの
             // 機密網 dir skipDescendants と対称）。ツリーを引かずに即決する（オフラインでも拒否）。
             // ユーザ `.syncignore` の dir 単位除外は下の Task 内（ツリーと層が要る・#120）。
+            // `IgnoreDecision.shouldExcludeDirectory` は「追跡済みあり → 機密網」の順だが、新規
+            // フォルダでは機密網を先に即決する（関数側のドキュメントコメント参照）。
             if HardcodedIgnoreRules.shouldIgnore(relativePath: path) {
                 AppLogger.fileProvider.notice("createItem: hardcoded-ignored directory excluded: \(path, privacy: .private)")
                 Task {
@@ -563,22 +565,31 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     // 受理済みの仮想フォルダを後からフォルダ単位で除外する（#120・既存分の畳み込み）:
                     // #120 以前に受理され配下が 1 ファイルずつ除外されているフォルダは、`touch` 等の
                     // メタデータ変更を契機にここで ExcludedFromSync を返すと、fileproviderd が配下の
-                    // 除外記録をフォルダ 1 件に畳む（rename 経路での実機確認 2026-10-16）。システムは
-                    // 続けて後始末の deleteItem を送るが、追跡済みファイルが無い（node == nil）ので
-                    // S3 非接触の仮想フォルダ削除として完了する。ローカルの実体は残る。
+                    // 除外記録をフォルダ 1 件に畳む（実機確認 2026-10-16）。システムは続けて後始末の
+                    // deleteItem を送るが、それは数十分遅れて届くことがあり、その時点のツリーで
+                    // 削除対象を作り直すと、間に他端末が配下へ上げたファイルを S3 から消してしまう
+                    // （PR #123 レビュー B1）。そこで除外を返す前に予約（`dirExclusionHolds`）を積み、
+                    // 後始末の deleteItem を S3 非接触で完了させる。予約を積めない（上限超過）ときは
+                    // 除外を返さず従来どおり受理する（保証の無い除外はしない）。ローカルの実体は残る。
                     // `.syncignore` の取得失敗は判定を諦めて従来どおり受理する（メタデータ変更を
                     // エラーにすると fileproviderd が再試行を続ける）。
+                    // 仮想フォルダの登録はここでは消さない: 後始末までの間に
+                    // `item(for:)` が noSuchItem を返すと、デーモンがローカルのフォルダごと掃除しうる。
+                    // 登録の掃除は後始末の deleteItem が行う。
                     if node == nil,
                        let layered = try? await services.ignore.layeredIgnore(
-                           tree: tree, anchor: current.anchor) {
-                        if IgnoreDecision.shouldExcludeDirectory(
-                            relativePath: path, hasTrackedDescendants: false, matcher: layered) {
+                           tree: tree, anchor: current.anchor),
+                       IgnoreDecision.shouldExcludeDirectory(
+                           relativePath: path, hasTrackedDescendants: false, matcher: layered) {
+                        await services.dirExclusionHolds.add(path)
+                        if await services.dirExclusionHolds.contains(path) {
                             AppLogger.fileProvider.notice("modifyItem(dir metadata): directory excluded as a whole: \(path, privacy: .private)")
                             await services.events.append(
                                 type: .info, path: path, message: "Excluded folder from sync (kept local)")
                             completion.value(nil, [], false, NSFileProviderError(.excludedFromSync))
                             return
                         }
+                        AppLogger.fileProvider.notice("modifyItem(dir metadata): exclusion hold unavailable; accepting instead: \(path, privacy: .private)")
                     }
                     if let node {
                         // 実体化バッジ（Issue #65）: チェック中の dir をプレーンで返すと
@@ -1108,18 +1119,39 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                         guard p.hasPrefix(prefix), case .file(_, let entry) = node else { continue }
                         expected[p] = entry.sha256
                     }
-                    guard !expected.isEmpty else {
-                        // 追跡ファイルなし = ローカル仮想フォルダ / 既に空・消滅済み。
-                        // S3 非接触でローカル削除だけ成立させる（冪等成功）。
+                    // フォルダ単位除外の予約（#120 レビュー B1）: 自身か祖先に予約があれば、
+                    // これは除外の後始末 = 追跡数に関わらず S3 非接触で完了させる。
+                    var hasHold = false
+                    for candidate in FileProviderWritePolicy.pathAndAncestors(dirPath) {
+                        if await services.dirExclusionHolds.contains(candidate) {
+                            hasHold = true
+                            break
+                        }
+                    }
+                    switch FileProviderWritePolicy.directoryDeletePlan(
+                        trackedCount: expected.count, hasExclusionHold: hasHold,
+                        recursive: recursive) {
+                    case .localOnly:
+                        // 追跡ファイルなし = ローカル仮想フォルダ / 既に空・消滅済み、または
+                        // フォルダ単位除外の後始末。S3 非接触でローカル削除だけ成立させる（冪等成功）。
+                        if hasHold {
+                            if expected.isEmpty {
+                                AppLogger.fileProvider.notice("deleteItem(dir): exclusion cleanup completed (S3 untouched): \(dirPath, privacy: .private)")
+                            } else {
+                                AppLogger.fileProvider.notice("deleteItem(dir): exclusion cleanup kept \(expected.count) tracked files on S3: \(dirPath, privacy: .private)")
+                            }
+                        }
                         await services.virtualDirs.removeSubtree(at: dirPath)
+                        await services.dirExclusionHolds.removeSubtree(at: dirPath)
                         dirCompletion.value(nil)
                         return
-                    }
-                    guard recursive else {
+                    case .notEmpty:
                         // 非再帰削除で中身がある → SDK 契約どおり DirectoryNotEmpty
                         //（システムが dir を最新メタデータから再作成する）。
                         dirCompletion.value(NSFileProviderError(.directoryNotEmpty))
                         return
+                    case .deleteRemote:
+                        break
                     }
                     switch try await services.writer.deleteDirectory(expecting: expected) {
                     case .removed(let count):
@@ -1127,6 +1159,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                         await services.events.append(
                             type: .delete, path: dirPath, message: "Deleted folder (\(count) files)")
                         await services.virtualDirs.removeSubtree(at: dirPath)
+                        await services.dirExclusionHolds.removeSubtree(at: dirPath)
                         // 実体化バッジ（Issue #65）: 消えた subtree の報告済みエントリも掃除
                         await services.materializedReported.removeSubtree(at: dirPath)
                         dirCompletion.value(nil)

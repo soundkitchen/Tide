@@ -218,4 +218,37 @@ final class FileProviderWritePolicyTests: XCTestCase {
         )
         XCTAssertEqual(targets, ["e/1.txt", "e/3.txt"])
     }
+
+    // MARK: - フォルダの deleteItem（#120 レビュー B1）
+
+    func testDirectoryDeleteWithoutTrackedFilesIsLocalOnly() {
+        // 追跡ゼロ（仮想フォルダ）は再帰の有無に関わらず S3 非接触
+        XCTAssertEqual(FileProviderWritePolicy.directoryDeletePlan(
+            trackedCount: 0, hasExclusionHold: false, recursive: true), .localOnly)
+        XCTAssertEqual(FileProviderWritePolicy.directoryDeletePlan(
+            trackedCount: 0, hasExclusionHold: false, recursive: false), .localOnly)
+    }
+
+    func testDirectoryDeleteWithTrackedFilesFollowsRecursiveFlag() {
+        XCTAssertEqual(FileProviderWritePolicy.directoryDeletePlan(
+            trackedCount: 3, hasExclusionHold: false, recursive: true), .deleteRemote)
+        XCTAssertEqual(FileProviderWritePolicy.directoryDeletePlan(
+            trackedCount: 3, hasExclusionHold: false, recursive: false), .notEmpty)
+    }
+
+    func testExclusionHoldKeepsTrackedFilesOnS3() {
+        // 除外の予約がある後始末は、判定後に追跡済みファイルが現れていても S3 に触れない
+        XCTAssertEqual(FileProviderWritePolicy.directoryDeletePlan(
+            trackedCount: 3, hasExclusionHold: true, recursive: true), .localOnly)
+        XCTAssertEqual(FileProviderWritePolicy.directoryDeletePlan(
+            trackedCount: 0, hasExclusionHold: true, recursive: true), .localOnly)
+    }
+
+    func testPathAndAncestors() {
+        XCTAssertEqual(
+            FileProviderWritePolicy.pathAndAncestors("a/node_modules/pkg"),
+            ["a/node_modules/pkg", "a/node_modules", "a"])
+        XCTAssertEqual(FileProviderWritePolicy.pathAndAncestors("top"), ["top"])
+        XCTAssertEqual(FileProviderWritePolicy.pathAndAncestors(""), [])
+    }
 }
