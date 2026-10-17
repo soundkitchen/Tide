@@ -235,9 +235,42 @@ fpOnly 運用中、rename したファイルに実体化チェックバッジ（
     移すと新 path では未追跡として除外され、後始末で S3 から外れる）。ファイル単体の移動は既存の挙動。
 - **副次の観測**: ① 仮想フォルダの登録簿（`fileprovider-virtual-dirs.json`）が上限 1,000 件で
   飽和していた（大半が `.venv` / `node_modules` 配下）→ 既存分の畳み込みで **61 件に解消**（2026-10-16）。
-  ② レプリカ直下の `.Trash/` が `ESTALE` で読めない（未対処）。③ 拡張起動時に
-  `ignore cache: pinned version missing; falling back to latest`（ルート `.syncignore` の宣言 versionId が
-  S3 に無い・実害は起動ごとの GET 1 回・未対処）。
+  ② レプリカ直下の `.Trash/` が `ESTALE` で読めない → **調査済み・対処不要（2026-10-17）**: File Provider が
+  ドメインごとに作るゴミ箱コンテナ（`NSFileProviderTrashContainerItemIdentifier`・作成はドメイン作成と同時刻）。
+  ドメインは `supportsSyncingTrash = false` で、拡張はゴミ箱の列挙に `noSuchItem` を返すので、fileproviderd が
+  中身を作れず `ESTALE` になる（意図した設定 = 宣言しないとダエモンがゴミ箱の列挙を永久に再試行する・
+  `FileProviderController.domain`）。ほかのプロセスはこのフォルダに触れておらず実害なし。Finder の
+  「ゴミ箱に入れる」がこのドメインでどう扱われるかは未確認（SDK 上はシステム任せ）。
+  ③ 拡張起動時に `ignore cache: pinned version missing; falling back to latest` → **原因はマニフェストの
+  versionId が古い版のまま残るバグだった = Issue #130**（下の節）。
+
+### 同一内容の保存し直しでマニフェストの versionId が古い版のまま残る（2026-10-17 発見 = Issue #130 → 対処実装 2026-10-17）
+
+- **症状**: アプリが中身を変えずに保存し直すと、拡張は本体を PUT して S3 の最新版を今回の版に変えるが、
+  `updateFileEntry` は sha が同じなので `.alreadyUpToDate` でシャードを書かず、マニフェストは前の版を
+  指したまま残っていた。前の版は「最新ではない版」としてライフサイクル（90 日）で失効し、失効後は宣言版に
+  固定する `copyObject` が `sourceVersionMissing` になって **rename / reparent が失敗し続ける**（その
+  ファイルを含むフォルダの改名も全体が失敗）。読み出し（`fetchContents` / `ManifestIgnoreCache`）は最新版へ
+  切り替えて sha / ETag で確かめるので無事。データ損失はない（中身が同じ最新版が残る）。
+- **規模（2026-10-17・dev-tide の全マニフェスト 40,158 件を版一覧と突合）**: 146 件が最新ではない版を
+  指していた（146 件とも最新版と ETag 一致）。うち 29 件は失効済み（7/14 にまとめて保存し直された分・
+  ルート `.syncignore` を含む）、117 件はこれから順に失効（最初は 10/19 の 7 件）。7 月から継続して発生。
+- **対処（2026-10-17 ユーザ確定）**:
+  1. **版 ID の向け直し**: `.alreadyUpToDate` でも、今回の PUT と権威 entry の versionId が違えば自分の
+     entry で書き直して `.wrote`（`ManifestUpdater.mustRepointVersion`）。全書き手が通るチョークポイントで
+     直すので、拡張の modifyItem / createItem・アプリの Uploader・S3 内復元のすべてに効く。代償は、
+     同一内容の保存し直しのたびにシャード書込が 1 回増えること。不採用 = 「同じ中身なら PUT しない」
+     （ファストパスを通らない経路で残り、#93 の手動治癒手順の挙動確認も要る）。
+  2. **既存分は rename 時に救う**: 宣言版が失効していて、最新版の ETag とサイズが entry と一致するときだけ、
+     その最新版の versionId に固定してコピーする（`FileProviderWritePolicy.copySourceFallbackVersion`）。
+     マニフェストの一括修復はしない（不採用 = シャードと index を CAS で書き換える修復処理を新設する必要）。
+- **残るもの（既知・据え置き）**:
+  - 既存 146 件のずれ自体は、次に保存し直されるか改名されるまで残る。読み出しのたびに
+    `pinned version missing` のログが出て GET が 1 回増える（ルート `.syncignore` は拡張起動ごと）。
+  - 残存レース: 別の書き手が同一内容を自分の PUT の後に PUT して先に宣言していると、向け直しが古い方
+    （自分の版）へ戻す（修正前と同じ状態に留まるだけ・2 台以上の同時保存が要るので稀）。
+  - 検出: `soak-check-fp` は versionId が最新かを見ない（全版一覧 ≈ 54MB の取得が要る）。必要になったら
+    突合を足す。
 
 ### 列挙を 1 回で全件返していたため、件数が上限を超えるとクラッシュを繰り返して同期が止まる（2026-10-17 発見 = Issue #131 → 対処実装 2026-10-17）
 

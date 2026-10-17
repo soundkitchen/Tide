@@ -73,6 +73,74 @@ final class ManifestUpdaterTests: XCTestCase {
         XCTAssertEqual(stored?.files[path], remote)
     }
 
+    /// #130: 同一内容の再 PUT（sha 同一・versionId が違う）→ 自分の entry で書き直して .wrote・発火 1 回。
+    /// 権威 entry が前の版を指したまま残ると、その版はライフサイクルで失効し rename が失敗し続ける。
+    func testSameContentNewVersionRepointsManifest() async throws {
+        let store = InMemoryManifestStore()
+        let counter = SignalCounter()
+        let path = "docs/a.txt"
+        let remote = makeManifestEntry(sha: "same")
+        let shardId = ManifestSharding.shardId(for: path)
+        var shard = ManifestShard.empty(id: shardId)
+        shard.files[path] = remote
+        await store.seed(shard: shard)
+        var uploaded = makeManifestEntry(sha: "same", mtime: "2026-10-17T00:00:00Z")
+        uploaded.s3VersionId = "v-reput"
+        uploaded.etag = "obj-etag-same"
+
+        let outcome = try await makeUpdater(store: store, counter: counter)
+            .updateFileEntry(for: path, base: "same", newEntry: uploaded)
+
+        XCTAssertEqual(outcome, .wrote)
+        XCTAssertEqual(counter.count, 1)
+        let stored = await store.shards[shardId]
+        XCTAssertEqual(stored?.files[path], uploaded)
+        let declared = await store.index?.shards[shardId]?.etag
+        let actual = await store.shardEtags[shardId]
+        XCTAssertNotNil(declared)
+        XCTAssertEqual(declared, actual)
+    }
+
+    /// #130: PUT に versionId が無い（バージョニング無効）なら向け直せない → 従来どおり .alreadyUpToDate。
+    func testSameContentWithoutVersionIdStaysAlreadyUpToDate() async throws {
+        let store = InMemoryManifestStore()
+        let counter = SignalCounter()
+        let path = "docs/a.txt"
+        let remote = makeManifestEntry(sha: "same")
+        let shardId = ManifestSharding.shardId(for: path)
+        var shard = ManifestShard.empty(id: shardId)
+        shard.files[path] = remote
+        await store.seed(shard: shard)
+        var uploaded = makeManifestEntry(sha: "same")
+        uploaded.s3VersionId = nil
+
+        let outcome = try await makeUpdater(store: store, counter: counter)
+            .updateFileEntry(for: path, base: "same", newEntry: uploaded)
+
+        XCTAssertEqual(outcome, .alreadyUpToDate(remote))
+        XCTAssertEqual(counter.count, 0)
+        let stored = await store.shards[shardId]
+        XCTAssertEqual(stored?.files[path], remote)
+    }
+
+    /// #130: 向け直しの判定表。
+    func testMustRepointVersionTable() {
+        func entry(_ version: String?) -> ManifestFileEntry {
+            var e = makeManifestEntry(sha: "same")
+            e.s3VersionId = version
+            return e
+        }
+        // 今回の版が権威と違う → 向け直す
+        XCTAssertTrue(ManifestUpdater.mustRepointVersion(existing: entry("v1"), uploaded: entry("v2")))
+        // 権威の versionId が無い（古い entry）→ 今回の版へ向け直す
+        XCTAssertTrue(ManifestUpdater.mustRepointVersion(existing: entry(nil), uploaded: entry("v2")))
+        // 同じ版 = 自分の前回書込の再試行（index 突合修復の経路）→ 向け直さない
+        XCTAssertFalse(ManifestUpdater.mustRepointVersion(existing: entry("v1"), uploaded: entry("v1")))
+        // 今回の versionId が無い → 判断できないので向け直さない
+        XCTAssertFalse(ManifestUpdater.mustRepointVersion(existing: entry("v1"), uploaded: entry(nil)))
+        XCTAssertFalse(ManifestUpdater.mustRepointVersion(existing: entry(nil), uploaded: entry(nil)))
+    }
+
     /// .conflict（base とも uploading とも違う sha が権威に居る）→ uploadConflict throw・発火 0 回。
     func testConflictDoesNotFireAndLeavesShardUntouched() async throws {
         let store = InMemoryManifestStore()

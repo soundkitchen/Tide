@@ -108,7 +108,8 @@ filename / parent 変化）を `TideFileProvider/ExtensionWriter.swift` が処�
 - **削除**: 単発 = `removeFileEntry(for:base:)`、ディレクトリ再帰削除 = `removeFileEntries` の
   シャード単位バッチ RMW（往復はシャード数で有界 ≤256）。順序は**マニフェスト除去 → deleteObject
   （delete marker）**で、権威判定点は RMW 内・ベース不一致は拒否側。
-- **rename / reparent**: `S3Client.copyObject`（**versionId 固定・最新版フォールバック禁止**）+
+- **rename / reparent**: `S3Client.copyObject`（**versionId 固定・最新版フォールバック禁止**。例外 =
+  宣言版が失効し、最新版の ETag とサイズが entry と一致するときだけ、その版に固定してコピー・#130）+
   `moveFileEntries` の二相バッチ RMW（全 add → remove・中間状態は常に両存側）。
   詳細は `docs/08`「FP 双方向書込」「rename / reparent」節。
 - 書込確定後は世代キャッシュを invalidate + 自己 signal（自世代 append で bounce 防止）。
@@ -210,7 +211,8 @@ M3 サブ C で **ベース / ローカル / リモートの 3 SHA による 3-w
   UploadMergeDecision{proceed, alreadyUpToDate, conflict}`。`base` = 最後に同期した sha
   （FP = `baseVersion` / folderSync = `FileRecord.sha256`）、`uploading` = 今アップロードした sha、
   `remote` = 権威シャードの現 entry sha。`remote==nil`→`proceed`（作成）、
-  `remote==uploading`→`alreadyUpToDate`（別書き手が同一内容を確定済み・書込不要）、
+  `remote==uploading`→`alreadyUpToDate`（同一内容を確定済み・書込不要。ただし権威 entry が今回の
+  PUT と違う versionId を指していれば、`ManifestUpdater` が今回の版へ向け直して書く = #130）、
   `remote==base`→`proceed`（通常）、それ以外→`conflict`。
 - **検出**: `ManifestUpdater.updateFileEntry` が RMW 内のフェッチ済みシャードから権威 entry を読み
   （追加 GET なし）判定。`.conflict` は `SyncError.uploadConflict(path:remoteEntry:)` を投げて RMW を
@@ -222,8 +224,10 @@ M3 サブ C で **ベース / ローカル / リモートの 3 SHA による 3-w
   （`SyncEngine.resolveUploadConflict` = キュー行除去 → リネーム退避 → versionId 指定 DL）は
   `docs/04a`。
 - **残存レース / orphan version（いずれも data loss でない・versioning backstop）**: 本体 PUT は
-  判定の前に走るため、`.conflict` / `.alreadyUpToDate` のどちらでも自分の PUT 版がマニフェスト
-  未参照の orphan S3 version として残る。**すべての読みは manifest の versionId 経由**なので
+  判定の前に走るため、`.conflict` では自分の PUT 版がマニフェスト
+  未参照の orphan S3 version として残る（`.alreadyUpToDate` は自分の PUT 版が最新版になるので、
+  上記の向け直しでマニフェストを今回の版へ合わせる。向け直さないと、マニフェストが指す前の版が
+  失効して rename が失敗し続ける = #130）。**すべての読みは manifest の versionId 経由**なので
   orphan は決して配信されず、ライフサイクルの noncurrent 失効で回収される（事前 GET + TOCTOU 窓を
   避けるための設計トレードオフ）。2 台同時 `.conflict` は互いのコピーができ得る（稀・自己収束）。
 

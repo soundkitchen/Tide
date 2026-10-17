@@ -22,8 +22,10 @@ public enum S3RestoreOutcome: Sendable, Equatable {
     /// 選んだ版を新しい現行版としてマニフェストへ書いた
     /// （FP レプリカへは `onManifestDidWrite` → signal → enumerateChanges で伝播する）。
     case restored
-    /// 選んだ版の内容が既に現行と同一だった（PUT もマニフェスト書込もしない no-op。
-    /// `updateFileEntry` が `.alreadyUpToDate` を返した＝並行書き手が同一内容を確定済みの場合も含む）。
+    /// 選んだ版の内容が既に現行と同一だった（PUT もマニフェスト書込もしない no-op）。
+    /// PUT の後で並行書き手が同一内容を確定済みだった場合は、版 ID を今回の版へ向け直すので
+    /// `.restored` になる（#130）。`updateFileEntry` が `.alreadyUpToDate` を返すのは、PUT に
+    /// versionId が無いときだけ。
     case alreadyCurrent
 }
 
@@ -192,7 +194,8 @@ public struct S3RestoreService: Sendable {
             )
             return .restored
         case .alreadyUpToDate:
-            // 並行書き手が同一内容を確定済み（自分の PUT は不可視 live 版として残る・無害）。
+            // PUT に versionId が無く、並行書き手が同一内容を確定済み（自分の PUT は不可視 live 版
+            // として残る・無害）。versionId があれば版 ID を向け直して `.wrote` になる（#130）。
             AppLogger.sync.info("S3 restore already up to date: \(relativePath, privacy: .private)")
             return .alreadyCurrent
         }
