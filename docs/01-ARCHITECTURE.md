@@ -76,6 +76,7 @@ Tide/（リポジトリルート）
 │   │   ├── SyncIgnoreMatcher.swift    .syncignore パターンマッチ（線形時間 DP）(M3)
 │   │   ├── ManifestTree.swift         マニフェスト → FP 列挙ツリー合成 (M5)
 │   │   ├── ManifestTreeDiff.swift     世代間 diff（enumerateChanges 用）(M5)
+│   │   ├── FileProviderEnumerationPaging.swift  FP 列挙のページ / バッチ分割（推奨サイズ × 10・#131）
 │   │   ├── MaterializedBadge.swift    実体化連動バッジ判定（#65）
 │   │   ├── FileProviderWritePolicy.swift  FP 書込のパス合成 / 検証 (M5 Phase 5)
 │   │   ├── ConflictNamer.swift        コンフリクト時のリネーム命名 (M2)

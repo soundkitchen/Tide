@@ -56,13 +56,24 @@
 `ManifestTree`（パスツリー化）→ `ManifestGenerationCache`（世代 = SyncAnchor 付き TTL キャッシュ）。
 `enumerateItems` / `item(for:)` / `fetchContents` は TTL 内キャッシュを使い、signal 応答
 （`enumerateChanges`）だけ TTL を待たずリフレッシュする（変更前キャッシュで「変更なし」と誤答して
-signal を消費しない）。世代の系譜は `ManifestGenerationLog`（App Group Caches）が持ち、未知 anchor は
-`syncAnchorExpired` でシステムに全再列挙させる。
+signal を消費しない）。世代の系譜は `ManifestGenerationLog`（App Group Caches・直近 64 世代）が持ち、
+未知 anchor は `syncAnchorExpired` でシステムに全再列挙させる。
+
+`enumerateItems` は推奨ページサイズ × 10 ごとのページに分けて返し、**最初のページの世代に固定**する
+（続きのページも同じ世代のツリーから返す = 提示内容と `currentSyncAnchor` が一致。その世代がログから
+落ちていたら `pageExpired` で最初からやり直し）。1 回で全件を返すと、件数が上限（推奨サイズの 100 倍）を
+超えたときに File Provider が拡張を abort する（Issue #131・符号化は `FileProviderEnumerationPaging`）。
 
 ### enumerateChanges（増分配信）
 
 起点世代（呼び出し元 anchor）と現行世代の **`ManifestTreeDiff`** を `didUpdate` / `didDeleteItems` で
 配信し、anchor を前進させる。
+
+- 差分が推奨バッチサイズ × 10 を超えるときは途中までを返し、途中の anchor
+  （`tide-changes-v1|<起点>|<目標>|<offset>`）と `moreComing: true` で続きを取りに来てもらう。目標の世代
+  anchor を返すのは最後のバッチだけで、その間に新しい世代ができていれば `moreComing: true`。実体化バッジは
+  最後のバッチの残りの枠に収まる分だけ進め（`MaterializedBadge.partialReport`）、残りは自己 signal で次に回す
+  （Issue #131・詳細は `docs/08`「File Provider 増分列挙」）。
 
 - item identifier は **kind 織り込み形式**（ファイル = `f:<path>` / ディレクトリ = `d:<path>`・
   M5 Phase 5-1）。種別変化（file ⇄ dir）は「旧 kind ノードの delete + 新 kind ノードの update」=
