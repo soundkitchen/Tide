@@ -271,6 +271,13 @@ fpOnly 運用中、rename したファイルに実体化チェックバッジ（
     （自分の版）へ戻す（修正前と同じ状態に留まるだけ・2 台以上の同時保存が要るので稀）。
   - 検出: `soak-check-fp` は versionId が最新かを見ない（全版一覧 ≈ 54MB の取得が要る）。必要になったら
     突合を足す。
+- **実機確認（2026-10-17・dev-tide・全項目パス）**:
+  1. 同じ中身で保存し直す → 同じ ETag の新しい版ができ、マニフェストもその版を指した
+     （`Same content re-uploaded; repointing manifest version`）。修正前は前の版のまま残っていた
+  2. 宣言版の失効を再現（同じ中身を aws CLI で直接 PUT → 宣言版を削除）してから改名 →
+     `moveFile: pinned source version missing; copied latest version with matching ETag` で改名が通り、
+     コピー先は中身・ETag・SSE-S3 とも正しかった
+  3. `make soak-check-fp` OK。実験データはローカル・S3（全版）とも削除済み
 
 ### 列挙を 1 回で全件返していたため、件数が上限を超えるとクラッシュを繰り返して同期が止まる（2026-10-17 発見 = Issue #131 → 対処実装 2026-10-17）
 
