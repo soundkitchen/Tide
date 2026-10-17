@@ -66,6 +66,42 @@ public enum MaterializedBadge {
         )
     }
 
+    /// バッジ差分を 1 回で配りきれないときの「途中まで進めた報告集合」（Issue #131）。
+    /// `changedPaths`（files + directories）の件数が `budget` 以内に収まるよう、previousReported から
+    /// newReport へ向けて**パス昇順の先頭 k ファイルだけ**状態を進めた集合を返す。全体が budget 以内
+    /// なら newReport そのもの。k は budget から半分ずつ減らして探す（1 ファイルで dir の反転が
+    /// 祖先ぶん増えうるため）。k = 1 でも超える場合はそのまま返す（上限は推奨サイズの 100 倍なので、
+    /// 祖先 dir ぶんのはみ出しは問題にならない）。少なくとも 1 ファイルは必ず進む = 繰り返せば
+    /// newReport に収束する（残りは呼び出し側が自己 signal で次の enumerateChanges に回す）。
+    public static func partialReport(
+        oldFilePaths: [String], newFilePaths: [String],
+        previousReported: Set<String>, newReport: Set<String>, budget: Int
+    ) -> Set<String> {
+        func changedCount(_ report: Set<String>) -> Int {
+            let changed = changedPaths(
+                oldFilePaths: oldFilePaths, newFilePaths: newFilePaths,
+                previousReported: previousReported, newReport: report)
+            return changed.files.count + changed.directories.count
+        }
+        if changedCount(newReport) <= budget { return newReport }
+        let toggles = previousReported.symmetricDifference(newReport).sorted()
+        // 報告集合は同じでツリーだけが変わった反転（dir のみ）は、進める単位が無いので丸ごと返す。
+        guard !toggles.isEmpty else { return newReport }
+        var k = max(1, min(budget, toggles.count))
+        while true {
+            var partial = previousReported
+            for path in toggles.prefix(k) {
+                if newReport.contains(path) {
+                    partial.insert(path)
+                } else {
+                    partial.remove(path)
+                }
+            }
+            if k == 1 || changedCount(partial) <= budget { return partial }
+            k /= 2
+        }
+    }
+
     /// filePaths の祖先 dir 全集合（= 配下に 1 ファイル以上ある dir。ルート `""` は含まない）。
     private static func directoriesContainingFiles(
         _ filePaths: some Sequence<String>

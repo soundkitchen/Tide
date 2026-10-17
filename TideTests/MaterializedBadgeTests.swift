@@ -143,4 +143,58 @@ final class MaterializedBadgeTests: XCTestCase {
         XCTAssertEqual(changed.files, [])
         XCTAssertEqual(changed.directories, [])
     }
+
+    // MARK: - partialReport（Issue #131: バッジ差分を推奨バッチサイズに収める）
+
+    /// 全体が枠に収まるなら newReport そのもの。
+    func testPartialReportReturnsFullReportWithinBudget() {
+        let files = ["a/1", "a/2", "b/1"]
+        let partial = MaterializedBadge.partialReport(
+            oldFilePaths: files, newFilePaths: files,
+            previousReported: [], newReport: ["b/1"], budget: 10)
+        XCTAssertEqual(partial, ["b/1"])
+    }
+
+    /// 枠を超えるなら、パス昇順の先頭から一部だけ進め、配る件数（files + dirs）を枠に収める。
+    /// 繰り返せば newReport に収束する。
+    func testPartialReportConvergesWithinBudget() {
+        let files = (0..<20).map { "dir\($0 % 4)/f\($0)" }
+        let target = Set(files)
+        var reported: Set<String> = []
+        var rounds = 0
+        while reported != target {
+            let next = MaterializedBadge.partialReport(
+                oldFilePaths: files, newFilePaths: files,
+                previousReported: reported, newReport: target, budget: 5)
+            let changed = MaterializedBadge.changedPaths(
+                oldFilePaths: files, newFilePaths: files,
+                previousReported: reported, newReport: next)
+            XCTAssertLessThanOrEqual(changed.files.count + changed.directories.count, 5)
+            XCTAssertNotEqual(next, reported, "1 回で少なくとも 1 ファイルは進む")
+            reported = next
+            rounds += 1
+            XCTAssertLessThan(rounds, 100)
+        }
+    }
+
+    /// 消灯方向（報告済みから外す）も同じく進む。
+    func testPartialReportAlsoShrinks() {
+        let files = (0..<10).map { "d/f\($0)" }
+        let partial = MaterializedBadge.partialReport(
+            oldFilePaths: files, newFilePaths: files,
+            previousReported: Set(files), newReport: [], budget: 3)
+        XCTAssertLessThan(partial.count, files.count)
+        XCTAssertTrue(partial.isSubset(of: Set(files)))
+    }
+
+    /// 報告集合は同じでツリーだけが変わった反転（dir のみ）は、進める単位が無いので丸ごと返す
+    /// （無限ループしない）。
+    func testPartialReportWithOnlyTreeChangeReturnsNewReport() {
+        let old = ["a/1", "a/2"]
+        let new = ["a/1"]
+        let partial = MaterializedBadge.partialReport(
+            oldFilePaths: old, newFilePaths: new,
+            previousReported: ["a/1"], newReport: ["a/1"], budget: 0)
+        XCTAssertEqual(partial, ["a/1"])
+    }
 }

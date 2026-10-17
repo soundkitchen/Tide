@@ -250,7 +250,7 @@ symlink を辿り、リンク先（例: `~/.ssh/id_rsa`）の中身を S3 へ送
 
 ## L16. File Provider 世代ログの at-rest 内容（プライバシー境界）
 
-**Status:** ✅ Reviewed — M5 Phase 4 の増分列挙用に、マニフェストスナップショットの世代ログ（直近 8 世代）を App Group コンテナ内 Caches に追加。**認証情報を含まず、保存するのは相対パス + ファイルメタデータ（size/mtime/sha256/versionId/etag）+ bucket 名のみ**で、露出はローカル DB / S3 マニフェストが既に持つメタデータと同等であることを確認した (2026-07-04・M5 Phase 4)。
+**Status:** ✅ Reviewed — M5 Phase 4 の増分列挙用に、マニフェストスナップショットの世代ログ（直近 8 世代・**2026-10-17 #131 で 64 世代へ**）を App Group コンテナ内 Caches に追加。**認証情報を含まず、保存するのは相対パス + ファイルメタデータ（size/mtime/sha256/versionId/etag）+ bucket 名のみ**で、露出はローカル DB / S3 マニフェストが既に持つメタデータと同等であることを確認した (2026-07-04・M5 Phase 4)。
 
 **該当箇所:** `TideCore/S3/ManifestGenerationLog.swift`（`<App Group>/Library/Caches/Tide/fileprovider-manifest-log.json`）、`TideCore/S3/ManifestGenerationCache.swift`（書き手は File Provider 拡張プロセスのみ）。
 
