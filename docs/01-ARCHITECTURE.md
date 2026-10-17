@@ -142,7 +142,7 @@ Tide/（リポジトリルート）
 │   ├── MaterializedSetObserver.swift  実体化セット観測（バッジ live 側）
 │   └── Resources/Localizable.xcstrings  拡張の user-facing 文言（app 側とは別カタログ）
 │
-├── TideTests/                        ユニットテスト（65 ファイル・folderSync 回帰網含む）
+├── TideTests/                        ユニットテスト（67 ファイル・folderSync 回帰網含む）
 └── tools/soak/                       soak 監視（consistency_check.py。launchd 常駐は 2026-09-19 で運用終了・#40 #84）
 ```
 
