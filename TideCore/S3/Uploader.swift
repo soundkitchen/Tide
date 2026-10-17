@@ -441,15 +441,20 @@ public struct ManifestUpdater: Sendable {
             )
             // existing は decideUpload が .alreadyUpToDate / .conflict を返すとき必ず非 nil
             // （remote == nil なら必ず .proceed）。理論上不到達の existing == nil は安全側で書込へ倒す。
-            if decision == .alreadyUpToDate, let existing,
-               Self.mustRepointVersion(existing: existing, uploaded: newEntry) {
+            let repoint = decision == .alreadyUpToDate
+                && existing.map { Self.mustRepointVersion(existing: $0, uploaded: newEntry) } == true
+            if repoint {
                 // 版 ID の向け直し（#130）: 同一内容の再 PUT で S3 の最新版は今回の版に変わった。
                 // 権威 entry が前の版を指したまま返すと、その版は「最新ではない版」として
                 // ライフサイクル（90 日）で失効し、宣言版に固定する copyObject（rename/reparent）が
                 // 恒久に失敗する。内容は同一なので、自分の entry で書く（.proceed と同じ経路）。
-                // 残存レース: 別の書き手が同一内容を「自分の PUT の後に」PUT して先に宣言していると、
-                // ここで古い方（自分の版）へ戻してしまう。結果は修正前と同じ状態（宣言版が最新でない）
-                // に留まるだけで、それより悪くはならない。
+                // 残存レース（PR #133 レビュー 1）: 版の新旧は見ていない。「自分が v1 を PUT → 別の書き手が
+                // 同じ内容の v2 を PUT して宣言 → 自分の RMW」の順だと、最新版 v2 を正しく指していた entry を
+                // 古い v1 へ戻してしまう（修正前なら v2 のまま残っていた = この順序では修正前より悪い）。
+                // 同じパスへ別の書き手が PUT と宣言を割り込ませる必要があり、Mac 1 台の運用ではまず起きない。
+                // 起きても読み出しは最新版へのフォールバック（sha 検証つき）で通り、rename も ETag 一致の
+                // 救済で通り、次に同じ内容を保存し直せばまた向け直る。今回の版が最新かを HEAD で
+                // 確かめると RMW 内で S3 往復が 1 回増えるので、しない。
                 AppLogger.s3.info("Same content re-uploaded; repointing manifest version: \(path, privacy: .private)")
             } else if decision == .alreadyUpToDate, let existing {
                 // index 突合修復（PR #56 レビュー ①）: 「putShard 成功 → updateIndex 未完」で
@@ -486,8 +491,8 @@ public struct ManifestUpdater: Sendable {
             // existing==nil で落ちてくると無音上書きが復活するので、debug で回帰を捕まえる
             // （release は安全側＝自分の entry を書込）。
             assert(
-                decision == .proceed || (decision == .alreadyUpToDate && existing != nil),
-                "decideUpload returned \(decision) with a nil existing entry"
+                decision == .proceed || repoint,
+                "decideUpload returned \(decision) but neither proceed nor a version repoint (nil existing entry?)"
             )
 
             shard.files[path] = newEntry
