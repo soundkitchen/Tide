@@ -42,6 +42,10 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @uncheck
         let target: String
         let tree: ManifestTree
         let changes: ManifestTreeDiff.Changes
+        /// 起点の世代のファイル一覧（最後のバッチのバッジ計算用）。続きのバッチで起点の世代を
+        /// 世代ログから引き直さないために持つ（PR #132 レビュー N1: 起点は分割中で最も古い世代
+        /// なので、大量書込の最中は目標より先にログから落ちて全再列挙に戻りやすい）。
+        let originFilePaths: [String]
     }
 
     init(dirPath: String?, services: ExtensionServices) {
@@ -64,27 +68,30 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @uncheck
             do {
                 // 最初のページで世代を固定し、続きのページも同じ世代のツリーから返す
                 // （2026-10-17 ユーザ確定）。提示内容と currentSyncAnchor が必ず一致する。
-                let current = try await services.cache.current()
+                let cached = pinnedItems.withLock { $0 }
                 let pinned: PinnedItems
-                if let requested, requested.anchor != current.anchor {
-                    if let cached = pinnedItems.withLock({ $0 }), cached.anchor == requested.anchor {
-                        pinned = cached
-                    } else if let generation = await services.cache.generation(anchor: requested.anchor) {
+                if let requested, let cached, cached.anchor == requested.anchor {
+                    // 続きのページで記憶が当たれば、今の世代は要らない（キャッシュの TTL 切れで
+                    // S3 を読みに行き、一時的なエラーで列挙が途中で止まるのを避ける・PR #132 レビュー N5）。
+                    pinned = cached
+                } else {
+                    let current = try await services.cache.current()
+                    if let requested, requested.anchor != current.anchor {
+                        guard let generation = await services.cache.generation(anchor: requested.anchor) else {
+                            // 固定した世代が世代ログから落ちた（ページの途中で大量の書込が続いた）。
+                            // pageExpired でシステムに最初のページからやり直してもらう。
+                            AppLogger.fileProvider.notice("enumerateItems: pinned generation expired — restarting from the first page")
+                            boxed.value.finishEnumeratingWithError(NSFileProviderError(.pageExpired))
+                            return
+                        }
                         pinned = Self.pin(
                             anchor: requested.anchor, tree: ManifestTree(files: generation.files),
                             workingSet: dirPath == nil)
-                        pinnedItems.withLock { $0 = pinned }
+                    } else if let cached, cached.anchor == current.anchor {
+                        pinned = cached
                     } else {
-                        // 固定した世代が世代ログから落ちた（ページの途中で大量の書込が続いた）。
-                        // pageExpired でシステムに最初のページからやり直してもらう。
-                        AppLogger.fileProvider.notice("enumerateItems: pinned generation expired — restarting from the first page")
-                        boxed.value.finishEnumeratingWithError(NSFileProviderError(.pageExpired))
-                        return
+                        pinned = Self.pin(anchor: current.anchor, tree: current.tree, workingSet: dirPath == nil)
                     }
-                } else if let cached = pinnedItems.withLock({ $0 }), cached.anchor == current.anchor {
-                    pinned = cached
-                } else {
-                    pinned = Self.pin(anchor: current.anchor, tree: current.tree, workingSet: dirPath == nil)
                     pinnedItems.withLock { $0 = pinned }
                 }
                 let offset = requested?.offset ?? 0
@@ -96,6 +103,7 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @uncheck
                         // 空フォルダ仮想受理）だけ空列挙で温存する。レジストリ外は noSuchItem —
                         // 無条件の空列挙は消えた dir を「実在する空 dir」に見せてしまう
                         //（item(for:) の合成 dir 限定と同じ理由・M5 Phase 5-4）。
+                        pinnedItems.withLock { $0 = nil }
                         if await services.virtualDirs.contains(dirPath) {
                             lastServedAnchor.withLock { $0 = pinned.anchor }
                             boxed.value.finishEnumerating(upTo: nil)
@@ -129,6 +137,9 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @uncheck
                     boxed.value.finishEnumerating(upTo: NSFileProviderPage(
                         FileProviderEnumerationPaging.encode(.init(anchor: pinned.anchor, offset: next))))
                 } else {
+                    // 列挙を終えたら固定したツリーを手放す（working set の enumerator は常駐するので、
+                    // 古い世代のツリーを持ち続けない・PR #132 レビュー N4）。
+                    pinnedItems.withLock { $0 = nil }
                     boxed.value.finishEnumerating(upTo: nil)
                 }
             } catch {
@@ -156,57 +167,67 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @uncheck
         // 分割の途中の anchor（Issue #131）なら、起点・目標の世代と続きの位置を取り出す。
         let cursor = anchorString.flatMap(FileProviderEnumerationPaging.decodeChangeCursor)
         Task { [pendingChanges] in
-            // 起点世代の解決。未知（非 UTF-8・世代落ち・Phase 3 の静的 anchor・ログ消失後）は
-            // syncAnchorExpired でシステムに全再列挙させる（単一 guard = どの経路でも必ず
-            // notice ログを通す。PR #57 レビュー #4）。
-            guard let originAnchor = cursor?.origin ?? anchorString,
-                  let origin = await services.cache.generation(anchor: originAnchor) else {
+            func expired() {
                 AppLogger.fileProvider.notice("enumerateChanges: unknown sync anchor (expired) — full re-enumeration")
                 boxed.value.finishEnumeratingWithError(NSFileProviderError(.syncAnchorExpired))
+            }
+            guard let originAnchor = cursor?.origin ?? anchorString else {
+                expired()
                 return
             }
             do {
-                // 目標の世代。ふつうは今の世代（signal 応答経路なので TTL を待たずリフレッシュ。
-                // バースト床は「呼び出し元と異なる世代のキャッシュ = diff を返せる」場合のみ効く —
-                // 同世代なら必ず再ロードし、変更前キャッシュで「変更なし」と誤答して signal を
-                // 消費しない）。分割の途中なら、分割を始めたときの世代（続きのバッチごとに
-                // 再ロードしない）。
-                let current: ManifestGenerationCache.Current
+                // 起点・目標の世代と差分を決める。
+                // - 続きのバッチで記憶（pendingChanges）が当たれば、それをそのまま使う。起点の世代を
+                //   世代ログから引き直さず、今の世代も読まない（PR #132 レビュー N1 / N5 / N6）。
+                // - それ以外は起点の世代を世代ログから引く。未知（非 UTF-8・世代落ち・Phase 3 の静的
+                //   anchor・ログ消失後）は syncAnchorExpired でシステムに全再列挙させる。
+                // - 目標はふつう今の世代（signal 応答経路なので TTL を待たずリフレッシュ。バースト床は
+                //   「呼び出し元と異なる世代のキャッシュ = diff を返せる」場合のみ効く — 同世代なら必ず
+                //   再ロードし、変更前キャッシュで「変更なし」と誤答して signal を消費しない）。分割の
+                //   途中なら、分割を始めたときの世代。
                 let target: (anchor: String, tree: ManifestTree)
-                if let cursor {
-                    current = try await services.cache.current()
-                    if let pending = pendingChanges.withLock({ $0 }),
-                       pending.origin == cursor.origin, pending.target == cursor.target {
-                        target = (cursor.target, pending.tree)
-                    } else if cursor.target == current.anchor {
-                        target = (cursor.target, current.tree)
-                    } else if let generation = await services.cache.generation(anchor: cursor.target) {
-                        target = (cursor.target, ManifestTree(files: generation.files))
-                    } else {
-                        AppLogger.fileProvider.notice("enumerateChanges: unknown sync anchor (expired) — full re-enumeration")
-                        boxed.value.finishEnumeratingWithError(NSFileProviderError(.syncAnchorExpired))
+                let changes: ManifestTreeDiff.Changes
+                let originFilePaths: [String]
+                var currentAnchor: String?
+                let pending = pendingChanges.withLock { $0 }
+                if let cursor, let pending, pending.origin == cursor.origin, pending.target == cursor.target {
+                    target = (pending.target, pending.tree)
+                    changes = pending.changes
+                    originFilePaths = pending.originFilePaths
+                } else {
+                    guard let origin = await services.cache.generation(anchor: originAnchor) else {
+                        expired()
                         return
                     }
-                } else {
-                    current = try await services.cache.refreshedCurrent(callerAnchor: originAnchor)
-                    target = (current.anchor, current.tree)
+                    if let cursor {
+                        let current = try await services.cache.current()
+                        currentAnchor = current.anchor
+                        if cursor.target == current.anchor {
+                            target = (cursor.target, current.tree)
+                        } else if let generation = await services.cache.generation(anchor: cursor.target) {
+                            target = (cursor.target, ManifestTree(files: generation.files))
+                        } else {
+                            expired()
+                            return
+                        }
+                    } else {
+                        let current = try await services.cache.refreshedCurrent(callerAnchor: originAnchor)
+                        currentAnchor = current.anchor
+                        target = (current.anchor, current.tree)
+                    }
+                    originFilePaths = Array(origin.files.keys)
+                    if target.anchor == originAnchor {
+                        changes = ManifestTreeDiff.Changes(updated: [], deleted: [])
+                    } else {
+                        changes = ManifestTreeDiff.changes(from: ManifestTree(files: origin.files), to: target.tree)
+                        let computed = PendingChanges(
+                            origin: originAnchor, target: target.anchor, tree: target.tree,
+                            changes: changes, originFilePaths: originFilePaths)
+                        pendingChanges.withLock { $0 = computed }
+                    }
                 }
-
-                // マニフェストの差分（起点 → 目標）。目標が起点と同じなら空。
-                let changes: ManifestTreeDiff.Changes
-                if target.anchor == originAnchor {
-                    changes = ManifestTreeDiff.Changes(updated: [], deleted: [])
-                } else if let pending = pendingChanges.withLock({ $0 }),
-                          pending.origin == originAnchor, pending.target == target.anchor {
-                    changes = pending.changes
-                } else {
-                    changes = ManifestTreeDiff.changes(from: ManifestTree(files: origin.files), to: target.tree)
-                    let computed = PendingChanges(
-                        origin: originAnchor, target: target.anchor, tree: target.tree, changes: changes)
-                    pendingChanges.withLock { $0 = computed }
-                }
-                let batch = FileProviderEnumerationPaging.batch(
-                    changes, offset: cursor?.offset ?? 0, size: batchSize)
+                let offset = cursor?.offset ?? 0
+                let batch = FileProviderEnumerationPaging.batch(changes, offset: offset, size: batchSize)
 
                 // 種別変化（file⇄dir）も単一セッションで安全に配れる（M5 Phase 5-1）:
                 // item identifier が kind 織り込み形式（`f:`/`d:` + path）なので、kind 変化は
@@ -259,29 +280,38 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @uncheck
                     }
                     let live = await services.materializedObserver.current() ?? reported
                     let filePaths = target.tree.filePaths
+                    let fullReport = MaterializedBadge.cappedReport(
+                        live: live.intersection(filePaths),
+                        cap: ExtensionServices.materializedBadgeCap
+                    )
                     // dirsBefore は origin（= Finder が最後に見た世代）のツリー基準で計算する
                     //（PR #66 レビュー指摘 1: 両側 current だと「ツリーだけが変わった」チェック
                     // 反転 — リモート削除で全実体化 / 古い mtime のリモート追加で dataless 混入、
                     // どちらも合成 mtime が動かずマニフェスト diff に dir が載らない — が対称差に
                     // 現れず固着する）。同一 anchor なら origin == current で従来と等価。
-                    let oldFilePaths = target.anchor == originAnchor ? filePaths : Array(origin.files.keys)
-                    let fullReport = MaterializedBadge.cappedReport(
-                        live: live.intersection(filePaths),
-                        cap: ExtensionServices.materializedBadgeCap
-                    )
-                    // 1 回で配る件数をバッチの大きさ（推奨バッチサイズの 10 倍）に収める（Issue #131）。マニフェストの差分を
-                    // 配った残りの枠でバッジを進め、残りは自己 signal で次の enumerateChanges に回す。
+                    // ただし同じ差分の途中のバッチで配った dir は、Finder がそのとき配った
+                    // 「目標ツリー × 報告済み集合」の状態を見ているので、そちらを基準にする
+                    // （PR #132 レビュー B1）。
+                    let deliveredDirectories: Set<String> = offset > 0
+                        ? Set(changes.updated.prefix(max(offset - changes.deleted.count, 0))
+                            .filter(\.isDirectory).map(\.path))
+                        : []
+                    let context = MaterializedBadge.ChangeContext(
+                        oldFilePaths: target.anchor == originAnchor ? filePaths : originFilePaths,
+                        newFilePaths: filePaths, previousReported: reported,
+                        deliveredDirectories: deliveredDirectories)
+                    // 1 回で配る件数をバッチの大きさ（推奨バッチサイズの 10 倍）に収める（Issue #131）。
+                    // マニフェストの差分を配った残りの枠でバッジを進め、残りは自己 signal で次の
+                    // enumerateChanges に回す。
                     let budget = batchSize - batch.deleted.count - batch.updated.count
-                    newReport = budget > 0
-                        ? MaterializedBadge.partialReport(
-                            oldFilePaths: oldFilePaths, newFilePaths: filePaths,
-                            previousReported: reported, newReport: fullReport, budget: budget)
-                        : reported
+                    if budget > 0 {
+                        (newReport, badgeFiles, badgeDirs) = context.partialReport(
+                            newReport: fullReport, budget: budget)
+                    } else {
+                        newReport = reported
+                        (badgeFiles, badgeDirs) = context.changedPaths(newReport: reported)
+                    }
                     badgeDeferred = newReport != fullReport
-                    (badgeFiles, badgeDirs) = MaterializedBadge.changedPaths(
-                        oldFilePaths: oldFilePaths,
-                        newFilePaths: filePaths,
-                        previousReported: reported, newReport: newReport)
                 }
                 // item 構築は常に newReport 基準（非 working set では newReport == reported）。
                 // マニフェスト diff で再配信される item にも正しいバッジを載せるため、フラグの
@@ -306,10 +336,15 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @uncheck
                     boxed.value.finishEnumeratingChanges(upTo: anchor, moreComing: false)
                 } else {
                     AppLogger.fileProvider.notice("enumerateChanges: \(batch.updated.count) updated / \(batch.deleted.count) deleted / \(badgeOnlyNodes.count) badge-only")
-                    // 分割している間に新しい世代ができていれば、続けて取りに来てもらう。
+                    // 分割している間に新しい世代ができていれば、続けて取りに来てもらう。続きのバッチで
+                    // 今の世代をまだ読んでいなければここで読む（読めなければ moreComing なし = 次の
+                    // signal で取りに来る）。
+                    if currentAnchor == nil {
+                        currentAnchor = try? await services.cache.current().anchor
+                    }
                     boxed.value.finishEnumeratingChanges(
                         upTo: NSFileProviderSyncAnchor(Data(target.anchor.utf8)),
-                        moreComing: target.anchor != current.anchor
+                        moreComing: currentAnchor.map { $0 != target.anchor } ?? false
                     )
                 }
                 // replace は badge 配信の有無と独立に前進させる（PR #66 レビュー nit 1）:
