@@ -299,6 +299,9 @@ FP 拡張の書込（deleteItem / modifyItem / createItem / move）は `Extensio
   ベースの「根拠なしに消さない」を維持。PR #60 レビュー #1 で nil 限定に縮小）。
   `S3Client.copyObject` は versionId 固定 + SSE-S3 明示で、**最新版フォールバックを禁止**
   （コピーは内容検証不能 = 宣言 sha と実体が乖離した entry によるマニフェスト真実の破壊を防ぐ）。
+  **2026-10-17（#130）**: 宣言版が失効していて、最新版の ETag とサイズが entry と一致するときだけ、
+  その最新版の versionId に固定してコピーする（ETag = SSE-S3 では内容の MD5 由来 = 内容が違えば
+  一致しない。HEAD で確かめた版に固定するので、HEAD と copy の間に最新版が変わっても確かめた版を使う）。
   `PersistedPathSet`（仮想フォルダ温存 / 後始末予約）は世代ログと同じ at-rest 規約 =
   App Group Caches・bucket キー・読込時 `validateRelativePath` 再適用・壊れは全体破棄
 

@@ -70,9 +70,10 @@ struct ExtensionWriter: Sendable {
     /// move 経路のエラー（fileproviderd はどのエラーも一時扱いで再試行する。
     /// completion へ渡す前に呼び出し側が SDK 規約ドメインへ包むこと）。
     enum MoveError: Error {
-        /// 宣言版（s3VersionId）のコピー元が消えていた（旧版失効等）。最新版フォールバックは
-        /// しない — コピーは内容検証ができず、宣言 sha と実体が乖離した entry を作ると
-        /// マニフェスト真実が壊れるため（`S3Client.copyObject` の規約）。
+        /// 宣言版（s3VersionId）のコピー元が消えていて（旧版失効等）、最新版にも切り替えられなかった。
+        /// 最新版へ切り替えるのは ETag とサイズが entry と一致するときだけ（#130・
+        /// `FileProviderWritePolicy.copySourceFallbackVersion`）— コピーは内容検証ができず、
+        /// 宣言 sha と実体が乖離した entry を作るとマニフェスト真実が壊れるため（`S3Client.copyObject` の規約）。
         case sourceVersionMissing(path: String)
     }
 
@@ -118,9 +119,11 @@ struct ExtensionWriter: Sendable {
             let outcome = try await updater.updateFileEntry(for: path, base: baseSha, newEntry: entry)
             // .wrote / .alreadyUpToDate いずれも S3 は確定済み。キャッシュを無効化して次の列挙が
             // S3 から読み直す（局所世代構築は撤去。PR #58 レビュー #2/#3）。
-            // .alreadyUpToDate（別書き手が同一 sha を先に確定）でも invalidate する: 自分は書いて
-            // いないが**リモートが分岐している**帰結なので、読み直しでその版を反映する（sha 同一なので
-            // itemVersion は不変 = 実質 no-op に収束・無害。PR #58 再レビュー参考 1 への意図的据え置き）。
+            // 同一内容の保存し直し（sha が権威 entry と同じ）は、版 ID を今回の PUT へ向け直して
+            // .wrote になる（#130・`ManifestUpdater.mustRepointVersion`）。.alreadyUpToDate は
+            // 自分の前回書込の再試行など、権威 entry が今回の版を既に指しているときだけ。
+            // .alreadyUpToDate でも invalidate する（sha 同一なので itemVersion は不変 = 実質 no-op に
+            // 収束・無害。PR #58 再レビュー参考 1 への意図的据え置き）。
             await cache.invalidateAfterLocalWrite()
             switch outcome {
             case .wrote:
@@ -290,12 +293,28 @@ struct ExtensionWriter: Sendable {
         guard let versionId = entry.s3VersionId else {
             throw MoveError.sourceVersionMissing(path: from)
         }
-        guard
-            let copied = try await s3.copyObject(
-                fromKey: "files/\(from)", versionId: versionId, toKey: "files/\(to)")
-        else {
-            AppLogger.fileProvider.error("moveFile: pinned source version missing: \(from, privacy: .private)")
-            throw MoveError.sourceVersionMissing(path: from)
+        let copied: TideS3Client.PutObjectResult
+        if let pinned = try await s3.copyObject(
+            fromKey: "files/\(from)", versionId: versionId, toKey: "files/\(to)")
+        {
+            copied = pinned
+        } else {
+            // 宣言版が失効していた（#130: 同一内容の再 PUT で宣言版が「最新ではない版」になり、
+            // ライフサイクルで消えた）。最新版の ETag とサイズが entry と一致するときだけ、その版に
+            // 固定してコピーする（HEAD と copy の間に最新版が変わっても、確かめた版を使う）。
+            guard
+                let head = try await s3.headObject(key: "files/\(from)"),
+                let fallback = FileProviderWritePolicy.copySourceFallbackVersion(
+                    entry: entry, latestEtag: head.etag,
+                    latestVersionId: head.versionId, latestSize: head.size),
+                let latest = try await s3.copyObject(
+                    fromKey: "files/\(from)", versionId: fallback, toKey: "files/\(to)")
+            else {
+                AppLogger.fileProvider.error("moveFile: pinned source version missing: \(from, privacy: .private)")
+                throw MoveError.sourceVersionMissing(path: from)
+            }
+            AppLogger.fileProvider.notice("moveFile: pinned source version missing; copied latest version with matching ETag: \(from, privacy: .private)")
+            copied = latest
         }
         // 内容不変 = size / mtime / sha256 は元 entry を維持（[mtime 不変条件] と整合）— ファクトリ側の契約
         return ManifestFileEntry.copied(from: entry, copy: copied, deviceId: deviceId)

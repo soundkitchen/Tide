@@ -251,4 +251,31 @@ final class FileProviderWritePolicyTests: XCTestCase {
         XCTAssertEqual(FileProviderWritePolicy.pathAndAncestors("top"), ["top"])
         XCTAssertEqual(FileProviderWritePolicy.pathAndAncestors(""), [])
     }
+
+    // MARK: - rename のコピー元の切り替え（#130）
+
+    /// 宣言版が失効していても、最新版の ETag とサイズが一致すれば（= 中身が同じ）最新版を使う。
+    /// 一致しない・最新版の versionId が無い・宣言版と同じ版なら切り替えない。
+    func testCopySourceFallbackVersion() {
+        let entry = makeManifestEntry(sha: "aaa", size: 550)  // versionId = "v-aaa", etag = "obj-etag-aaa"
+        func fallback(_ etag: String, _ version: String?, _ size: Int64?) -> String? {
+            FileProviderWritePolicy.copySourceFallbackVersion(
+                entry: entry, latestEtag: etag, latestVersionId: version, latestSize: size)
+        }
+        XCTAssertEqual(fallback("obj-etag-aaa", "v-latest", 550), "v-latest")
+        // 中身が違う（ETag 不一致）
+        XCTAssertNil(fallback("obj-etag-bbb", "v-latest", 550))
+        // サイズ不一致・サイズ不明
+        XCTAssertNil(fallback("obj-etag-aaa", "v-latest", 551))
+        XCTAssertNil(fallback("obj-etag-aaa", "v-latest", nil))
+        // 最新版の versionId が無い（それを使うと版を固定できない）
+        XCTAssertNil(fallback("obj-etag-aaa", nil, 550))
+        // 最新版が宣言版そのもの（切り替えにならない）
+        XCTAssertNil(fallback("obj-etag-aaa", "v-aaa", 550))
+        // ETag が空
+        var noEtag = entry
+        noEtag.etag = ""
+        XCTAssertNil(FileProviderWritePolicy.copySourceFallbackVersion(
+            entry: noEtag, latestEtag: "", latestVersionId: "v-latest", latestSize: 550))
+    }
 }

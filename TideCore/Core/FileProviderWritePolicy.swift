@@ -124,6 +124,21 @@ public enum FileProviderWritePolicy {
         return recursive ? .deleteRemote : .notEmpty
     }
 
+    /// rename / reparent のコピー元の切り替え（#130）: 宣言版（`entry.s3VersionId`）が失効して
+    /// コピーできなかったとき、代わりに使ってよい最新版の versionId を返す。使えなければ nil。
+    /// 最新版の ETag とサイズが entry と一致する（= 中身が同じ）ときだけ切り替える。コピーは
+    /// 内容を検証できないので、一致を確かめずに最新版へ倒すと「宣言 sha と実体が乖離した entry」を
+    /// 作り得る（`S3Client.copyObject` の規約）。ETag は SSE-S3 の単発 PUT なら内容の MD5、
+    /// マルチパートなら各パートの MD5 から作る値で、どちらも内容が違えば一致しない。
+    /// - 最新版の versionId が無い / 宣言版と同じ（= 同じ版の再試行で切り替えにならない）は nil。
+    public static func copySourceFallbackVersion(
+        entry: ManifestFileEntry, latestEtag: String, latestVersionId: String?, latestSize: Int64?
+    ) -> String? {
+        guard let latestVersionId, latestVersionId != entry.s3VersionId else { return nil }
+        guard !latestEtag.isEmpty, latestEtag == entry.etag, latestSize == entry.size else { return nil }
+        return latestVersionId
+    }
+
     /// パス自身と祖先（深い → 浅い順・ルート "" は含まない）。`a/b/c` → `[a/b/c, a/b, a]`。
     /// 除外の予約は除外したフォルダの path で積まれるが、後始末の deleteItem は配下の
     /// 仮想フォルダ（以前に受理済みの `d:` item）単位でも届くため、祖先まで照合する。

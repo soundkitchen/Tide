@@ -298,9 +298,10 @@ public struct Uploader: Sendable {
 
 /// `updateFileEntry` の結果。アップロード書込シームでの並行更新検出（Issue #25 / A）の結末を表す。
 public enum ShardUpdateOutcome: Equatable, Sendable {
-    /// 自分の entry でマニフェストを更新した。
+    /// 自分の entry でマニフェストを更新した。同一内容でも版 ID を向け直した場合はこちら（#130）。
     case wrote
-    /// 別の書き手が同一内容を既に確定済みだった（マニフェスト書込せず）。
+    /// 同一内容が既に確定済みで、権威 entry が今回の PUT と同じ版を指していた（マニフェスト書込せず）。
+    /// 実際に来るのは、自分の前回書込の再試行と、PUT に versionId が無い場合。
     /// 付随する `ManifestFileEntry` は権威シャードの現リモート版＝ローカル DB をこの identity に合わせる。
     case alreadyUpToDate(ManifestFileEntry)
 }
@@ -418,6 +419,8 @@ public struct ManifestUpdater: Sendable {
     /// `decideUpload(base:uploading:remote:)` で判定する:
     /// - `.proceed` → 自分の entry を put（通常 / 再作成）。
     /// - `.alreadyUpToDate` → put せず権威 entry を返す（別書き手が同一内容を確定済み）。
+    ///   ただし今回の PUT と権威 entry の versionId が違えば、自分の entry を put して `.wrote`
+    ///   （版 ID の向け直し・#130・`mustRepointVersion`）。
     /// - `.conflict` → `SyncError.uploadConflict` を投げて RMW を安全中断（無音上書きしない）。
     ///
     /// 412/409 で再フェッチされた場合は同 retry 内で `decideUpload` を再評価するため、無音上書きの窓は
@@ -438,7 +441,22 @@ public struct ManifestUpdater: Sendable {
             )
             // existing は decideUpload が .alreadyUpToDate / .conflict を返すとき必ず非 nil
             // （remote == nil なら必ず .proceed）。理論上不到達の existing == nil は安全側で書込へ倒す。
-            if decision == .alreadyUpToDate, let existing {
+            let repoint = decision == .alreadyUpToDate
+                && existing.map { Self.mustRepointVersion(existing: $0, uploaded: newEntry) } == true
+            if repoint {
+                // 版 ID の向け直し（#130）: 同一内容の再 PUT で S3 の最新版は今回の版に変わった。
+                // 権威 entry が前の版を指したまま返すと、その版は「最新ではない版」として
+                // ライフサイクル（90 日）で失効し、宣言版に固定する copyObject（rename/reparent）が
+                // 恒久に失敗する。内容は同一なので、自分の entry で書く（.proceed と同じ経路）。
+                // 残存レース（PR #133 レビュー 1）: 版の新旧は見ていない。「自分が v1 を PUT → 別の書き手が
+                // 同じ内容の v2 を PUT して宣言 → 自分の RMW」の順だと、最新版 v2 を正しく指していた entry を
+                // 古い v1 へ戻してしまう（修正前なら v2 のまま残っていた = この順序では修正前より悪い）。
+                // 同じパスへ別の書き手が PUT と宣言を割り込ませる必要があり、Mac 1 台の運用ではまず起きない。
+                // 起きても読み出しは最新版へのフォールバック（sha 検証つき）で通り、rename も ETag 一致の
+                // 救済で通り、次に同じ内容を保存し直せばまた向け直る。今回の版が最新かを HEAD で
+                // 確かめると RMW 内で S3 往復が 1 回増えるので、しない。
+                AppLogger.s3.info("Same content re-uploaded; repointing manifest version: \(path, privacy: .private)")
+            } else if decision == .alreadyUpToDate, let existing {
                 // index 突合修復（PR #56 レビュー ①）: 「putShard 成功 → updateIndex 未完」で
                 // 失敗した書込の再試行はここに入る（remote == uploading）。そのまま返すと
                 // index が旧シャード etag を宣言し続け、全読者（他デバイス pull / FP 増分ロード）から
@@ -467,11 +485,15 @@ public struct ManifestUpdater: Sendable {
                 }
                 throw SyncError.uploadConflict(path: path, remoteEntry: existing)
             }
-            // ここに来るのは .proceed のみ（理論上不到達: .alreadyUpToDate/.conflict は existing 非 nil で
-            // 上の if が return/throw する）。万一 decideUpload の不変条件「remote==nil ⟹ .proceed」が
-            // 壊れて existing==nil で落ちてくると無音上書きが復活するので、debug で回帰を捕まえる
+            // ここに来るのは .proceed と、版 ID の向け直し（#130・.alreadyUpToDate かつ existing 非 nil）
+            // のみ（理論上不到達: それ以外の .alreadyUpToDate/.conflict は existing 非 nil で上の if が
+            // return/throw する）。万一 decideUpload の不変条件「remote==nil ⟹ .proceed」が壊れて
+            // existing==nil で落ちてくると無音上書きが復活するので、debug で回帰を捕まえる
             // （release は安全側＝自分の entry を書込）。
-            assert(decision == .proceed, "decideUpload returned \(decision) with a nil existing entry")
+            assert(
+                decision == .proceed || repoint,
+                "decideUpload returned \(decision) but neither proceed nor a version repoint (nil existing entry?)"
+            )
 
             shard.files[path] = newEntry
             // シャード + index の両方が確定した時のみ発火（commitShardWrite）。putShard 成功 →
@@ -482,6 +504,17 @@ public struct ManifestUpdater: Sendable {
             try await commitShardWrite(shardId: shardId, shard: shard, etag: etag)
             return .wrote
         }
+    }
+
+    /// 内容が同一（`.alreadyUpToDate`）でも、権威 entry を今回 PUT した版へ向け直すべきか（#130）。
+    /// 今回の PUT に versionId があり、権威 entry の versionId と違うときだけ true。
+    /// - 同じ versionId = 自分の前回書込の再試行（index 突合修復の経路）なので向け直さない。
+    /// - 今回の versionId が nil（バージョニング無効）は判断できないので向け直さない（従来どおり）。
+    public static func mustRepointVersion(
+        existing: ManifestFileEntry, uploaded: ManifestFileEntry
+    ) -> Bool {
+        guard let uploadedVersion = uploaded.s3VersionId else { return false }
+        return existing.s3VersionId != uploadedVersion
     }
 
     /// FP 拡張の deleteItem（M5 Phase 5-2）用: per-file entry を「権威 entry がベースと一致する

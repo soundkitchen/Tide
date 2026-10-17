@@ -266,7 +266,8 @@ public final class TideS3Client: @unchecked Sendable {
     /// - `versionId` 固定でコピーする（enumerate/fetch と同じ「宣言した版を使う」規約）。
     ///   **最新版フォールバックはしない**: コピーは内容を検証できないため、宣言版が消えて
     ///   いるときに最新へ倒すと「宣言 sha と実体が乖離した entry」を作り得る（マニフェスト
-    ///   真実の破壊）。404 / NoSuchVersion は nil を返し、呼び出し側が移動を失敗として扱う。
+    ///   真実の破壊）。404 / NoSuchVersion は nil を返す。呼び出し側は、最新版の ETag とサイズが
+    ///   一致するときだけその版に固定して取り直し（#130）、それ以外は移動を失敗として扱う。
     /// - SSE-S3 を明示（Copy は元オブジェクトの暗号化設定を引き継がない）・
     ///   metadataDirective は COPY。
     /// - Returns: コピー先の新しい identity（etag / versionId）。
