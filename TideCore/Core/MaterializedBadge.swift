@@ -56,18 +56,99 @@ public enum MaterializedBadge {
         oldFilePaths: [String], newFilePaths: [String],
         previousReported: Set<String>, newReport: Set<String>
     ) -> (files: Set<String>, directories: Set<String>) {
-        let files = Set(newFilePaths).intersection(previousReported.symmetricDifference(newReport))
-        let dirsBefore = checkedDirectories(filePaths: oldFilePaths, materialized: previousReported)
-        let dirsAfter = checkedDirectories(filePaths: newFilePaths, materialized: newReport)
-        let currentDirs = directoriesContainingFiles(newFilePaths)
-        return (
-            files,
-            dirsBefore.symmetricDifference(dirsAfter).intersection(currentDirs)
-        )
+        ChangeContext(
+            oldFilePaths: oldFilePaths, newFilePaths: newFilePaths, previousReported: previousReported
+        ).changedPaths(newReport: newReport)
+    }
+
+    /// バッジ差分の計算の文脈。報告集合を変えて何度も計算するとき（`partialReport`）に、
+    /// 変わらない部分（新ツリーのファイル集合・dirsBefore・配下にファイルがある dir）を 1 回だけ
+    /// 計算する（Issue #131・PR #132 レビュー N3）。
+    public struct ChangeContext: Sendable {
+        private let newFilePaths: [String]
+        private let newFileSet: Set<String>
+        private let previousReported: Set<String>
+        private let dirsBefore: Set<String>
+        private let currentDirs: Set<String>
+
+        /// - Parameter deliveredDirectories: 同じ差分の途中のバッチ（Issue #131）で、すでに
+        ///   「新ツリー × previousReported」のフラグで配った dir。Finder はこの状態を見ているので、
+        ///   これらの dir の「前」は旧ツリーではなく新ツリー基準で数える（PR #132 レビュー B1:
+        ///   旧ツリー基準のままだと、途中で配った状態と最後の報告集合の状態が食い違っても反転と
+        ///   判定されず、配り直されずに固着する）。
+        public init(
+            oldFilePaths: [String], newFilePaths: [String], previousReported: Set<String>,
+            deliveredDirectories: Set<String> = []
+        ) {
+            self.newFilePaths = newFilePaths
+            self.newFileSet = Set(newFilePaths)
+            self.previousReported = previousReported
+            let beforeOld = MaterializedBadge.checkedDirectories(
+                filePaths: oldFilePaths, materialized: previousReported)
+            if deliveredDirectories.isEmpty {
+                self.dirsBefore = beforeOld
+            } else {
+                let beforeNew = MaterializedBadge.checkedDirectories(
+                    filePaths: newFilePaths, materialized: previousReported)
+                self.dirsBefore = beforeOld.subtracting(deliveredDirectories)
+                    .union(beforeNew.intersection(deliveredDirectories))
+            }
+            self.currentDirs = MaterializedBadge.directoriesContainingFiles(newFilePaths)
+        }
+
+        /// 報告集合を `newReport` に進めたときに didUpdate へ載せるべきパス（意味は `changedPaths`）。
+        public func changedPaths(newReport: Set<String>) -> (files: Set<String>, directories: Set<String>) {
+            let files = newFileSet.intersection(previousReported.symmetricDifference(newReport))
+            let dirsAfter = MaterializedBadge.checkedDirectories(
+                filePaths: newFilePaths, materialized: newReport)
+            return (files, dirsBefore.symmetricDifference(dirsAfter).intersection(currentDirs))
+        }
+
+        /// バッジ差分を 1 回で配りきれないときの「途中まで進めた報告集合」（Issue #131）と、
+        /// そのとき配るパス。`changedPaths`（files + directories）の件数が `budget` 以内に収まるよう、
+        /// previousReported から newReport へ向けて**先頭 k 件の切り替えだけ**進める。全体が budget
+        /// 以内なら newReport そのもの。
+        /// - 切り替えは「外す方（パス昇順）→ 足す方（パス昇順）」の順に進める（PR #132 レビュー B2）:
+        ///   途中の集合が previousReported と newReport の大きい方を超えない = レジストリ上限
+        ///   （`materializedBadgeCap`）を超えない。超えると `replace(with:)` の切り詰めで、Finder に
+        ///   報告した集合と永続化した集合が食い違い、外す通知を配っていないパスのバッジが固着する。
+        /// - k は budget から半分ずつ減らして探す（1 ファイルで dir の反転が祖先ぶん増えうるため）。
+        ///   k = 1 でも超える場合はそのまま返す（上限は推奨サイズの 100 倍なので、祖先 dir ぶんの
+        ///   はみ出しは問題にならない）。少なくとも 1 件は必ず進む = 繰り返せば newReport に収束する
+        ///   （残りは呼び出し側が自己 signal で次の enumerateChanges に回す）。
+        /// - 報告集合は同じでツリーだけが変わった反転（dir のみ）は、進める単位が無いので丸ごと返す。
+        public func partialReport(
+            newReport: Set<String>, budget: Int
+        ) -> (report: Set<String>, files: Set<String>, directories: Set<String>) {
+            let full = changedPaths(newReport: newReport)
+            if full.files.count + full.directories.count <= budget {
+                return (newReport, full.files, full.directories)
+            }
+            let removals = previousReported.subtracting(newReport).sorted()
+            let additions = newReport.subtracting(previousReported).sorted()
+            let toggles = removals + additions
+            guard !toggles.isEmpty else { return (newReport, full.files, full.directories) }
+            var k = max(1, min(budget, toggles.count))
+            while true {
+                var partial = previousReported
+                for path in toggles.prefix(k) {
+                    if newReport.contains(path) {
+                        partial.insert(path)
+                    } else {
+                        partial.remove(path)
+                    }
+                }
+                let changed = changedPaths(newReport: partial)
+                if k == 1 || changed.files.count + changed.directories.count <= budget {
+                    return (partial, changed.files, changed.directories)
+                }
+                k /= 2
+            }
+        }
     }
 
     /// filePaths の祖先 dir 全集合（= 配下に 1 ファイル以上ある dir。ルート `""` は含まない）。
-    private static func directoriesContainingFiles(
+    fileprivate static func directoriesContainingFiles(
         _ filePaths: some Sequence<String>
     ) -> Set<String> {
         var dirs: Set<String> = []

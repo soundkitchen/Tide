@@ -76,6 +76,7 @@ Tide/（リポジトリルート）
 │   │   ├── SyncIgnoreMatcher.swift    .syncignore パターンマッチ（線形時間 DP）(M3)
 │   │   ├── ManifestTree.swift         マニフェスト → FP 列挙ツリー合成 (M5)
 │   │   ├── ManifestTreeDiff.swift     世代間 diff（enumerateChanges 用）(M5)
+│   │   ├── FileProviderEnumerationPaging.swift  FP 列挙のページ / バッチ分割（推奨サイズ × 10・#131）
 │   │   ├── MaterializedBadge.swift    実体化連動バッジ判定（#65）
 │   │   ├── FileProviderWritePolicy.swift  FP 書込のパス合成 / 検証 (M5 Phase 5)
 │   │   ├── ConflictNamer.swift        コンフリクト時のリネーム命名 (M2)
@@ -141,7 +142,7 @@ Tide/（リポジトリルート）
 │   ├── MaterializedSetObserver.swift  実体化セット観測（バッジ live 側）
 │   └── Resources/Localizable.xcstrings  拡張の user-facing 文言（app 側とは別カタログ）
 │
-├── TideTests/                        ユニットテスト（65 ファイル・folderSync 回帰網含む）
+├── TideTests/                        ユニットテスト（67 ファイル・folderSync 回帰網含む）
 └── tools/soak/                       soak 監視（consistency_check.py。launchd 常駐は 2026-09-19 で運用終了・#40 #84）
 ```
 

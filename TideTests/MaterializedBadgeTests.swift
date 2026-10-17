@@ -143,4 +143,92 @@ final class MaterializedBadgeTests: XCTestCase {
         XCTAssertEqual(changed.files, [])
         XCTAssertEqual(changed.directories, [])
     }
+
+    // MARK: - partialReport（Issue #131: バッジ差分をバッチの大きさに収める）
+
+    private func context(
+        _ old: [String], _ new: [String], _ previous: Set<String>, delivered: Set<String> = []
+    ) -> MaterializedBadge.ChangeContext {
+        MaterializedBadge.ChangeContext(
+            oldFilePaths: old, newFilePaths: new, previousReported: previous, deliveredDirectories: delivered)
+    }
+
+    /// 全体が枠に収まるなら newReport そのもの。
+    func testPartialReportReturnsFullReportWithinBudget() {
+        let files = ["a/1", "a/2", "b/1"]
+        let partial = context(files, files, []).partialReport(newReport: ["b/1"], budget: 10)
+        XCTAssertEqual(partial.report, ["b/1"])
+        XCTAssertEqual(partial.files, ["b/1"])
+        XCTAssertEqual(partial.directories, ["b"])
+    }
+
+    /// 枠を超えるなら一部だけ進め、配る件数（files + dirs）を枠に収める。繰り返せば newReport に収束する。
+    /// 返すパスは、その途中の集合へ進めたときの `changedPaths` と一致する。
+    func testPartialReportConvergesWithinBudget() {
+        let files = (0..<20).map { "dir\($0 % 4)/f\($0)" }
+        let target = Set(files)
+        var reported: Set<String> = []
+        var rounds = 0
+        while reported != target {
+            let ctx = context(files, files, reported)
+            let next = ctx.partialReport(newReport: target, budget: 5)
+            XCTAssertLessThanOrEqual(next.files.count + next.directories.count, 5)
+            let expected = ctx.changedPaths(newReport: next.report)
+            XCTAssertEqual(next.files, expected.files)
+            XCTAssertEqual(next.directories, expected.directories)
+            XCTAssertNotEqual(next.report, reported, "1 回で少なくとも 1 ファイルは進む")
+            reported = next.report
+            rounds += 1
+            XCTAssertLessThan(rounds, 100)
+        }
+    }
+
+    /// 消灯方向（報告済みから外す）も同じく進む。
+    func testPartialReportAlsoShrinks() {
+        let files = (0..<10).map { "d/f\($0)" }
+        let partial = context(files, files, Set(files)).partialReport(newReport: [], budget: 3)
+        XCTAssertLessThan(partial.report.count, files.count)
+        XCTAssertTrue(partial.report.isSubset(of: Set(files)))
+    }
+
+    /// PR #132 レビュー B2: 外す方を先に進めるので、途中の集合が previous と newReport の大きい方
+    /// （= レジストリ上限以内）を超えない。追加がパス順で前・削除が後ろにある並びでも同じ。
+    func testPartialReportNeverExceedsTheLargerOfBothReports() {
+        let files = ["a/1", "a/2", "a/3", "z/1", "z/2", "z/3"]
+        let previous: Set<String> = ["z/1", "z/2", "z/3"]
+        let full: Set<String> = ["a/1", "a/2", "a/3"]
+        var reported = previous
+        var rounds = 0
+        while reported != full {
+            let next = context(files, files, reported).partialReport(newReport: full, budget: 2)
+            XCTAssertLessThanOrEqual(next.report.count, max(previous.count, full.count))
+            reported = next.report
+            rounds += 1
+            XCTAssertLessThan(rounds, 100)
+        }
+    }
+
+    /// 報告集合は同じでツリーだけが変わった反転（dir のみ）は、進める単位が無いので丸ごと返す
+    /// （無限ループしない）。
+    func testPartialReportWithOnlyTreeChangeReturnsNewReport() {
+        let partial = context(["a/1", "a/2"], ["a/1"], ["a/1"]).partialReport(newReport: ["a/1"], budget: 0)
+        XCTAssertEqual(partial.report, ["a/1"])
+        XCTAssertEqual(partial.directories, ["a"], "a/2 の削除で a は全実体化 = チェックが付く")
+    }
+
+    /// PR #132 レビュー B1: 同じ差分の途中のバッチで「新ツリー × previous」のフラグで配った dir は、
+    /// その状態を「前」として数える。旧ツリー基準のままだと、最後の報告集合で状態が戻ったとき
+    /// 反転と判定されず、途中で配ったチェックが固着する。
+    func testDeliveredDirectoriesUseTheStateFinderSaw() {
+        let old = ["D/a", "D/b"]   // 起点: a 実体化・b 未実体化 → D は未チェック
+        let new = ["D/a"]          // b がリモートで削除 → 途中のバッチで D はチェック付きで配られた
+        let previous: Set<String> = ["D/a"]
+        let newReport: Set<String> = []  // 最後のバッチまでに a が evict された
+        // 旧ツリー基準: 前 = 未チェック / 後 = 未チェック → 反転なし（固着の原因）
+        XCTAssertEqual(context(old, new, previous).changedPaths(newReport: newReport).directories, [])
+        // 途中で配った dir は新ツリー基準: 前 = チェック付き / 後 = 未チェック → 配り直す
+        XCTAssertEqual(
+            context(old, new, previous, delivered: ["D"]).changedPaths(newReport: newReport).directories,
+            ["D"])
+    }
 }

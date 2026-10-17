@@ -23,7 +23,11 @@ public enum ManifestGenerationLog {
     public static let currentSchemaVersion = 2
     /// 保持する世代数（最新世代を含む）。コンテナごとの anchor が数世代ずれても diff を返せる
     /// 程度に持ち、それより古い anchor は `.syncAnchorExpired`（全再列挙）に倒す。
-    public static let defaultMaxGenerations = 8
+    /// 64（Issue #131・2026-10-17 ユーザ確定。旧 8）: 大量の書込で世代が数秒ごとに進むと、8 世代は
+    /// 約 45 秒で入れ替わり、fileproviderd の anchor が失効して全再列挙になるうえ、ページに分けた
+    /// 全再列挙（約 3 万件）も固定した世代が先に落ちて終わらなかった。古い世代は逆差分だけを持つ
+    /// （#128）ので、増やしても大きさは差分の量にしか比例しない。
+    public static let defaultMaxGenerations = 64
 
     /// 1 世代 = ある時点のリモート全体像。`anchor` が `NSFileProviderSyncAnchor` の中身になる。
     public struct Generation: Codable, Equatable, Sendable {
