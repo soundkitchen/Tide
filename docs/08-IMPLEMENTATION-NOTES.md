@@ -256,6 +256,25 @@ FP ドメイン内のファイル編集（`modifyItem` の .contents）と削除
     拡張のログが出なかった。B1 の対処後は、予約つきの後始末で
     `deleteItem(dir): exclusion cleanup completed (S3 untouched)` を残す（追跡済みファイルが現れていた
     場合は `… kept N tracked files on S3`）。fileproviderd 側は `delete-item` の `done executing` で追える。
+- **同期済みのフォルダを後から外す手順（2026-10-19・Unity のキャッシュで実施）**: ユーザパターンは
+  未追跡のファイルにしか効かず、配下に追跡済みファイルがあるフォルダはフォルダ単位で除外しない（判定 ①）
+  ので、パターンを足しただけでは同期済みのフォルダは外れない。外すには一度だけ消して作り直す:
+  1. パターンを書く（例: Unity のプロジェクトを並べた親フォルダの `.syncignore` に `/*/Library/`・`/*/Temp/`・
+     `/*/Logs/`。先頭の `/` でその `.syncignore` の場所に固定し、`*` はプロジェクト名の 1 階層だけに当たる。
+     `Library/` だけだと、どの深さの同名フォルダにも当たる）。
+  2. フォルダを使うアプリ（Unity のエディタ）を閉じてから、フォルダを `rm -r` で消す。S3 から消えるのを待つ
+     （フォルダの deleteItem 1 回 = 操作の記録に `Deleted folder (N files)` が 1 行。この行は削除を終えたときに
+     書かれる。2.9 万件では `rm` から S3 で消えきるまで約 15 分）。fileproviderd へ削除を伝える enumerateChanges も 2,000 件ずつ続くので、
+     最後のバッチ（`more coming` の無い行）まで待つ。
+  3. アプリで開き直す。作り直されたフォルダは追跡済みファイルを持たないので、
+     `createItem: directory excluded as a whole` でフォルダごと除外される。
+  - 観測（2026-10-19・dev-tide）: 作り直された `Library/`（2.9 万件）・`Temp/`・`Logs/` は 3 つとも
+    フォルダ単位で除外され、S3 は 0 件のまま・`soak-check-fp` OK。fileproviderd は、除外したフォルダの中身が
+    変わるあいだ、そのフォルダの createItem を頼み直す（`Library/` で約 1 分に 8 回・答えはどれも
+    `-2010` = excludedFromSync）。頼み直しはフォルダ 1 件分なので、#120 の再送嵐にはならない。
+  - 観測: パターンを足した時点でアプリが動いていると、追跡済みのファイルが除外される名前への改名で置き換え
+    られた分（Unity の `Logs/` の書き直し）は、改名経路の除外（5-4・#124）として S3 から外れる
+    （ローカルは温存）。設計どおりの挙動。
 - **実機受け入れ（2026-10-16・dev-tide・全項目パス）**:
   1. 新規の `node_modules/`（配下 100 ファイル）: 除外イベントはフォルダ 1 件（"Excluded folder from sync"）
      だけで、ファイル単位のイベントは 0 件。
