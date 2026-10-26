@@ -57,4 +57,39 @@ final class HardcodedIgnoreRulesTests: XCTestCase {
         XCTAssertTrue(HardcodedIgnoreRules.shouldIgnore(relativePath: "store.p12"))
         XCTAssertTrue(HardcodedIgnoreRules.shouldIgnore(relativePath: "app.keystore"))
     }
+
+    // MARK: - 大文字小文字を区別しない（#136）
+
+    func testSuffixPatternsIgnoreCase() {
+        for name in ["Server.PEM", "certs/Wildcard.Key", "STORE.P12", "id.PFX", "App.KeyStore"] {
+            XCTAssertTrue(HardcodedIgnoreRules.shouldIgnore(relativePath: name), "\(name) should be ignored")
+        }
+    }
+
+    func testExactNamesIgnoreCase() {
+        for name in [".ENV", ".Envrc", "ID_RSA", "Id_Ed25519", "Credentials", ".ds_store", "THUMBS.DB"] {
+            XCTAssertTrue(HardcodedIgnoreRules.shouldIgnore(relativePath: name), "\(name) should be ignored")
+            XCTAssertTrue(HardcodedIgnoreRules.shouldIgnore(relativePath: "sub/\(name)"))
+        }
+    }
+
+    func testSensitiveDirectoriesIgnoreCase() {
+        for dir in [".SSH", ".Aws", ".GNUPG", ".Config"] {
+            XCTAssertTrue(HardcodedIgnoreRules.shouldIgnore(relativePath: dir))
+            XCTAssertTrue(HardcodedIgnoreRules.shouldIgnore(relativePath: "home/\(dir)/config"))
+        }
+    }
+
+    func testPrefixPatternsIgnoreCase() {
+        XCTAssertTrue(HardcodedIgnoreRules.shouldIgnore(relativePath: ".ENV.Local"))
+        XCTAssertTrue(HardcodedIgnoreRules.shouldIgnore(relativePath: ".documentrevisions-v100"))
+        XCTAssertTrue(HardcodedIgnoreRules.shouldIgnore(relativePath: "dir/.TIDE/tmp"))
+    }
+
+    func testRegularPathsKeptRegardlessOfCase() {
+        XCTAssertFalse(HardcodedIgnoreRules.shouldIgnore(relativePath: "Documents/Report.PDF"))
+        XCTAssertFalse(HardcodedIgnoreRules.shouldIgnore(relativePath: ".GITIGNORE"))
+        XCTAssertFalse(HardcodedIgnoreRules.shouldIgnore(relativePath: "Environment/notes.txt"))
+        XCTAssertFalse(HardcodedIgnoreRules.shouldIgnore(relativePath: "Keys/readme.md"))
+    }
 }

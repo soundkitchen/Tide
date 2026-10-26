@@ -276,6 +276,10 @@ FP 拡張の書込（deleteItem / modifyItem / createItem / move）は `Extensio
   「データ損失 < 重複」）。拡張はアプリの DB / syncRoot / tmp に一切書かない（書込面の最小化）。
   dir 再帰削除（Phase 5-3）も同ガードのシャード単位バッチ版 `removeFileEntries`（拒否で即中断・
   tree 由来 path は S3 キー組み立て前に全件 `validateRelativePath`）
+- **Status（2026-10-27・#136）: 機密網の照合を大文字小文字非区別へ修正**。それまでは `Server.PEM` /
+  `.ENV` / `ID_RSA` のような大文字を含む名前が機密網を素通りし、FP createItem / rename でも除外されずに
+  S3 へ上がっていた（APFS は既定で大文字小文字を区別しないため現実に作れる名前）。全規則に一律で適用。
+  修正前に上がった大文字名は追跡済みとして同期が続くため、マニフェストを読み取り専用で突合して個別に判断する
 - **機密網（`HardcodedIgnoreRules`）は FP createItem でも最優先で強制**（M5 Phase 5-3・2026-07-09）:
   該当パス（`.env` / `.aws` 等）とその配下は `NSFileProviderError(.excludedFromSync)` で拒否 =
   ローカルに残るが S3 へは決して上がらない。symlink も同様に除外（同期しない不変条件の FP 側適用）。
