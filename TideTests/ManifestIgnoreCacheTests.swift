@@ -92,6 +92,44 @@ final class ManifestIgnoreCacheTests: XCTestCase {
         )
     }
 
+    /// 大文字小文字違いの名前（`.SyncIgnore` 等）も層として読む（#136）。
+    func testBuildsLayerFromCaseVariantName() async throws {
+        let recorder = FetchRecorder()
+        recorder.respond(path: ".SyncIgnore", versionId: "v-root", sha: "root", text: "*.log\n")
+        recorder.respond(path: "sub/.SYNCIGNORE", versionId: "v-sub", sha: "sub", text: "*.tmp\n")
+        let cache = makeCache(recorder)
+        let tree = makeTree([
+            ".SyncIgnore": makeManifestEntry(sha: "root"),
+            "sub/.SYNCIGNORE": makeManifestEntry(sha: "sub"),
+        ])
+
+        let layered = try await cache.layeredIgnore(tree: tree, anchor: "gen-1")
+
+        XCTAssertEqual(layered.fileCount, 2)
+        XCTAssertTrue(layered.isIgnored("a.log"))
+        XCTAssertTrue(layered.isIgnored("sub/x.tmp"))
+        XCTAssertFalse(layered.isIgnored("x.tmp"))  // sub の層はルートに効かない = 層キーが "sub"
+    }
+
+    /// 同じフォルダに大文字小文字違いが複数あるときは正規名 `.syncignore` の層を使い、他は取得しない（#136）。
+    func testCanonicalNameWinsOverCaseVariantInSameFolder() async throws {
+        let recorder = FetchRecorder()
+        recorder.respond(path: "sub/.syncignore", versionId: "v-canon", sha: "canon", text: "*.tmp\n")
+        recorder.respond(path: "sub/.SyncIgnore", versionId: "v-variant", sha: "variant", text: "*.log\n")
+        let cache = makeCache(recorder)
+        let tree = makeTree([
+            "sub/.syncignore": makeManifestEntry(sha: "canon"),
+            "sub/.SyncIgnore": makeManifestEntry(sha: "variant"),
+        ])
+
+        let layered = try await cache.layeredIgnore(tree: tree, anchor: "gen-1")
+
+        XCTAssertEqual(layered.fileCount, 1)
+        XCTAssertTrue(layered.isIgnored("sub/x.tmp"))
+        XCTAssertFalse(layered.isIgnored("sub/x.log"))
+        XCTAssertEqual(recorder.calls.map(\.path), ["sub/.syncignore"])
+    }
+
     /// 同一アンカーの再要求は fetch ゼロ（世代キャッシュ）。
     func testSameAnchorServedFromCache() async throws {
         let recorder = FetchRecorder()

@@ -48,6 +48,18 @@ final class IgnoreDecisionTests: XCTestCase {
         XCTAssertTrue(IgnoreDecision.shouldSkip(relativePath: "sub/my.syncignore", isAlreadyTracked: false, matcher: m))
     }
 
+    /// 大文字小文字違いの `.SyncIgnore` も `.syncignore` として自己保護する（#136）。
+    func testSyncignoreNameIgnoresCase() {
+        XCTAssertTrue(IgnoreDecision.isSyncignoreFile(".SyncIgnore"))
+        XCTAssertTrue(IgnoreDecision.isSyncignoreFile("a/b/.SYNCIGNORE"))
+        XCTAssertFalse(IgnoreDecision.isSyncignoreFile("a/My.SyncIgnore"))
+        XCTAssertFalse(IgnoreDecision.isCanonicalSyncignoreName(".SyncIgnore"))
+        XCTAssertTrue(IgnoreDecision.isCanonicalSyncignoreName("a/.syncignore"))
+        let m = root("*")
+        XCTAssertFalse(IgnoreDecision.shouldSkip(relativePath: ".SyncIgnore", isAlreadyTracked: false, matcher: m))
+        XCTAssertFalse(IgnoreDecision.shouldSkip(relativePath: "sub/.SYNCIGNORE", isAlreadyTracked: false, matcher: m))
+    }
+
     func testNestedHardcodedBeatsNestedSyncignore() {
         // 機密網配下（.aws/）にある .syncignore はハードコードが最優先＝スキップ（同期しない）。
         let m = LayeredSyncIgnore.empty

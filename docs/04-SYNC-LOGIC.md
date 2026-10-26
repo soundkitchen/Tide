@@ -241,6 +241,9 @@ M3 サブ C で **ベース / ローカル / リモートの 3 SHA による 3-w
 （OS ジャンク + `.tide` + `.aws`/`.ssh`/`id_rsa` 等の機密 dotfile）、`prefixPatterns`、
 `suffixPatterns`（`.pem`/`.key`/`.p12`/`.pfx`/`.keystore`）、判定メソッドは
 `shouldIgnore(relativePath:)`。**常に最優先**で効き、`.syncignore` の否定 `!` でも覆せない。
+照合は**大文字小文字を区別しない**（#136・全規則に一律）。APFS は既定で大文字小文字を区別しないため、
+区別すると `Server.PEM` / `.ENV` / `ID_RSA` が素通りして S3 へ上がる。副作用として `Credentials` や
+`.Config` という名前のフォルダも subtree ごと除外される（意図どおり）。
 新しい dotfile / 拡張子で機密が紛れ込みそうなら即追加する運用（CLAUDE.md 参照）。
 
 ### `.syncignore`（ユーザ除外・M3）
@@ -250,6 +253,8 @@ gitignore 構文の一般的サブセット。詳細な確定仕様は `docs/07-
 
 - ユーザパターンは**新規ファイルにのみ**適用する（gitignore 純正）。既に同期済みのファイルは
   触らない。バックアップから外したい時はローカル削除 → 通常の削除伝播で消す。
+- `.syncignore` の名前は大文字小文字を区別しない（#136・`.SyncIgnore` も層として読む。同じフォルダに
+  大文字小文字違いが複数あれば正規名 `.syncignore` を使う）。
 - `.syncignore` 自身は同期対象に含める（S3 経由で全デバイスに伝わる）。ネスト `.syncignore` は
   git 風の階層適用（浅い→深い順に合成・深い層が上書き）。**例外**: フォルダごと除外したフォルダ
   （機密網フォルダと、下記 ③ のフォルダ単位除外）の中の `.syncignore` は同期しない（git が除外

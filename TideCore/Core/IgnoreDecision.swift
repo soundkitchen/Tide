@@ -97,7 +97,14 @@ public enum IgnoreDecision {
 
     /// ルート直下またはネストした `.syncignore` 自身か。決して除外せず、変更検知の契機にも使う共有判定。
     /// （ネスト対応で `path == ".syncignore"` の完全一致では取りこぼすため `hasSuffix("/.syncignore")` も見る。）
+    /// 名前の大文字小文字は区別しない（#136）: APFS では `.SyncIgnore` も同じ役割のファイルとして作れる。
     public static func isSyncignoreFile(_ relativePath: String) -> Bool {
+        let lower = relativePath.lowercased()
+        return lower == ".syncignore" || lower.hasSuffix("/.syncignore")
+    }
+
+    /// 名前が正規の小文字表記 `.syncignore` そのものか（同じフォルダに大文字小文字違いが複数あるときの優先判定用）。
+    public static func isCanonicalSyncignoreName(_ relativePath: String) -> Bool {
         relativePath == ".syncignore" || relativePath.hasSuffix("/.syncignore")
     }
 }
