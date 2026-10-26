@@ -155,6 +155,12 @@ struct SettingsWindow: View {
                 ForEach(HardcodedIgnoreRules.prefixPatterns, id: \.self) { p in
                     Text("\(p)* (prefix)").font(.system(.body, design: .monospaced))
                 }
+                ForEach(HardcodedIgnoreRules.suffixPatterns, id: \.self) { s in
+                    Text("*\(s) (suffix)").font(.system(.body, design: .monospaced))
+                }
+                Text("Matched against every folder and file name in the path, ignoring upper and lower case.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             Section(".syncignore") {
                 // #97: パターン一覧は撤去（ソースが engine.activeIgnorePatterns = fpOnly では

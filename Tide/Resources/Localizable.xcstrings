@@ -904,6 +904,17 @@
         }
       }
     },
+    "*%@ (suffix)" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "*%@（後方一致）"
+          }
+        }
+      }
+    },
     "%lld GB" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -1263,6 +1274,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "エラー: %@"
+          }
+        }
+      }
+    },
+    "Matched against every folder and file name in the path, ignoring upper and lower case." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "パスに含まれるすべてのフォルダ名・ファイル名に対して、大文字小文字を区別せずに照合します。"
           }
         }
       }

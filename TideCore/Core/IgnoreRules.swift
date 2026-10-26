@@ -70,9 +70,9 @@ public enum HardcodedIgnoreRules {
     /// 大文字小文字を区別せずに照合する（#136）。APFS では `Server.PEM` も `.ENV` も普通に
     /// 作れるため、区別すると機密網を素通りして S3 へ上がる。
     public static func shouldIgnore(relativePath: String) -> Bool {
-        for component in relativePath.split(separator: "/") {
-            let c = component.lowercased()
-            if lowercasedExactNames.contains(c) { return true }
+        // ホットパス（スキャン / FileWatcher / FP createItem）なので小文字化はパス全体で 1 回だけ。
+        for c in relativePath.lowercased().split(separator: "/") {
+            if lowercasedExactNames.contains(String(c)) { return true }
             for prefix in lowercasedPrefixPatterns where c.hasPrefix(prefix) {
                 return true
             }

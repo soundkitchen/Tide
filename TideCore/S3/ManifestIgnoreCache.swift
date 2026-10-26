@@ -107,11 +107,19 @@ public actor ManifestIgnoreCache {
             candidates = Array(candidates.prefix(LayeredSyncIgnore.maxFiles))
         }
 
+        // 同じフォルダに大文字小文字違いの `.syncignore` が複数ある（S3 のキーは区別する）ときは、
+        // 正規名 `.syncignore` の層を使う（#136）。正規名が無いフォルダでは、ソート順で最後の 1 つ。
+        let canonicalDirs = Set(
+            candidates.filter { IgnoreDecision.isCanonicalSyncignoreName($0.path) }
+                .map { Self.layerKey(of: $0.path) })
+
         var matchers: [String: SyncIgnoreMatcher] = [:]
         var newMemo: [String: (sha: String, matcher: SyncIgnoreMatcher)] = [:]
         for (path, entry) in candidates {
-            // "a/b/.syncignore" → 層キー "a/b"、ルート ".syncignore" → ""
-            let dirKey = path == ".syncignore" ? "" : String(path.dropLast(".syncignore".count + 1))
+            let dirKey = Self.layerKey(of: path)
+            if canonicalDirs.contains(dirKey) && !IgnoreDecision.isCanonicalSyncignoreName(path) {
+                continue
+            }
             let matcher: SyncIgnoreMatcher
             if let memo = matcherMemo[path], memo.sha == entry.sha256 {
                 matcher = memo.matcher
@@ -126,6 +134,12 @@ public actor ManifestIgnoreCache {
         // 消えた `.syncignore` のメモは世代ごとに刈る（メモリの単調増加防止）
         matcherMemo = newMemo
         return LayeredSyncIgnore(matchers: matchers)
+    }
+
+    /// `.syncignore` のパスから層キー（置かれているフォルダの相対パス）を出す。
+    /// "a/b/.syncignore" → "a/b"、ルート直下 → ""。名前の大文字小文字は問わない（#136）。
+    private static func layerKey(of path: String) -> String {
+        path.lastIndex(of: "/").map { String(path[..<$0]) } ?? ""
     }
 
     private func fetchAndParse(
