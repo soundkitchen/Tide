@@ -121,9 +121,11 @@ PR #66 レビュー指摘 1 の回帰・両方向）・rebind 回帰（rename �
 
 **症状**: FP レプリカで作成して実体化した直後のファイルを除外される名前（例 `Test136.Key`・小文字の `.key` でも同じ）へ改名すると、後片付けの deleteItem が来ず、S3 に旧版が残る。fileproviderd は `update-item(propagated:<f:旧 path>) why:itemChangedRemotely` を `itemNotFound(… structuralVersionMismatch(root/<新名>, expected: root/<旧名>))` で失敗し続け、間隔を広げながら再試行が止まらない。機密網の名前への改名なら秘密の可能性があるファイルが S3 に残り続ける（`security/low.md` L17）。
 
-**原因（実機で確定）**: ローカルの改名から後片付けの deleteItem までの間に、拡張が旧 item の版が変わった `didUpdate` を送ると、fileproviderd はそれをリモートの変更として取り込み、ディスクを旧名に戻そうとして失敗し続ける。送り手は問わない（Issue 本文のケース = 予約後のバッジ点灯の badge-only 配信 / 再現のケース = 自分のアップロードを配るマニフェスト差分）。作成直後に踏みやすいのは、実体化バッジがちらついていたため — 返却 item は無条件に `|m` 付きで、直後の差分配信が `|m` なしで再送していた。再現時は報告済みレジストリが上限 10,000 件に達しており、パス昇順で上限の外のファイルは報告に入らないのに返却 item だけ `|m` 付きだった（上限そのものは別 Issue）。
+**原因（実機で確定）**: ローカルの改名から後片付けの deleteItem までの間に、拡張が旧 item の版が変わった `didUpdate` を送ると、fileproviderd はそれをリモートの変更として取り込み、ディスクを旧名に戻そうとして失敗し続ける。送り手は問わない（Issue 本文のケース = 予約後のバッジ点灯の badge-only 配信 / 再現のケース = 自分のアップロードを配るマニフェスト差分）。作成直後に踏みやすいのは、実体化バッジがちらついていたため — 返却 item は無条件に `|m` 付きで、直後の差分配信が `|m` なしで再送していた。再現時は報告済みレジストリが上限 10,000 件に達しており、パス昇順で上限の外のファイルは報告に入らないのに返却 item だけ `|m` 付きだった（上限そのものは #141）。
 
 **✅ 対処（2026-10-27）**: ① 返却 item のフラグを差分配信と揃える（`fitsReport` + 返却分の台帳 `ReturnLedger`）。② 後片付けを予約した path のバッジを伝え済みのまま凍結する（`pinning`）。詳細 = `docs/08`「FP 実体化連動バッジ」節の「返却 item と差分配信の版を揃える」と「除外名への改名」節。
+
+**実機で確認（2026-10-27）**: 再現と同じ手順（作成 → アップロードを配る `enumerateChanges: 1 updated` の直後に `.key` へ改名）で 2 通り試し、どちらも改名から約 1.3 秒で後片付けの `delete-item`（`why:itemIgnored`）が届いた。上限の内側の名前（`A138.txt`）は返却 item が `<sha>|m` のまま、上限の外側の名前（`Repro138c.txt`）は `<sha>` のままで、作成直後に版が変わる再送は出なかった。マニフェストから消え、S3 は削除マーカーが最新・`.key` は未アップロード。`make soak-check-fp` は整合 OK（manifest 11666 / s3 11666）。`structuralVersionMismatch` は 2 通りとも 1 回ずつ出たが、fileproviderd 自身の `evictionUrgency` 更新によるもので、直後に `delete-item` へ進んだ（再試行は続かない）。
 
 **据え置き（残る窓）**: ① ローカルの改名から modifyItem が予約するまで（実測約 0.15 秒）にバッジの差分配信が入る場合。② 他の端末が同じ時間帯にその file を変え、マニフェストの差分が旧 item を再通知する場合。どちらも起きれば同じ詰まりになる。抜け出す手段は 2 手だけ試した: `fileproviderctl check`（読み取り専用）では詰まった item が `item_throttled_side_b` として出る / ローカルのファイルへの `touch` は効かない（mtime の変更は modifyItem に届いて受理されるが、旧名へ戻す処理は残る）。**ローカルの改名後のファイルを削除すると、fileproviderd が旧 item の deleteItem を送って数秒で収束する**（Issue のコメント・再現の両方で確認）。`fileproviderctl repair` はドメイン全体の DB に手を入れるため未検証。拡張側から抜け出させる手段（`reimportItems` 等）は未調査。
 
