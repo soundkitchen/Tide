@@ -80,12 +80,54 @@ struct ExtensionServices: Sendable {
     /// 初回リフレッシュ（プロセス起動後まだ didChange が来ていない場合の遅延観測）が共用。
     /// 問い合わせ失敗は何もしない（バッジ更新を見送るだけ・安全側）。
     func refreshMaterializedObservation() async {
+        let query = await materializedObserver.beginQuery()
         guard let live = await queryMaterializedFilePaths() else { return }
-        await materializedObserver.update(live)
+        await materializedObserver.update(live, query: query)
         let reported = await materializedReported.snapshot()
         if live != reported {
             signalWorkingSet()
         }
+    }
+
+    /// Finder へ伝え済みの実体化済みファイル（Issue #138）= 報告済み + 返却 item で伝えた分。
+    /// 読み取り経路（item(for:) / enumerateItems / 書込コールバックの返却 item）のファイルの
+    /// フラグはこれで引く。dir のフラグは報告済みだけで数える（`BadgeFlags`）。
+    func toldMaterialized() async -> (reported: Set<String>, pendingReturned: Set<String>) {
+        let reported = await materializedReported.snapshot()
+        let pending = await materializedObserver.ledgerSnapshot().pending
+        return (reported, pending)
+    }
+
+    /// 内容がローカルにあるファイルを返却 item で返すときの実体化フラグ（Issue #138）。
+    /// 次の差分配信で報告に入る（上限の内側の）ときだけ true にし、台帳に記録する — 記録しないと
+    /// 観測が来るまでの差分配信が同じ item をフラグなしで再送し、版が変わる（バッジのちらつき）。
+    func returnedMaterializedFlag(for path: String) async -> Bool {
+        let reported = await materializedReported.snapshot()
+        let frozen = await exclusionCleanups.snapshot()
+        return await materializedObserver.noteReturnedIfFits(
+            path, reported: reported, frozen: frozen, cap: Self.materializedBadgeCap)
+    }
+
+    /// 返却 item のフラグを、台帳に記録せず伝え済みの状態のまま返す（Issue #138）。内容がまだ
+    /// ローカルに無い返却 item（modifyItem の競合でリモート版を取り直させる場合）に使う —
+    /// 記録すると、内容が来る前に点灯して報告まで進みうる（PR #142 レビュー指摘 8）。
+    func toldMaterializedFlag(for path: String) async -> Bool {
+        let told = await toldMaterialized()
+        return told.reported.contains(path) || told.pendingReturned.contains(path)
+    }
+
+    /// 単一ファイルの move に実体化バッジの状態（報告済み・live・返却分の台帳）を追従させる。
+    /// 単一ファイルの rename は id rebind で実体化ごと維持される（実機確定）ので live も動かす。
+    /// dir の move は配下が dataless になる（Phase 5-4 パスベース id の帰結）ので使わない。
+    func followMaterializedFileMove(from: String, to: String) async {
+        await materializedReported.renameSubtree(from: from, to: to)
+        await materializedObserver.renameSubtree(from: from, to: to)
+    }
+
+    /// 削除に実体化バッジの状態（報告済み・live・返却分の台帳）を追従させる。
+    func followMaterializedRemoval(at path: String) async {
+        await materializedReported.removeSubtree(at: path)
+        await materializedObserver.removeSubtree(at: path)
     }
 
     /// 共有設定から構築する。未セットアップ / 認証情報なしなら nil

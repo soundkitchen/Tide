@@ -41,6 +41,77 @@ public enum MaterializedBadge {
         return Set(live.sorted().prefix(max(cap, 0)))
     }
 
+    /// working set の差分配信で報告する集合（Issue #138）。除外名への改名で後片付けを予約した
+    /// path（`frozen` = 自身か祖先が予約中）のバッジは、Finder へ伝え済みの状態（`told`）のまま
+    /// 据え置く — 予約から後片付けの削除までの間に旧 item の版を変えて再通知すると、fileproviderd が
+    /// 旧名をディスクへ戻そうとして失敗し続け、後片付けが来なくなる。凍結した分は上限より優先して
+    /// 残し、それ以外を残りの枠で `cappedReport` と同じ昇順 prefix に切り詰める（凍結を切り詰めの
+    /// 前にかけると、上限ちょうどのとき凍結した path が切り落とされて消灯が配られる = PR #142
+    /// レビュー指摘 1）。
+    public static func pinnedReport(
+        live: Set<String>, told: Set<String>, frozen: Set<String>, cap: Int
+    ) -> Set<String> {
+        guard !frozen.isEmpty else { return cappedReport(live: live, cap: cap) }
+        let pinned = told.filter { isFrozen($0, frozen: frozen) }
+        let rest = live.filter { !isFrozen($0, frozen: frozen) }
+        return cappedReport(live: rest, cap: cap - pinned.count).union(pinned)
+    }
+
+    /// 書込・実体化コールバック（createItem / modifyItem / fetchContents）の返却 item に実体化
+    /// フラグを付けてよいか（Issue #138）。伝え済みの集合（`reported` + `pendingReturned`）に
+    /// `path` を足して `pinnedReport` を取ったときに `path` が残るか、と同じ規則。上限の外の
+    /// パスに付けると、直後の差分配信が切り詰めで外したフラグで同じ item を再送し、版が変わる
+    /// （= バッジのちらつき）。その再送がローカルの除外名への改名と重なると、fileproviderd が
+    /// 旧名をディスクへ戻そうとして失敗し続け、後片付けの削除が来なくなる。
+    /// 伝え済みの集合は上限を超えうる（返却分が足される）ので、「報告済みなら残る」とはせず、
+    /// `path` より前に並ぶ凍結外のパスの数で決める。凍結中の path は伝え済みの状態のまま。
+    public static func fitsReport(
+        path: String, reported: Set<String>, pendingReturned: Set<String> = [],
+        frozen: Set<String> = [], cap: Int
+    ) -> Bool {
+        if !frozen.isEmpty, isFrozen(path, frozen: frozen) {
+            return reported.contains(path) || pendingReturned.contains(path)
+        }
+        var slots = cap
+        var before = 0
+        func count(_ other: String) {
+            if !frozen.isEmpty, isFrozen(other, frozen: frozen) {
+                slots -= 1
+            } else if other < path {
+                before += 1
+            }
+        }
+        for other in reported { count(other) }
+        for other in pendingReturned where !reported.contains(other) { count(other) }
+        return before < slots
+    }
+
+    /// `path` が凍結中か（自身か祖先が後片付けの予約に入っている）。フォルダを除外名へ改名した
+    /// ときは旧フォルダの path を予約するので、配下のファイルもまとめて凍結する（PR #142
+    /// レビュー指摘 2）。
+    public static func isFrozen(_ path: String, frozen: Set<String>) -> Bool {
+        if frozen.contains(path) { return true }
+        var ancestor = Substring(path)
+        while let slash = ancestor.lastIndex(of: "/") {
+            ancestor = ancestor[..<slash]
+            if frozen.contains(String(ancestor)) { return true }
+        }
+        return false
+    }
+
+    /// `path` が `root` 自身かその配下か。
+    fileprivate static func isInSubtree(_ path: String, of root: String) -> Bool {
+        path == root || path.hasPrefix(root + "/")
+    }
+
+    /// `path` を `from` → `to` の subtree 移動に追従させる（`from` の外なら nil）。
+    fileprivate static func renamed(_ path: String, from: String, to: String) -> String? {
+        if path == from { return to }
+        let prefix = from + "/"
+        guard path.hasPrefix(prefix) else { return nil }
+        return to + "/" + path.dropFirst(prefix.count)
+    }
+
     /// バッジ変化として didUpdate に載せるべきパス。
     /// - files: reported と newReport の対称差のうち**新ツリーに実在するファイルのみ**
     ///   （消えたファイルはマニフェスト diff の delete 側が処理する = ここで update を出すと
@@ -54,10 +125,12 @@ public enum MaterializedBadge {
     ///   （消えた dir はマニフェスト diff の delete 側が処理する）。
     public static func changedPaths(
         oldFilePaths: [String], newFilePaths: [String],
-        previousReported: Set<String>, newReport: Set<String>
+        previousReported: Set<String>, newReport: Set<String>,
+        pendingReturned: Set<String> = []
     ) -> (files: Set<String>, directories: Set<String>) {
         ChangeContext(
-            oldFilePaths: oldFilePaths, newFilePaths: newFilePaths, previousReported: previousReported
+            oldFilePaths: oldFilePaths, newFilePaths: newFilePaths, previousReported: previousReported,
+            pendingReturned: pendingReturned
         ).changedPaths(newReport: newReport)
     }
 
@@ -67,7 +140,9 @@ public enum MaterializedBadge {
     public struct ChangeContext: Sendable {
         private let newFilePaths: [String]
         private let newFileSet: Set<String>
-        private let previousReported: Set<String>
+        /// Finder へ伝え済みのファイル（previousReported + pendingReturned）。ファイルの差分と
+        /// `partialReport` の起点はこちら。
+        private let told: Set<String>
         private let dirsBefore: Set<String>
         private let currentDirs: Set<String>
 
@@ -76,13 +151,17 @@ public enum MaterializedBadge {
         ///   これらの dir の「前」は旧ツリーではなく新ツリー基準で数える（PR #132 レビュー B1:
         ///   旧ツリー基準のままだと、途中で配った状態と最後の報告集合の状態が食い違っても反転と
         ///   判定されず、配り直されずに固着する）。
+        /// - Parameter pendingReturned: 書込・実体化コールバックの返却 item で「実体化済み」と
+        ///   伝えたが、まだ previousReported に畳み込んでいないファイル（Issue #138）。ファイルは
+        ///   伝え済みとして数える（再送しない）。dir は返却 item で伝えていないので、dirsBefore は
+        ///   previousReported だけで数える。
         public init(
             oldFilePaths: [String], newFilePaths: [String], previousReported: Set<String>,
-            deliveredDirectories: Set<String> = []
+            deliveredDirectories: Set<String> = [], pendingReturned: Set<String> = []
         ) {
             self.newFilePaths = newFilePaths
             self.newFileSet = Set(newFilePaths)
-            self.previousReported = previousReported
+            self.told = previousReported.union(pendingReturned)
             let beforeOld = MaterializedBadge.checkedDirectories(
                 filePaths: oldFilePaths, materialized: previousReported)
             if deliveredDirectories.isEmpty {
@@ -98,7 +177,7 @@ public enum MaterializedBadge {
 
         /// 報告集合を `newReport` に進めたときに didUpdate へ載せるべきパス（意味は `changedPaths`）。
         public func changedPaths(newReport: Set<String>) -> (files: Set<String>, directories: Set<String>) {
-            let files = newFileSet.intersection(previousReported.symmetricDifference(newReport))
+            let files = newFileSet.intersection(told.symmetricDifference(newReport))
             let dirsAfter = MaterializedBadge.checkedDirectories(
                 filePaths: newFilePaths, materialized: newReport)
             return (files, dirsBefore.symmetricDifference(dirsAfter).intersection(currentDirs))
@@ -106,11 +185,12 @@ public enum MaterializedBadge {
 
         /// バッジ差分を 1 回で配りきれないときの「途中まで進めた報告集合」（Issue #131）と、
         /// そのとき配るパス。`changedPaths`（files + directories）の件数が `budget` 以内に収まるよう、
-        /// previousReported から newReport へ向けて**先頭 k 件の切り替えだけ**進める。全体が budget
-        /// 以内なら newReport そのもの。
+        /// 伝え済みの集合（previousReported + pendingReturned）から newReport へ向けて**先頭 k 件の
+        /// 切り替えだけ**進める。全体が budget 以内なら newReport そのもの。
         /// - 切り替えは「外す方（パス昇順）→ 足す方（パス昇順）」の順に進める（PR #132 レビュー B2）:
-        ///   途中の集合が previousReported と newReport の大きい方を超えない = レジストリ上限
-        ///   （`materializedBadgeCap`）を超えない。超えると `replace(with:)` の切り詰めで、Finder に
+        ///   途中の集合が伝え済みの集合と newReport の大きい方を超えない = レジストリ上限
+        ///   （`materializedBadgeCap`）を超えない（伝え済みの集合は返却分で上限を超えうるが、
+        ///   超えた分は外す方の切り替えに含まれ、先に進む）。超えると `replace(with:)` の切り詰めで、Finder に
         ///   報告した集合と永続化した集合が食い違い、外す通知を配っていないパスのバッジが固着する。
         /// - k は budget から半分ずつ減らして探す（1 ファイルで dir の反転が祖先ぶん増えうるため）。
         ///   k = 1 でも超える場合はそのまま返す（上限は推奨サイズの 100 倍なので、祖先 dir ぶんの
@@ -124,13 +204,13 @@ public enum MaterializedBadge {
             if full.files.count + full.directories.count <= budget {
                 return (newReport, full.files, full.directories)
             }
-            let removals = previousReported.subtracting(newReport).sorted()
-            let additions = newReport.subtracting(previousReported).sorted()
+            let removals = told.subtracting(newReport).sorted()
+            let additions = newReport.subtracting(told).sorted()
             let toggles = removals + additions
             guard !toggles.isEmpty else { return (newReport, full.files, full.directories) }
             var k = max(1, min(budget, toggles.count))
             while true {
-                var partial = previousReported
+                var partial = told
                 for path in toggles.prefix(k) {
                     if newReport.contains(path) {
                         partial.insert(path)
@@ -145,6 +225,93 @@ public enum MaterializedBadge {
                 k /= 2
             }
         }
+    }
+
+    /// 返却 item で「実体化済み」と伝えたファイルの台帳（Issue #138）。
+    ///
+    /// createItem / modifyItem / fetchContents は内容がローカルにあるので、返却 item に実体化
+    /// フラグを付ける。ところが fileproviderd の実体化セット（live）の観測はその後になるため、
+    /// 観測が来るまでの差分配信は同じ item をフラグなしで再送し、版が変わる（バッジのちらつき）。
+    /// 台帳は返したパスを 2 つの役目で持つ:
+    /// - **未確認**（返したあとに始まった観測がまだ反映されていない）: live に足して扱う。
+    /// - **未畳み込み**（報告済み集合 reported にまだ入っていない）: Finder へ伝え済みとして扱う
+    ///   （`ChangeContext` の pendingReturned）。
+    /// 確認済みのエントリは、報告点（working set の enumerateChanges）が reported を前進させたときに
+    /// 畳み込んで外す。観測で確認しただけで外すと、返した直後に退避されたファイルの消灯を
+    /// 配らないまま reported と食い違い、バッジが残る。
+    public struct ReturnLedger: Sendable, Equatable {
+        /// path → 返したときまでに始まっていた観測の数
+        private var entries: [String: UInt64] = [:]
+        private var queriesStarted: UInt64 = 0
+        private var lastApplied: UInt64 = 0
+
+        public init() {}
+
+        /// 返却 item に実体化フラグを付けて返した。
+        public mutating func noteReturned(_ path: String) {
+            entries[path] = queriesStarted
+        }
+
+        /// 実体化セットの観測を始める。返値は `shouldApply` に渡す番号。
+        public mutating func beginQuery() -> UInt64 {
+            queriesStarted += 1
+            return queriesStarted
+        }
+
+        /// 観測の結果を live に反映してよいか（後から始まった観測が先に反映されていたら false）。
+        /// true のとき、この観測より前に返したエントリは確認済みになる。
+        public mutating func shouldApply(query: UInt64) -> Bool {
+            guard query > lastApplied else { return false }
+            lastApplied = query
+            return true
+        }
+
+        /// 未畳み込みの全パス（Finder へ伝え済みとして扱う）。
+        public var pending: Set<String> { Set(entries.keys) }
+
+        /// 未確認のパス（live に足して扱う）。
+        public var unconfirmed: Set<String> {
+            Set(entries.compactMap { $0.value >= lastApplied ? $0.key : nil })
+        }
+
+        /// 報告点で畳み込むときの印。`fold(_:)` に渡す。
+        public var confirmedMarks: [String: UInt64] {
+            entries.filter { $0.value < lastApplied }
+        }
+
+        /// `confirmedMarks` を取ったあと reported を前進させたので、その確認済みエントリを外す。
+        /// 取ったあとに同じパスを返し直していたら（印が変わっていたら）残す。
+        public mutating func fold(_ marks: [String: UInt64]) {
+            for (path, mark) in marks where entries[path] == mark {
+                entries[path] = nil
+            }
+        }
+
+        /// subtree の移動に追従する（reported の `renameSubtree` と揃える）。
+        public mutating func renameSubtree(from: String, to: String) {
+            var next: [String: UInt64] = [:]
+            for (path, mark) in entries {
+                next[MaterializedBadge.renamed(path, from: from, to: to) ?? path] = mark
+            }
+            entries = next
+        }
+
+        /// subtree の削除に追従する（reported の `removeSubtree` と揃える）。
+        public mutating func removeSubtree(at root: String) {
+            entries = entries.filter { !MaterializedBadge.isInSubtree($0.key, of: root) }
+        }
+    }
+
+    /// live 集合を subtree の移動に追従させる（`ReturnLedger.renameSubtree` と同じ規則）。
+    public static func renamingSubtree(
+        _ paths: Set<String>, from: String, to: String
+    ) -> Set<String> {
+        Set(paths.map { renamed($0, from: from, to: to) ?? $0 })
+    }
+
+    /// live 集合から subtree を除く（`ReturnLedger.removeSubtree` と同じ規則）。
+    public static func removingSubtree(_ paths: Set<String>, at root: String) -> Set<String> {
+        paths.filter { !isInSubtree($0, of: root) }
     }
 
     /// filePaths の祖先 dir 全集合（= 配下に 1 ファイル以上ある dir。ルート `""` は含まない）。

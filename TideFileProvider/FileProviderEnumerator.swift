@@ -126,10 +126,10 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @uncheck
                     AppLogger.fileProvider.notice("enumerateItems: working set finished (\(nodes.count) items)")
                 }
                 if !page.items.isEmpty {
-                    // 実体化バッジ（Issue #65）: 列挙 item は報告済み集合基準のフラグ付き。
+                    // 実体化バッジ（Issue #65）: 列挙 item は伝え済み（報告済み + 返却分）基準のフラグ付き。
                     // ここは読み取り専用（レジストリの前進は working set の enumerateChanges のみ）。
-                    let reported = await services.materializedReported.snapshot()
-                    let flags = BadgeFlags(tree: pinned.tree, reported: reported)
+                    let told = await services.toldMaterialized()
+                    let flags = BadgeFlags(tree: pinned.tree, told: told)
                     boxed.value.didEnumerate(page.items.map(flags.item))
                 }
                 lastServedAnchor.withLock { $0 = pinned.anchor }
@@ -244,10 +244,11 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @uncheck
 
                 if let next = batch.nextOffset {
                     // 途中のバッチ: マニフェストの差分だけを配る。バッジ（報告済み集合）は動かさない
-                    // （最後のバッチでまとめて計算する）ので、item のフラグも今の報告済み集合基準。
+                    // （最後のバッチでまとめて計算する）ので、item のフラグも今の伝え済み（報告済み +
+                    // 返却分）基準。
                     if !batch.updated.isEmpty {
-                        let reported = await services.materializedReported.snapshot()
-                        let flags = BadgeFlags(tree: target.tree, reported: reported)
+                        let told = await services.toldMaterialized()
+                        let flags = BadgeFlags(tree: target.tree, told: told)
                         boxed.value.didUpdate(batch.updated.map(flags.item))
                     }
                     AppLogger.fileProvider.notice("enumerateChanges: batch \(batch.updated.count) updated / \(batch.deleted.count) deleted (more coming)")
@@ -265,7 +266,12 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @uncheck
                 // **報告点（reported の前進）は working set（dirPath == nil）のみ** — コンテナ
                 // enumerator が消費すると working set 経由の配信が空振りしてバッジが固着する。
                 // anchor（マニフェスト世代）意味論とは独立の eventual（docs/09 の設計判断）。
+                // 返却 item で「実体化済み」と伝えた分（Issue #138・`ReturnLedger`）は、ファイルは
+                // 伝え済みとして数え、まだ観測で確認できていなければ live にも足す。
                 let reported = await services.materializedReported.snapshot()
+                let ledger = await services.materializedObserver.ledgerSnapshot()
+                let pendingReturned = ledger.pending
+                let told = reported.union(pendingReturned)
                 var newReport = reported
                 var badgeFiles: Set<String> = []
                 var badgeDirs: Set<String> = []
@@ -278,10 +284,16 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @uncheck
                         let refreshServices = services
                         Task { await refreshServices.refreshMaterializedObservation() }
                     }
-                    let live = await services.materializedObserver.current() ?? reported
+                    let live = (await services.materializedObserver.current() ?? reported)
+                        .union(ledger.unconfirmed)
                     let filePaths = target.tree.filePaths
-                    let fullReport = MaterializedBadge.cappedReport(
-                        live: live.intersection(filePaths),
+                    // 除外名への改名で後片付けを予約した path（フォルダなら配下ごと）はバッジを
+                    // 伝え済みのまま凍結する（Issue #138: 予約から後片付けの削除までに旧 item の版を
+                    // 変えて再通知すると、fileproviderd が旧名をディスクへ戻そうとして失敗し続け、
+                    // 後片付けが来ない）。凍結した分は上限より優先して残す。
+                    let frozen = await services.exclusionCleanups.snapshot()
+                    let fullReport = MaterializedBadge.pinnedReport(
+                        live: live.intersection(filePaths), told: told, frozen: frozen,
                         cap: ExtensionServices.materializedBadgeCap
                     )
                     // dirsBefore は origin（= Finder が最後に見た世代）のツリー基準で計算する
@@ -299,7 +311,7 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @uncheck
                     let context = MaterializedBadge.ChangeContext(
                         oldFilePaths: target.anchor == originAnchor ? filePaths : originFilePaths,
                         newFilePaths: filePaths, previousReported: reported,
-                        deliveredDirectories: deliveredDirectories)
+                        deliveredDirectories: deliveredDirectories, pendingReturned: pendingReturned)
                     // 1 回で配る件数をバッチの大きさ（推奨バッチサイズの 10 倍）に収める（Issue #131）。
                     // マニフェストの差分を配った残りの枠でバッジを進め、残りは自己 signal で次の
                     // enumerateChanges に回す。
@@ -308,15 +320,17 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @uncheck
                         (newReport, badgeFiles, badgeDirs) = context.partialReport(
                             newReport: fullReport, budget: budget)
                     } else {
-                        newReport = reported
-                        (badgeFiles, badgeDirs) = context.changedPaths(newReport: reported)
+                        newReport = told
+                        (badgeFiles, badgeDirs) = context.changedPaths(newReport: told)
                     }
                     badgeDeferred = newReport != fullReport
                 }
-                // item 構築は常に newReport 基準（非 working set では newReport == reported）。
+                // item 構築は working set では newReport 基準、非 working set では伝え済み基準。
                 // マニフェスト diff で再配信される item にも正しいバッジを載せるため、フラグの
                 // 基準を didUpdate 全体で 1 つに揃える。
-                let flags = BadgeFlags(tree: target.tree, reported: newReport)
+                let flags = isWorkingSet
+                    ? BadgeFlags(tree: target.tree, reported: newReport)
+                    : BadgeFlags(tree: target.tree, reported: reported, pendingReturned: pendingReturned)
 
                 // バッジ差分のみの item（マニフェスト diff に載っていない path）を合流させる。
                 let updatedPaths = Set(batch.updated.map(\.path))
@@ -354,6 +368,14 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @uncheck
                 // 同値なら内部で no-op。
                 if isWorkingSet {
                     await services.materializedReported.replace(with: newReport)
+                    // 観測で確認済みの返却分は newReport に反映済みなので台帳から外す（Issue #138）。
+                    // ただし newReport に入れたのに replace の上限で切り詰められた分は、伝え済み
+                    // （点灯で配った）なのに reported に残っていないので、台帳に残す（外すと伝え済みの
+                    // 集合から落ち、次の配信で消灯を配らないまま食い違う = PR #142 レビュー指摘 7）。
+                    let persisted = await services.materializedReported.snapshot()
+                    await services.materializedObserver.fold(ledger.confirmedMarks.filter {
+                        persisted.contains($0.key) || !newReport.contains($0.key)
+                    })
                     if badgeDeferred {
                         // 配りきれなかったバッジは次の enumerateChanges で配る（Issue #131）。
                         services.signalWorkingSet()

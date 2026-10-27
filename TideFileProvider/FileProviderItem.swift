@@ -142,19 +142,32 @@ final class FileProviderItem: NSObject, NSFileProviderItem, NSFileProviderItemDe
 final class BadgeFlags {
     private let tree: ManifestTree
     private let reported: Set<String>
+    private let pendingReturned: Set<String>
     private lazy var checkedDirs: Set<String> = MaterializedBadge.checkedDirectories(
         filePaths: tree.filePaths, materialized: reported)
 
     /// - Parameter reported: Finder へ報告する（した）実体化済みファイルパス集合。
     ///   working set の enumerateChanges では newReport、読み取り経路では
     ///   `materializedReported.snapshot()` を渡す。
-    init(tree: ManifestTree, reported: Set<String>) {
+    /// - Parameter pendingReturned: 返却 item で「実体化済み」と伝えたが reported にまだ
+    ///   畳み込んでいないファイル（Issue #138・`ExtensionServices.toldMaterialized()`）。
+    ///   ファイルのフラグにだけ足す — dir は返却 item で伝えていないので reported だけで数える
+    ///   （足すと、報告点の dir 反転の基準 = reported と食い違ったチェックを配り、固着しうる）。
+    init(tree: ManifestTree, reported: Set<String>, pendingReturned: Set<String> = []) {
         self.tree = tree
         self.reported = reported
+        self.pendingReturned = pendingReturned
+    }
+
+    convenience init(
+        tree: ManifestTree, told: (reported: Set<String>, pendingReturned: Set<String>)
+    ) {
+        self.init(tree: tree, reported: told.reported, pendingReturned: told.pendingReturned)
     }
 
     func isOn(_ node: ManifestTree.Node) -> Bool {
-        node.isDirectory ? checkedDirs.contains(node.path) : reported.contains(node.path)
+        if node.isDirectory { return checkedDirs.contains(node.path) }
+        return reported.contains(node.path) || pendingReturned.contains(node.path)
     }
 
     func item(_ node: ManifestTree.Node) -> FileProviderItem {

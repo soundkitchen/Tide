@@ -5,12 +5,22 @@ import TideCore
 /// 実体化バッジ（Issue #65）: fileproviderd から最後に観測した live 集合（実体化済みファイル
 /// パス）の置き場。**メモリのみ**（拡張プロセスは短命だが、live は OS からいつでも全量を
 /// 再取得できる真実なので永続化しない。永続化するのは「報告済み」= `PersistedPathSet` の側だけ）。
+/// 返却 item で「実体化済み」と伝えたファイルの台帳（Issue #138・`MaterializedBadge.ReturnLedger`）
+/// も同じ actor に置く — 観測の番号と台帳の確認を同じ順序で進めるため。
 actor MaterializedObserver {
     private var live: Set<String>?
     private var initialRefreshStarted = false
+    private var ledger = MaterializedBadge.ReturnLedger()
 
-    /// `materializedItemsDidChange` / 初回リフレッシュが観測した live 集合を置く。
-    func update(_ paths: Set<String>) {
+    /// 実体化セットの観測を始める。返値は `update(_:query:)` に渡す。
+    func beginQuery() -> UInt64 {
+        ledger.beginQuery()
+    }
+
+    /// `materializedItemsDidChange` / 初回リフレッシュが観測した live 集合を置く。後から始まった
+    /// 観測が先に反映されていたら捨てる（古い集合で live を戻さない）。
+    func update(_ paths: Set<String>, query: UInt64) {
+        guard ledger.shouldApply(query: query) else { return }
         live = paths
     }
 
@@ -18,6 +28,44 @@ actor MaterializedObserver {
     /// 呼び出し側は reported へフォールバックする（= 差分なし扱い・eventual）。
     func current() -> Set<String>? {
         live
+    }
+
+    /// 返却 item に実体化フラグを付けてよいかを決め、付けるなら台帳に記録する（Issue #138）。
+    /// 判定（伝え済みの集合 = `reported` + 台帳）と記録を同じ actor の 1 回の呼び出しで行う —
+    /// 分けると、上限の手前で並行したコールバックがどれも「入る」と判定して上限を超え、
+    /// 超えた分が差分配信でフラグなしに再送される（PR #142 レビュー指摘 4）。
+    func noteReturnedIfFits(
+        _ path: String, reported: Set<String>, frozen: Set<String>, cap: Int
+    ) -> Bool {
+        guard MaterializedBadge.fitsReport(
+            path: path, reported: reported, pendingReturned: ledger.pending,
+            frozen: frozen, cap: cap)
+        else { return false }
+        ledger.noteReturned(path)
+        return true
+    }
+
+    /// 台帳の今の状態（Issue #138）。報告点は `fold(_:)` に `confirmedMarks` を渡して畳み込む。
+    func ledgerSnapshot() -> MaterializedBadge.ReturnLedger {
+        ledger
+    }
+
+    /// 報告点が reported を前進させたので、確認済みの返却分を畳み込む（Issue #138）。
+    func fold(_ marks: [String: UInt64]) {
+        ledger.fold(marks)
+    }
+
+    /// 単一ファイルの move に追従する（reported の `renameSubtree` と揃える。追従しないと、次の
+    /// 観測までの差分配信が移動先を未実体化として再送し、版が変わる = Issue #138 のちらつき）。
+    func renameSubtree(from: String, to: String) {
+        live = live.map { MaterializedBadge.renamingSubtree($0, from: from, to: to) }
+        ledger.renameSubtree(from: from, to: to)
+    }
+
+    /// 削除に追従する（reported の `removeSubtree` と揃える）。
+    func removeSubtree(at path: String) {
+        live = live.map { MaterializedBadge.removingSubtree($0, at: path) }
+        ledger.removeSubtree(at: path)
     }
 
     /// 初回リフレッシュ（enumerateChanges 契機の遅延観測）を開始してよいか。一度きり true。
