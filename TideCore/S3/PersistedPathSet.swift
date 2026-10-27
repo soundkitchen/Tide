@@ -98,6 +98,14 @@ public actor PersistedPathSet {
         persist()
     }
 
+    /// `path` のエントリだけを外す（配下・祖先には触れない）。
+    public func remove(_ path: String) {
+        loadIfNeeded()
+        if paths.remove(path) != nil {
+            persist()
+        }
+    }
+
     /// `path` を加え、ディスクにも保存できたときだけ true を返す（#120 F1・フォルダ単位除外の
     /// 予約用）。拡張の再起動を跨いで効く保証が要る用途のための `add`:
     /// - 上限超過・保存先の無い縮退時（fileURL nil）は加えずに false

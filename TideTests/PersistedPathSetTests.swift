@@ -73,6 +73,25 @@ final class PersistedPathSetTests: XCTestCase {
         XCTAssertTrue(results.sibling)
     }
 
+    /// 単一エントリの除去（Issue #138・フォルダの後片付けを断ったとき）: 配下・祖先は残る。
+    func testRemoveSingleEntryKeepsOthers() async {
+        let registry = PersistedPathSet(bucket: "b", fileURL: nil, epoch: nil)
+        await registry.add("a")
+        await registry.add("a/b")
+        await registry.add("a/b/c.key")
+
+        await registry.remove("a/b")
+
+        let results = await (
+            a: registry.contains("a"),
+            ab: registry.contains("a/b"),
+            descendant: registry.contains("a/b/c.key")
+        )
+        XCTAssertTrue(results.a)
+        XCTAssertFalse(results.ab)
+        XCTAssertTrue(results.descendant)
+    }
+
     func testPersistenceRoundtrip() async {
         let url = tempURL()
         defer { try? FileManager.default.removeItem(at: url) }

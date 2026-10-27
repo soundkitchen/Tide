@@ -883,8 +883,10 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                         // 凍結する（Issue #138・PR #142 レビュー指摘 2: 配下の旧 item を版を変えて
                         // 再通知すると、ファイルの改名と同じく後片付けが来なくなりうる）。予約は
                         // 旧フォルダの path 1 件（凍結は祖先一致 = `MaterializedBadge.isFrozen`）。
-                        // ファイルの deleteItem の受理判定は path の完全一致なので、配下の判定は変わらない。
-                        await services.exclusionCleanups.add(oldPath)
+                        // ファイルの後片付け予約（受理根拠）とは別の集合に積む（PR #143 レビュー指摘 1）。
+                        // 同じ名前のフォルダが作り直されても外さない — 旧フォルダの後片付けの前に
+                        // 凍結が解けると同じ詰まりが起こりうる（同 指摘 2）。
+                        await services.dirCleanupFreezes.add(oldPath)
                         completion.value(nil, [], false, NSFileProviderError(.excludedFromSync))
                         return
                     }
@@ -1172,6 +1174,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                         await services.virtualDirs.removeSubtree(at: dirPath)
                         await services.dirExclusionHolds.removeSubtree(at: dirPath)
                         await services.exclusionCleanups.removeSubtree(at: dirPath)
+                        await services.dirCleanupFreezes.removeSubtree(at: dirPath)
                         // 実体化バッジ: 消えた subtree を報告済み・live・台帳から外す（PR #142
                         // レビュー指摘 9）。
                         await services.followMaterializedRemoval(at: dirPath)
@@ -1180,6 +1183,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     case .notEmpty:
                         // 非再帰削除で中身がある → SDK 契約どおり DirectoryNotEmpty
                         //（システムが dir を最新メタデータから再作成する）。
+                        // フォルダの凍結予約（Issue #138）も外す（下の `.rejected` と同じ理由）。
+                        await services.releaseDirCleanupFreeze(at: dirPath)
                         dirCompletion.value(NSFileProviderError(.directoryNotEmpty))
                         return
                     case .deleteRemote:
@@ -1192,8 +1197,9 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                             type: .delete, path: dirPath, message: "Deleted folder (\(count) files)")
                         await services.virtualDirs.removeSubtree(at: dirPath)
                         await services.dirExclusionHolds.removeSubtree(at: dirPath)
-                        // フォルダを除外名へ改名したときの後片付け予約（Issue #138）を外す。
+                        // フォルダを除外名へ改名したときの後片付け予約・凍結予約（Issue #138）を外す。
                         await services.exclusionCleanups.removeSubtree(at: dirPath)
+                        await services.dirCleanupFreezes.removeSubtree(at: dirPath)
                         // 実体化バッジ（Issue #65）: 消えた subtree の報告済みエントリも掃除
                         await services.followMaterializedRemoval(at: dirPath)
                         dirCompletion.value(nil)
@@ -1217,6 +1223,11 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                         await services.events.append(
                             type: .info, path: dirPath,
                             message: "Delete rejected (remote changed under folder)")
+                        // フォルダの凍結予約（Issue #138）は外す — システムは旧フォルダをリモートの内容で
+                        // 作り直し（createItem は来ない）、残すとその配下のバッジが凍結されたままになる。
+                        // 凍結予約は削除の受理判定に使わないので、外しても判定は変わらない（ファイルの
+                        // 後片付け予約は別の集合 = 再送された後片付けの受理根拠のまま残る）。
+                        await services.releaseDirCleanupFreeze(at: dirPath)
                         dirCompletion.value(NSFileProviderError(.directoryNotEmpty))
                     }
                 } catch {
