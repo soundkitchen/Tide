@@ -44,6 +44,52 @@ final class PathValidatorTests: XCTestCase {
         XCTAssertThrowsError(try PathValidator.validateRelativePath("a/"))
     }
 
+    /// `/` や `\` の直後に結合文字（U+0301）を付けて、書記素単位の判定から区切りや禁止文字を
+    /// 隠したパス（#137）。バイト単位で見れば各ゲートに掛かるので、すべて拒否する。
+    func testRejectsSeparatorsHiddenByCombiningCharacter() {
+        let accent = "\u{301}"
+        // バイト単位では ".." がある
+        XCTAssertThrowsError(try PathValidator.validateRelativePath("a/../\(accent)b"))
+        XCTAssertThrowsError(try PathValidator.validateRelativePath("a/./\(accent)b"))
+        // 先頭の "/" = 絶対パス
+        XCTAssertThrowsError(try PathValidator.validateRelativePath("/\(accent)etc/passwd"))
+        // バックスラッシュ
+        XCTAssertThrowsError(try PathValidator.validateRelativePath("a\\\(accent)b"))
+        // 空要素
+        XCTAssertThrowsError(try PathValidator.validateRelativePath("a//\(accent)b"))
+        // 区切りと結合文字が 1 つの書記素になっているだけのパスも拒否（下流の書記素単位の分割とずれるため）
+        XCTAssertThrowsError(try PathValidator.validateRelativePath("a/\(accent)b"))
+    }
+
+    /// 結合文字そのものは普通のファイル名に含まれる（NFD の濁点・アクセント）。区切りの直後でなければ通す。
+    func testAcceptsCombiningCharactersInsideComponents() throws {
+        try PathValidator.validateRelativePath("caf\u{65}\u{301}/menu.txt")      // NFD の é
+        try PathValidator.validateRelativePath("\u{304B}\u{3099}/\u{304B}\u{3099}.txt")  // NFD の「が」
+        try PathValidator.validateRelativePath("a/.\u{301}")                       // "." ではない名前
+    }
+
+    /// 区切りの `/` が前後の文字と 1 つの書記素になる名前は、結合文字に限らず拒否する（PR #146 レビュー）。
+    /// 要素の先頭に Extend / SpacingMark / ZWJ が来る場合と、フォルダ名が Prepend 文字で終わる場合。
+    func testRejectsSeparatorFusedWithAdjacentCharacter() {
+        XCTAssertThrowsError(try PathValidator.validateRelativePath("docs/\u{1F3FD}notes.txt"))  // 肌色修飾子だけ
+        XCTAssertThrowsError(try PathValidator.validateRelativePath("docs/\u{FE0F}x"))           // 異体字セレクタ
+        XCTAssertThrowsError(try PathValidator.validateRelativePath("a/\u{200D}b"))              // ZWJ
+        XCTAssertThrowsError(try PathValidator.validateRelativePath("a/\u{093F}x"))              // デーヴァナーガリーの母音記号
+        XCTAssertThrowsError(try PathValidator.validateRelativePath("a\u{0600}/b"))              // Prepend で終わるフォルダ名
+    }
+
+    /// 絵文字で始まる普通の名前は通す（修飾子・セレクタ・ZWJ は基底文字の後に付いている）。
+    func testAcceptsNamesStartingWithEmoji() throws {
+        try PathValidator.validateRelativePath("docs/\u{1F44D}notes.txt")                        // 👍
+        try PathValidator.validateRelativePath("docs/\u{1F44D}\u{1F3FD}notes.txt")               // 👍🏽
+        try PathValidator.validateRelativePath("docs/\u{2764}\u{FE0F}memo.txt")                  // ❤️
+        try PathValidator.validateRelativePath("docs/\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467} family")  // 👨‍👩‍👧
+        try PathValidator.validateRelativePath("docs/\u{1F1EF}\u{1F1F5}trip")                    // 🇯🇵
+        try PathValidator.validateRelativePath("docs/1\u{FE0F}\u{20E3}first.txt")                // 1️⃣
+        try PathValidator.validateRelativePath("\u{1F4C1}/\u{1F44D}\u{1F3FD}x.txt")              // 📁/👍🏽
+        try PathValidator.validateRelativePath("a/\u{0915}\u{093F}.txt")                         // कि
+    }
+
     // MARK: - resolveSafely
 
     func testResolveSafelyAcceptsContainedPath() throws {

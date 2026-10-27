@@ -167,6 +167,8 @@ final class FileProviderWritePolicyTests: XCTestCase {
         XCTAssertNil(FileProviderWritePolicy.childPath(parentPath: "docs", filename: "a/b.txt"))
         XCTAssertNil(FileProviderWritePolicy.childPath(parentPath: "docs", filename: "/a.txt"))
         XCTAssertNil(FileProviderWritePolicy.childPath(parentPath: "docs", filename: "a\0.txt"))
+        // `/` の直後に結合文字を付けて書記素単位の判定から隠したネスト注入（#137）
+        XCTAssertNil(FileProviderWritePolicy.childPath(parentPath: "docs", filename: "a/\u{301}b.txt"))
     }
 
     // MARK: - 版スタンプ自動治癒の対象選定（Issue #93）

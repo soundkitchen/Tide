@@ -25,29 +25,54 @@ public enum PathValidator {
     /// - 先頭が `/` でない
     /// - NUL バイトを含まない
     /// - 各コンポーネントが `.` / `..` / 空ではない
-    /// - ハードコード除外 (`.tide`) に該当しない
+    /// - 区切りの `/` がすべて単独の書記素になっている（前後の文字と 1 つの書記素になっていない）
+    ///
+    /// 判定はすべて UTF-8 バイト単位で行う（#137）。Swift の `String` の操作（`split` / `hasPrefix` /
+    /// `contains`）は書記素単位なので、`/` や `\` の直後に結合文字（例 U+0301）が付くと区切りや
+    /// 禁止文字として見えなくなり、ファイルシステム（バイト単位）では `..` を含むパスが通ってしまう。
     public static func validateRelativePath(_ relativePath: String) throws {
-        guard !relativePath.isEmpty else {
+        let slash = UInt8(ascii: "/")
+        let bytes = relativePath.utf8
+        guard !bytes.isEmpty else {
             throw ValidationError.invalidRelativePath(relativePath, reason: "empty")
         }
-        guard !relativePath.hasPrefix("/") else {
+        guard bytes.first != slash else {
             throw ValidationError.invalidRelativePath(relativePath, reason: "absolute path")
         }
-        guard !relativePath.contains("\u{0}") else {
+        guard !bytes.contains(0) else {
             throw ValidationError.invalidRelativePath(relativePath, reason: "NUL byte")
         }
         // Windows 系区切りも弾く（POSIX 想定）
-        guard !relativePath.contains("\\") else {
+        guard !bytes.contains(UInt8(ascii: "\\")) else {
             throw ValidationError.invalidRelativePath(relativePath, reason: "backslash")
         }
-        for component in relativePath.split(separator: "/", omittingEmptySubsequences: false) {
-            let c = String(component)
-            if c.isEmpty {
+        let components = bytes.split(separator: slash, omittingEmptySubsequences: false)
+        for component in components {
+            if component.isEmpty {
                 throw ValidationError.invalidRelativePath(relativePath, reason: "empty component")
             }
-            if c == "." || c == ".." {
-                throw ValidationError.invalidRelativePath(relativePath, reason: "relative ref '\(c)'")
+            if component.elementsEqual(".".utf8) || component.elementsEqual("..".utf8) {
+                throw ValidationError.invalidRelativePath(
+                    relativePath, reason: "relative ref '\(String(decoding: component, as: UTF8.self))'"
+                )
             }
+        }
+        // 区切りの `/` がすべて単独の書記素であること（書記素として数えた `/` の数がバイトの数と同じ）。
+        // 下流（ManifestTree・機密網の照合・FP の item 組み立てなど）は書記素単位で
+        // `split(separator: "/")` するため、`/` が前後の文字と 1 つの書記素になっていると、検証と
+        // 実際の使い方で分け方が食い違う。そうなるのは次の場合で、いずれも拒否する（PR #146 レビュー）:
+        // - 要素が Extend / SpacingMark / ZWJ で始まる（結合文字 U+0301・肌色修飾子だけ・FE0F・
+        //   ZWJ・デーヴァナーガリーの母音記号など。`👍🏽` のように基底文字の後に付く普通の絵文字は通る）
+        // - フォルダ名が Prepend 文字（U+0600 など）で終わる
+        // 拒否されたパスは FP では excludedFromSync（ローカル温存・S3 非汚染）になる。バックスラッシュを
+        // 含む名前と同じ扱い。
+        let graphemeSlashCount = relativePath.reduce(into: 0) { count, character in
+            if character == "/" { count += 1 }
+        }
+        guard graphemeSlashCount == components.count - 1 else {
+            throw ValidationError.invalidRelativePath(
+                relativePath, reason: "separator combined with adjacent character"
+            )
         }
     }
 
