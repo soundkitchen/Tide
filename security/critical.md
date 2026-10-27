@@ -4,7 +4,17 @@
 
 **Status:** ✅ Fixed (2026-05-24) — `Tide/Core/PathValidator.swift` を新設。`Downloader.download` / `applyRemoteDeletion` / `renameLocalForConflict`、`SyncEngine.reconcileRemoteEntry` / `performFullScan`、`Uploader.processUpload` / `processDelete` の各入口で `validateRelativePath` + `resolveSafely` を呼び、`..` / 絶対パス / NUL / バックスラッシュ / 空コンポーネントを拒否し、解決後 URL が `syncRoot` 配下に収まることも検証する。`ManifestReader.read` が manifest のキーを取り込む前にも検証する。
 
-**Status（2026-10-28・#137）: `validateRelativePath` の判定を UTF-8 バイト単位に修正（多層防御）**。それまでは Swift の `String` 操作（`split(separator: "/")` / `hasPrefix("/")` / `contains("\\")`）が書記素単位で、`/` や `\` の直後に結合文字（例 U+0301）を付けると区切りや禁止文字として見えなくなっていた。そのため `a/../◌́b`（バイト単位では `..` がある）・`/◌́etc`（絶対パス）・`a\◌́b`・`a//◌́b` が検証を通った。修正後は空要素・絶対パス・NUL・バックスラッシュ・`.`／`..` の判定をすべてバイト単位で行う。さらに、区切りの `/` が直後の文字と 1 つの書記素になっているパスは拒否する（下流の `ManifestTree`・機密網の照合・FP の item 組み立てなどは書記素単位で分割するため、通すと検証と実際の使い方で分け方が食い違う）。FP の createItem のパス合成 `FileProviderWritePolicy.childPath` の `/` / NUL 判定も同じくバイト単位にした。修正前も `resolveSafely` の `standardizedFileURL` による二重確認で同期ルートからは出られず、fpOnly の経路に悪用できる書込先は無かった（2026-10-26 の Claude Security 全体スキャンで候補に挙がり、ゲートの約束が破れていること自体を確認して起票）。稼働バケット dev-tide のマニフェストと S3 実体（各 11,666 件）を照合し、新たに拒否されるパスは 0 件であることを確認済み（2026-10-28）。回帰は `PathValidatorTests.testRejectsSeparatorsHiddenByCombiningCharacter` ほか。
+**Status（2026-10-28・#137）: `validateRelativePath` の判定を UTF-8 バイト単位に修正（多層防御）**。それまでは Swift の `String` 操作（`split(separator: "/")` / `hasPrefix("/")` / `contains("\\")`）が書記素単位で、`/` や `\` の直後に結合文字（例 U+0301）を付けると区切りや禁止文字として見えなくなっていた。そのため `a/../◌́b`（バイト単位では `..` がある）・`/◌́etc`（絶対パス）・`a\◌́b`・`a//◌́b` が検証を通った。修正後は空要素・絶対パス・NUL・バックスラッシュ・`.`／`..` の判定をすべてバイト単位で行う。さらに、区切りの `/` が前後の文字と 1 つの書記素になっているパスは拒否する。下流の `ManifestTree`・機密網の照合・FP の item 組み立てなどは書記素単位で分割するため、通すと検証と実際の使い方で分け方が食い違う。拒否される範囲は結合文字（U+0301）に限らず、次の 2 つ（PR #146 レビューで実測）:
+- 要素が Extend / SpacingMark / ZWJ で始まる名前: 肌色修飾子だけ・FE0F・ZWJ・デーヴァナーガリーの母音記号などで始まる名前。`👍🏽`・`❤️`・`👨‍👩‍👧`・`🇯🇵` のように基底文字の後に付く普通の絵文字は通る
+- Prepend 文字（U+0600 など）で終わるフォルダ名の配下
+
+これらは通常の入力ではできない崩れた形の名前で、拒否するとユーザが確定した（2026-10-28）。
+- FP では、拒否された名前はバックスラッシュを含む名前と同じく `excludedFromSync`（ローカル温存・S3 非汚染）になる。既存ファイルをこうした名前へ改名すると、後片付けの deleteItem で S3 から外れる。ユーザから一目でわからない点は #147 で扱う
+- 厳しくした検証は、すでに S3 や永続状態にあるパスにも効く:
+  - マニフェストの読み込み（`ManifestSnapshotLoader` / `ManifestReader`）はその entry を捨てる。レプリカから見えなくなるが、データは S3 に残る
+  - `ManifestGenerationLog.load` と `PersistedPathSet` の読込は、該当が 1 件でもあれば全体を捨てる。世代ログは cold 扱いで全件を再列挙する。レジストリは空集合から始まる
+
+FP の createItem のパス合成 `FileProviderWritePolicy.childPath` の `/` / NUL 判定も同じくバイト単位にした。修正前も `resolveSafely` の `standardizedFileURL` による二重確認で同期ルートからは出られず、fpOnly の経路に悪用できる書込先は無かった（2026-10-26 の Claude Security 全体スキャンで候補に挙がり、ゲートの約束が破れていること自体を確認して起票）。稼働バケット dev-tide のマニフェストと S3 実体（各 11,666 件）を実装と同じ判定（Swift の書記素・バイト分割）で照合し、新たに拒否されるパスは 0 件であることを確認済み（2026-10-28）。回帰は `PathValidatorTests` の `testRejectsSeparatorsHiddenByCombiningCharacter`・`testRejectsSeparatorFusedWithAdjacentCharacter`・`testAcceptsNamesStartingWithEmoji` ほか。
 
 **該当箇所（対応コード）:** 検証は `Tide/Core/PathValidator.swift`（`validateRelativePath` / `resolveSafely` / `resolveForWrite`）。呼び出し入口は `Downloader.download`（`Downloader.swift:64` の `resolveForWrite`、commit は `:226` の `moveItem`）、`renameLocalForConflict`（`:259-260`）、`applyRemoteDeletion`（`:290`）、`SyncEngine.reconcileRemoteEntry`（`SyncEngine.swift:739`）、`performFullScan`（`:500`）、`ManifestReader.read`。以下は対策前の脆弱だったコード（参考）:
 

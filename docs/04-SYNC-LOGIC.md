@@ -311,8 +311,12 @@ macOS は NFD（分解形式）でファイル名を返す。S3 にはこれを�
   `PathValidator` を通す。FP 拡張には syncRoot が無いため**字句検証**
   （`validateRelativePath` = `..` / 絶対パス / NUL / バックスラッシュ / 空コンポーネント拒否）を
   S3 キー組み立て前に全件適用する（パス合成は `FileProviderWritePolicy.childPath` 経由）。
-  判定は UTF-8 バイト単位で行い、区切りの `/` が直後の結合文字と 1 つの書記素になっているパスも
-  拒否する（書記素単位の判定では結合文字で `..` や区切りを隠せるため・#137）。
+  判定は UTF-8 バイト単位で行う（書記素単位の判定では結合文字で `..` や区切りを隠せるため・#137）。
+  区切りの `/` が前後の文字と 1 つの書記素になっているパスも拒否する。該当するのは、要素が
+  Extend / SpacingMark / ZWJ で始まる名前と、Prepend 文字で終わるフォルダ名の配下。基底文字の後に
+  修飾子が付く普通の絵文字は通る。下流が書記素単位で分割するので、分け方を検証とそろえるため。
+  拒否された名前は FP では `excludedFromSync`（ローカル温存）になる。すでにマニフェストや永続状態に
+  あるパスにも効き、読み込み時に捨てられる。詳細は `security/critical.md` C1。
 - マニフェスト系の `getObject` は `maxBytes` 16 MiB（OOM 自己防衛）。本体 DL は `streamObject` で
   チャンク・ストリーミング（メモリ有界）+ 受信累積長を `entry.size` と突合（超過破棄 = DoS ガード）。
 - アップロードは **`NoFollowFileReader`（`open(O_RDONLY | O_NOFOLLOW)`）の単一 FD** で行い、

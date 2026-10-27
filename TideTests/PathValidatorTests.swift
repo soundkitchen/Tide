@@ -68,6 +68,28 @@ final class PathValidatorTests: XCTestCase {
         try PathValidator.validateRelativePath("a/.\u{301}")                       // "." ではない名前
     }
 
+    /// 区切りの `/` が前後の文字と 1 つの書記素になる名前は、結合文字に限らず拒否する（PR #146 レビュー）。
+    /// 要素の先頭に Extend / SpacingMark / ZWJ が来る場合と、フォルダ名が Prepend 文字で終わる場合。
+    func testRejectsSeparatorFusedWithAdjacentCharacter() {
+        XCTAssertThrowsError(try PathValidator.validateRelativePath("docs/\u{1F3FD}notes.txt"))  // 肌色修飾子だけ
+        XCTAssertThrowsError(try PathValidator.validateRelativePath("docs/\u{FE0F}x"))           // 異体字セレクタ
+        XCTAssertThrowsError(try PathValidator.validateRelativePath("a/\u{200D}b"))              // ZWJ
+        XCTAssertThrowsError(try PathValidator.validateRelativePath("a/\u{093F}x"))              // デーヴァナーガリーの母音記号
+        XCTAssertThrowsError(try PathValidator.validateRelativePath("a\u{0600}/b"))              // Prepend で終わるフォルダ名
+    }
+
+    /// 絵文字で始まる普通の名前は通す（修飾子・セレクタ・ZWJ は基底文字の後に付いている）。
+    func testAcceptsNamesStartingWithEmoji() throws {
+        try PathValidator.validateRelativePath("docs/\u{1F44D}notes.txt")                        // 👍
+        try PathValidator.validateRelativePath("docs/\u{1F44D}\u{1F3FD}notes.txt")               // 👍🏽
+        try PathValidator.validateRelativePath("docs/\u{2764}\u{FE0F}memo.txt")                  // ❤️
+        try PathValidator.validateRelativePath("docs/\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467} family")  // 👨‍👩‍👧
+        try PathValidator.validateRelativePath("docs/\u{1F1EF}\u{1F1F5}trip")                    // 🇯🇵
+        try PathValidator.validateRelativePath("docs/1\u{FE0F}\u{20E3}first.txt")                // 1️⃣
+        try PathValidator.validateRelativePath("\u{1F4C1}/\u{1F44D}\u{1F3FD}x.txt")              // 📁/👍🏽
+        try PathValidator.validateRelativePath("a/\u{0915}\u{093F}.txt")                         // कि
+    }
+
     // MARK: - resolveSafely
 
     func testResolveSafelyAcceptsContainedPath() throws {

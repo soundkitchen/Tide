@@ -25,7 +25,7 @@ public enum PathValidator {
     /// - 先頭が `/` でない
     /// - NUL バイトを含まない
     /// - 各コンポーネントが `.` / `..` / 空ではない
-    /// - 区切りの `/` が直後の結合文字と 1 つの書記素になっていない
+    /// - 区切りの `/` がすべて単独の書記素になっている（前後の文字と 1 つの書記素になっていない）
     ///
     /// 判定はすべて UTF-8 バイト単位で行う（#137）。Swift の `String` の操作（`split` / `hasPrefix` /
     /// `contains`）は書記素単位なので、`/` や `\` の直後に結合文字（例 U+0301）が付くと区切りや
@@ -57,16 +57,21 @@ public enum PathValidator {
                 )
             }
         }
-        // 書記素単位でもバイト単位と同じ数に分かれること。ずれるのは `/` が直後の結合文字と
-        // 1 つの書記素になっているときだけで、そのようなパスは拒否する。下流（ManifestTree・
-        // 機密網の照合・FP の item 組み立てなど）は書記素単位で `split(separator: "/")` するため、
-        // 通すと検証と実際の使い方で分け方が食い違う。
-        let graphemeComponentCount = relativePath.split(
-            separator: "/", omittingEmptySubsequences: false
-        ).count
-        guard graphemeComponentCount == components.count else {
+        // 区切りの `/` がすべて単独の書記素であること（書記素として数えた `/` の数がバイトの数と同じ）。
+        // 下流（ManifestTree・機密網の照合・FP の item 組み立てなど）は書記素単位で
+        // `split(separator: "/")` するため、`/` が前後の文字と 1 つの書記素になっていると、検証と
+        // 実際の使い方で分け方が食い違う。そうなるのは次の場合で、いずれも拒否する（PR #146 レビュー）:
+        // - 要素が Extend / SpacingMark / ZWJ で始まる（結合文字 U+0301・肌色修飾子だけ・FE0F・
+        //   ZWJ・デーヴァナーガリーの母音記号など。`👍🏽` のように基底文字の後に付く普通の絵文字は通る）
+        // - フォルダ名が Prepend 文字（U+0600 など）で終わる
+        // 拒否されたパスは FP では excludedFromSync（ローカル温存・S3 非汚染）になる。バックスラッシュを
+        // 含む名前と同じ扱い。
+        let graphemeSlashCount = relativePath.reduce(into: 0) { count, character in
+            if character == "/" { count += 1 }
+        }
+        guard graphemeSlashCount == components.count - 1 else {
             throw ValidationError.invalidRelativePath(
-                relativePath, reason: "separator combined with following character"
+                relativePath, reason: "separator combined with adjacent character"
             )
         }
     }
