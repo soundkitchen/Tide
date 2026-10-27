@@ -98,6 +98,14 @@ public actor PersistedPathSet {
         persist()
     }
 
+    /// `path` のエントリだけを外す（配下・祖先には触れない）。
+    public func remove(_ path: String) {
+        loadIfNeeded()
+        if paths.remove(path) != nil {
+            persist()
+        }
+    }
+
     /// `path` を加え、ディスクにも保存できたときだけ true を返す（#120 F1・フォルダ単位除外の
     /// 予約用）。拡張の再起動を跨いで効く保証が要る用途のための `add`:
     /// - 上限超過・保存先の無い縮退時（fileURL nil）は加えずに false
@@ -184,10 +192,19 @@ public actor PersistedPathSet {
     /// マニフェストの合成 dir になった（レジストリ保護が不要になった）ので外す。
     /// 残しておくと「実体化後にリモートで削除された dir」を空フォルダとして復活させてしまう。
     public func removeAncestors(of filePath: String) {
+        removeAncestors(of: filePath, includingSelf: false)
+    }
+
+    /// `path` の祖先（`includingSelf` なら自身も）のエントリだけを外す。配下には触れない。
+    /// フォルダを除外名へ改名したときの後片付け予約（Issue #138）は旧フォルダの path で積むので、
+    /// 同じ path にフォルダやファイルが作り直されたら（= 旧フォルダの後片付けは済んだか、もう要らない）
+    /// 祖先側の予約を外す — 残すと配下のバッジが凍結されたままになる。
+    public func removeAncestors(of path: String, includingSelf: Bool) {
         loadIfNeeded()
         var ancestor = ""
         var changed = false
-        for component in filePath.split(separator: "/").dropLast() {
+        let components = path.split(separator: "/")
+        for component in includingSelf ? components[...] : components.dropLast() {
             ancestor = ancestor.isEmpty ? String(component) : "\(ancestor)/\(component)"
             if paths.remove(ancestor) != nil { changed = true }
         }

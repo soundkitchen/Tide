@@ -363,6 +363,10 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 }
                 // レジストリ登録 = item(for:) / enumerator の合成 dir 温存の根拠（M5 Phase 5-4）
                 await services.virtualDirs.add(path)
+                // 同じ path（か祖先）がフォルダの除外名への改名で後片付けの予約中なら外す（Issue #138・
+                // 残すと作り直したフォルダの配下のバッジが凍結されたままになる）。配下の予約には
+                // 触れない（作成済みフォルダの再取り込みでファイルの後片付けの受理根拠を消さない）。
+                await services.exclusionCleanups.removeAncestors(of: path, includingSelf: true)
                 dirCompletion.value(
                     FileProviderItem(node: .directory(path: path, mtime: dirMtime)),
                     [], false, nil
@@ -425,6 +429,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     // 同 path が除外後始末の予約中なら解除（再包含 = 除外の再評価で同期復帰）。
                     await services.virtualDirs.removeAncestors(of: path)
                     await services.exclusionCleanups.removeSubtree(at: path)
+                    // 祖先フォルダの後片付け予約（フォルダの除外名への改名・Issue #138）も外す。
+                    await services.exclusionCleanups.removeAncestors(of: path)
                     await Self.completeCreate(
                         outcome, path: path, services: services, completion: completion)
                     return
@@ -439,6 +445,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 )
                 await services.virtualDirs.removeAncestors(of: path)
                 await services.exclusionCleanups.removeSubtree(at: path)
+                // 祖先フォルダの後片付け予約（フォルダの除外名への改名・Issue #138）も外す。
+                await services.exclusionCleanups.removeAncestors(of: path)
                 await Self.completeCreate(
                     outcome, path: path, services: services, completion: completion)
             } catch {
@@ -1217,6 +1225,12 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                         await services.events.append(
                             type: .info, path: dirPath,
                             message: "Delete rejected (remote changed under folder)")
+                        // フォルダの除外名への改名の後片付け予約（Issue #138）は外す — システムは旧
+                        // フォルダをリモートの内容で作り直し（createItem は来ない）、残すとその配下の
+                        // バッジが凍結されたままになる。フォルダの予約はバッジの凍結にしか使っていない
+                        // ので、外しても削除の受理判定は変わらない（ファイルの予約は再送された後片付けの
+                        // 受理根拠も兼ねるので、ファイルの拒否では外さない）。配下の予約には触れない。
+                        await services.exclusionCleanups.remove(dirPath)
                         dirCompletion.value(NSFileProviderError(.directoryNotEmpty))
                     }
                 } catch {
