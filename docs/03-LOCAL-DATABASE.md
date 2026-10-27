@@ -44,7 +44,7 @@ App Group の Caches（`~/Library/Group Containers/G5G54TCH8W.org.izukawa.Tide/L
 | group defaults | `ConfigStore`（`TideAppGroup.sharedDefaults()`） | 設定（bucket / region / deviceId / setupCompleted / syncMode〈外部ツール契約キー〉/ fileProviderDomainEpoch） |
 | Data Protection Keychain | `KeychainStore` | AWS 認証情報 |
 
-`PersistedPathSet` 3 本はドメイン epoch（`fileProviderDomainEpoch`）を構築時 capture し、
+`PersistedPathSet` 5 本（materialized / virtual-dirs / exclusion-cleanups / dir-exclusion-holds / dir-cleanup-freezes）はドメイン epoch（`fileProviderDomainEpoch`）を構築時 capture し、
 ドメイン作り直し跨ぎの stale を読込時全体破棄で防ぐ（#104）。
 
 ## テーブル定義
