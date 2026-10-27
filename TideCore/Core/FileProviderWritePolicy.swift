@@ -94,9 +94,11 @@ public enum FileProviderWritePolicy {
     /// 空 / "." / ".." / `/` 含み（ネスト注入）/ NUL 含みは nil = 合成不能。
     /// フルパスとしての妥当性（バックスラッシュ・トラバーサル等の網羅検証）は呼び出し側が
     /// `PathValidator.validateRelativePath` で担う（この関数は filename 起因の構造破壊のみ塞ぐ）。
+    /// `/` と NUL は UTF-8 バイト単位で探す（#137）。`String.contains` は書記素単位なので、
+    /// `/` の直後に結合文字が付くと見落とす。
     public static func childPath(parentPath: String, filename: String) -> String? {
         guard !filename.isEmpty, filename != ".", filename != "..",
-              !filename.contains("/"), !filename.contains("\0") else {
+              !filename.utf8.contains(UInt8(ascii: "/")), !filename.utf8.contains(0) else {
             return nil
         }
         return parentPath.isEmpty ? filename : "\(parentPath)/\(filename)"

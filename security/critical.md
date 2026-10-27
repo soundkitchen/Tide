@@ -4,6 +4,8 @@
 
 **Status:** ✅ Fixed (2026-05-24) — `Tide/Core/PathValidator.swift` を新設。`Downloader.download` / `applyRemoteDeletion` / `renameLocalForConflict`、`SyncEngine.reconcileRemoteEntry` / `performFullScan`、`Uploader.processUpload` / `processDelete` の各入口で `validateRelativePath` + `resolveSafely` を呼び、`..` / 絶対パス / NUL / バックスラッシュ / 空コンポーネントを拒否し、解決後 URL が `syncRoot` 配下に収まることも検証する。`ManifestReader.read` が manifest のキーを取り込む前にも検証する。
 
+**Status（2026-10-28・#137）: `validateRelativePath` の判定を UTF-8 バイト単位に修正（多層防御）**。それまでは Swift の `String` 操作（`split(separator: "/")` / `hasPrefix("/")` / `contains("\\")`）が書記素単位で、`/` や `\` の直後に結合文字（例 U+0301）を付けると区切りや禁止文字として見えなくなっていた。そのため `a/../◌́b`（バイト単位では `..` がある）・`/◌́etc`（絶対パス）・`a\◌́b`・`a//◌́b` が検証を通った。修正後は空要素・絶対パス・NUL・バックスラッシュ・`.`／`..` の判定をすべてバイト単位で行う。さらに、区切りの `/` が直後の文字と 1 つの書記素になっているパスは拒否する（下流の `ManifestTree`・機密網の照合・FP の item 組み立てなどは書記素単位で分割するため、通すと検証と実際の使い方で分け方が食い違う）。FP の createItem のパス合成 `FileProviderWritePolicy.childPath` の `/` / NUL 判定も同じくバイト単位にした。修正前も `resolveSafely` の `standardizedFileURL` による二重確認で同期ルートからは出られず、fpOnly の経路に悪用できる書込先は無かった（2026-10-26 の Claude Security 全体スキャンで候補に挙がり、ゲートの約束が破れていること自体を確認して起票）。稼働バケット dev-tide のマニフェストと S3 実体（各 11,666 件）を照合し、新たに拒否されるパスは 0 件であることを確認済み（2026-10-28）。回帰は `PathValidatorTests.testRejectsSeparatorsHiddenByCombiningCharacter` ほか。
+
 **該当箇所（対応コード）:** 検証は `Tide/Core/PathValidator.swift`（`validateRelativePath` / `resolveSafely` / `resolveForWrite`）。呼び出し入口は `Downloader.download`（`Downloader.swift:64` の `resolveForWrite`、commit は `:226` の `moveItem`）、`renameLocalForConflict`（`:259-260`）、`applyRemoteDeletion`（`:290`）、`SyncEngine.reconcileRemoteEntry`（`SyncEngine.swift:739`）、`performFullScan`（`:500`）、`ManifestReader.read`。以下は対策前の脆弱だったコード（参考）:
 
 ```swift

@@ -44,6 +44,30 @@ final class PathValidatorTests: XCTestCase {
         XCTAssertThrowsError(try PathValidator.validateRelativePath("a/"))
     }
 
+    /// `/` や `\` の直後に結合文字（U+0301）を付けて、書記素単位の判定から区切りや禁止文字を
+    /// 隠したパス（#137）。バイト単位で見れば各ゲートに掛かるので、すべて拒否する。
+    func testRejectsSeparatorsHiddenByCombiningCharacter() {
+        let accent = "\u{301}"
+        // バイト単位では ".." がある
+        XCTAssertThrowsError(try PathValidator.validateRelativePath("a/../\(accent)b"))
+        XCTAssertThrowsError(try PathValidator.validateRelativePath("a/./\(accent)b"))
+        // 先頭の "/" = 絶対パス
+        XCTAssertThrowsError(try PathValidator.validateRelativePath("/\(accent)etc/passwd"))
+        // バックスラッシュ
+        XCTAssertThrowsError(try PathValidator.validateRelativePath("a\\\(accent)b"))
+        // 空要素
+        XCTAssertThrowsError(try PathValidator.validateRelativePath("a//\(accent)b"))
+        // 区切りと結合文字が 1 つの書記素になっているだけのパスも拒否（下流の書記素単位の分割とずれるため）
+        XCTAssertThrowsError(try PathValidator.validateRelativePath("a/\(accent)b"))
+    }
+
+    /// 結合文字そのものは普通のファイル名に含まれる（NFD の濁点・アクセント）。区切りの直後でなければ通す。
+    func testAcceptsCombiningCharactersInsideComponents() throws {
+        try PathValidator.validateRelativePath("caf\u{65}\u{301}/menu.txt")      // NFD の é
+        try PathValidator.validateRelativePath("\u{304B}\u{3099}/\u{304B}\u{3099}.txt")  // NFD の「が」
+        try PathValidator.validateRelativePath("a/.\u{301}")                       // "." ではない名前
+    }
+
     // MARK: - resolveSafely
 
     func testResolveSafelyAcceptsContainedPath() throws {
