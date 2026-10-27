@@ -12,10 +12,13 @@ public struct FPEventRecord: Codable, Sendable, Equatable {
     public var path: String?
     public var message: String
     public var details: String?
+    /// ユーザへ OS 通知で知らせる出来事なら、その種類（`FPEventNotice.rawValue`・Issue #147）。
+    /// 通知しないイベントと #147 より前のレコードは nil（キー自体が無い行もそのまま読める）。
+    public var notice: String?
 
     public init(
         timestamp: Double, bucket: String, eventType: String,
-        path: String?, message: String, details: String? = nil
+        path: String?, message: String, details: String? = nil, notice: String? = nil
     ) {
         self.timestamp = timestamp
         self.bucket = bucket
@@ -23,6 +26,46 @@ public struct FPEventRecord: Codable, Sendable, Equatable {
         self.path = path
         self.message = message
         self.details = details
+        self.notice = notice
+    }
+}
+
+/// FP 拡張のイベントのうち、アプリが OS 通知で知らせるものの種類（Issue #147）。
+/// 拡張が `FPEventLog.append(notice:)` で印を付け、アプリの `FPEventNoticeWatcher` が新着を
+/// 拾って通知する。どれも「ファイルがこの Mac にだけ残り、バックアップされない」出来事で、
+/// ユーザが意図していない可能性があるものに限る（機密網・`.syncignore` による新規作成の除外は、
+/// 意図した除外なので印を付けない）。
+///
+/// 通知に出す名前の出どころ（`subject`）は種類で決まる:
+/// - `unsyncableName` / `renamedFileExcluded` / `renamedFolderExcluded`: `details`（表示用の
+///   パス。検証できない名前は `path` に入れられず、改名は新しい名前を出したいため）
+/// - `symbolicLink`: `path`
+public enum FPEventNotice: String, Sendable, CaseIterable {
+    /// 同期できない名前（バックスラッシュ等）で新規作成された
+    case unsyncableName
+    /// symlink が新規作成された
+    case symbolicLink
+    /// 追跡中のファイルが同期しない名前へ改名され、バックアップから外れた
+    case renamedFileExcluded
+    /// 追跡中のファイルを含むフォルダが同期しない名前へ改名され、配下がバックアップから外れた
+    case renamedFolderExcluded
+
+    /// fileproviderd が同じアイテムの除外を再送する種類か（#120 の再送嵐）。再送される種類は、
+    /// アプリ側で同じアイテムを 1 回だけ通知する。改名の除外は後片付けの deleteItem で終わり、
+    /// 再送されない。
+    public var isResentByDaemon: Bool {
+        switch self {
+        case .unsyncableName, .symbolicLink: return true
+        case .renamedFileExcluded, .renamedFolderExcluded: return false
+        }
+    }
+
+    /// 通知に出す名前（表示用のパス）。上の型コメントの規約どおり。
+    public func subject(of record: FPEventRecord) -> String? {
+        switch self {
+        case .symbolicLink: return record.path
+        case .unsyncableName, .renamedFileExcluded, .renamedFolderExcluded: return record.details
+        }
     }
 }
 
@@ -76,8 +119,10 @@ public actor FPEventLog {
     // MARK: - 書込（FP 拡張プロセス専用）
 
     /// 1 イベント追記（best-effort・失敗はログのみ）。
+    /// - Parameter notice: アプリに OS 通知で知らせる出来事なら、その種類（Issue #147）。
     public func append(
-        type: SyncLogEventType, path: String?, message: String, details: String? = nil
+        type: SyncLogEventType, path: String?, message: String, details: String? = nil,
+        notice: FPEventNotice? = nil
     ) {
         guard let fileURL else { return }
         let record = FPEventRecord(
@@ -86,7 +131,8 @@ public actor FPEventLog {
             eventType: type.rawValue,
             path: path,
             message: message,
-            details: details
+            details: details,
+            notice: notice?.rawValue
         )
         do {
             var data = try JSONEncoder().encode(record)  // 1 行 JSON（改行は JSON 文字列内で必ずエスケープされる）
@@ -123,6 +169,21 @@ public actor FPEventLog {
 
     // MARK: - 読込（アプリプロセス）
 
+    /// ログが前回から変わったかを安く確かめるための署名（現行と `.1` のサイズ・更新時刻）。
+    /// 中身は読まない（stat のみ）。新着を見張る側（`FPEventNoticeWatcher`・Issue #147）が、
+    /// 署名が変わったときだけ `loadRecords()` を呼ぶのに使う。
+    public nonisolated func changeSignature() -> String {
+        guard let fileURL else { return "" }
+        let fm = FileManager.default
+        func stamp(_ url: URL) -> String {
+            guard let attributes = try? fm.attributesOfItem(atPath: url.path) else { return "-" }
+            let size = (attributes[.size] as? Int) ?? -1
+            let mtime = (attributes[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+            return "\(size)@\(mtime)"
+        }
+        return stamp(fileURL) + "|" + stamp(URL(fileURLWithPath: fileURL.path + ".1"))
+    }
+
     /// 全レコードを時系列（古い → 新しい）で返す。呼ぶたびにディスクを読み直す。
     /// 書き手（拡張）が追記中の書きかけ末尾行はデコード失敗 = スキップされ、次回読込で載る。
     /// `.1` → 現行の 2 ファイル読取は非アトミック（クロスプロセス）— 読取の合間に拡張側の
@@ -154,6 +215,10 @@ public actor FPEventLog {
             record.message = String(record.message.prefix(maxMessageLength))
             if let details = record.details {
                 record.details = String(details.prefix(maxDetailsLength))
+            }
+            // 未知の通知種類はレコードごと捨てず、印だけ外す（表示には使えるため）
+            if let notice = record.notice, FPEventNotice(rawValue: notice) == nil {
+                record.notice = nil
             }
             records.append(record)
         }

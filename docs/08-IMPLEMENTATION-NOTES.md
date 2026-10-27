@@ -636,7 +636,7 @@ fpOnly はアプリが DB を開かない（凍結温存）ため DB 由来の S
   ファイル名の `-ext` は書き手識別子 — 将来アプリ側イベントを足す場合は**別ファイル**を増やし
   読み時マージする（同一ファイルへの多プロセス追記はしない・2026-07-26 ユーザ確定）。
   レコードは `timestamp` / `bucket` / `eventType`（`SyncLogEventType` の rawValue）/ `path` /
-  `message` / `details`。拡張の DB 非接触は維持（GRDB 非依存の素のファイル）。security L19。
+  `message` / `details` / `notice`（OS 通知で知らせる出来事の種類・#147 = 下記「バックアップされないファイルの通知」節）。拡張の DB 非接触は維持（GRDB 非依存の素のファイル）。security L19。
 - **記録点**（`FileProviderExtension` の各コールバック + `completeCreate`）: 書込系成功 =
   created / uploaded / moved（dir move は件数付き）/ deleted（file / dir）→ upload / move /
   delete、materialize 成功 → download、競合（conflict copy 作成・正規パスはリモート勝ち）→
@@ -1578,15 +1578,49 @@ revert 復帰ランブックを含む）。実施 3 段の記録は本ファイ�
 
 ### 通知（UserNotifications・M4・2026-06-15）
 
-- **発火は「ユーザの介入が要る／取りこぼし（未バックアップ）が起きうる確定的な事象」だけに絞る**（5 種）: ① 競合コピー作成（`reconcileRemoteEntry` の `.conflictThenDownload`）、② サイズ上限超過 `fileTooLarge`、③ リトライ give-up（`attempts >= 5`）、④ 不安定ファイル（`unstableFile` 警告・既に `unstableWarned` で dedup 済み）、⑤ **FP 拡張のユーザ OFF**（`fileProviderDisabled`・fpOnly = 全同期停止・Issue #103・2026-08-15 追加。発火元は SyncEngine ではなく `RemoteChangeSignaler` のエッジ検出 = 連発しない・identifier 固定 `"fpDisabled"`・復帰エッジで配達済みを撤去。詳細は「FP 拡張トグル OFF の検出」節）。**一過性エラー（network 等）は出さない**（オフラインのたびに通知が溢れるのを避ける＝本ファイル「構造化エラー」の `recentIssues` とは別ポリシー: recentIssues は全失敗を載せるが通知は確定事象だけ）。
+- **発火は「ユーザの介入が要る／取りこぼし（未バックアップ）が起きうる確定的な事象」だけに絞る**（6 種）: ① 競合コピー作成（`reconcileRemoteEntry` の `.conflictThenDownload`）、② サイズ上限超過 `fileTooLarge`、③ リトライ give-up（`attempts >= 5`）、④ 不安定ファイル（`unstableFile` 警告・既に `unstableWarned` で dedup 済み）、⑤ **FP 拡張のユーザ OFF**（`fileProviderDisabled`・fpOnly = 全同期停止・Issue #103・2026-08-15 追加。発火元は SyncEngine ではなく `RemoteChangeSignaler` のエッジ検出 = 連発しない・identifier 固定 `"fpDisabled"`・復帰エッジで配達済みを撤去。詳細は「FP 拡張トグル OFF の検出」節）、⑥ **バックアップされないファイル**（`notBackedUp`・fpOnly・Issue #147・2026-10-28 追加。同期できない名前・symlink の新規作成と、追跡中のファイル / フォルダの同期しない名前への改名。発火元は FP 拡張の `FPEventLog` の印を拾う `FPEventNoticeWatcher`。詳細は下の「バックアップされないファイルの通知」節）。**fpOnly では ①〜④ は出ない**（`SyncEngine` を作らないため。Issue #148 で ⑥ と同じ経路に載せる予定）。**一過性エラー（network 等）は出さない**（オフラインのたびに通知が溢れるのを避ける＝本ファイル「構造化エラー」の `recentIssues` とは別ポリシー: recentIssues は全失敗を載せるが通知は確定事象だけ）。
 - **配線は `SyncEngine`（@MainActor）の各点から fire-and-forget の `Task { await self.notifier?.post(...) }`**（PR #18 レビュー Medium）。`post` の初回呼びは許可プロンプト応答までサスペンドし得るため、インライン `await` だと確定エラー 1 件で以降のアップロード処理（特に `fileTooLarge` 分岐はキュー除去 Tx の直前）が宙吊りになる。通知は順序保証不要なので同期処理から切り離す（@MainActor 同士＋ path 値渡しで安全）。
-- **判定は純粋関数 `NotificationPolicy.content(for:) -> NotificationContent`（`Tide/Core/NotificationPolicy.swift`）**。`NotificationEvent` enum（上記 5 種）→ `(identifier, title, body)`。**identifier は `"<種別>:<path>"`**（例 `conflict:a/b.txt`。path を持たない `fileProviderDisabled` は固定 `"fpDisabled"`）で、UNUserNotificationCenter の「同一 identifier は置換」仕様により同一 (path, 種別) の連発を 1 件に畳む（バナー溢れ防止）。本文はフルパスでなく**末尾コンポーネント**（通知は幅が狭い）。全分岐 `NotificationPolicyTests`（identifier の安定性 / path・種別での分離 / 本文がファイル名を含む）。表示文言は xcstrings（`%@` 一個・`extractionState:"manual"`）。
+- **判定は純粋関数 `NotificationPolicy.content(for:) -> NotificationContent`（`Tide/Core/NotificationPolicy.swift`）**。`NotificationEvent` enum（上記 6 種）→ `(identifier, title, body)`。**identifier は `"<種別>:<path>"`**（例 `conflict:a/b.txt`。path を持たない `fileProviderDisabled` は固定 `"fpDisabled"`）で、UNUserNotificationCenter の「同一 identifier は置換」仕様により同一 (path, 種別) の連発を 1 件に畳む（バナー溢れ防止）。本文はフルパスでなく**末尾コンポーネント**（通知は幅が狭い）。全分岐 `NotificationPolicyTests`（identifier の安定性 / path・種別での分離 / 本文がファイル名を含む）。表示文言は xcstrings（`%@` 一個・`extractionState:"manual"`）。
 - **発行と OS 連携は `NotificationManager`（`Tide/App/NotificationManager.swift`・@MainActor・`SyncNotifying` 実装）**。SyncEngine には `SyncNotifying`（`NotificationPolicy.swift` 定義）だけ注入し、UserNotifications / AppKit を持ち込まない（テストでも nil 差し替え可・既存 SyncEngine 直構築は AppEnvironment 1 箇所のみ）。`AppEnvironment` が 1 インスタンス保持し `notifier:` で SyncEngine へ注入。
 - **許可（authorization）は初回 `post` 時に一度だけリクエスト**（起動時・セットアップ時には出さない＝エラー/競合が一度も起きないユーザにいきなりプロンプトしない）。許可されていなければ静かに諦める。Settings の「Notifications」トグル（`ConfigStore.notificationsEnabled`・**既定 on**・presence 判定）が off なら許可も求めない。`factoryReset` で消える設定群にも追加済み。
 - **初回リクエストは単一タスク `authorizationRequest: Task<Void, Never>?` に集約**（PR #18 レビュー Low）。並行 post はこのタスクの完了を `await` してから `notificationSettings()` を読むので、初回プロンプト応答待ち中に来た 2 件目が `.notDetermined` で early-return＝取りこぼされない。許可状態は毎回読む（後から System Settings で許可された場合も拾う）。`requestAuthorization` は `.notDetermined` のときだけプロンプトを出し確定済みなら即返る。
 - **通知クリックで Sync Activity を開く**: `NotificationManager.openActivity` クロージャを App 層が登録する（`openWindow` は SwiftUI の View 環境にしか無く AppKit デリゲートから直接呼べないため）。登録は **MenuBarExtra のラベル（`MenuBarLabel`・常駐アプリでは起動直後に必ず生成される）の `onAppear`** が一次、`MenuBarContent.task` が保険。クリック時も `openWindow` 前に `NSApp.activate`（LSUIElement の定石）。デリゲート登録は `AppDelegate.applicationDidFinishLaunching` で `registerAsDelegate()`。
 - **据え置き**: file 名（末尾コンポーネント）が OS 通知本文＝ロック画面等に出うる（メタデータ露出）。バックアップツールとして「どのファイルか」を伝えるのが通知の目的なので by-design・トグル + OS 許可でゲート・**生エラー文字列は通知に出さない**（`SyncIssue.rawDetail` は通知に載せない）。`security/README.md` に注記。**実機受け入れ消化済み（✅ 2026-06-16・対話形式・チェックリストは運用どおり削除）**: ① 競合バナー（同期済みファイルを `chmod 000` → `.unreadable` → `.conflictThenDownload` で単一マシン再現）、② fileTooLarge バナー（1GiB 超スパースで誘発・FD `fstat` のみで本体未読のまま弾く）、③ バナークリック → Sync Activity 起動、④ トグル off で抑止（許可プロンプトも出ない＝`post` 冒頭ガードが `authorizationRequest` の前で return）、⑤ 初回許可プロンプト（OFF→ON 後の最初の確定事象で 1 回）を実機確認。give-up / unstable バナーは `NotificationPolicyTests` + 同一 `notifier?.post` 経路で担保しライブ確認は省略（divert と同じ判断）。**消化中に `ConflictNamer` のタイムスタンプ書式バグを発見し修正**（→ §3「競合ファイル命名」の注記）。
 - **将来の追加候補（PR #18 レビュー・スコープ外メモ）**: `applyRemoteDeletion` の `.keepLocalRemoteDeleted`（リモート削除だがローカル編集で残した＝ユーザ判断が要る）も通知候補。現状 sync_log warning のみで通知はしない。将来の通知拡張時に検討（⑤ は #103 で 2026-08-15 に追加済み）。
+
+#### バックアップされないファイルの通知（Issue #147・2026-10-28）
+
+FP 拡張が `excludedFromSync` で拒否したファイルは、ローカルにだけ残り S3 に上がらない。ところが、そのことを
+ユーザが知る手段が無かった（Sync Activity に info が残るだけ）。特に追跡中のファイルを同期しない名前へ改名すると、
+後片付けの deleteItem で S3 から外れ、バックアップから黙って外れる。
+
+- **実機観察（2026-10-28）**: FP レプリカに検証できない名前（`a\b.txt`）と symlink を作ると、拡張は両方を
+  `excludedFromSync` で拒否した。fileproviderd 側は `isExcludedFromSync = 1`・`isUploading = 1`・
+  `uploadingError = -2010` と把握しているが、**Finder には印もアイコンも出ない**（普通のローカルファイルと
+  同じ見た目）。拡張が付けるバッジ（`decorations`）は拡張が返した item にしか付かず、除外したファイルには
+  item を返さないので、拡張からも印を付けられない。よって知らせ方は OS 通知にした（ユーザ確定）。
+- **対象（ユーザ確定）**: 意図しない除外 = 同期できない名前（`unsyncableName`）と symlink（`symbolicLink`）の新規作成、
+  および追跡中のファイル（`renamedFileExcluded`）・追跡中のファイルを含むフォルダ（`renamedFolderExcluded`）の、
+  同期しない名前への改名（機密網・`.syncignore` に当たる名前への改名を含む）。機密網・`.syncignore` による新規作成の
+  除外は意図した除外なので通知しない（#120 の再送嵐で通知があふれるのも避けられる）。中身が仮想フォルダだけの
+  フォルダの改名は S3 に影響しないので通知しない。
+- **経路**: 拡張がアプリへ伝える手段は共有ログ `FPEventLog` だけなので、拡張がイベントに印（`FPEventRecord.notice` =
+  `FPEventNotice` の rawValue）を付け、アプリの `FPEventNoticeWatcher`（`Tide/Core/`・fpOnly 起動で signaler と
+  一緒に立てて一緒に止める）が 5 秒ごとに新着を見る。ログが変わったかは stat の署名（`FPEventLog.changeSignature`
+  = 現行と `.1` のサイズ・更新時刻）で先に確かめ、変わったときだけ読む。印は他の出来事にも付けられる形にしてあり、
+  #148 で競合コピー等を載せる予定。未知の印は読込時に外す（レコードは表示用に残す）。
+- **通知に出す名前**: symlink は `path`、それ以外は `details`（表示用のパス）。検証できない名前は `path` に入れられない
+  （読込時の `validateRelativePath` で行ごと捨てられる）ため、親フォルダを含む表示用のパスを `details` に入れる。
+  改名は新しい名前を出したいので、新しい表示用のパスを `details` に入れる（`path` は旧 path のまま）。
+- **重複の防ぎ方**: 起動した時点より前のイベントは通知しない（起動直後にまとめて出さない）。fileproviderd は作成時の
+  除外を再送する（実測: フォルダ単位の除外は 10 日で 33 件に 799 回）ので、再送される種類（`isResentByDaemon` =
+  作成時の 2 種）は同じアイテムを**起動中に 1 回だけ**通知する（記録はメモリだけ・ユーザ確定 = 再起動すると再送分を
+  もう一度知らせる）。改名の除外は後片付けで終わり再送されない（実測 17 件に 17 回）ので毎回知らせる。identifier は
+  `notBackedUp:<種類>:<表示パス>`。
+- **取りこぼしうる場合**（通知が 1 件欠けるだけ・同期には影響しない）: `loadRecords()` の `.1` と現行の読み取りの
+  合間に拡張がローテーションしたとき（2MB ごと）、タイムスタンプが同じ値のイベントの片方だけを先に読んだとき。
+- **据え置き**: 機密網・`.syncignore` に当たるようになった追跡中のファイルが、再取り込み（`createItem(mayAlreadyExist)`）や
+  ドメイン作り直しで黙って外れる経路（#136 の注記）は通知の対象外。
 
 ### reconcile 入口の stat ゲート（M4 perf・pull コスト削減・2026-06-16）
 

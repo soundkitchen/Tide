@@ -288,12 +288,15 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             (try? PathValidator.validateRelativePath(path)) != nil
         else {
             AppLogger.fileProvider.notice("createItem: unsyncable name (excludedFromSync): \(itemTemplate.filename, privacy: .private)")
-            // 同期文脈なので fire-and-forget（イベントは best-effort・path は検証不能なので details へ）
+            // 同期文脈なので fire-and-forget（イベントは best-effort・path は検証不能なので details へ）。
+            // details は親フォルダを含む表示用のパス（通知の重複判定の鍵にもなる・#147）。
             let filename = itemTemplate.filename
+            let displayPath = parent.path.isEmpty ? filename : "\(parent.path)/\(filename)"
             Task {
                 await services.events.append(
                     type: .info, path: nil,
-                    message: "Excluded from sync: unsyncable name (kept local)", details: filename)
+                    message: "Excluded from sync: unsyncable name (kept local)", details: displayPath,
+                    notice: .unsyncableName)
             }
             progress.completedUnitCount = 1
             completionHandler(nil, [], false, NSFileProviderError(.excludedFromSync))
@@ -306,7 +309,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             Task {
                 await services.events.append(
                     type: .info, path: path,
-                    message: "Excluded from sync: symbolic link (kept local)")
+                    message: "Excluded from sync: symbolic link (kept local)", notice: .symbolicLink)
             }
             progress.completedUnitCount = 1
             completionHandler(nil, [], false, NSFileProviderError(.excludedFromSync))
@@ -760,6 +763,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         if validNewPath == nil {
             AppLogger.fileProvider.notice("modifyItem(move): unsyncable new name (excluded): \(item.filename, privacy: .private)")
         }
+        // 除外したときの通知に出す新しい名前（検証できない名前もそのまま・表示専用・#147）
+        let newDisplayPath = newParentPath.isEmpty ? item.filename : "\(newParentPath)/\(item.filename)"
         guard validNewPath != oldPath else {
             // 実質 no-op（同一 path への「移動」）。この分岐は実際に踏める — Swift の
             // `String ==` は正準等価（NFC/NFD 同一視）のため、正規化差だけの rename が該当する。
@@ -875,9 +880,12 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                         //（dir 再帰）は子のベースをツリー現行 sha で取るため、受理のための予約は不要 =
                         // そのまま受理される（下の予約はバッジの凍結用）。
                         AppLogger.fileProvider.notice("modifyItem(move): dir excluded (excludedFromSync; cleanup via system deleteItem): \(oldPath, privacy: .private)")
+                        // 配下に追跡中のファイルがあれば、後片付けで S3 から外れる = 通知する（#147）。
+                        // 中身が仮想フォルダだけなら S3 に影響しないので通知しない。
                         await services.events.append(
                             type: .info, path: oldPath,
-                            message: "Excluded from sync by rename (kept local)")
+                            message: "Excluded from sync by rename (kept local)", details: newDisplayPath,
+                            notice: children.isEmpty ? nil : .renamedFolderExcluded)
                         await services.virtualDirs.removeSubtree(at: oldPath)
                         // 後片付けの deleteItem(dir) までは旧フォルダ配下のバッジを伝え済みのまま
                         // 凍結する（Issue #138・PR #142 レビュー指摘 2: 配下の旧 item を版を変えて
@@ -969,9 +977,11 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     // deleteItem 側でツリー現行 sha をベースに受理する。
                     await services.exclusionCleanups.add(oldPath)
                     AppLogger.fileProvider.notice("modifyItem(move): excluded new name (excludedFromSync; cleanup reserved): \(oldPath, privacy: .private)")
+                    // 追跡中なら後片付けで S3 から外れる = 通知する（#147）
                     await services.events.append(
                         type: .info, path: oldPath,
-                        message: "Excluded from sync by rename (kept local)")
+                        message: "Excluded from sync by rename (kept local)", details: newDisplayPath,
+                        notice: current.tree.node(at: oldPath) == nil ? nil : .renamedFileExcluded)
                     completion.value(nil, [], false, NSFileProviderError(.excludedFromSync))
                     return
                 }

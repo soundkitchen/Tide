@@ -128,7 +128,8 @@ Tide/（リポジトリルート）
 │   ├── Core/
 │   │   ├── RemoteChangeSignaler.swift リモート変化検知（index HEAD ETag → FP signal）【現行の駆動】
 │   │   ├── FileProviderController.swift  FP ドメイン登録 / 解除・signal 配線・status 観測
-│   │   ├── NotificationPolicy.swift   通知発火判定（純粋関数・5 事象のみ）(M4 + #103)
+│   │   ├── NotificationPolicy.swift   通知発火判定（純粋関数・6 事象のみ）(M4 + #103 + #147)
+│   │   ├── FPEventNoticeWatcher.swift FP 拡張イベントログの新着 → OS 通知（fpOnly・#147）
 │   │   ├── DiagnosticsExporter.swift / SettingsTransfer.swift
 │   │   └── （folderSync 世代: SyncEngine(+FullScan) / FileWatcher / DebounceQueue / RemoteOpGate）
 │   └── Resources/                     Assets.xcassets / Localizable.xcstrings（en source / ja 翻訳）

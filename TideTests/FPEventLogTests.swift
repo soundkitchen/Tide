@@ -154,4 +154,63 @@ final class FPEventLogTests: XCTestCase {
         XCTAssertEqual(records[0].message.count, FPEventLog.maxMessageLength)
         XCTAssertEqual(records[0].details?.count, FPEventLog.maxDetailsLength)
     }
+
+    // MARK: - 通知の印（Issue #147）
+
+    func testNoticeRoundtrip() async throws {
+        let log = makeLog()
+        await log.append(type: .info, path: "a/link", message: "m", notice: .symbolicLink)
+        await log.append(type: .upload, path: "b.txt", message: "m")
+
+        let records = await log.loadRecords()
+        XCTAssertEqual(records.map(\.notice), [FPEventNotice.symbolicLink.rawValue, nil])
+    }
+
+    /// #147 より前の行（notice キーが無い）はそのまま読め、印は nil。
+    func testRecordWithoutNoticeKeyDecodes() async throws {
+        let log = makeLog()
+        let line = #"{"timestamp":1,"bucket":"b","eventType":"info","path":"a.txt","message":"m"}"#
+        try Data((line + "\n").utf8).write(to: fileURL)
+
+        let records = await log.loadRecords()
+        XCTAssertEqual(records.count, 1)
+        XCTAssertNil(records[0].notice)
+    }
+
+    /// 未知の印はレコードごと捨てず、印だけ外す（表示には使える）。
+    func testUnknownNoticeIsClearedButRecordKept() async throws {
+        let log = makeLog()
+        var data = try JSONEncoder().encode(FPEventRecord(
+            timestamp: 1, bucket: "b", eventType: "info", path: "a.txt", message: "m", notice: "bogus"))
+        data.append(0x0A)
+        try data.write(to: fileURL)
+
+        let records = await log.loadRecords()
+        XCTAssertEqual(records.count, 1)
+        XCTAssertNil(records[0].notice)
+    }
+
+    /// 署名は追記で変わり、何もしなければ変わらない（新着の見張りの stat ゲート）。
+    func testChangeSignatureTracksAppends() async throws {
+        let log = makeLog()
+        let empty = log.changeSignature()
+        XCTAssertEqual(empty, log.changeSignature())
+        await log.append(type: .upload, path: "a.txt", message: "m")
+        let afterOne = log.changeSignature()
+        XCTAssertNotEqual(empty, afterOne)
+        XCTAssertEqual(afterOne, log.changeSignature())
+        await log.append(type: .upload, path: "b.txt", message: "m")
+        XCTAssertNotEqual(afterOne, log.changeSignature())
+    }
+
+    /// 通知に出す名前: symlink は path、それ以外は details（表示用のパス）。
+    func testNoticeSubject() {
+        let record = FPEventRecord(
+            timestamp: 1, bucket: "b", eventType: "info", path: "old/name.txt", message: "m",
+            details: "new/name.env")
+        XCTAssertEqual(FPEventNotice.symbolicLink.subject(of: record), "old/name.txt")
+        XCTAssertEqual(FPEventNotice.unsyncableName.subject(of: record), "new/name.env")
+        XCTAssertEqual(FPEventNotice.renamedFileExcluded.subject(of: record), "new/name.env")
+        XCTAssertEqual(FPEventNotice.renamedFolderExcluded.subject(of: record), "new/name.env")
+    }
 }
