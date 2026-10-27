@@ -127,6 +127,13 @@ PR #66 レビュー指摘 1 の回帰・両方向）・rebind 回帰（rename �
 
 **実機で確認（2026-10-27）**: 再現と同じ手順（作成 → アップロードを配る `enumerateChanges: 1 updated` の直後に `.key` へ改名）で 2 通り試し、どちらも改名から約 1.3 秒で後片付けの `delete-item`（`why:itemIgnored`）が届いた。上限の内側の名前（`A138.txt`）は返却 item が `<sha>|m` のまま、上限の外側の名前（`Repro138c.txt`）は `<sha>` のままで、作成直後に版が変わる再送は出なかった。マニフェストから消え、S3 は削除マーカーが最新・`.key` は未アップロード。`make soak-check-fp` は整合 OK（manifest 11666 / s3 11666）。`structuralVersionMismatch` は 2 通りとも 1 回ずつ出たが、fileproviderd 自身の `evictionUrgency` 更新によるもので、直後に `delete-item` へ進んだ（再試行は続かない）。
 
+**実機で確認・フォルダの凍結予約（2026-10-28・PR #143 のマージ後 c465e8f）**: 3 通り試し、すべて期待どおり。どれもマニフェストから消え、S3 は削除マーカーが最新・除外名の側は未アップロード。`make soak-check-fp` は整合 OK（manifest 11666 / s3 11666）。
+- フォルダを除外名へ改名（`T143/F/a.txt` を上げてから `F` → `.ssh`）: 凍結予約（`fileprovider-dir-cleanup-freezes.json`）に `T143/F` だけが入り、後片付け予約（`fileprovider-exclusion-cleanups.json`）は空のまま。後片付けの `delete-item`（dir・`why:itemIgnored`）は改名から約 75 秒後に届き（fileproviderd が内容の取り込み = `materialize-ignored-item` を background の優先度で回すため）、`deleteItem(dir): removed 1 files` のあと凍結予約は空に戻った。
+- ファイルを改名した直後に同じ名前のフォルダを作る（`S143` → `S143.key` の直後に `mkdir S143` = PR #143 レビュー指摘 1 の手順）: `mkdir` のあとも後片付け予約に `T143/S143` が残り、約 56 秒後に後片付けの `delete-item`（file）が受理された。作ったフォルダの create-item はそのあとに通った。`structuralVersionMismatch` は 1 回だけ出たが、前日と同じく fileproviderd 自身の `evictionUrgency` 更新によるもので、その間に拡張は差分を配っていない。
+- フォルダを除外名へ改名した直後に同じ名前で作り直す（`G` → `.aws` の直後に `mkdir G` = 同 指摘 2）: 作り直したあとも凍結予約に `T143/G` が残り、約 8 秒後の後片付けの `deleteItem(dir)` で外れた。作り直したフォルダの create-item はそのあとに通った。
+- 後片付けの削除を断る経路（`.rejected` / `.notEmpty`）は、他の端末の変更が要るため試していない。
+- 気づいた別件: 作り直した空フォルダ（仮想フォルダ）のローカルの更新日時が 1970-01-01 になった = Issue #144。
+
 **据え置き（残る窓）**: ① ローカルの改名から modifyItem が予約するまで（実測約 0.15 秒）にバッジの差分配信が入る場合。② 他の端末が同じ時間帯にその file を変え、マニフェストの差分が旧 item を再通知する場合。③ 返却 item を fileproviderd が取り込む前に始まった観測が、その item を含まないまま反映された場合（台帳は返した時点までに始まった観測の数で確認済みにするため）。④ move・削除の前に始まった観測が、そのあとに反映された場合（移動先が live から消える）。③ と ④ は次の観測で戻るちらつきだが、改名の直前に重なれば同じ詰まりになりうる（PR #142 レビュー指摘 5・6。取り込みの時点を拡張から知る手段がなく、据え置き）。どれも起きれば同じ詰まりになる。抜け出す手段は 2 手だけ試した: `fileproviderctl check`（読み取り専用）では詰まった item が `item_throttled_side_b` として出る / ローカルのファイルへの `touch` は効かない（mtime の変更は modifyItem に届いて受理されるが、旧名へ戻す処理は残る）。**ローカルの改名後のファイルを削除すると、fileproviderd が旧 item の deleteItem を送って数秒で収束する**（Issue のコメント・再現の両方で確認）。`fileproviderctl repair` はドメイン全体の DB に手を入れるため未検証。拡張側から抜け出させる手段（`reimportItems` 等）は未調査。
 
 ### rename 後に fileproviderd の版スタンプが stale 固着する（2026-07-31 発見・実験で全容確定 = Issue #93）
