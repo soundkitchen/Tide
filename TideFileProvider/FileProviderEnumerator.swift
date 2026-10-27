@@ -291,7 +291,7 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @uncheck
                     // 伝え済みのまま凍結する（Issue #138: 予約から後片付けの削除までに旧 item の版を
                     // 変えて再通知すると、fileproviderd が旧名をディスクへ戻そうとして失敗し続け、
                     // 後片付けが来ない）。凍結した分は上限より優先して残す。
-                    let frozen = await services.exclusionCleanups.snapshot()
+                    let frozen = await services.frozenBadgePaths()
                     let fullReport = MaterializedBadge.pinnedReport(
                         live: live.intersection(filePaths), told: told, frozen: frozen,
                         cap: ExtensionServices.materializedBadgeCap

@@ -92,28 +92,6 @@ final class PersistedPathSetTests: XCTestCase {
         XCTAssertTrue(results.descendant)
     }
 
-    /// フォルダの作り直し（Issue #138）: 自身と祖先の予約だけ外れ、配下の予約は残る。
-    func testRemoveAncestorsIncludingSelfKeepsDescendants() async {
-        let registry = PersistedPathSet(bucket: "b", fileURL: nil, epoch: nil)
-        await registry.add("a")
-        await registry.add("a/b")
-        await registry.add("a/b/c.key")
-        await registry.add("a/sibling")
-
-        await registry.removeAncestors(of: "a/b", includingSelf: true)
-
-        let results = await (
-            a: registry.contains("a"),
-            ab: registry.contains("a/b"),
-            descendant: registry.contains("a/b/c.key"),
-            sibling: registry.contains("a/sibling")
-        )
-        XCTAssertFalse(results.a)
-        XCTAssertFalse(results.ab)
-        XCTAssertTrue(results.descendant)
-        XCTAssertTrue(results.sibling)
-    }
-
     func testPersistenceRoundtrip() async {
         let url = tempURL()
         defer { try? FileManager.default.removeItem(at: url) }

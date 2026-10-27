@@ -39,6 +39,7 @@ App Group の Caches（`~/Library/Group Containers/G5G54TCH8W.org.izukawa.Tide/L
 | `fileprovider-virtual-dirs.json` | `PersistedPathSet` | 空フォルダのローカル仮想受理の温存（Phase 5-3。未使用なら未作成） |
 | `fileprovider-exclusion-cleanups.json` | `PersistedPathSet` | 除外後始末の予約（Phase 5-4。未使用なら未作成） |
 | `fileprovider-dir-exclusion-holds.json` | `PersistedPathSet` | フォルダ単位除外の予約（#120・後始末の deleteItem を S3 非接触にする根拠。未使用なら未作成） |
+| `fileprovider-dir-cleanup-freezes.json` | `PersistedPathSet` | フォルダを除外名へ改名したときのバッジ凍結の予約（#138・後片付けの deleteItem(dir) の完了か拒否まで配下のバッジを凍結する。削除の受理判定には使わない。未使用なら未作成） |
 | `fileprovider-manifest-log.json` | `ManifestGenerationLog` | マニフェスト世代ログ（`enumerateChanges` の anchor 解決。書き手 = 拡張の `ManifestGenerationCache` アクター） |
 | group defaults | `ConfigStore`（`TideAppGroup.sharedDefaults()`） | 設定（bucket / region / deviceId / setupCompleted / syncMode〈外部ツール契約キー〉/ fileProviderDomainEpoch） |
 | Data Protection Keychain | `KeychainStore` | AWS 認証情報 |

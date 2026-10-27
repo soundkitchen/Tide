@@ -38,6 +38,12 @@ struct ExtensionServices: Sendable {
     /// 付き削除**として受理する根拠にする。除外以外の deleteItem は従来どおり itemVersion 由来
     /// ベースで裁く（「根拠なしに消さない」の維持）。
     let exclusionCleanups: PersistedPathSet
+    /// フォルダを除外名へ改名したときのバッジ凍結の予約（Issue #138・PR #143 レビュー指摘 1）。
+    /// 旧フォルダの path を積み、後片付けの deleteItem(dir) が完了するか断るまで、配下のバッジを
+    /// 伝え済みのまま凍結する（祖先一致 = `MaterializedBadge.isFrozen`）。削除の受理判定には
+    /// 使わない — `exclusionCleanups`（ファイルの受理根拠）と分けておかないと、フォルダの予約を
+    /// 外す操作がファイルの予約まで消し、再送された後片付けを断って旧版を S3 に残す。
+    let dirCleanupFreezes: PersistedPathSet
     /// フォルダ単位除外の予約（#120 レビュー B1）。仮想フォルダのメタデータ変更（modifyItem）で
     /// 「配下に追跡済みファイルが無い」ことを根拠に `ExcludedFromSync` を返した path を登録し、
     /// 後から届く後始末の deleteItem（dir）を **S3 非接触**で完了させる根拠にする。判定から
@@ -103,9 +109,26 @@ struct ExtensionServices: Sendable {
     /// 観測が来るまでの差分配信が同じ item をフラグなしで再送し、版が変わる（バッジのちらつき）。
     func returnedMaterializedFlag(for path: String) async -> Bool {
         let reported = await materializedReported.snapshot()
-        let frozen = await exclusionCleanups.snapshot()
+        let frozen = await frozenBadgePaths()
         return await materializedObserver.noteReturnedIfFits(
             path, reported: reported, frozen: frozen, cap: Self.materializedBadgeCap)
+    }
+
+    /// バッジを伝え済みのまま凍結する path（Issue #138）: ファイルの後片付け予約と、フォルダの
+    /// 凍結予約の和。フォルダの分は配下ごと凍結する（祖先一致は `MaterializedBadge.isFrozen` 側）。
+    func frozenBadgePaths() async -> Set<String> {
+        let files = await exclusionCleanups.snapshot()
+        let dirs = await dirCleanupFreezes.snapshot()
+        return files.union(dirs)
+    }
+
+    /// 後片付けの deleteItem(dir) を断ったときに、そのフォルダの凍結予約（Issue #138）だけを外す。
+    /// 配下の予約には触れない。凍結中にたまったバッジの変化を配るため working set を signal する
+    ///（PR #143 レビュー指摘 4: しないと、ほかの変化が起きるまで配られない）。
+    func releaseDirCleanupFreeze(at dirPath: String) async {
+        guard await dirCleanupFreezes.contains(dirPath) else { return }
+        await dirCleanupFreezes.remove(dirPath)
+        signalWorkingSet()
     }
 
     /// 返却 item のフラグを、台帳に記録せず伝え済みの状態のまま返す（Issue #138）。内容がまだ
@@ -242,12 +265,14 @@ struct ExtensionServices: Sendable {
                 filename: "fileprovider-materialized.json")
             let dirHoldsURL = try? PersistedPathSet.defaultURL(
                 filename: "fileprovider-dir-exclusion-holds.json")
+            let dirFreezesURL = try? PersistedPathSet.defaultURL(
+                filename: "fileprovider-dir-cleanup-freezes.json")
             if virtualDirsURL == nil || cleanupsURL == nil || materializedURL == nil
-                || dirHoldsURL == nil {
+                || dirHoldsURL == nil || dirFreezesURL == nil {
                 AppLogger.fileProvider.error("Extension: path-set registry URL unavailable (persisting disabled)")
             }
             // ドメイン epoch（Issue #104）: アプリがドメイン除去のたびに進める世代値をここで
-            // 一度だけ capture し、レジストリ 4 本の payload スタンプ / 読込検証に使う。
+            // 一度だけ capture し、レジストリ 5 本の payload スタンプ / 読込検証に使う。
             // ドメイン作り直しを跨いだ stale レジストリ（バッジ永久不点灯・消えた dir の合成・
             // 無意味な削除受理予約）は epoch 不一致で読込時に全体破棄される。プロセス生存中に
             // アプリが bump しても capture 値は変えない — 遅延 persist は旧 epoch でスタンプされ
@@ -268,6 +293,8 @@ struct ExtensionServices: Sendable {
                     bucket: bucket, fileURL: virtualDirsURL, epoch: domainEpoch),
                 exclusionCleanups: PersistedPathSet(
                     bucket: bucket, fileURL: cleanupsURL, epoch: domainEpoch),
+                dirCleanupFreezes: PersistedPathSet(
+                    bucket: bucket, fileURL: dirFreezesURL, epoch: domainEpoch),
                 dirExclusionHolds: PersistedPathSet(
                     bucket: bucket, fileURL: dirHoldsURL, epoch: domainEpoch),
                 materializedReported: PersistedPathSet(
