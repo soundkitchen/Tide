@@ -287,13 +287,13 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @uncheck
                     let live = (await services.materializedObserver.current() ?? reported)
                         .union(ledger.unconfirmed)
                     let filePaths = target.tree.filePaths
-                    // 除外名への改名で後片付けを予約した path はバッジを伝え済みのまま凍結する
-                    //（Issue #138: 予約から後片付けの削除までに旧 item の版を変えて再通知すると、
-                    // fileproviderd が旧名をディスクへ戻そうとして失敗し続け、後片付けが来ない）。
+                    // 除外名への改名で後片付けを予約した path（フォルダなら配下ごと）はバッジを
+                    // 伝え済みのまま凍結する（Issue #138: 予約から後片付けの削除までに旧 item の版を
+                    // 変えて再通知すると、fileproviderd が旧名をディスクへ戻そうとして失敗し続け、
+                    // 後片付けが来ない）。凍結した分は上限より優先して残す。
                     let frozen = await services.exclusionCleanups.snapshot()
-                    let fullReport = MaterializedBadge.cappedReport(
-                        live: MaterializedBadge.pinning(
-                            live.intersection(filePaths), to: told, frozen: frozen),
+                    let fullReport = MaterializedBadge.pinnedReport(
+                        live: live.intersection(filePaths), told: told, frozen: frozen,
                         cap: ExtensionServices.materializedBadgeCap
                     )
                     // dirsBefore は origin（= Finder が最後に見た世代）のツリー基準で計算する
@@ -369,7 +369,13 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @uncheck
                 if isWorkingSet {
                     await services.materializedReported.replace(with: newReport)
                     // 観測で確認済みの返却分は newReport に反映済みなので台帳から外す（Issue #138）。
-                    await services.materializedObserver.fold(ledger.confirmedMarks)
+                    // ただし newReport に入れたのに replace の上限で切り詰められた分は、伝え済み
+                    // （点灯で配った）なのに reported に残っていないので、台帳に残す（外すと伝え済みの
+                    // 集合から落ち、次の配信で消灯を配らないまま食い違う = PR #142 レビュー指摘 7）。
+                    let persisted = await services.materializedReported.snapshot()
+                    await services.materializedObserver.fold(ledger.confirmedMarks.filter {
+                        persisted.contains($0.key) || !newReport.contains($0.key)
+                    })
                     if badgeDeferred {
                         // 配りきれなかったバッジは次の enumerateChanges で配る（Issue #131）。
                         services.signalWorkingSet()

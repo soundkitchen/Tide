@@ -687,7 +687,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     await services.events.append(
                         type: .conflict, path: path,
                         message: "Upload conflict — local edit preserved as copy → \(copyPath)")
-                    let materialized = await services.returnedMaterializedFlag(for: path)
+                    // 内容はこれから取り直すので台帳に記録しない（伝え済みの状態のまま返す）。
+                    let materialized = await services.toldMaterializedFlag(for: path)
                     completion.value(
                         FileProviderItem(node: .file(path: path, entry: remote), materialized: materialized),
                         [], true, nil)
@@ -805,7 +806,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                             await services.events.append(
                                 type: .conflict, path: oldPath,
                                 message: "Upload conflict — local edit preserved as copy → \(copyPath)")
-                            let materialized = await services.returnedMaterializedFlag(for: oldPath)
+                            // 内容はこれから取り直すので台帳に記録しない（上の modifyItem 競合と同じ）。
+                            let materialized = await services.toldMaterializedFlag(for: oldPath)
                             completion.value(
                                 FileProviderItem(
                                     node: .file(path: oldPath, entry: remote), materialized: materialized),
@@ -870,13 +872,19 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                         // **マニフェストはここでは触らない** — SDK は除外時に「内容をダウンロード
                         // してから deleteItem を発行」する契約で、先に entry を消すと dataless の
                         // 子が materialize できない殻になる（5-4 実機で確定）。後追い deleteItem
-                        //（dir 再帰）は子のベースをツリー現行 sha で取るため追加の予約は不要 =
-                        // そのまま受理される。
+                        //（dir 再帰）は子のベースをツリー現行 sha で取るため、受理のための予約は不要 =
+                        // そのまま受理される（下の予約はバッジの凍結用）。
                         AppLogger.fileProvider.notice("modifyItem(move): dir excluded (excludedFromSync; cleanup via system deleteItem): \(oldPath, privacy: .private)")
                         await services.events.append(
                             type: .info, path: oldPath,
                             message: "Excluded from sync by rename (kept local)")
                         await services.virtualDirs.removeSubtree(at: oldPath)
+                        // 後片付けの deleteItem(dir) までは旧フォルダ配下のバッジを伝え済みのまま
+                        // 凍結する（Issue #138・PR #142 レビュー指摘 2: 配下の旧 item を版を変えて
+                        // 再通知すると、ファイルの改名と同じく後片付けが来なくなりうる）。予約は
+                        // 旧フォルダの path 1 件（凍結は祖先一致 = `MaterializedBadge.isFrozen`）。
+                        // ファイルの deleteItem の受理判定は path の完全一致なので、配下の判定は変わらない。
+                        await services.exclusionCleanups.add(oldPath)
                         completion.value(nil, [], false, NSFileProviderError(.excludedFromSync))
                         return
                     }
@@ -1163,6 +1171,10 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                         }
                         await services.virtualDirs.removeSubtree(at: dirPath)
                         await services.dirExclusionHolds.removeSubtree(at: dirPath)
+                        await services.exclusionCleanups.removeSubtree(at: dirPath)
+                        // 実体化バッジ: 消えた subtree を報告済み・live・台帳から外す（PR #142
+                        // レビュー指摘 9）。
+                        await services.followMaterializedRemoval(at: dirPath)
                         dirCompletion.value(nil)
                         return
                     case .notEmpty:
@@ -1180,6 +1192,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                             type: .delete, path: dirPath, message: "Deleted folder (\(count) files)")
                         await services.virtualDirs.removeSubtree(at: dirPath)
                         await services.dirExclusionHolds.removeSubtree(at: dirPath)
+                        // フォルダを除外名へ改名したときの後片付け予約（Issue #138）を外す。
+                        await services.exclusionCleanups.removeSubtree(at: dirPath)
                         // 実体化バッジ（Issue #65）: 消えた subtree の報告済みエントリも掃除
                         await services.followMaterializedRemoval(at: dirPath)
                         dirCompletion.value(nil)

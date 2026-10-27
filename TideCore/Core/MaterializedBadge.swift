@@ -41,28 +41,62 @@ public enum MaterializedBadge {
         return Set(live.sorted().prefix(max(cap, 0)))
     }
 
-    /// 書込・実体化コールバック（createItem / modifyItem / fetchContents）の返却 item に実体化
-    /// フラグを付けてよいか（Issue #138）。`reported` に `path` を足して `cappedReport` で切り詰めた
-    /// ときに `path` が残るか、と同じ規則。上限の外のパスに付けると、直後の差分配信が
-    /// `cappedReport` で外したフラグで同じ item を再送し、版が変わる（= バッジのちらつき）。
-    /// その再送がローカルの除外名への改名と重なると、fileproviderd が旧名をディスクへ戻そうと
-    /// して失敗し続け、後片付けの削除が来なくなる。
-    public static func fitsReport(path: String, reported: Set<String>, cap: Int) -> Bool {
-        guard cap > 0 else { return false }
-        if reported.count < cap || reported.contains(path) { return true }
-        guard let last = reported.max() else { return true }
-        return path < last
+    /// working set の差分配信で報告する集合（Issue #138）。除外名への改名で後片付けを予約した
+    /// path（`frozen` = 自身か祖先が予約中）のバッジは、Finder へ伝え済みの状態（`told`）のまま
+    /// 据え置く — 予約から後片付けの削除までの間に旧 item の版を変えて再通知すると、fileproviderd が
+    /// 旧名をディスクへ戻そうとして失敗し続け、後片付けが来なくなる。凍結した分は上限より優先して
+    /// 残し、それ以外を残りの枠で `cappedReport` と同じ昇順 prefix に切り詰める（凍結を切り詰めの
+    /// 前にかけると、上限ちょうどのとき凍結した path が切り落とされて消灯が配られる = PR #142
+    /// レビュー指摘 1）。
+    public static func pinnedReport(
+        live: Set<String>, told: Set<String>, frozen: Set<String>, cap: Int
+    ) -> Set<String> {
+        guard !frozen.isEmpty else { return cappedReport(live: live, cap: cap) }
+        let pinned = told.filter { isFrozen($0, frozen: frozen) }
+        let rest = live.filter { !isFrozen($0, frozen: frozen) }
+        return cappedReport(live: rest, cap: cap - pinned.count).union(pinned)
     }
 
-    /// 除外名への改名で後片付けを予約した path（`frozen`）のバッジを、Finder へ伝え済みの状態
-    /// （`told`）のまま据え置いた報告集合（Issue #138）。予約から後片付けの削除までの間に旧 item の
-    /// 版を変えて再通知すると、fileproviderd が旧名をディスクへ戻そうとして失敗し続け、後片付けが
-    /// 来なくなる。凍結した path は報告の差分に現れないので配信もされない。
-    public static func pinning(
-        _ target: Set<String>, to told: Set<String>, frozen: Set<String>
-    ) -> Set<String> {
-        guard !frozen.isEmpty else { return target }
-        return target.subtracting(frozen).union(told.intersection(frozen))
+    /// 書込・実体化コールバック（createItem / modifyItem / fetchContents）の返却 item に実体化
+    /// フラグを付けてよいか（Issue #138）。伝え済みの集合（`reported` + `pendingReturned`）に
+    /// `path` を足して `pinnedReport` を取ったときに `path` が残るか、と同じ規則。上限の外の
+    /// パスに付けると、直後の差分配信が切り詰めで外したフラグで同じ item を再送し、版が変わる
+    /// （= バッジのちらつき）。その再送がローカルの除外名への改名と重なると、fileproviderd が
+    /// 旧名をディスクへ戻そうとして失敗し続け、後片付けの削除が来なくなる。
+    /// 伝え済みの集合は上限を超えうる（返却分が足される）ので、「報告済みなら残る」とはせず、
+    /// `path` より前に並ぶ凍結外のパスの数で決める。凍結中の path は伝え済みの状態のまま。
+    public static func fitsReport(
+        path: String, reported: Set<String>, pendingReturned: Set<String> = [],
+        frozen: Set<String> = [], cap: Int
+    ) -> Bool {
+        if !frozen.isEmpty, isFrozen(path, frozen: frozen) {
+            return reported.contains(path) || pendingReturned.contains(path)
+        }
+        var slots = cap
+        var before = 0
+        func count(_ other: String) {
+            if !frozen.isEmpty, isFrozen(other, frozen: frozen) {
+                slots -= 1
+            } else if other < path {
+                before += 1
+            }
+        }
+        for other in reported { count(other) }
+        for other in pendingReturned where !reported.contains(other) { count(other) }
+        return before < slots
+    }
+
+    /// `path` が凍結中か（自身か祖先が後片付けの予約に入っている）。フォルダを除外名へ改名した
+    /// ときは旧フォルダの path を予約するので、配下のファイルもまとめて凍結する（PR #142
+    /// レビュー指摘 2）。
+    public static func isFrozen(_ path: String, frozen: Set<String>) -> Bool {
+        if frozen.contains(path) { return true }
+        var ancestor = Substring(path)
+        while let slash = ancestor.lastIndex(of: "/") {
+            ancestor = ancestor[..<slash]
+            if frozen.contains(String(ancestor)) { return true }
+        }
+        return false
     }
 
     /// `path` が `root` 自身かその配下か。

@@ -102,13 +102,18 @@ struct ExtensionServices: Sendable {
     /// 次の差分配信で報告に入る（上限の内側の）ときだけ true にし、台帳に記録する — 記録しないと
     /// 観測が来るまでの差分配信が同じ item をフラグなしで再送し、版が変わる（バッジのちらつき）。
     func returnedMaterializedFlag(for path: String) async -> Bool {
+        let reported = await materializedReported.snapshot()
+        let frozen = await exclusionCleanups.snapshot()
+        return await materializedObserver.noteReturnedIfFits(
+            path, reported: reported, frozen: frozen, cap: Self.materializedBadgeCap)
+    }
+
+    /// 返却 item のフラグを、台帳に記録せず伝え済みの状態のまま返す（Issue #138）。内容がまだ
+    /// ローカルに無い返却 item（modifyItem の競合でリモート版を取り直させる場合）に使う —
+    /// 記録すると、内容が来る前に点灯して報告まで進みうる（PR #142 レビュー指摘 8）。
+    func toldMaterializedFlag(for path: String) async -> Bool {
         let told = await toldMaterialized()
-        guard MaterializedBadge.fitsReport(
-            path: path, reported: told.reported.union(told.pendingReturned),
-            cap: Self.materializedBadgeCap)
-        else { return false }
-        await materializedObserver.noteReturned(path)
-        return true
+        return told.reported.contains(path) || told.pendingReturned.contains(path)
     }
 
     /// 単一ファイルの move に実体化バッジの状態（報告済み・live・返却分の台帳）を追従させる。

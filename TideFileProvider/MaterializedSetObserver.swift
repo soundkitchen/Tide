@@ -30,9 +30,19 @@ actor MaterializedObserver {
         live
     }
 
-    /// 返却 item に実体化フラグを付けて返した（Issue #138）。
-    func noteReturned(_ path: String) {
+    /// 返却 item に実体化フラグを付けてよいかを決め、付けるなら台帳に記録する（Issue #138）。
+    /// 判定（伝え済みの集合 = `reported` + 台帳）と記録を同じ actor の 1 回の呼び出しで行う —
+    /// 分けると、上限の手前で並行したコールバックがどれも「入る」と判定して上限を超え、
+    /// 超えた分が差分配信でフラグなしに再送される（PR #142 レビュー指摘 4）。
+    func noteReturnedIfFits(
+        _ path: String, reported: Set<String>, frozen: Set<String>, cap: Int
+    ) -> Bool {
+        guard MaterializedBadge.fitsReport(
+            path: path, reported: reported, pendingReturned: ledger.pending,
+            frozen: frozen, cap: cap)
+        else { return false }
         ledger.noteReturned(path)
+        return true
     }
 
     /// 台帳の今の状態（Issue #138）。報告点は `fold(_:)` に `confirmedMarks` を渡して畳み込む。

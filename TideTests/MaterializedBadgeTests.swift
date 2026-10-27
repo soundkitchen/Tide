@@ -255,13 +255,40 @@ final class MaterializedBadgeTests: XCTestCase {
     }
 
     /// 凍結した path は伝え済みの状態のまま（点灯も消灯も進めない）。それ以外は目標どおり。
-    func testPinningKeepsFrozenPathsAsTold() {
-        let target: Set<String> = ["a", "frozen-on"]
+    func testPinnedReportKeepsFrozenPathsAsTold() {
+        let live: Set<String> = ["a", "frozen-on"]
         let told: Set<String> = ["frozen-off-told", "b"]
-        let pinned = MaterializedBadge.pinning(
-            target, to: told, frozen: ["frozen-on", "frozen-off-told"])
-        XCTAssertEqual(pinned, ["a", "frozen-off-told"])
-        XCTAssertEqual(MaterializedBadge.pinning(target, to: told, frozen: []), target)
+        let report = MaterializedBadge.pinnedReport(
+            live: live, told: told, frozen: ["frozen-on", "frozen-off-told"], cap: 10)
+        XCTAssertEqual(report, ["a", "frozen-off-told"])
+        XCTAssertEqual(MaterializedBadge.pinnedReport(live: live, told: told, frozen: [], cap: 10), live)
+    }
+
+    /// PR #142 レビュー指摘 1: 上限ちょうどでも凍結した path は切り落とさない（凍結以外を残りの枠で
+    /// 切り詰める）。切り落とすと旧 item の消灯が配られ、#138 が再発する。
+    func testPinnedReportKeepsFrozenPathsAheadOfCap() {
+        let told: Set<String> = ["a", "z"]  // 上限 2 ちょうど・z は後片付けの予約中
+        let live: Set<String> = ["a", "b", "z"]  // z より前に並ぶ b が加わった
+        let report = MaterializedBadge.pinnedReport(live: live, told: told, frozen: ["z"], cap: 2)
+        XCTAssertEqual(report, ["a", "z"])
+        let changed = MaterializedBadge.changedPaths(
+            oldFilePaths: ["a", "b", "z"], newFilePaths: ["a", "b", "z"],
+            previousReported: told, newReport: report)
+        XCTAssertFalse(changed.files.contains("z"))
+    }
+
+    /// PR #142 レビュー指摘 2: フォルダを除外名へ改名したときは旧フォルダの path を予約するので、
+    /// 配下のファイルもまとめて凍結する（名前の前方一致ではなく、パスの祖先で判定する）。
+    func testFrozenFolderFreezesItsSubtree() {
+        XCTAssertTrue(MaterializedBadge.isFrozen("D/x.txt", frozen: ["D"]))
+        XCTAssertTrue(MaterializedBadge.isFrozen("D/sub/y.txt", frozen: ["D"]))
+        XCTAssertTrue(MaterializedBadge.isFrozen("D", frozen: ["D"]))
+        XCTAssertFalse(MaterializedBadge.isFrozen("DD/x.txt", frozen: ["D"]))
+        XCTAssertFalse(MaterializedBadge.isFrozen("x.txt", frozen: ["D"]))
+        // 観測で D/x.txt が外れても（改名後の旧 item）、伝え済みの点灯のまま
+        let report = MaterializedBadge.pinnedReport(
+            live: ["other.txt"], told: ["D/x.txt"], frozen: ["D"], cap: 10)
+        XCTAssertEqual(report, ["D/x.txt", "other.txt"])
     }
 
     /// Issue #138 の再現手順: 予約中の path は、live が点灯に変わってもバッジの差分に現れない
@@ -270,10 +297,44 @@ final class MaterializedBadgeTests: XCTestCase {
         let files = ["Test136.txt", "other.txt"]
         let reported: Set<String> = []  // 作成直後でまだ報告していない
         let live: Set<String> = ["Test136.txt", "other.txt"]  // 改名後に観測が届いた
-        let report = MaterializedBadge.pinning(live, to: reported, frozen: ["Test136.txt"])
+        let report = MaterializedBadge.pinnedReport(
+            live: live, told: reported, frozen: ["Test136.txt"], cap: 10)
         let changed = MaterializedBadge.changedPaths(
             oldFilePaths: files, newFilePaths: files, previousReported: reported, newReport: report)
         XCTAssertEqual(changed.files, ["other.txt"])
+    }
+
+    /// PR #142 レビュー指摘 3: 伝え済みの集合（報告済み + 返却分）は上限を超えうる。そのとき
+    /// 「報告済みに含まれる / 末尾より前」では判定せず、`pinnedReport` と同じ答えを返す。
+    func testFitsReportCountsToldBeyondCapAndFrozen() {
+        // 伝え済み {a, b, c}（上限 2 を超えている）: bb は a, b の後ろなので入らない
+        XCTAssertFalse(MaterializedBadge.fitsReport(
+            path: "bb", reported: ["a", "b"], pendingReturned: ["c"], cap: 2))
+        // 報告済みでも上限の外に押し出される位置なら付けない
+        XCTAssertFalse(MaterializedBadge.fitsReport(
+            path: "c", reported: ["a", "b", "c"], cap: 2))
+        // 凍結した分は枠を先に取る / 凍結中の path 自身は伝え済みの状態のまま
+        XCTAssertFalse(MaterializedBadge.fitsReport(
+            path: "b", reported: ["a", "z"], frozen: ["z"], cap: 2))
+        XCTAssertTrue(MaterializedBadge.fitsReport(
+            path: "0", reported: ["a", "z"], frozen: ["z"], cap: 2))
+        XCTAssertTrue(MaterializedBadge.fitsReport(
+            path: "z", reported: ["a", "z"], frozen: ["z"], cap: 2))
+        XCTAssertFalse(MaterializedBadge.fitsReport(
+            path: "y", reported: ["a"], frozen: ["y"], cap: 2))
+        // pinnedReport（伝え済みに足した集合）と同じ答えになる
+        let reported: Set<String> = ["a", "c", "z"]
+        let pending: Set<String> = ["b"]
+        let frozen: Set<String> = ["z"]
+        let told = reported.union(pending)
+        for path in ["0", "a", "b", "bb", "c", "d"] {
+            XCTAssertEqual(
+                MaterializedBadge.fitsReport(
+                    path: path, reported: reported, pendingReturned: pending, frozen: frozen, cap: 3),
+                MaterializedBadge.pinnedReport(
+                    live: told.union([path]), told: told, frozen: frozen, cap: 3).contains(path),
+                path)
+        }
     }
 
     /// 返却 item で伝えたファイルは伝え済みとして数える: 報告に入れても再送しない / 外せば消灯を配る。
