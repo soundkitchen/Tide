@@ -347,3 +347,9 @@ FP 拡張の書込（deleteItem / modifyItem / createItem / move）は `Extensio
 - **at-rest 場所と寿命**: App Group Caches。診断ログ = 消えても同期の正しさに影響しない。サイズローテーション（2MB × 現行 + 1 世代）で有界。`factoryReset` / `make reset` の掃除範囲は L16 と同じ。
 - **読込ゲート**: 表示専用（path を FS 操作に使わない）のため**行単位破棄** — 壊れ行スキップ・bucket キー・未知 eventType 破棄・`validateRelativePath` 再適用・message / details の長さ上限・肥大ファイル（> 2×maxBytes・改ざん前提）は読込ごと拒否。UI 表示は `Text(verbatim:)`（ローカライズ解決に流さない）。
 - **書込は best-effort**: 追記失敗は os.Logger のみ（FP 操作を失敗させない）。単一書き手（拡張プロセス + actor 直列化）でローテーション競合なし。
+- **Status（2026-10-28・#147）: レコードに通知の印 `notice` を追加し、アプリが新着を OS 通知に使うようにした**。
+  印は `FPEventNotice` の rawValue（固定の 4 種）で、未知の値は読込時に外す（レコードは表示用に残す）。通知の
+  本文に出すのは表示用のパスの末尾の名前だけで、生エラー文字列は出さない（既存の通知と同じ・`security/README.md` の
+  通知の注記どおり by-design）。検証できない名前の除外は `path` に入れられないため、親フォルダを含む表示用のパスを
+  `details` に入れる（表示専用・FS 操作にも S3 キーにも使わない = 読込ゲートの前提は変わらない）。改ざんされたログは
+  偽の通知を出しうるが、書けるのは本人の App Group コンテナに書ける者だけで、通知は表示のみ（同期に影響しない）。

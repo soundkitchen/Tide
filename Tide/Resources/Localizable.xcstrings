@@ -2469,6 +2469,61 @@
           }
         }
       }
+    },
+    "“%@” has a name Tide can’t sync, so it stays only on this Mac. Rename it to back it up." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "「%@」は Tide が同期できない名前のため、この Mac にだけ残っています。バックアップするには名前を変えてください。"
+          }
+        }
+      }
+    },
+    "“%@” is a symbolic link. Tide doesn’t sync links, so it stays only on this Mac." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "「%@」はシンボリックリンクです。Tide はリンクを同期しないため、この Mac にだけ残っています。"
+          }
+        }
+      }
+    },
+    "“%@” was renamed to a name Tide doesn’t sync and is no longer backed up. It stays on this Mac." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "「%@」は Tide が同期しない名前に変わったため、バックアップから外れました。この Mac には残っています。"
+          }
+        }
+      }
+    },
+    "The folder “%@” was renamed to a name Tide doesn’t sync, so its files are no longer backed up. They stay on this Mac." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "フォルダ「%@」は Tide が同期しない名前に変わったため、中のファイルがバックアップから外れました。この Mac には残っています。"
+          }
+        }
+      }
+    },
+    "%lld more files aren’t backed up. They stay only on this Mac." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ほか %lld 件のファイルがバックアップされていません。この Mac にだけ残っています。"
+          }
+        }
+      }
     }
   },
   "version" : "1.1"

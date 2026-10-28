@@ -19,6 +19,7 @@ public final class ConfigStore: @unchecked Sendable {
         static let syncMode = "tide.syncMode"
         static let fileProviderDomainEpoch = "tide.fileProviderDomainEpoch"
         static let launchAtLoginMigrated = "tide.launchAtLoginMigrated"
+        static let fpNoticeRenameCursor = "tide.fpNoticeRenameCursor"
     }
 
     /// 稼働モードの列挙。**v0.3.0（#96）以降、アプリはこの値で分岐しない**（boot は無条件
@@ -49,7 +50,7 @@ public final class ConfigStore: @unchecked Sendable {
         Key.uploadSizeLimitBytes,
         Key.uploadBandwidthBytesPerSec, Key.downloadBandwidthBytesPerSec,
         Key.notificationsEnabled, Key.syncRootBookmark,
-        Key.syncMode, Key.launchAtLoginMigrated
+        Key.syncMode, Key.launchAtLoginMigrated, Key.fpNoticeRenameCursor
     ]
 
     /// セットアップ完了フラグの defaults キー（`LegacyStateMigrator` の移行要否判定用）。
@@ -151,6 +152,20 @@ public final class ConfigStore: @unchecked Sendable {
     public var launchAtLoginMigrated: Bool {
         get { defaults.bool(forKey: Key.launchAtLoginMigrated) }
         set { defaults.set(newValue, forKey: Key.launchAtLoginMigrated) }
+    }
+
+    /// 改名による除外の通知を、どのイベントまで済ませたか（`FPEventLog` のタイムスタンプ・Issue #147）。
+    /// 改名の除外は再送されないので、アプリが止まっていた間の分を次の起動で知らせるために保存する
+    /// （`FPEventNoticeWatcher`）。nil = 未保存（初回・`reset()` 後）= 起動時刻から始める。
+    public var fpNoticeRenameCursor: Double? {
+        get { defaults.object(forKey: Key.fpNoticeRenameCursor) as? Double }
+        set {
+            if let newValue {
+                defaults.set(newValue, forKey: Key.fpNoticeRenameCursor)
+            } else {
+                defaults.removeObject(forKey: Key.fpNoticeRenameCursor)
+            }
+        }
     }
 
     /// 同期フォルダの security-scoped bookmark（App Sandbox 下での再アクセス手段・M5 Phase 2）。

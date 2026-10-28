@@ -171,6 +171,14 @@ final class FileProviderWritePolicyTests: XCTestCase {
         XCTAssertNil(FileProviderWritePolicy.childPath(parentPath: "docs", filename: "a/\u{301}b.txt"))
     }
 
+    // MARK: - 通知に出す表示用のパス（Issue #147）
+
+    /// 親と名前をつなぐだけで検証しない（同期できない名前もそのまま組み立てる）。
+    func testDisplayPathJoinsWithoutValidation() {
+        XCTAssertEqual(FileProviderWritePolicy.displayPath(parentPath: "", filename: "a\\b.txt"), "a\\b.txt")
+        XCTAssertEqual(FileProviderWritePolicy.displayPath(parentPath: "docs/sub", filename: "x.pem"), "docs/sub/x.pem")
+    }
+
     // MARK: - 版スタンプ自動治癒の対象選定（Issue #93）
 
     /// 実体化済み（旧パス掲載）のファイルだけが治癒対象。dataless は症状が可視化されず、

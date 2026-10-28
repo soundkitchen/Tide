@@ -20,6 +20,9 @@ final class AppEnvironment {
     /// FP-only 稼働モード（Track B）のリモート変更検知。`fpOnly` 起動時のみ非 nil
     /// （`engine` とは相互排他 = モードごとにどちらか一方だけが立つ）。
     var signaler: RemoteChangeSignaler?
+    /// fpOnly: FP 拡張のイベントログの新着を OS 通知へつなぐ（Issue #147）。signaler と同じく
+    /// fpOnly 起動時のみ非 nil で、signaler と一緒に立てて一緒に止める。
+    var fpNoticeWatcher: FPEventNoticeWatcher?
 
     var isSetupCompleted: Bool { config.setupCompleted }
 
@@ -310,6 +313,24 @@ final class AppEnvironment {
         )
         self.signaler = signaler
         signaler.start()
+
+        // 同期できない名前・symlink・同期しない名前への改名を OS 通知で知らせる（Issue #147）。
+        // 拡張が FPEventLog に印を付けたイベントの新着を拾う。通知は fire-and-forget（post は
+        // 許可プロンプト応答待ちで長く suspend し得る = SyncEngine の配線と同じ理由）。
+        // ログの URL が作れない（group container 不達のエッジ）ときは見張らない。
+        fpNoticeWatcher?.stop()
+        fpNoticeWatcher = nil
+        if let eventsURL = try? FPEventLog.defaultURL() {
+            let watcher = FPEventNoticeWatcher(
+                log: FPEventLog(bucket: config.bucketName!, fileURL: eventsURL), config: config
+            ) { [notifications] event in
+                Task { @MainActor in await notifications.post(event) }
+            }
+            fpNoticeWatcher = watcher
+            watcher.start()
+        } else {
+            AppLogger.ui.error("FP-only mode: cannot locate the FP event log; exclusion notices are disabled")
+        }
         AppLogger.ui.info("Launched in FP-only mode (RemoteChangeSignaler active)")
 
         Self.enforceTLSBucketPolicyDetached(s3: s3)
@@ -623,6 +644,8 @@ final class AppEnvironment {
         // nil = no-op。
         signaler?.stop()
         signaler = nil
+        fpNoticeWatcher?.stop()
+        fpNoticeWatcher = nil
 
         // bootstrap の fire-and-forget 移行タスクと直列化（四次レビュー指摘 3）: in-flight の
         // migrate が除去**前**のスナップショットで resume すると、この後 disableForRecreation が
@@ -784,6 +807,8 @@ final class AppEnvironment {
         engine = nil
         signaler?.stop()
         signaler = nil
+        fpNoticeWatcher?.stop()
+        fpNoticeWatcher = nil
         // 配達済みの「Tide is not syncing」を撤去（PR #109 収束レビュー ブロッカー 4）: 全消し後の
         // 起動は launchFPOnlySignaler の無条件掃除に到達しない（setupCompleted 手前で return）ため、
         // ここで消さないと再セットアップ完走まで stale 通知が残り続ける。撤去は冪等。

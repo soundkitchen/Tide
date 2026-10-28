@@ -104,6 +104,13 @@ public enum FileProviderWritePolicy {
         return parentPath.isEmpty ? filename : "\(parentPath)/\(filename)"
     }
 
+    /// 通知や記録に出す表示用のパス（Issue #147）。`childPath` と違って検証しない — 同期できない
+    /// 名前もそのまま組み立てる（表示専用・FS 操作にも S3 キーにも使わない）。通知の重複除去の鍵にも
+    /// なるので、createItem と modifyItem で同じ式を使うためにここへ置く。
+    public static func displayPath(parentPath: String, filename: String) -> String {
+        parentPath.isEmpty ? filename : "\(parentPath)/\(filename)"
+    }
+
     /// フォルダの deleteItem の進め方（M5 Phase 5-3・#120 レビュー B1）。
     public enum DirectoryDeletePlan: Equatable, Sendable {
         /// S3 に触れず、ローカル側の掃除（仮想フォルダ登録など）だけで成功を返す

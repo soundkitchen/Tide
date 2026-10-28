@@ -106,7 +106,7 @@ Tide/（リポジトリルート）
 │   │   ├── ConfigStore.swift          group UserDefaults ラッパー
 │   │   ├── KeychainStore.swift        認証情報保管（Data Protection Keychain）
 │   │   ├── TideAppGroup.swift         App Group 定数 / コンテナパス解決
-│   │   ├── FPEventLog.swift           FP イベントの共有 JSONL（Sync Activity のソース・#83）
+│   │   ├── FPEventLog.swift           FP イベントの共有 JSONL（Sync Activity と通知のソース・#83 / #147）
 │   │   ├── LegacyStateMigrator.swift  旧ロケーションからの一度きり移行
 │   │   └── （folderSync 世代: LocalDatabase / Migrations / TransferStateStore）
 │   └── Models/
@@ -128,7 +128,8 @@ Tide/（リポジトリルート）
 │   ├── Core/
 │   │   ├── RemoteChangeSignaler.swift リモート変化検知（index HEAD ETag → FP signal）【現行の駆動】
 │   │   ├── FileProviderController.swift  FP ドメイン登録 / 解除・signal 配線・status 観測
-│   │   ├── NotificationPolicy.swift   通知発火判定（純粋関数・5 事象のみ）(M4 + #103)
+│   │   ├── NotificationPolicy.swift   通知発火判定（純粋関数・6 事象のみ）(M4 + #103 + #147)
+│   │   ├── FPEventNoticeWatcher.swift FP 拡張イベントログの新着 → OS 通知（fpOnly・#147）
 │   │   ├── DiagnosticsExporter.swift / SettingsTransfer.swift
 │   │   └── （folderSync 世代: SyncEngine(+FullScan) / FileWatcher / DebounceQueue / RemoteOpGate）
 │   └── Resources/                     Assets.xcassets / Localizable.xcstrings（en source / ja 翻訳）
@@ -264,10 +265,13 @@ final class TideS3Client: @unchecked Sendable {
 Version History / 削除済み復元の実行系。tmp DL → 現行版 PUT → `ManifestUpdater` 合流の
 **S3 内復元**（ローカル書き戻しなし）。詳細は `08-IMPLEMENTATION-NOTES.md`「FP-only 稼働モード B-2」節。
 
-### FPEventLog（fpOnly の Sync Activity ソース）
+### FPEventLog（fpOnly の Sync Activity と通知のソース）
 
 FP 拡張が書く App Group Caches の追記型 JSONL（書き手 = 拡張のみ・サイズ上限ローテーション）。
-Sync Activity ウィンドウは fpOnly でこれを読む（#83）。
+Sync Activity ウィンドウは fpOnly でこれを読む（#83）。アプリの `FPEventNoticeWatcher` も読み、
+拡張が印 `notice` を付けたレコード（同期できない名前・symlink・同期しない名前への改名）を
+「ファイルが未バックアップ」の OS 通知にする（#147。5 秒ごとに stat の署名 `changeSignature` で
+変化を見て、変わったときだけ読む）。
 
 ### HashCalculator
 
@@ -322,6 +326,7 @@ struct HashCalculator {
     │       ├─ Keychain から資格情報 → TideS3Client 構築
     │       ├─ FP ドメイン status 観測（#103 の OFF 検出）+ stale 通知掃除
     │       ├─ RemoteChangeSignaler.start()（ベースライン確立 + 初回 signal）
+    │       ├─ FPEventNoticeWatcher.start()（FPEventLog の新着 → 未バックアップ通知・#147。ログ URL が取れなければ起動しない）
     │       └─ TLS ポリシー自己修復を detached で冪等適用
     │       ※ DB / syncRoot / bookmark には一切触れない（SyncEngine は構築されない）
     │

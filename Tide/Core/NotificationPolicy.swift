@@ -17,6 +17,13 @@ enum NotificationEvent: Equatable, Sendable {
     /// 要る確定的事象・Issue #103）。発火は signaler のエッジ検出のみ = 連発しない。
     /// 復帰エッジで配達済み通知は撤去される（`NotificationManager.removeDelivered`）。
     case fileProviderDisabled
+    /// fpOnly: 同期できない名前・symlink・同期しない名前への改名で、ファイルがこの Mac にだけ
+    /// 残りバックアップされない（Issue #147）。FP 拡張が `FPEventLog` に印を付けたイベントを
+    /// `FPEventNoticeWatcher` が拾って発火する。`path` は表示用のパス（改名は新しい名前）。
+    case notBackedUp(path: String, reason: FPEventNotice)
+    /// `notBackedUp` が 1 回の確認で多数出るとき（symlink を多く含むフォルダを入れた等）に、
+    /// 個別に出した残りの件数をまとめる 1 件（Issue #147・PR #149 レビュー指摘 1）。
+    case notBackedUpMore(count: Int)
 }
 
 /// OS 通知 1 件分の表示内容。`NotificationManager` が `UNMutableNotificationContent` へ詰め替える。
@@ -68,6 +75,31 @@ enum NotificationPolicy {
                 identifier: "fpDisabled",
                 title: String(localized: "Tide is not syncing"),
                 body: String(localized: "The Tide File Provider extension is turned off in System Settings. Turn it on to resume syncing.")
+            )
+        case let .notBackedUp(path, reason):
+            let name = lastComponent(path)
+            let body: String
+            switch reason {
+            case .unsyncableName:
+                body = String(localized: "“\(name)” has a name Tide can’t sync, so it stays only on this Mac. Rename it to back it up.")
+            case .symbolicLink:
+                body = String(localized: "“\(name)” is a symbolic link. Tide doesn’t sync links, so it stays only on this Mac.")
+            case .renamedFileExcluded:
+                body = String(localized: "“\(name)” was renamed to a name Tide doesn’t sync and is no longer backed up. It stays on this Mac.")
+            case .renamedFolderExcluded:
+                body = String(localized: "The folder “\(name)” was renamed to a name Tide doesn’t sync, so its files are no longer backed up. They stay on this Mac.")
+            }
+            return NotificationContent(
+                identifier: "notBackedUp:\(reason.rawValue):\(path)",
+                title: String(localized: "File not backed up"),
+                body: body
+            )
+        case let .notBackedUpMore(count):
+            // identifier は固定 = 次のまとめが来たら置き換える（まとめ通知が積み上がらない）
+            return NotificationContent(
+                identifier: "notBackedUp:more",
+                title: String(localized: "File not backed up"),
+                body: String(localized: "\(count) more files aren’t backed up. They stay only on this Mac.")
             )
         }
     }
