@@ -2513,6 +2513,17 @@
           }
         }
       }
+    },
+    "%lld more files aren’t backed up. They stay only on this Mac." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ほか %lld 件のファイルがバックアップされていません。この Mac にだけ残っています。"
+          }
+        }
+      }
     }
   },
   "version" : "1.1"

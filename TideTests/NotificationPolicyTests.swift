@@ -105,4 +105,14 @@ final class NotificationPolicyTests: XCTestCase {
         }
         XCTAssertEqual(bodies.count, FPEventNotice.allCases.count)
     }
+
+    /// まとめの通知は identifier 固定（次のまとめで置き換える）で、本文に件数を含む。
+    func testNotBackedUpMoreIsFixedIdentifierWithCount() {
+        let a = NotificationPolicy.content(for: .notBackedUpMore(count: 7))
+        let b = NotificationPolicy.content(for: .notBackedUpMore(count: 12))
+        XCTAssertEqual(a.identifier, "notBackedUp:more")
+        XCTAssertEqual(a.identifier, b.identifier)
+        XCTAssertFalse(a.title.isEmpty)
+        XCTAssertTrue(a.body.contains("7"), "body should mention the count: \(a.body)")
+    }
 }

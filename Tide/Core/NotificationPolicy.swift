@@ -21,6 +21,9 @@ enum NotificationEvent: Equatable, Sendable {
     /// 残りバックアップされない（Issue #147）。FP 拡張が `FPEventLog` に印を付けたイベントを
     /// `FPEventNoticeWatcher` が拾って発火する。`path` は表示用のパス（改名は新しい名前）。
     case notBackedUp(path: String, reason: FPEventNotice)
+    /// `notBackedUp` が 1 回の確認で多数出るとき（symlink を多く含むフォルダを入れた等）に、
+    /// 個別に出した残りの件数をまとめる 1 件（Issue #147・PR #149 レビュー指摘 1）。
+    case notBackedUpMore(count: Int)
 }
 
 /// OS 通知 1 件分の表示内容。`NotificationManager` が `UNMutableNotificationContent` へ詰め替える。
@@ -90,6 +93,13 @@ enum NotificationPolicy {
                 identifier: "notBackedUp:\(reason.rawValue):\(path)",
                 title: String(localized: "File not backed up"),
                 body: body
+            )
+        case let .notBackedUpMore(count):
+            // identifier は固定 = 次のまとめが来たら置き換える（まとめ通知が積み上がらない）
+            return NotificationContent(
+                identifier: "notBackedUp:more",
+                title: String(localized: "File not backed up"),
+                body: String(localized: "\(count) more files aren’t backed up. They stay only on this Mac.")
             )
         }
     }

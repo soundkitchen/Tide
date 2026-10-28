@@ -291,7 +291,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             // 同期文脈なので fire-and-forget（イベントは best-effort・path は検証不能なので details へ）。
             // details は親フォルダを含む表示用のパス（通知の重複判定の鍵にもなる・#147）。
             let filename = itemTemplate.filename
-            let displayPath = parent.path.isEmpty ? filename : "\(parent.path)/\(filename)"
+            let displayPath = FileProviderWritePolicy.displayPath(parentPath: parent.path, filename: filename)
             Task {
                 await services.events.append(
                     type: .info, path: nil,
@@ -764,7 +764,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             AppLogger.fileProvider.notice("modifyItem(move): unsyncable new name (excluded): \(item.filename, privacy: .private)")
         }
         // 除外したときの通知に出す新しい名前（検証できない名前もそのまま・表示専用・#147）
-        let newDisplayPath = newParentPath.isEmpty ? item.filename : "\(newParentPath)/\(item.filename)"
+        let newDisplayPath = FileProviderWritePolicy.displayPath(parentPath: newParentPath, filename: item.filename)
         guard validNewPath != oldPath else {
             // 実質 no-op（同一 path への「移動」）。この分岐は実際に踏める — Swift の
             // `String ==` は正準等価（NFC/NFD 同一視）のため、正規化差だけの rename が該当する。

@@ -322,7 +322,7 @@ final class AppEnvironment {
         fpNoticeWatcher = nil
         if let eventsURL = try? FPEventLog.defaultURL() {
             let watcher = FPEventNoticeWatcher(
-                log: FPEventLog(bucket: config.bucketName!, fileURL: eventsURL)
+                log: FPEventLog(bucket: config.bucketName!, fileURL: eventsURL), config: config
             ) { [notifications] event in
                 Task { @MainActor in await notifications.post(event) }
             }
