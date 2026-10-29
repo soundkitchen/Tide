@@ -51,9 +51,11 @@ public enum HardcodedIgnoreRules {
         ".env."            // .env.local / .env.production 等
     ]
 
+    // `.key` は入れない（#140）: Keynote の書類（単一ファイル = zip / パッケージ = フォルダ）と同じ拡張子で、
+    // 入れると Keynote がすべて黙ってバックアップから外れる（機密網は `.syncignore` の `!` でも覆せない）。
+    // 秘密鍵の `.key` は各自 `.syncignore` で除外する（既定 `.syncignore` のコメント例と `docs/04` で案内）。
     public static let suffixPatterns: [String] = [
         ".pem",
-        ".key",
         ".p12",
         ".pfx",
         ".keystore"

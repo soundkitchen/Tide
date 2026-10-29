@@ -239,12 +239,16 @@ M3 サブ C で **ベース / ローカル / リモートの 3 SHA による 3-w
 
 `HardcodedIgnoreRules`（`TideCore/Core/IgnoreRules.swift`）。プロパティは `exactNames`
 （OS ジャンク + `.tide` + `.aws`/`.ssh`/`id_rsa` 等の機密 dotfile）、`prefixPatterns`、
-`suffixPatterns`（`.pem`/`.key`/`.p12`/`.pfx`/`.keystore`）、判定メソッドは
+`suffixPatterns`（`.pem`/`.p12`/`.pfx`/`.keystore`）、判定メソッドは
 `shouldIgnore(relativePath:)`。**常に最優先**で効き、`.syncignore` の否定 `!` でも覆せない。
 照合は**大文字小文字を区別しない**（#136・全規則に一律）。APFS は既定で大文字小文字を区別しないため、
 区別すると `Server.PEM` / `.ENV` / `ID_RSA` が素通りして S3 へ上がる。副作用として `Credentials` や
 `.Config` という名前のフォルダも subtree ごと除外される（意図どおり）。
 新しい dotfile / 拡張子で機密が紛れ込みそうなら即追加する運用（CLAUDE.md 参照）。
+ただし**一般の書類と重なる拡張子は入れない**: `.key` は Keynote の書類（単一ファイル = zip /
+パッケージ = フォルダ）と同じ拡張子なので機密網に含めない（#140・2026-10-30 ユーザ確定）。入れると
+Keynote の書類がすべて黙ってバックアップから外れ、`!` でも戻せない。秘密鍵の `.key` は、置いている
+フォルダに限って各自 `.syncignore` で除外する（例 `certs/*.key`。既定テンプレートにコメントで例示）。
 
 ### `.syncignore`（ユーザ除外・M3）
 

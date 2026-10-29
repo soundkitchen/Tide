@@ -18,6 +18,8 @@ Hardened Runtime は有効だが、App Sandbox は無効。直配布 + Notarize 
 
 **Status:** ✅ Fixed (2026-05-24) — `HardcodedIgnoreRules` を拡張: `.env` / `.envrc` / `.netrc` / `.npmrc` / `.pgpass` / `.aws` / `.ssh` / `.gnupg` / `.kube` / `.docker` / `.gitconfig` / `id_rsa` / `id_ed25519` / `credentials` を exactNames、`.env.` を prefixPatterns、`.pem` / `.key` / `.p12` / `.pfx` / `.keystore` を新設の suffixPatterns に追加。`SetupWizardWindow.validateSyncRoot` で home / Library / System / Applications 配下の選択を警告。
 
+**Status:** ✅ Fixed（2026-10-30 更新・#140）— 方針変更: suffixPatterns から `.key` を外した。Keynote の書類と同じ拡張子で、機密網が Keynote の書類をすべて黙ってバックアップから外していた（`!` でも戻せない）。復旧という主目的に対する損失のほうが大きいと判断（ユーザ確定）。残るリスク: `server.key` のような秘密鍵の `.key` は既定で S3 に上がる。対策は、置いているフォルダに限った `.syncignore`（例 `certs/*.key`・既定テンプレートにコメントで例示）。S3 側は SSE-S3 で暗号化され、バケットは非公開。稼働環境では `.key` の追跡済みキーは 0 件、レプリカの `.key` 8 件は `node_modules/` のフォルダ単位除外の中にあり除外のまま（`docs/08` 機密網の節）。
+
 **該当箇所:** `Tide/Core/IgnoreRules.swift`
 
 `HardcodedIgnoreRules` は `.DS_Store` 等 OS の雑多ファイルのみ。**`.env`, `.envrc`, `id_rsa`, `id_ed25519`, `.npmrc`, `.aws/`, `*.pem`, `*.key`** などの「明らかな秘匿ファイル」も既定除外推奨。`SetupWizardWindow` は「`.git/` も含まれます」とだけ明示しているが、ユーザがホームディレクトリを選んだら破滅する。`validateSyncRoot` でホーム直下や `/Library`、`/Users/.../Library` を警告する強化を。
