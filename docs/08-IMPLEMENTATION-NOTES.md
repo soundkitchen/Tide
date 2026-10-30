@@ -347,9 +347,11 @@ FP ドメイン内のファイル編集（`modifyItem` の .contents）と削除
 - **目的**: fileproviderd と拡張の接続が切れる（LifetimeError）原因を調べるため（#140 の受け入れで、長い改名の直後の移動の途中で起きた）。fileproviderd は同じプロセスの中で拡張のインスタンスを作り直すことがある（#150 の実機確認で、同じ PID のまま約 15 秒に 5 回 `FileProviderExtension initialized` が出た）。それまでは `invalidate()` が空でログも無く、インスタンスが見限られた時刻と、そのとき処理中だったコールバックを突き合わせられなかった。
 - **出すログ**（カテゴリ `fileprovider`・`notice`）: インスタンスごとにランダムな 8 文字の識別子（`[xxxxxxxx]`・機密ではないので public）を付ける。
   - `FileProviderExtension initialized [id]`
-  - `FileProviderExtension invalidated [id] (writes in flight: N)` — N はそのインスタンスで返事をまだ返していない書込系コールバックの数。N > 0 で invalidate されたなら、その返事はシステムに届かない
-  - `createItem` / `modifyItem(fields: <changedFields の rawValue>)` / `deleteItem` の `started [id] (writes in flight: N): <対象>` と `finished [id] after <ms> ms`（エラーなら `with error: …`）。対象（ファイル名・item id）とエラーは `privacy: .private`
-- **仕組み**: 各書込系コールバックの冒頭で completion を包む（`trackWrite`）。どの経路で返しても終了が 1 回だけ記録される（二重呼び出しでも数を崩さない）。読み取り系（`item(for:)` / `fetchContents` / 列挙）は対象外。
+  - `FileProviderExtension invalidated [id] (writes in flight: N = #3 modifyItem(fields: 3), …)` — 返事をまだ返していない書込系コールバックを連番と名前で出す。N > 0 で invalidate されたなら、その返事はシステムに届かない
+  - `FileProviderExtension deinitialized [id]` — インスタンスの解放。invalidate されずに捨てられた・invalidate の後も生き続けた（新旧のインスタンスが同時に生きていた）かを見分ける
+  - `createItem` / `modifyItem(fields: <changedFields の rawValue>)` / `deleteItem` の `#<連番> started [id] (writes in flight: N): <対象>` と `#<連番> finished [id] after <ms> ms`（エラーなら `with error: …`）。連番はインスタンスの中の通し番号で、started と finished を結ぶ。対象（createItem は親の item id / ファイル名・それ以外は item id）とエラーは `privacy: .private`
+  - **レベル**: started と速く成功した finished は `info`、遅い（1 秒以上・`(slow)`）かエラーの finished だけ `notice`。数千件の書込で `notice` があふれ、突き合わせたい fileproviderd 側の行が先に消えるのを避ける（採るときは `--info` を付ける）。調査が済んだら外してよい
+- **仕組み**: 各書込系コールバックの冒頭で completion を包む（`trackWrite`）。どの経路で返しても終了が 1 回だけ記録される（二重呼び出しでも数を崩さない）。**読み取り系（`item(for:)` / `fetchContents` / 列挙）は対象外** — `writes in flight: 0` は「処理中の書込系コールバックが無かった」の意味で、長い `fetchContents` や列挙が走っていた可能性は残る（そちらは既存のログ = `fetchContents failed` / `enumerateItems: working set started` 等で見る）。
 - **採り方**: `/usr/bin/log show --last 10m --info --predicate 'subsystem == "org.izukawa.Tide" AND category == "fileprovider"'`。fileproviderd 側（`LifetimeError`・接続の invalidate）は `process == "fileproviderd"` で同じ時刻を採る。Info ログは 10〜15 分で消えるので、起きたらすぐに採る。
 
 #### FP 実体化連動バッジ（Issue #65・2026-07-14）
