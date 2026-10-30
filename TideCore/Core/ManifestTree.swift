@@ -62,6 +62,12 @@ public struct ManifestTree: Sendable {
             if case .package = self { return true }
             return false
         }
+
+        /// パッケージの中身の件数（パッケージ以外は 0）。
+        public var memberCount: Int {
+            if case .package(_, let members, _, _) = self { return members.count }
+            return 0
+        }
     }
 
     /// ディレクトリパス（`""` = ルート）→ 直下の子ノード（名前昇順）。
@@ -118,10 +124,7 @@ public struct ManifestTree: Sendable {
         // パッケージのノード（#140）。同名のファイルがあればパッケージで置換する（directory-wins と
         // 同じ考え方 = 中身を持つ側を残す。名前の判定は一貫しているので同名のディレクトリは生じない）。
         for (packagePath, info) in packageMembers {
-            let mtime = info.members.values.compactMap { ISO8601.parse($0.mtime) }.max()
-            let node = Node.package(
-                path: packagePath, members: info.members,
-                digest: Self.packageDigest(members: info.members), mtime: mtime)
+            let node = Self.packageNode(path: packagePath, members: info.members)
             nodes[packagePath] = node
             children[info.parent, default: [:]][info.name] = node
         }
@@ -196,14 +199,55 @@ public struct ManifestTree: Sendable {
     /// `FileProviderWritePolicy.baseSha` をそのまま通る。中身のパス・内容のどちらが変わっても変わり、
     /// mtime だけの変化では変わらない。
     public static func packageDigest(members: [String: ManifestFileEntry]) -> String {
+        packageDigest(shas: members.mapValues(\.sha256))
+    }
+
+    /// 中身からパッケージのノードを作る（版 = `packageDigest`・mtime = 中身の最大値）。ツリーの構築と、
+    /// FP 拡張が書いた直後に返す item が同じ版になるよう、両方がここを通る。
+    public static func packageNode(path: String, members: [String: ManifestFileEntry]) -> Node {
+        .package(
+            path: path, members: members, digest: packageDigest(members: members),
+            mtime: members.values.compactMap { ISO8601.parse($0.mtime) }.max())
+    }
+
+    /// `packageDigest(members:)` と同じ版を、中身の相対パス → sha256 から作る（ローカルの
+    /// パッケージを書く前に、マニフェストの版と比べるため）。
+    public static func packageDigest(shas: [String: String]) -> String {
         var hasher = SHA256()
-        for relative in members.keys.sorted() {
+        for relative in shas.keys.sorted() {
             hasher.update(data: Data(relative.utf8))
             hasher.update(data: Data([0]))
-            hasher.update(data: Data(members[relative]!.sha256.utf8))
+            hasher.update(data: Data(shas[relative]!.utf8))
             hasher.update(data: Data([0x0a]))
         }
         return HashCalculator.hex(hasher.finalize())
+    }
+
+    /// `dirPath` 配下のマニフェストのファイル（パッケージは中身に開く）の相対パスと entry（#140）。
+    /// フォルダの削除・移動の対象一覧。パッケージの中身を落とすと、フォルダと一緒に消える・動くはずの
+    /// パッケージが旧の場所に残る。順序不定。
+    public func trackedFiles(under dirPath: String) -> [(path: String, entry: ManifestFileEntry)] {
+        let prefix = dirPath.isEmpty ? "" : dirPath + "/"
+        var result: [(path: String, entry: ManifestFileEntry)] = []
+        for (path, node) in nodesByPath where path.hasPrefix(prefix) && path != dirPath {
+            switch node {
+            case .file(_, let entry):
+                result.append((path, entry))
+            case .package(_, let members, _, _):
+                for (relative, entry) in members { result.append((path + "/" + relative, entry)) }
+            case .directory:
+                break
+            }
+        }
+        return result
+    }
+
+    /// `dirPath` 配下のファイルとパッケージのノード（item になる葉・#140）。順序不定。
+    public func leaves(under dirPath: String) -> [Node] {
+        let prefix = dirPath.isEmpty ? "" : dirPath + "/"
+        return nodesByPath.compactMap { path, node in
+            path.hasPrefix(prefix) && !node.isDirectory ? node : nil
+        }
     }
 
     /// `dirPath` 直下の子（名前昇順）。ディレクトリが存在しなければ nil。

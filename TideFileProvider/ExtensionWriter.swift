@@ -32,6 +32,21 @@ struct ExtensionWriter: Sendable {
         case conflict(remote: ManifestFileEntry, copyPath: String, copyEntry: ManifestFileEntry)
     }
 
+    enum PackageWriteOutcome {
+        /// 書込成功。ノードは書いた直後の中身から作ったもの（ツリーの次の世代と同じ版）。
+        case written(ManifestTree.Node)
+        /// マニフェストが同じ中身を既に持っていた = 何も書いていない（イベントを記録しないこと）。
+        case unchanged(ManifestTree.Node)
+        /// 競合: ローカルの中身は `copyPath` のパッケージとして上げ済み・正規パスはリモートが勝つ。
+        case conflict(copyPath: String, copyNode: ManifestTree.Node)
+        /// 丸ごと除外する（シンボリックリンク・通常のファイルでない中身・同期できない名前・上限超え）。
+        case excluded(PackageScanner.Exclusion)
+        /// 上げる中身が無い（空・全部機密網に当たった）= マニフェストに表せない。
+        case empty
+        /// 同じパスにフォルダがある。
+        case kindCollision
+    }
+
     enum DeleteOutcome {
         case removed
         /// マニフェスト除去は確定・marker も発行済みだが index 反映が未完（Issue #91 の部分完了）。
@@ -152,6 +167,134 @@ struct ExtensionWriter: Sendable {
             }
             await cache.invalidateAfterLocalWrite()
             return .conflict(remote: remoteEntry, copyPath: copyPath, copyEntry: copyEntry)
+        }
+    }
+
+    /// パッケージの書込（createItem = `baseDigest: nil` / modifyItem の .contents・#140）。
+    /// 中身はファイルごとに S3 とマニフェストへ置く（今の `.xcodeproj` と同じ形）。
+    ///
+    /// 1. 中身を走査する（`PackageScanner`: シンボリックリンク等・上限超えは丸ごと除外・機密網は黙って飛ばす）。
+    /// 2. 中身の sha256 から版（digest）を出し、ツリーの今のノードと 3-way で判定する
+    ///    （`FileProviderWritePolicy.packageWriteDecision`）。
+    /// 3. 変わった中身だけ上げ（限定並列 4・SSE は `uploadObject` が付ける）、`writeFileEntries` で
+    ///    「全部書き足してから消す」。中身ごとのベースはツリーの今の sha（ツリーの版がベースと一致した
+    ///    ときだけここへ来る）。RMW の中で中身が 1 件でもリモートで進んでいたら、ローカルの中身を
+    ///    競合コピーの名前のパッケージとして上げ直す（正規パスはリモートが勝つ = ファイルと同じ）。
+    ///    シャードをまたぐので、そのときまでに書いたシャードの分は正規パスに残る（データは失われない）。
+    func writePackage(
+        path: String, contentsURL: URL, baseDigest: String?
+    ) async throws -> PackageWriteOutcome {
+        try PathValidator.validateRelativePath(path)
+        let members: [PackageScanner.Member]
+        switch try PackageScanner.scan(root: contentsURL, packagePath: path) {
+        case .excluded(let reason):
+            return .excluded(reason)
+        case .members(let scanned):
+            members = scanned
+        }
+        guard !members.isEmpty else { return .empty }
+        var localShas: [String: String] = [:]
+        for member in members {
+            localShas[member.relativePath] = try HashCalculator.sha256NoFollow(of: member.url)
+        }
+        let localDigest = ManifestTree.packageDigest(shas: localShas)
+
+        let tree = try await cache.current().tree
+        let remote = tree.node(at: path)
+        switch FileProviderWritePolicy.packageWriteDecision(
+            localDigest: localDigest, base: baseDigest, remote: remote)
+        {
+        case .unchanged:
+            return .unchanged(remote!)
+        case .kindCollision:
+            return .kindCollision
+        case .conflict:
+            return try await writePackageConflictCopy(path: path, members: members)
+        case .write(let remoteMembers):
+            let changed = members.filter { remoteMembers[$0.relativePath]?.sha256 != localShas[$0.relativePath] }
+            let uploaded = try await uploadMembers(changed, packagePath: path)
+            let upserts = changed.map { member in
+                ManifestFileUpsert(
+                    path: path + "/" + member.relativePath,
+                    base: remoteMembers[member.relativePath]?.sha256,
+                    newEntry: uploaded[member.relativePath]!)
+            }
+            var removing: [String: String] = [:]
+            for (relative, entry) in remoteMembers where localShas[relative] == nil {
+                removing[path + "/" + relative] = entry.sha256
+            }
+            switch try await updater.writeFileEntries(upserting: upserts, removing: removing) {
+            case .written(let removedPaths):
+                await emitDeleteMarkers(paths: removedPaths)
+                await cache.invalidateAfterLocalWrite()
+                var written: [String: ManifestFileEntry] = [:]
+                for member in members {
+                    written[member.relativePath] = uploaded[member.relativePath] ?? remoteMembers[member.relativePath]
+                }
+                return .written(ManifestTree.packageNode(path: path, members: written))
+            case .conflict(let conflictPath, _):
+                AppLogger.fileProvider.notice("writePackage: member changed remotely: \(conflictPath, privacy: .private)")
+                await cache.invalidateAfterLocalWrite()
+                return try await writePackageConflictCopy(path: path, members: members)
+            case .removalRejected(let rejectedPath, _, let removedPaths):
+                AppLogger.fileProvider.notice("writePackage: member to remove changed remotely: \(rejectedPath, privacy: .private)")
+                await emitDeleteMarkers(paths: removedPaths)
+                await cache.invalidateAfterLocalWrite()
+                return try await writePackageConflictCopy(path: path, members: members)
+            case .removedIndexStale(let removedPaths, let detail):
+                // 除去確定分の marker を発行して孤児を作らず、エラーで再試行に委ねる（Issue #91 と同じ）。
+                await emitDeleteMarkers(paths: removedPaths)
+                await cache.invalidateAfterLocalWrite()
+                throw SyncError.indexUpdateFailedAfterCommit(detail)
+            }
+        }
+    }
+
+    /// ローカルの中身を競合コピーの名前のパッケージとして上げる（`writePackage` の競合）。
+    private func writePackageConflictCopy(
+        path: String, members: [PackageScanner.Member]
+    ) async throws -> PackageWriteOutcome {
+        let copyPath = ConflictNamer.localCopyRelativePath(for: path)
+        try PathValidator.validateRelativePath(copyPath)
+        let uploaded = try await uploadMembers(members, packagePath: copyPath)
+        let upserts = members.map {
+            ManifestFileUpsert(
+                path: copyPath + "/" + $0.relativePath, base: nil, newEntry: uploaded[$0.relativePath]!)
+        }
+        let outcome = try await updater.writeFileEntries(upserting: upserts, removing: [:])
+        await cache.invalidateAfterLocalWrite()
+        guard case .written = outcome else {
+            // 競合コピーの名前は秒精度のタイムスタンプ付きで衝突は実質ない。万一衝突したら競合を伝播
+            // （再試行は fileproviderd が担う。上げた中身は版履歴に残る）。
+            throw CocoaError(.fileWriteFileExists, userInfo: [NSFilePathErrorKey: copyPath])
+        }
+        return .conflict(copyPath: copyPath, copyNode: ManifestTree.packageNode(path: copyPath, members: uploaded))
+    }
+
+    /// パッケージの中身を限定並列（4）で上げる。返値は中身の相対パス → 上げた entry。
+    private func uploadMembers(
+        _ members: [PackageScanner.Member], packagePath: String
+    ) async throws -> [String: ManifestFileEntry] {
+        let upload: @Sendable (PackageScanner.Member) async throws -> (String, ManifestFileEntry) = { member in
+            let entry = try await self.uploadObject(
+                path: packagePath + "/" + member.relativePath,
+                contentsURL: member.url, contentModified: member.modified)
+            return (member.relativePath, entry)
+        }
+        return try await withThrowingTaskGroup(of: (String, ManifestFileEntry).self) { group in
+            var results: [String: ManifestFileEntry] = [:]
+            var pending = members[...]
+            for _ in 0..<min(4, pending.count) {
+                guard let member = pending.popFirst() else { break }
+                group.addTask { try await upload(member) }
+            }
+            while let (relative, entry) = try await group.next() {
+                results[relative] = entry
+                if let member = pending.popFirst() {
+                    group.addTask { try await upload(member) }
+                }
+            }
+            return results
         }
     }
 

@@ -85,6 +85,15 @@
   - **ツリーと id**: `ManifestTree` はパス要素がパッケージ名になった所で、その先を 1 つの `.package` ノードに畳む（入れ子は一番外側だけ・最後の要素は判定しない = 単一ファイル形式の `Deck.key` はファイルのまま・同名のファイルがあればパッケージが勝つ）。id は `k:<path>`（ファイルとも別の id = Keynote の単一ファイル ⇄ パッケージの保存し直しが「旧 id の削除 + 新 id の出現」になる・ユーザ確定）。版は中身の「相対パスと sha256」の列の sha256（`ManifestTree.packageDigest`・64 桁 16 進なので `baseSha` をそのまま通る・mtime だけの変化では変わらない）。バッジの `filePaths` にはパッケージを 1 件として入れる。
   - **まとめ書き（`ManifestUpdater.writeFileEntries`）**: パッケージの中身の追加・置換・除去を、`moveFileEntries` と同じ二相のシャード単位バッチ RMW で書く。Phase A（追加・置換）は各 entry を `updateFileEntry` と同じ `decideUpload` で判定し、`.conflict` が 1 件でもあればそのシャードは何も書かずに中断・除去にも進まない（先行シャードの書込は残り、同じ内容の再試行は `.alreadyUpToDate` で素通し・版 ID の向け直しは #130 と同じ規則）。Phase B（除去）は `removeFileEntries` に委譲。「全部書き足してから消す」ので、途中で止まっても旧の中身が残る側に倒れる（シャードをまたぐので不可分ではない = 他の端末が途中の状態を見ることはある）。マニフェスト書込の唯一のチョークポイント（`ManifestUpdater`）の中に置き、entry は従来どおりファクトリ（`ManifestFileEntry.uploaded`）で作る。
   - **表示と読込（拡張）**: item(for:) は id の種類（`f:`/`d:`/`k:`）とツリーのノードの種類が食い違えば `noSuchItem`（種類が変わった後の古い id）。パッケージはコンテナではないので `enumerator(for: k:…)` は `noSuchItem`・中身は item にしない。fetchContents はパッケージなら中身をファイルごとにドメインの一時フォルダへ組み立て（中身の相対パスは `PathValidator.resolveForWrite` で一時フォルダの外へ出さない・1 件ずつマニフェストの版を第一候補に取得してサイズと sha256 を照合・更新日時もマニフェストに揃える）、**フォルダの URL を返す**（PoC で受理を確認した文書化されていない挙動）。中身が 1 件でも取れない・合わない・大文字小文字だけ違う中身が重なるときは `noSuchItem` にせず I/O エラー（デーモンにパッケージごと消させない・再試行に回す）。中身の無いフォルダはマニフェストに残らないので組み立て後にも現れない。実体化セットの観測（`MaterializedSetQuery`）は `k:` をファイルと同じく 1 件の葉として数え、enumerateChanges の起点のファイル一覧もツリーの葉（`ManifestTree.filePaths`）で取る（マニフェストのキーのままだとパッケージの中身が並んで目標側と食い違う）。
+  - **書込（拡張）**:
+    - **入口**: createItem はフォルダの判定より先に「テンプレートの `contentType` がパッケージ型 ∧ ツリーの判定（`PackageClassifier.active`）もパッケージ」を見る（パッケージ型は `.directory` にも適合する。両方そろったときだけにするのは、ツリーでフォルダに見えるのにパッケージの item を返す食い違いを作らないため）。除外の判定はファイルと同じ（`IgnoreDecision.shouldSkip` をパッケージのパスに当てる = 機密網 → ユーザ `.syncignore` は未追跡のみ）。
+    - **中身の走査（`PackageScanner`・TideCore）**: 自前の再帰下降で、シンボリックリンクは追従しない。中身にシンボリックリンク・通常のファイルでない項目・同期できない名前が 1 つでもあるか、中身が 10,000 件を超えるとパッケージごと除外（`ExcludedFromSync` = ローカル温存 + 通知 `packageHasUnsyncableItem` / `packageTooManyFiles`・#147 の経路）。機密網に当たる中身（OS のジャンクを含む）は黙って飛ばし、ユーザ `.syncignore` のパターンは中身に当てない（パッケージは 1 つの書類 = 一部だけ外すと復元しても開けない）。中の `.syncignore` は層として読まない（`ManifestIgnoreCache` はツリーの `.file` ノードだけを見るので、パッケージの中身は自然に外れる）。上げる中身が無い（空・全部機密網）ときもマニフェストに表せないのでローカルに残す。
+    - **書込（`ExtensionWriter.writePackage`）**: 中身の sha256 から版を出し、ツリーの今のノードと判定する（`FileProviderWritePolicy.packageWriteDecision`: 同じ版 = 書かない〈再取り込みの問い直し〉/ ベースが今の版 = 変わった中身だけ上げて `writeFileEntries`〈中身ごとのベースはツリーの sha・消えた中身は除去〉/ ベースと違う・新規作成の重なり = ローカルの中身を競合コピーの名前のパッケージで上げ、正規パスはリモートが勝つ / 同じパスにフォルダ = 名前の衝突）。同じパスにファイルがあるとき（Keynote が単一ファイルの書類をパッケージで保存し直した）は書く — 旧のファイルの entry は続いて届く旧 id（`f:`）の deleteItem がベースつきで消し、それまではツリーでパッケージが勝つ。逆向き（パッケージ → 単一ファイル）は、旧 id（`k:`）の deleteItem が中身を消すまでツリーでパッケージが勝ち、新しいファイルが見えない時間がある。どちらの順で届くかは実機で確かめる。
+    - **編集で除外の条件に当たった**（追跡中のパッケージにシンボリックリンクが入った等）: 除外名への改名と同じく `ExcludedFromSync` + 後片付けの予約（`exclusionCleanups`）= 続く deleteItem で S3 から外れる（通知する）。
+    - **改名・移動**: 除外の判定はファイルと同じ（新しいパスに当てる・除外なら予約して `ExcludedFromSync`）。中身はフォルダの move と同じ `moveDirectory`（copyObject → 全 add → 全 remove）で動かし、返す item は `k:<新しいパス>`。改名と同時に内容も変わったときは、新しいパスへ新規作成として書いてから旧の中身を消す（途中で止まっても新旧両方が残る側・再試行では新しいパスが同じ版 = 書かずに旧の削除へ進む）。版スタンプの治癒（#93）は `k:` の id で再取り込みを頼む。
+    - **削除**: baseVersion の digest がツリーの今の版と一致したときだけ、中身を `deleteDirectory`（中身ごとにツリーの sha で RMW ガード）で消す。合わなければ最新の item を添えて拒否（システムが戻す）。除外の後片付け（予約あり・ベースが digest の形でない）はツリーの今の版に読み替える。そのパスがもうパッケージでないときは消すものが無い = 成功。
+    - **フォルダの削除・移動**は配下のパッケージを中身に開いて対象に含める（`ManifestTree.trackedFiles(under:)`。落とすとフォルダと一緒に消える・動くはずのパッケージが旧の場所に残る）。版スタンプの治癒はツリーの葉（`leaves(under:)` = ファイルとパッケージ）単位。
+    - **非原子性**: 中身はシャードをまたぐので、RMW の途中で競合に当たったとき、それまでに書いたシャードの分は正規パスに残る（データは版履歴と競合コピーにあり失われない）。
   - **段階**: ツリーの既定の判定 `PackageClassifier.active` は、書込・読込の経路とドメインの作り直しがそろうまで `.none`（途中の段階のビルドで、稼働中のレプリカの `.xcodeproj` が種類違い = item(for:) の `noSuchItem` にならないように）。
 - **CloudStorage フォルダ名は変更不可（調査結論・2026-07-04）**: `~/Library/CloudStorage/<ホストアプリ表示名>-<domain.displayName>` はシステム（fileproviderd）が合成し、制御する API は無い（Tide は "Tide-Tide"）。ただし **Finder 上の表示名は既に「Tide」に解決済み**（実測）で、ハイフン名が露出するのは POSIX パスのみ。Dropbox も実フォルダは "Dropbox - Personal" 形式。→ 現状維持で確定（据え置きにしない）。なお同一 identifier のドメインは再 add でプロパティ更新可（remove 不要・SDK ヘッダ明記）。
 
@@ -1613,7 +1622,9 @@ FP 拡張が `excludedFromSync` で拒否したファイルは、ローカルに
   および追跡中のファイル（`renamedFileExcluded`）・追跡中のファイルを含むフォルダ（`renamedFolderExcluded`）の、
   同期しない名前への改名（機密網・`.syncignore` に当たる名前への改名を含む）。機密網・`.syncignore` による新規作成の
   除外は意図した除外なので通知しない（#120 の再送嵐で通知があふれるのも避けられる）。中身が仮想フォルダだけの
-  フォルダの改名は S3 に影響しないので通知しない。
+  フォルダの改名は S3 に影響しないので通知しない。**#140 で 2 種を追加**: パッケージの中身にシンボリックリンク等が
+  あってパッケージごと除外した（`packageHasUnsyncableItem`）・中身が上限を超えてパッケージごと除外した
+  （`packageTooManyFiles`）。どちらも作成時の除外と同じく再送される種類（同じパッケージは起動中 1 回だけ）。
 - **経路**: 拡張がアプリへ伝える手段は共有ログ `FPEventLog` だけなので、拡張がイベントに印（`FPEventRecord.notice` =
   `FPEventNotice` の rawValue）を付け、アプリの `FPEventNoticeWatcher`（`Tide/Core/`・fpOnly 起動で signaler と
   一緒に立てて一緒に止める）が 5 秒ごとに新着を見る。ログが変わったかは stat の署名（`FPEventLog.changeSignature`

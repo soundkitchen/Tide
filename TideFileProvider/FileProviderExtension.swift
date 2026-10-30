@@ -397,6 +397,16 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             return progress
         }
 
+        // パッケージ（#140）: フォルダの判定より先に見る（パッケージ型は `.directory` にも適合する）。
+        // ツリーの判定（`PackageClassifier.active`）もパッケージとみなすときだけ（食い違うと、書いた後の
+        // ツリーでフォルダに見え、返した item と種類が合わない）。
+        if contentType?.conforms(to: .package) == true,
+           PackageClassifier.active.isPackage(name: itemTemplate.filename) {
+            return createPackage(
+                path: path, contents: url, mayAlreadyExist: options.contains(.mayAlreadyExist),
+                services: services, progress: progress, completionHandler: completionHandler)
+        }
+
         if contentType?.conforms(to: .directory) == true {
             // 機密網ディレクトリ（.aws / .ssh 等）は subtree ごとローカル温存。単発の
             // ExcludedFromSync で配下の個別 createItem 評価も生じない（FSEvents スキャンの
@@ -537,6 +547,108 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         }
         progress.cancellationHandler = { task.cancel() }
         return progress
+    }
+
+    /// createItem のパッケージ分岐（#140）。除外の判定はファイルと同じ（機密網 → ユーザ `.syncignore` は
+    /// 未追跡のみ・パッケージのパスに当てる）。中身の扱いは `ExtensionWriter.writePackage`。
+    private func createPackage(
+        path: String, contents url: URL?, mayAlreadyExist: Bool, services: ExtensionServices,
+        progress: Progress,
+        completionHandler: @escaping (NSFileProviderItem?, NSFileProviderItemFields, Bool, Error?) -> Void
+    ) -> Progress {
+        let completion = UncheckedSendableBox(value: completionHandler)
+        let boxedURL = UncheckedSendableBox(value: url)
+        let task = Task {
+            defer { progress.completedUnitCount = progress.totalUnitCount }
+            do {
+                let current = try await services.cache.current()
+                let node = current.tree.node(at: path)
+                let layered = try await services.ignore.layeredIgnore(
+                    tree: current.tree, anchor: current.anchor)
+                if IgnoreDecision.shouldSkip(
+                    relativePath: path, isAlreadyTracked: node != nil, matcher: layered) {
+                    AppLogger.fileProvider.notice("createItem(package): excluded from sync: \(path, privacy: .private)")
+                    await services.events.append(
+                        type: .info, path: path, message: "Excluded from sync (kept local)")
+                    completion.value(nil, [], false, NSFileProviderError(.excludedFromSync))
+                    return
+                }
+                guard let contentsURL = boxedURL.value else {
+                    // 内容の無い再取り込み（dataless の再発見）はマニフェストと突合して束ねる（ファイルと同じ）。
+                    // 内容の無い新規作成は中身が無い = マニフェストに表せないのでローカルに残す。
+                    if mayAlreadyExist, let node, node.isPackage {
+                        completion.value(FileProviderItem(node: node), [], false, nil)
+                    } else if mayAlreadyExist {
+                        completion.value(nil, [], false, nil)
+                    } else {
+                        completion.value(nil, [], false, NSFileProviderError(.excludedFromSync))
+                    }
+                    return
+                }
+                let outcome = try await services.writer.writePackage(
+                    path: path, contentsURL: contentsURL, baseDigest: nil)
+                switch outcome {
+                case .written(let written), .unchanged(let written):
+                    if case .written = outcome {
+                        await services.events.append(
+                            type: .upload, path: path, message: "Created package (\(written.memberCount) files)")
+                    } else {
+                        AppLogger.fileProvider.notice("createItem(package): unchanged (idempotent replay): \(path, privacy: .private)")
+                    }
+                    await services.virtualDirs.removeAncestors(of: path)
+                    await services.exclusionCleanups.removeSubtree(at: path)
+                    let materialized = await services.returnedMaterializedFlag(for: path)
+                    completion.value(FileProviderItem(node: written, materialized: materialized), [], false, nil)
+                case .conflict(let copyPath, let copyNode):
+                    AppLogger.fileProvider.notice("createItem(package): collision with remote — created as conflict copy: \(copyPath, privacy: .private)")
+                    await services.events.append(
+                        type: .conflict, path: path, message: "Created as conflict copy → \(copyPath)")
+                    await services.virtualDirs.removeAncestors(of: path)
+                    let materialized = await services.returnedMaterializedFlag(for: copyPath)
+                    completion.value(FileProviderItem(node: copyNode, materialized: materialized), [], false, nil)
+                case .excluded(let reason):
+                    await Self.recordPackageExclusion(reason, path: path, services: services)
+                    completion.value(nil, [], false, NSFileProviderError(.excludedFromSync))
+                case .empty:
+                    AppLogger.fileProvider.notice("createItem(package): nothing to sync (kept local): \(path, privacy: .private)")
+                    completion.value(nil, [], false, NSFileProviderError(.excludedFromSync))
+                case .kindCollision:
+                    completion.value(nil, [], false, NSFileProviderError(.filenameCollision))
+                }
+            } catch {
+                AppLogger.fileProvider.error("createItem(package) failed: \(String(describing: error), privacy: .private)")
+                if !(error is CancellationError) {
+                    await services.events.append(
+                        type: .error, path: path, message: "Create failed",
+                        details: String(describing: error))
+                }
+                completion.value(nil, [], false, Self.wrapForCompletion(error))
+            }
+        }
+        progress.cancellationHandler = { task.cancel() }
+        return progress
+    }
+
+    /// パッケージを丸ごと除外したことを記録し、通知の印を付ける（#140・#147 の経路）。
+    private static func recordPackageExclusion(
+        _ reason: PackageScanner.Exclusion, path: String, services: ExtensionServices
+    ) async {
+        let notice: FPEventNotice
+        let detail: String
+        switch reason {
+        case .symbolicLink(let member):
+            (notice, detail) = (.packageHasUnsyncableItem, "symbolic link: \(member)")
+        case .unsupportedItem(let member):
+            (notice, detail) = (.packageHasUnsyncableItem, "unsupported item: \(member)")
+        case .unsyncableName(let member):
+            (notice, detail) = (.packageHasUnsyncableItem, "unsyncable name: \(member)")
+        case .tooManyFiles(let limit):
+            (notice, detail) = (.packageTooManyFiles, "more than \(limit) files")
+        }
+        AppLogger.fileProvider.notice("package excluded as a whole (\(detail, privacy: .private)): \(path, privacy: .private)")
+        await services.events.append(
+            type: .info, path: path, message: "Excluded package from sync (kept local)", details: detail,
+            notice: notice)
     }
 
     /// 新規フォルダをユーザ `.syncignore` でフォルダごと除外するか（createItem 用・#120）。
@@ -710,7 +822,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 defer { progress.completedUnitCount = progress.totalUnitCount }
                 do {
                     let tree = try await services.cache.current().tree
-                    guard let node = tree.node(at: path), !node.isDirectory else {
+                    guard let node = tree.node(at: path), node.kind == ref.kind else {
                         completion.value(nil, [], false, NSFileProviderError(.noSuchItem))
                         return
                     }
@@ -735,6 +847,11 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         // 競合検出できる（「拡張 = 第 3 のデバイス」の要・docs/08）。
         let baseSha = FileProviderWritePolicy.baseSha(
             contentVersion: version.contentVersion, metadataVersion: version.metadataVersion)
+        if ref.isPackage {
+            return modifyPackageContents(
+                path: path, contents: newContents, baseDigest: baseSha, services: services,
+                progress: progress, completion: completion)
+        }
         let contentModified = item.contentModificationDate ?? nil
         let boxedURL = UncheckedSendableBox(value: newContents)
         let task = Task {
@@ -779,6 +896,72 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 }
             } catch {
                 AppLogger.fileProvider.error("modifyItem failed: \(String(describing: error), privacy: .private)")
+                if !(error is CancellationError) {
+                    await services.events.append(
+                        type: .error, path: path, message: "Upload failed",
+                        details: String(describing: error))
+                }
+                completion.value(nil, [], false, Self.wrapForCompletion(error))
+            }
+        }
+        progress.cancellationHandler = { task.cancel() }
+        return progress
+    }
+
+    /// modifyItem の .contents のパッケージ分岐（#140）。3-way のベースは baseVersion の digest。
+    ///
+    /// 編集でシンボリックリンク等が入った・上限を超えた・中身が空になったパッケージは、改名で除外名に
+    /// なったファイルと同じく `ExcludedFromSync` を返し、後片付けの deleteItem を予約で受理する
+    /// （S3 の旧版はバックアップから外れる = 通知する。ローカルの実体は残る）。
+    private func modifyPackageContents(
+        path: String, contents: URL, baseDigest: String?, services: ExtensionServices,
+        progress: Progress,
+        completion: UncheckedSendableBox<(NSFileProviderItem?, NSFileProviderItemFields, Bool, Error?) -> Void>
+    ) -> Progress {
+        let boxedURL = UncheckedSendableBox(value: contents)
+        let task = Task {
+            defer { progress.completedUnitCount = progress.totalUnitCount }
+            do {
+                let outcome = try await services.writer.writePackage(
+                    path: path, contentsURL: boxedURL.value, baseDigest: baseDigest)
+                switch outcome {
+                case .written(let node), .unchanged(let node):
+                    if case .written = outcome {
+                        await services.events.append(
+                            type: .upload, path: path, message: "Uploaded package (\(node.memberCount) files)")
+                    } else {
+                        AppLogger.fileProvider.notice("modifyItem(package): unchanged (idempotent replay): \(path, privacy: .private)")
+                    }
+                    let materialized = await services.returnedMaterializedFlag(for: path)
+                    completion.value(FileProviderItem(node: node, materialized: materialized), [], false, nil)
+                case .conflict(let copyPath, _):
+                    // 正規パスはリモートが勝つ（ファイルと同じ）。リモートの中身を取り直させる。
+                    AppLogger.fileProvider.notice("modifyItem(package): upload conflict — local edit preserved as copy: \(copyPath, privacy: .private)")
+                    await services.events.append(
+                        type: .conflict, path: path,
+                        message: "Upload conflict — local edit preserved as copy → \(copyPath)")
+                    guard let remote = try await services.cache.current().tree.node(at: path), remote.isPackage else {
+                        // リモートの正規パスが今はパッケージでない（さらに消えた等）。一時エラーで再試行させ、
+                        // 次の差分配信に任せる（ローカルの中身は競合コピーに上がっている）。
+                        completion.value(nil, [], false, Self.moveConflictError())
+                        return
+                    }
+                    let materialized = await services.toldMaterializedFlag(for: path)
+                    completion.value(FileProviderItem(node: remote, materialized: materialized), [], true, nil)
+                case .excluded, .empty:
+                    if case .excluded(let reason) = outcome {
+                        await Self.recordPackageExclusion(reason, path: path, services: services)
+                    } else {
+                        AppLogger.fileProvider.notice("modifyItem(package): nothing to sync (excluded; cleanup reserved): \(path, privacy: .private)")
+                    }
+                    await services.exclusionCleanups.add(path)
+                    completion.value(nil, [], false, NSFileProviderError(.excludedFromSync))
+                case .kindCollision:
+                    // id は k: なのに同じパスがフォルダ = そのパッケージはもう無い
+                    completion.value(nil, [], false, NSFileProviderError(.noSuchItem))
+                }
+            } catch {
+                AppLogger.fileProvider.error("modifyItem(package) failed: \(String(describing: error), privacy: .private)")
                 if !(error is CancellationError) {
                     await services.events.append(
                         type: .error, path: path, message: "Upload failed",
@@ -853,6 +1036,14 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             //（PR #60 レビュー #4: 全フィールド消化で返すと新内容が未アップロードのまま
             // 「同期済み」になる無エラー乖離）— rename は no-op とし、内容は通常の
             // modifyFileContents 経路（modifyItem の .contents 分岐と同じ帰結写像）で処理する。
+            if ref.isPackage, changedFields.contains(.contents), let newContents {
+                // パッケージの内容は writePackage へ（ファイルの modifyFileContents に流さない・#140）
+                return modifyPackageContents(
+                    path: oldPath, contents: newContents,
+                    baseDigest: FileProviderWritePolicy.baseSha(
+                        contentVersion: version.contentVersion, metadataVersion: version.metadataVersion),
+                    services: services, progress: progress, completion: completion)
+            }
             let noopContents =
                 changedFields.contains(.contents) && !ref.isDirectory ? newContents : nil
             let boxedNoopURL = UncheckedSendableBox(value: noopContents)
@@ -907,6 +1098,9 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                         let told = await services.toldMaterialized()
                         completion.value(
                             BadgeFlags(tree: tree, told: told).item(node), [], false, nil)
+                    } else if ref.isPackage {
+                        // パッケージに仮想の受け皿は無い（#140）= もう無い
+                        completion.value(nil, [], false, NSFileProviderError(.noSuchItem))
                     } else {
                         completion.value(
                             FileProviderItem(node: .directory(path: oldPath, mtime: nil)),
@@ -931,10 +1125,9 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
 
                 if isDirectory {
                     let prefix = oldPath + "/"
-                    var children: [(from: String, entry: ManifestFileEntry)] = []
-                    for (p, node) in current.tree.nodesByPath {
-                        guard p.hasPrefix(prefix), case .file(_, let entry) = node else { continue }
-                        children.append((from: p, entry: entry))
+                    // 配下のパッケージは中身に開いて一緒に動かす（#140・落とすと旧の場所に残る）
+                    let children = current.tree.trackedFiles(under: oldPath).map {
+                        (from: $0.path, entry: $0.entry)
                     }
                     // 除外判定: 検証不能な新名 / 機密網（component 一致）/ ユーザパターンの
                     // dir 一致（`<dir>/` 評価）→ subtree ごと同期対象外（実体はローカル温存）。
@@ -1025,8 +1218,16 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                                 node: .directory(path: newPath, mtime: oldMtime),
                                 materialized: wasChecked),
                             [], false, nil)
+                        // 版スタンプの治癒は item 単位（ファイルとパッケージ）で頼む（#140: パッケージの
+                        // 中身は item ではない）
+                        let leaves = current.tree.leaves(under: oldPath)
                         Self.scheduleVersionRestamp(
-                            moves: descendants.map { (from: $0.from, to: $0.to) },
+                            moves: leaves.map {
+                                (from: $0.path, to: newPath + "/" + $0.path.dropFirst(prefix.count))
+                            },
+                            packages: Set(leaves.filter(\.isPackage).map {
+                                newPath + "/" + $0.path.dropFirst(prefix.count)
+                            }),
                             services: services)
                     case .destinationOccupied:
                         completion.value(nil, [], false, NSFileProviderError(.filenameCollision))
@@ -1034,6 +1235,14 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                         AppLogger.fileProvider.notice("modifyItem(move): source changed under dir (retry later): \(path, privacy: .private)")
                         completion.value(nil, [], false, Self.moveConflictError())
                     }
+                    return
+                }
+
+                if ref.isPackage {
+                    try await Self.movePackage(
+                        from: oldPath, to: validNewPath, newDisplayPath: newDisplayPath,
+                        contents: hasNewContents ? boxedURL.value : nil,
+                        current: current, services: services, completion: completion)
                     return
                 }
 
@@ -1102,7 +1311,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                             materialized: wasMaterialized),
                         [], false, nil)
                     Self.scheduleVersionRestamp(
-                        moves: [(from: oldPath, to: newPath)], services: services)
+                        moves: [(from: oldPath, to: newPath)], packages: [], services: services)
                 case .destinationOccupied:
                     completion.value(nil, [], false, NSFileProviderError(.filenameCollision))
                 case .sourceChanged(let path, _):
@@ -1121,6 +1330,114 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         }
         progress.cancellationHandler = { task.cancel() }
         return progress
+    }
+
+    /// パッケージの改名 / 移動（#140）。除外の判定はファイルと同じ（パッケージのパスに当てる）。
+    /// 中身はフォルダの move と同じ `moveDirectory`（copyObject → 全 add → 全 remove）で動かす。
+    ///
+    /// 改名と同時に内容も変わったとき（`contents` あり）は、新しいパスへ新規作成として書いて
+    /// （`writePackage(baseDigest: nil)`）から旧の中身を消す。途中で止まっても新旧両方が残る側に倒れ、
+    /// 再試行では新しいパスが同じ中身 = 書かずに旧の削除へ進む。
+    private static func movePackage(
+        from oldPath: String, to validNewPath: String?, newDisplayPath: String, contents: URL?,
+        current: ManifestGenerationCache.Current, services: ExtensionServices,
+        completion: UncheckedSendableBox<(NSFileProviderItem?, NSFileProviderItemFields, Bool, Error?) -> Void>
+    ) async throws {
+        let oldNode = current.tree.node(at: oldPath)
+        let excluded: Bool
+        if let newPath = validNewPath {
+            let layered = try await services.ignore.layeredIgnore(
+                tree: current.tree, anchor: current.anchor)
+            excluded = IgnoreDecision.shouldSkip(
+                relativePath: newPath, isAlreadyTracked: current.tree.node(at: newPath) != nil,
+                matcher: layered)
+        } else {
+            excluded = true
+        }
+        if excluded {
+            // ファイルの除外名への改名と同じ: マニフェストは触らず、後片付けの deleteItem を予約で受理する。
+            await services.exclusionCleanups.add(oldPath)
+            AppLogger.fileProvider.notice("modifyItem(move package): excluded new name (excludedFromSync; cleanup reserved): \(oldPath, privacy: .private)")
+            await services.events.append(
+                type: .info, path: oldPath,
+                message: "Excluded from sync by rename (kept local)", details: newDisplayPath,
+                notice: oldNode == nil ? nil : .renamedFileExcluded)
+            completion.value(nil, [], false, NSFileProviderError(.excludedFromSync))
+            return
+        }
+        let newPath = validNewPath!  // excluded が nil ケースを吸収済み
+        guard case .package(_, let members, _, _)? = oldNode else {
+            completion.value(nil, [], false, NSFileProviderError(.noSuchItem))
+            return
+        }
+        let told = await services.toldMaterialized()
+        let wasMaterialized = told.reported.contains(oldPath) || told.pendingReturned.contains(oldPath)
+
+        if let contents {
+            let written: ManifestTree.Node
+            switch try await services.writer.writePackage(path: newPath, contentsURL: contents, baseDigest: nil) {
+            case .written(let node), .unchanged(let node):
+                written = node
+            case .conflict, .kindCollision:
+                // 新しいパスに別の中身・フォルダがある（競合コピーは上がっている）= 名前をずらしてもらう
+                completion.value(nil, [], false, NSFileProviderError(.filenameCollision))
+                return
+            case .excluded(let reason):
+                await recordPackageExclusion(reason, path: oldPath, services: services)
+                await services.exclusionCleanups.add(oldPath)
+                completion.value(nil, [], false, NSFileProviderError(.excludedFromSync))
+                return
+            case .empty:
+                await services.exclusionCleanups.add(oldPath)
+                completion.value(nil, [], false, NSFileProviderError(.excludedFromSync))
+                return
+            }
+            var expected: [String: String] = [:]
+            for (relative, entry) in members { expected[oldPath + "/" + relative] = entry.sha256 }
+            switch try await services.writer.deleteDirectory(expecting: expected) {
+            case .removed:
+                break
+            case .removedIndexStale(_, let detail):
+                throw SyncError.indexUpdateFailedAfterCommit(detail)
+            case .rejected(let path, _):
+                AppLogger.fileProvider.notice("modifyItem(move package): source changed (retry later): \(path, privacy: .private)")
+                completion.value(nil, [], false, moveConflictError())
+                return
+            }
+            await services.events.append(
+                type: .move, path: oldPath, message: "Moved → \(newPath) (with changes)")
+            await services.followMaterializedFileMove(from: oldPath, to: newPath)
+            let materialized = await services.returnedMaterializedFlag(for: newPath)
+            completion.value(FileProviderItem(node: written, materialized: materialized), [], false, nil)
+            return
+        }
+
+        guard current.tree.node(at: newPath) == nil else {
+            completion.value(nil, [], false, NSFileProviderError(.filenameCollision))
+            return
+        }
+        let descendants = members.map {
+            (from: oldPath + "/" + $0.key, to: newPath + "/" + $0.key, entry: $0.value)
+        }
+        switch try await services.writer.moveDirectory(descendants: descendants) {
+        case .moved:
+            await services.events.append(
+                type: .move, path: oldPath, message: "Moved → \(newPath)")
+            // 実体化状態は旧 path を引き継ぐ（ファイルの move と同じ）
+            await services.followMaterializedFileMove(from: oldPath, to: newPath)
+            completion.value(
+                FileProviderItem(
+                    node: ManifestTree.packageNode(path: newPath, members: members),
+                    materialized: wasMaterialized),
+                [], false, nil)
+            scheduleVersionRestamp(
+                moves: [(from: oldPath, to: newPath)], packages: [newPath], services: services)
+        case .destinationOccupied:
+            completion.value(nil, [], false, NSFileProviderError(.filenameCollision))
+        case .sourceChanged(let path, _):
+            AppLogger.fileProvider.notice("modifyItem(move package): source changed (retry later): \(path, privacy: .private)")
+            completion.value(nil, [], false, moveConflictError())
+        }
     }
 
     /// 版スタンプ自動治癒（Issue #93）の待ち時間。初回猶予 = ダエモンが completion 返却
@@ -1150,8 +1467,9 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
     ///   ingest 猶予を**全件共有で一度だけ**待ってからまとめて再試行（per-file 直列待ちだと
     ///   dir move N 件でワーストケース N×2 秒に伸びる。PR #113 レビュー #2）。それでも失敗なら
     ///   諦める（「次の編集 or 開いて保存で自然治癒」の従来挙動に戻るだけ・安全側）。
+    /// - Parameter packages: 移動先のうちパッケージのパス（再取り込みを `k:` の id で頼む・#140）。
     private static func scheduleVersionRestamp(
-        moves: [(from: String, to: String)], services: ExtensionServices
+        moves: [(from: String, to: String)], packages: Set<String>, services: ExtensionServices
     ) {
         Task.detached(priority: .utility) {
             try? await Task.sleep(for: restampInitialDelay)
@@ -1187,7 +1505,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             }
             var retryTargets: [String] = []
             for path in targets {
-                let error = await services.requestReimport(path)
+                let error = await services.requestReimport(path, packages.contains(path) ? .package : .file)
                 if let fpError = error as? NSFileProviderError, fpError.code == .noSuchItem {
                     retryTargets.append(path)
                 } else {
@@ -1198,7 +1516,9 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 // 待ちの意味は「ダエモンの ingest 完了待ち」なので全件共有の一度きりで足りる。
                 try? await Task.sleep(for: restampRetryDelay)
                 for path in retryTargets {
-                    logOutcome(await services.requestReimport(path), path: path)
+                    logOutcome(
+                        await services.requestReimport(path, packages.contains(path) ? .package : .file),
+                        path: path)
                 }
             }
         }
@@ -1234,10 +1554,9 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 defer { progress.completedUnitCount = progress.totalUnitCount }
                 do {
                     let current = try await services.cache.current()
-                    let prefix = dirPath + "/"
+                    // 配下のパッケージは中身に開いて一緒に消す（#140）
                     var expected: [String: String] = [:]
-                    for (p, node) in current.tree.nodesByPath {
-                        guard p.hasPrefix(prefix), case .file(_, let entry) = node else { continue }
+                    for (p, entry) in current.tree.trackedFiles(under: dirPath) {
                         expected[p] = entry.sha256
                     }
                     // フォルダ単位除外の予約（#120 レビュー B1）: 自身か祖先に予約があれば、
@@ -1336,6 +1655,11 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         }
         let baseSha = FileProviderWritePolicy.baseSha(
             contentVersion: version.contentVersion, metadataVersion: version.metadataVersion)
+        if ref.isPackage {
+            return deletePackage(
+                path: ref.path, baseDigest: baseSha, services: services,
+                progress: progress, completionHandler: completionHandler)
+        }
         let completion = UncheckedSendableBox(value: completionHandler)
         let task = Task {
             defer { progress.completedUnitCount = progress.totalUnitCount }
@@ -1408,6 +1732,85 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 if !(error is CancellationError) {
                     await services.events.append(
                         type: .error, path: ref.path, message: "Delete failed",
+                        details: String(describing: error))
+                }
+                completion.value(Self.wrapForCompletion(error))
+            }
+        }
+        progress.cancellationHandler = { task.cancel() }
+        return progress
+    }
+
+    /// パッケージの削除（#140）。ベースは baseVersion の digest（ツリーの今の版と一致したときだけ消す・
+    /// 合わなければ最新の item を添えて拒否 = システムが戻す）。除外の後片付け（予約あり・ベースが
+    /// digest の形でない）はツリーの今の版をベースに読み替える（ファイルと同じ）。中身の除去は
+    /// フォルダの再帰削除と同じ `deleteDirectory`（中身ごとにツリーの sha で RMW ガード）。
+    /// そのパスがもうパッケージでない（消えた・ファイルで保存し直された）ときは、消すものが無い = 成功。
+    private func deletePackage(
+        path: String, baseDigest: String?, services: ExtensionServices,
+        progress: Progress, completionHandler: @escaping (Error?) -> Void
+    ) -> Progress {
+        let completion = UncheckedSendableBox(value: completionHandler)
+        let task = Task {
+            defer { progress.completedUnitCount = progress.totalUnitCount }
+            func forgetLocalState() async {
+                await services.exclusionCleanups.removeSubtree(at: path)
+                await services.followMaterializedRemoval(at: path)
+            }
+            do {
+                let tree = try await services.cache.current().tree
+                guard case .package(_, let members, let digest, _)? = tree.node(at: path) else {
+                    await forgetLocalState()
+                    completion.value(nil)
+                    return
+                }
+                let isCleanup = baseDigest == nil ? await services.exclusionCleanups.contains(path) : false
+                guard baseDigest == digest || isCleanup else {
+                    let reason = baseDigest == nil ? "base unknown" : "remote changed since base"
+                    AppLogger.fileProvider.notice("deleteItem(package): rejected (\(reason, privacy: .public)): \(path, privacy: .private)")
+                    await services.events.append(
+                        type: .info, path: path, message: "Delete rejected (\(reason))")
+                    let materialized = await services.toldMaterializedFlag(for: path)
+                    completion.value(NSError.fileProviderErrorForRejectedDeletion(
+                        of: FileProviderItem(node: tree.node(at: path)!, materialized: materialized)))
+                    return
+                }
+                var expected: [String: String] = [:]
+                for (relative, entry) in members { expected[path + "/" + relative] = entry.sha256 }
+                switch try await services.writer.deleteDirectory(expecting: expected) {
+                case .removed(let count):
+                    await services.events.append(
+                        type: .delete, path: path, message: "Deleted package (\(count) files)")
+                    if isCleanup {
+                        AppLogger.fileProvider.notice("deleteItem(package): exclusion cleanup completed: \(path, privacy: .private)")
+                    }
+                    await forgetLocalState()
+                    completion.value(nil)
+                case .removedIndexStale(let count, let detail):
+                    AppLogger.fileProvider.error("deleteItem(package): partial completion (index update pending, \(count) files removed): \(path, privacy: .private): \(detail, privacy: .private)")
+                    await services.events.append(
+                        type: .delete, path: path,
+                        message: "Deleted package (\(count) files; index update pending)")
+                    completion.value(Self.wrapForCompletion(SyncError.indexUpdateFailedAfterCommit(detail)))
+                case .rejected(let member, _):
+                    // 中身がリモートで進んでいた（キャッシュの後の変化）。最新の item を添えて拒否する。
+                    AppLogger.fileProvider.notice("deleteItem(package): rejected — remote changed inside package: \(member, privacy: .private)")
+                    await services.events.append(
+                        type: .info, path: path, message: "Delete rejected (remote changed inside package)")
+                    guard let latest = try await services.cache.current().tree.node(at: path), latest.isPackage else {
+                        await forgetLocalState()
+                        completion.value(nil)
+                        return
+                    }
+                    let materialized = await services.toldMaterializedFlag(for: path)
+                    completion.value(NSError.fileProviderErrorForRejectedDeletion(
+                        of: FileProviderItem(node: latest, materialized: materialized)))
+                }
+            } catch {
+                AppLogger.fileProvider.error("deleteItem(package) failed: \(String(describing: error), privacy: .private)")
+                if !(error is CancellationError) {
+                    await services.events.append(
+                        type: .error, path: path, message: "Delete failed",
                         details: String(describing: error))
                 }
                 completion.value(Self.wrapForCompletion(error))

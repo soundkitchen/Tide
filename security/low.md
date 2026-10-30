@@ -321,6 +321,17 @@ FP 拡張の書込（deleteItem / modifyItem / createItem / move）は `Extensio
   他端末の同時更新）は `docs/09` に記録。ローカルの改名後のファイルを削除すれば後始末される
   `PersistedPathSet`（仮想フォルダ温存 / 後始末予約）は世代ログと同じ at-rest 規約 =
   App Group Caches・bucket キー・読込時 `validateRelativePath` 再適用・壊れは全体破棄
+- **Status（2026-10-30・#140・実装中 = 判定の既定 `PackageClassifier.active` は `.none` のまま）: パッケージの書込も同じゲートを通す**。
+  macOS のパッケージ（Keynote のパッケージ形式・`.xcodeproj` 等）は createItem / modifyItem に中身を持つ
+  1 つのフォルダとして届くため、中身を拡張自身が走査する（`PackageScanner`）。**中身にシンボリックリンク・
+  通常のファイルでない項目（FIFO 等）・同期できない名前が 1 つでもあればパッケージごと除外**（リンクは
+  追従もアップロードもしない。リンクだけ落として上げると復元したパッケージが壊れるため丸ごと）・中身が
+  10,000 件を超えるものも丸ごと除外（いずれもローカル温存 + 通知）。機密網に当たる中身は黙って飛ばす
+  （機密網は何にも優先）。ユーザ `.syncignore` はパッケージのパスにだけ当て、中身には当てない（中の
+  `.syncignore` も層として読まない = ツリーの `.file` ノードにならない）。中身の本体は従来どおり
+  `NoFollowFileReader` + SSE-S3、パスは `validateRelativePath`。fetchContents が組み立てる一時フォルダへの
+  書込は、リモート由来の中身の相対パスを `PathValidator.resolveForWrite`（一時フォルダを root）に通す。
+  フォルダの再帰削除・移動はパッケージの中身も対象に含める（`ManifestTree.trackedFiles`）
 
 ## L18. File Provider 実体化バッジレジストリの at-rest 内容（プライバシー境界）
 

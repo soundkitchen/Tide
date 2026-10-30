@@ -2481,6 +2481,28 @@
         }
       }
     },
+    "“%@” contains a link or an item Tide can’t sync, so Tide doesn’t back it up. It stays only on this Mac." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "「%@」には Tide が同期できないリンクや項目が入っているため、バックアップしません。この Mac にだけ残っています。"
+          }
+        }
+      }
+    },
+    "“%@” contains more than %lld files, so Tide doesn’t back it up. It stays only on this Mac." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "「%@」には %lld 個を超えるファイルが入っているため、バックアップしません。この Mac にだけ残っています。"
+          }
+        }
+      }
+    },
     "“%@” is a symbolic link. Tide doesn’t sync links, so it stays only on this Mac." : {
       "extractionState" : "manual",
       "localizations" : {

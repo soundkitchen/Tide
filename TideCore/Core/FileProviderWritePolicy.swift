@@ -157,6 +157,42 @@ public enum FileProviderWritePolicy {
     /// パス自身と祖先（深い → 浅い順・ルート "" は含まない）。`a/b/c` → `[a/b/c, a/b, a]`。
     /// 除外の予約は除外したフォルダの path で積まれるが、後始末の deleteItem は配下の
     /// 仮想フォルダ（以前に受理済みの `d:` item）単位でも届くため、祖先まで照合する。
+    /// パッケージを書くか（FP の createItem / modifyItem・#140）。
+    public enum PackageWriteDecision: Equatable, Sendable {
+        /// 書く。`remoteMembers` は今のマニフェストの中身（中身ごとの 3-way のベースと、消す中身の一覧）。
+        case write(remoteMembers: [String: ManifestFileEntry])
+        /// マニフェストが同じ中身を既に持つ（再取り込みの問い直し・クラッシュ後の再送）= 何も書かない。
+        case unchanged
+        /// ベースの後でリモートが変わった・新規作成が他の端末の作成と重なった = 競合コピーへ。
+        case conflict
+        /// 同じパスにフォルダがある = 名前の衝突（システムに名前をずらさせる）。
+        case kindCollision
+    }
+
+    /// パッケージの書込の判定（ファイルの `decideUpload` をパッケージの版 = digest で行う）。
+    /// - Parameters:
+    ///   - localDigest: ローカルの中身の版（`ManifestTree.packageDigest(shas:)`）。
+    ///   - base: システムが最後に見た版（新規作成は nil）。
+    ///   - remote: 今のツリーのそのパスのノード。
+    ///
+    /// 同じパスに**ファイル**があるときは書く（Keynote が単一ファイルの書類をパッケージで保存し直した。
+    /// 古いファイルの entry は、続いて届く旧 id の deleteItem がベースつきで消す。それまではツリーで
+    /// パッケージが勝つ）。リモートに無いときも書く（ベースつきなら、リモートの削除よりローカルの
+    /// 編集を残す側 = ファイルと同じ）。
+    public static func packageWriteDecision(
+        localDigest: String, base: String?, remote: ManifestTree.Node?
+    ) -> PackageWriteDecision {
+        switch remote {
+        case nil, .file?:
+            return .write(remoteMembers: [:])
+        case .directory?:
+            return .kindCollision
+        case .package(_, let members, let digest, _)?:
+            if digest == localDigest { return .unchanged }
+            return base == digest ? .write(remoteMembers: members) : .conflict
+        }
+    }
+
     public static func pathAndAncestors(_ path: String) -> [String] {
         var result: [String] = []
         var current = Substring(path)

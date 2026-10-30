@@ -79,7 +79,7 @@ struct ExtensionServices: Sendable {
     /// されるだけで `isDownloadRequested` も立たず fetchContents も来ない（no-op 扱い）ことを
     /// 実機確定（2026-08-25・フル DL センチネル明示でも同じ。docs/08 #93 節）。
     /// 返値 nil = acknowledge 成功。エラーの解釈（noSuchItem リトライ等）は呼び出し側が担う。
-    let requestReimport: @Sendable (String) async -> (any Error)?
+    let requestReimport: @Sendable (String, ManifestTree.Node.Kind) async -> (any Error)?
 
     /// live 集合を観測し直し、報告済みと食い違えば working set を signal する（Issue #65）。
     /// `materializedItemsDidChange`（materialize / evict の通知）と、enumerateChanges の
@@ -200,14 +200,13 @@ struct ExtensionServices: Sendable {
                     }
                 }
             }
-            let requestReimport: @Sendable (String) async -> (any Error)? = { path in
+            let requestReimport: @Sendable (String, ManifestTree.Node.Kind) async -> (any Error)? = { path, kind in
                 guard let manager = NSFileProviderManager(for: boxedDomain.value) else {
                     return NSFileProviderError(.providerNotFound)
                 }
                 do {
                     try await manager.reimportItems(
-                        below: NSFileProviderItemIdentifier(
-                            tideRelativePath: path, isDirectory: false))
+                        below: NSFileProviderItemIdentifier(tideRelativePath: path, kind: kind))
                     return nil
                 } catch {
                     return error
