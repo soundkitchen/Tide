@@ -113,6 +113,17 @@ final class SyncIgnoreMatcherTests: XCTestCase {
         XCTAssertFalse(s.isIgnored("README.md"))
         // .git は既定テンプレートでは除外しない（復旧目的で同期対象のまま）
         XCTAssertFalse(s.isIgnored(".git/HEAD"))
+        // 秘密鍵の .key の例はコメントのまま（Keynote の書類を除外しない・#140）
+        XCTAssertFalse(s.isIgnored("Slides.key"))
+        XCTAssertFalse(s.isIgnored("certs/server.key"))
+    }
+
+    func testScopedKeyPatternFromTemplateExample() {
+        // テンプレートのコメント例を有効にすると、そのフォルダの .key だけが除外される（#140）
+        let s = m("certs/*.key")
+        XCTAssertTrue(s.isIgnored("certs/server.key"))
+        XCTAssertFalse(s.isIgnored("Slides.key"))
+        XCTAssertFalse(s.isIgnored("Talks/Deck.key/Index.zip"))
     }
 
     func testPatternCountCapDoesNotCrash() {

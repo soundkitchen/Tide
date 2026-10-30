@@ -40,6 +40,18 @@ actor InMemoryManifestStore: ManifestStore {
         isGetIndexHeld = false
     }
 
+    struct SimulatedNetworkFailure: Error, CustomStringConvertible {
+        var description: String { "simulated network failure" }
+    }
+
+    private var failingGetShardIds: Set<String> = []
+
+    /// 指定したシャードの getShard を毎回失敗させる（412 以外のエラー = 再試行されない・
+    /// バッチ RMW の並行処理で、別のシャードが確定した分を落とさないことの検証用）。
+    func failGetShard(_ id: String) {
+        failingGetShardIds.insert(id)
+    }
+
     /// 次の putShard を `times` 回だけ 412 で失敗させる。
     func failNextPutShard(times: Int) {
         putShardFailuresRemaining = times
@@ -147,6 +159,7 @@ actor InMemoryManifestStore: ManifestStore {
     }
 
     func getShard(_ id: String) throws -> TideS3Client.ManifestFetch<ManifestShard>? {
+        if failingGetShardIds.contains(id) { throw SimulatedNetworkFailure() }
         let result: TideS3Client.ManifestFetch<ManifestShard>?
         if let shard = shards[id], let etag = shardEtags[id] {
             result = .init(value: shard, etag: etag)

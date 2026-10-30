@@ -88,6 +88,10 @@ enum NotificationPolicy {
                 body = String(localized: "“\(name)” was renamed to a name Tide doesn’t sync and is no longer backed up. It stays on this Mac.")
             case .renamedFolderExcluded:
                 body = String(localized: "The folder “\(name)” was renamed to a name Tide doesn’t sync, so its files are no longer backed up. They stay on this Mac.")
+            case .packageHasUnsyncableItem:
+                body = String(localized: "“\(name)” contains a link or an item Tide can’t sync, so Tide doesn’t back it up. It stays only on this Mac.")
+            case .packageTooManyFiles:
+                body = String(localized: "“\(name)” contains more than \(PackageScanner.memberLimit) files, so Tide doesn’t back it up. It stays only on this Mac.")
             }
             return NotificationContent(
                 identifier: "notBackedUp:\(reason.rawValue):\(path)",

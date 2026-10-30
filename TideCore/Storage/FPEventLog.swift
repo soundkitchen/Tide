@@ -39,7 +39,7 @@ public struct FPEventRecord: Codable, Sendable, Equatable {
 /// 通知に出す名前の出どころ（`subject`）は種類で決まる:
 /// - `unsyncableName` / `renamedFileExcluded` / `renamedFolderExcluded`: `details`（表示用の
 ///   パス。検証できない名前は `path` に入れられず、改名は新しい名前を出したいため）
-/// - `symbolicLink`: `path`
+/// - `symbolicLink` / `packageHasUnsyncableItem` / `packageTooManyFiles`: `path`
 public enum FPEventNotice: String, Sendable, CaseIterable {
     /// 同期できない名前（バックスラッシュ等）で新規作成された
     case unsyncableName
@@ -49,13 +49,18 @@ public enum FPEventNotice: String, Sendable, CaseIterable {
     case renamedFileExcluded
     /// 追跡中のファイルを含むフォルダが同期しない名前へ改名され、配下がバックアップから外れた
     case renamedFolderExcluded
+    /// パッケージにシンボリックリンク・通常のファイルでない項目・同期できない名前が入っていて、
+    /// パッケージごと除外した（#140）
+    case packageHasUnsyncableItem
+    /// パッケージの中身が上限（`PackageScanner.memberLimit`）を超えていて、パッケージごと除外した（#140）
+    case packageTooManyFiles
 
     /// fileproviderd が同じアイテムの除外を再送する種類か（#120 の再送嵐）。再送される種類は、
     /// アプリ側で同じアイテムを 1 回だけ通知する。改名の除外は後片付けの deleteItem で終わり、
     /// 再送されない。
     public var isResentByDaemon: Bool {
         switch self {
-        case .unsyncableName, .symbolicLink: return true
+        case .unsyncableName, .symbolicLink, .packageHasUnsyncableItem, .packageTooManyFiles: return true
         case .renamedFileExcluded, .renamedFolderExcluded: return false
         }
     }
@@ -63,7 +68,7 @@ public enum FPEventNotice: String, Sendable, CaseIterable {
     /// 通知に出す名前（表示用のパス）。上の型コメントの規約どおり。
     public func subject(of record: FPEventRecord) -> String? {
         switch self {
-        case .symbolicLink: return record.path
+        case .symbolicLink, .packageHasUnsyncableItem, .packageTooManyFiles: return record.path
         case .unsyncableName, .renamedFileExcluded, .renamedFolderExcluded: return record.details
         }
     }

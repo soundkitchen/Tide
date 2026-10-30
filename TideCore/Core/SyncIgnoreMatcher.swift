@@ -95,6 +95,10 @@ public struct SyncIgnoreMatcher: Sendable {
         # その他のキャッシュ
         .cache/
 
+        # 秘密鍵の .key は既定では除外しません（Keynote の書類と同じ拡張子のため）。
+        # 秘密鍵を置くフォルダがあれば、そのフォルダに限って除外してください。
+        # certs/*.key
+
         """
 
     public static func parse(_ text: String) -> SyncIgnoreMatcher {

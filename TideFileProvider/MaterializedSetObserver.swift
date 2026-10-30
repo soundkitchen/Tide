@@ -77,7 +77,7 @@ actor MaterializedObserver {
 }
 
 /// `NSFileProviderManager.enumeratorForMaterializedItems()` を全ページ駆動して、実体化済み
-/// **ファイル**の相対パス集合を取り出す（Issue #65）。
+/// **ファイル**（パッケージ含む・#140）の相対パス集合を取り出す（Issue #65）。
 ///
 /// - ヘッダ仕様: 開始ページは `[NSData new]` 相当（`Data()`）。ソート定数は無効。
 ///   「システムが `materializedItemsDidChangeWithCompletionHandler` を呼んだら拡張側が列挙する」
@@ -109,6 +109,7 @@ enum MaterializedSetQuery {
             case .success(let (ids, next)):
                 totalCount += ids.count
                 for id in ids {
+                    // パッケージ（`k:`）はファイルと同じく 1 件の葉として数える（ツリーの `filePaths` と揃える）。
                     guard let ref = id.tidePathAndKind, !ref.isDirectory, !ref.path.isEmpty else {
                         continue
                     }

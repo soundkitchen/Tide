@@ -333,6 +333,8 @@ public enum ShardBatchRemoveOutcome: Equatable, Sendable {
     /// そこで中断（Issue #91。index が失敗し続ける状況で後続シャードへ進んでも無駄打ちになる）。
     /// `removedPaths` は先行シャード + 当該シャードで除去が**確定済み**のパス（呼び出し側は
     /// marker を発行してよい）。後続シャードには触れていない = エラー返却後の再試行が続きを担う。
+    /// 並行して走っていた別のシャードが throw した（ネットワークエラー等）ときも、確定した除去が
+    /// あればこれで返す（`detail` はそのエラー・#140 のシャード並行化・PR #152 レビュー指摘 8）。
     case removedIndexStale(removedPaths: [String], detail: String)
     /// `path` の権威 entry がベースから進んでいた = 中断（「拒否で即中断」方針）。
     /// `removedPaths` は中断より**前のシャードで既に除去済み**のパス（未変更ファイルのみなので
@@ -363,7 +365,8 @@ public enum ShardMoveOutcome: Equatable, Sendable {
     /// （呼び出し側が旧キーへ delete marker を発行する対象。冪等再入では空になり得る）。
     case moved(removedPaths: [String])
     /// add フェーズで移動先に**別内容**の entry が実在 = 衝突（中断・remove 未実施 = 元は無傷。
-    /// 先行シャードで add 済みの分は移動先の重複として残る = 冪等リトライ / 次回 pull で収束）。
+    /// 先に全シャードを読んで判定するので通常は何も add していない。add している間に他の端末が
+    /// 書いたシャードで衝突したときだけ、先に add した分が移動先の重複として残る = 冪等リトライで収束）。
     case destinationOccupied(path: String, remote: ManifestFileEntry)
     /// remove フェーズで旧 entry がベースから進んでいた = 中断（新旧**両存**のまま返す。
     /// 自動 rollback はしない — rollback 自体が新たな競合窓を作るため。「データ損失 < 重複」）。
@@ -372,6 +375,36 @@ public enum ShardMoveOutcome: Equatable, Sendable {
     /// `removedPaths` は除去が確定済みの旧パス（呼び出し側は marker を発行してよい）。
     /// 呼び出し側はエラーとして返し、再試行（add = 冪等再入・remove = 残分続行）に委ねる。
     case movedIndexStale(removedPaths: [String], detail: String)
+}
+
+/// 1 ファイルぶんの追加・置換の指示（`writeFileEntries`・#140）。
+public struct ManifestFileUpsert: Sendable {
+    public let path: String
+    /// 3-way のベース sha256（新規は nil）。`updateFileEntry` の `base` と同じ意味。
+    public let base: String?
+    public let newEntry: ManifestFileEntry
+
+    public init(path: String, base: String?, newEntry: ManifestFileEntry) {
+        self.path = path
+        self.base = base
+        self.newEntry = newEntry
+    }
+}
+
+/// `writeFileEntries` の結果（#140）。
+public enum ShardBatchWriteOutcome: Equatable, Sendable {
+    /// 追加・置換と除去がすべて完了した。`removedPaths` は実際にマニフェストから除去したパス
+    /// （呼び出し側が delete marker を発行する対象）。
+    case written(removedPaths: [String])
+    /// 追加・置換の判定で、`path` のリモートがベースから進んでいた = 中断（除去は未実施）。
+    /// 先に全シャードを読んで判定するので、通常は 1 件も書いていない（書いている間に他の端末が
+    /// 書いたシャードで衝突したときだけ、それより前に書いたシャードの分が残る）。
+    case conflict(path: String, remote: ManifestFileEntry)
+    /// 除去で `path` のリモートがベースから進んでいた = 中断（追加・置換は全完了済み）。
+    /// `removedPaths` は中断より前に除去が確定したパス。
+    case removalRejected(path: String, remote: ManifestFileEntry, removedPaths: [String])
+    /// 除去で「シャード書込確定 × index 反映失敗」の部分完了（Issue #91）。追加・置換は全完了済み。
+    case removedIndexStale(removedPaths: [String], detail: String)
 }
 
 /// シャードと index.json を楽観的ロックで更新する。
@@ -563,20 +596,22 @@ public struct ManifestUpdater: Sendable {
     /// ガードは `removeFileEntry` と同じく RMW 内（412 リトライごとにシャード内全対象を再評価）。
     ///
     /// 方針は「拒否で即中断」（2026-07-09 ユーザ確定）: あるシャードで 1 件でもベース不一致
-    /// （リモート先行）を見つけたら**そのシャードからは何も除去せず**、以降のシャードにも進まない。
-    /// 呼び出し側は `DirectoryNotEmpty` を返してシステムに残存分を復元させる。処理済みシャードの
-    /// 除去分はそのまま（ベース一致 = 未変更ファイルのみなので安全・再試行で収束）。
+    /// （リモート先行）を見つけたら**そのシャードからは何も除去せず**、新しいシャードには進まない
+    /// （シャードは `runShardBatch` で限られた数だけ並行に処理するので、そのとき走っていた
+    /// シャードは書き切る）。呼び出し側は `DirectoryNotEmpty` を返してシステムに残存分を復元させる。
+    /// 処理済みシャードの除去分はそのまま（ベース一致 = 未変更ファイルのみなので安全・再試行で収束）。
     /// - Parameter expectedByPath: 除去対象の相対パス → 期待 sha256（呼び出し側がキャッシュ済み
     ///   ツリーから取る）。ベース不明のパスはそもそも渡さないこと（「根拠なしに消さない」）。
     public func removeFileEntries(
         expecting expectedByPath: [String: String]
     ) async throws -> ShardBatchRemoveOutcome {
-        var removedAll: [String] = []
         let groups = Dictionary(grouping: expectedByPath.keys, by: ManifestSharding.shardId(for:))
-        // シャード順は決定的に（テスト再現性と、再試行時に同じ順で進んで途中中断点が安定するため）
-        for shardId in groups.keys.sorted() {
+        let batch = await runShardBatch(groups.keys.sorted(), stopsBatch: { (outcome: BatchShardOutcome) in
+            if case .committed = outcome { return false }
+            return true
+        }) { shardId in
             let paths = groups[shardId]!.sorted()
-            let outcome = try await withConditionalRetry("shard \(shardId)") {
+            return try await withConditionalRetry("shard \(shardId)") {
                 () -> BatchShardOutcome in
                 let fetched = try await store.getShard(shardId)
                 var shard = fetched?.value ?? ManifestShard.empty(id: shardId)
@@ -611,13 +646,31 @@ public struct ManifestUpdater: Sendable {
                 }
                 return .committed(toRemove)
             }
+        }
+        // 除去が確定した分は、中断の理由に関わらずすべて返す（呼び出し側が marker を発行する）。
+        var removedAll: [String] = []
+        for (_, outcome) in batch.results {
             switch outcome {
-            case .committed(let removed):
+            case .committed(let removed), .committedIndexStale(let removed, _):
                 removedAll.append(contentsOf: removed)
-            case .committedIndexStale(let removed, let detail):
-                // index が失敗し続ける状況で後続シャードへ進んでも無駄打ちになるため中断。
-                // 除去確定分（先行 + 当該シャード）は marker 発行対象として返す。
-                removedAll.append(contentsOf: removed)
+            case .rejected:
+                break
+            }
+        }
+        // 並行して走っていた別のシャードが throw した（ネットワークエラー等）: 確定した除去があれば
+        // index の部分完了と同じく運ぶ（呼び出し側は marker を出してからエラーで返す = 再試行が残りを
+        // 消す・PR #152 レビュー指摘 8）。確定した除去が無ければそのまま投げる。
+        if let error = batch.firstError {
+            guard !removedAll.isEmpty else { throw error }
+            return .removedIndexStale(removedPaths: removedAll, detail: String(describing: error))
+        }
+        // 中断の理由はシャード順で最初のもの。index の失敗（後続へ進んでも無駄打ち）も拒否も、
+        // 新しいシャードには進まない。
+        for (_, outcome) in batch.results {
+            switch outcome {
+            case .committed:
+                continue
+            case .committedIndexStale(_, let detail):
                 return .removedIndexStale(removedPaths: removedAll, detail: detail)
             case .rejected(let path, let remote):
                 return .rejected(path: path, remote: remote, removedPaths: removedAll)
@@ -639,51 +692,23 @@ public struct ManifestUpdater: Sendable {
     /// - **Phase A（add）**: 移動先シャードごとに新 entry を書く。**全シャードの add が完了する
     ///   まで remove を始めない** — どこで中断・クラッシュしても中間状態が常に「新旧両存
     ///   （重複）」側に倒れる（「データ損失 < 重複」）。移動先に**別内容**の entry が実在したら
-    ///   `.destinationOccupied` で中断（同一 sha は冪等再入とみなし素通し）。
+    ///   `.destinationOccupied` で中断（同一 sha は冪等再入とみなし素通し）。先に全シャードを読んで
+    ///   判定してから書く（`addEntries`・#140）。
     /// - **Phase B（remove）**: `removeFileEntries` に委譲（5-3 と同じベースガード・
     ///   拒否で即中断）。拒否は `.sourceChanged` = 新旧両存のまま返す（自動 rollback は
     ///   新たな競合窓を作るため不採用）。
     /// - 同一シャードが from/to 両方に関与する場合も 2 回の RMW に分かれる（往復は最大
     ///   2×シャード数で有界。1 RMW に畳むより中間状態の単純さを優先）。
+    /// - 各フェーズの中ではシャードを限られた数だけ並行に処理する（`runShardBatch`・#140）。
+    ///   フェーズの順（全 add → remove）は崩さない。
     ///
     /// 呼び出し側の前提: 本体オブジェクトのコピー（copyObject）は **add より前に**完了して
     /// いること（entry が指す versionId が実在してから可視化する）。
     public func moveFileEntries(_ moves: [ManifestFileMove]) async throws -> ShardMoveOutcome {
-        // Phase A: add（移動先シャード順・決定的）
-        let addGroups = Dictionary(grouping: moves) { ManifestSharding.shardId(for: $0.toPath) }
-        for shardId in addGroups.keys.sorted() {
-            let group = addGroups[shardId]!.sorted { $0.toPath < $1.toPath }
-            let outcome = try await withConditionalRetry("shard \(shardId)") {
-                () -> AddShardOutcome in
-                let fetched = try await store.getShard(shardId)
-                var shard = fetched?.value ?? ManifestShard.empty(id: shardId)
-                let etag = fetched?.etag
-                var changed = false
-                for move in group {
-                    if let existing = shard.files[move.toPath] {
-                        if existing.sha256 == move.newEntry.sha256 { continue }  // 冪等再入
-                        return .occupied(path: move.toPath, remote: existing)
-                    }
-                    shard.files[move.toPath] = move.newEntry
-                    changed = true
-                }
-                guard changed else {
-                    // 全て追加済み = no-op。分断の後始末だけ突合（removeFileEntries と同じ規約）。
-                    if let fetchedEtag = etag {
-                        try await repairIndexDeclarationIfStale(
-                            shardId: shardId, fetchedEtag: fetchedEtag, count: shard.files.count
-                        )
-                    } else {
-                        try await removeDanglingDeclarationIfShardAbsent(shardId: shardId)
-                    }
-                    return .committed
-                }
-                try await commitShardWrite(shardId: shardId, shard: shard, etag: etag)
-                return .committed
-            }
-            if case .occupied(let path, let remote) = outcome {
-                return .destinationOccupied(path: path, remote: remote)
-            }
+        // Phase A: add（先に全シャードを読んで判定してから書く = `addEntries`）
+        let adds = moves.map { PendingAdd(path: $0.toPath, newEntry: $0.newEntry, rule: .move) }
+        if case .occupied(let path, let remote) = try await addEntries(adds) {
+            return .destinationOccupied(path: path, remote: remote)
         }
         // Phase B: remove（5-3 のバッチ削除へ委譲 = ベースガード・拒否で即中断・
         // 空シャード削除/index 突合も同一機構）
@@ -701,10 +726,238 @@ public struct ManifestUpdater: Sendable {
         }
     }
 
-    /// `moveFileEntries` の add フェーズ 1 シャードぶんの RMW 結果（内部専用）。
+    /// 複数 entry の追加・置換と除去を**二相のシャード単位バッチ RMW** で行う（#140・パッケージの
+    /// 中身をまとめて書く）。`moveFileEntries` と同じく「全部書き足してから消す」順にして、どこで
+    /// 中断・クラッシュしても中間状態が「旧の中身が残る」側に倒れるようにする（「データ損失 < 重複」）。
+    ///
+    /// - **Phase A（追加・置換）**: 各 entry を `updateFileEntry` と同じ `decideUpload(base:uploading:remote:)`
+    ///   で判定する（`addEntries`）。先に全シャードを読んで判定し、`.conflict` が 1 件でもあれば 1 件も
+    ///   書かずに `.conflict` で返す（Phase B にも進まない）。`.alreadyUpToDate` は書かない
+    ///   （版 ID の向け直しは `mustRepointVersion` = #130 と同じ規則）。
+    /// - **Phase B（除去）**: `removeFileEntries` に委譲する（ベースガード・拒否で即中断・空シャード
+    ///   削除と index 突合も同じ機構）。
+    /// - シャード書込の確定後に index だけ失敗した場合は、Phase A では `SyncError.indexUpdateFailedAfterCommit`
+    ///   をそのまま投げ（`updateFileEntry` と同じ）、Phase B では `.removedIndexStale` で返す。
+    ///
+    /// 呼び出し側の前提: 追加・置換する entry が指す本体オブジェクトの PUT は、この呼び出しより前に
+    /// 完了していること（entry が指す versionId が実在してから可視化する）。
+    /// - Parameter removals: 除去する相対パス → 期待 sha256（ベース不明のパスは渡さないこと）。
+    public func writeFileEntries(
+        upserting upserts: [ManifestFileUpsert],
+        removing removals: [String: String]
+    ) async throws -> ShardBatchWriteOutcome {
+        let adds = upserts.map { PendingAdd(path: $0.path, newEntry: $0.newEntry, rule: .upsert(base: $0.base)) }
+        if case .occupied(let path, let remote) = try await addEntries(adds) {
+            return .conflict(path: path, remote: remote)
+        }
+        guard !removals.isEmpty else { return .written(removedPaths: []) }
+        switch try await removeFileEntries(expecting: removals) {
+        case .removed(let paths):
+            return .written(removedPaths: paths)
+        case .removedIndexStale(let removedPaths, let detail):
+            return .removedIndexStale(removedPaths: removedPaths, detail: detail)
+        case .rejected(let path, let remote, let removedPaths):
+            return .removalRejected(path: path, remote: remote, removedPaths: removedPaths)
+        }
+    }
+
+    /// 書き足しフェーズで書く 1 件（`moveFileEntries` / `writeFileEntries` の Phase A・内部専用）。
+    private struct PendingAdd: Sendable {
+        enum Rule: Sendable {
+            /// 移動先: 無ければ書く・同じ sha なら冪等再入として飛ばす・別の内容なら衝突。
+            case move
+            /// 追加・置換: `decideUpload` で判定する（`base` = 3-way のベース）。
+            case upsert(base: String?)
+        }
+        let path: String
+        let newEntry: ManifestFileEntry
+        let rule: Rule
+    }
+
+    /// 書き足しフェーズの結果（内部専用）。
     private enum AddShardOutcome {
         case committed
         case occupied(path: String, remote: ManifestFileEntry)
+    }
+
+    /// 1 シャードぶんの書き足しの判定（内部専用）。
+    private enum ShardAddEvaluation: Sendable {
+        /// 書き足した後のシャード。
+        case changed(ManifestShard)
+        /// 書くものが無い（全部書き足し済み）。
+        case unchanged(ManifestShard)
+        case occupied(path: String, remote: ManifestFileEntry)
+    }
+
+    /// シャードの読み取りと、その時点の判定（内部専用）。
+    private struct ShardAddRead: Sendable {
+        let etag: String?
+        let evaluation: ShardAddEvaluation
+    }
+
+    private static func evaluateAdds(_ adds: [PendingAdd], on shard: ManifestShard) -> ShardAddEvaluation {
+        var shard = shard
+        var changed = false
+        for add in adds {
+            let existing = shard.files[add.path]
+            switch add.rule {
+            case .move:
+                if let existing {
+                    if existing.sha256 == add.newEntry.sha256 { continue }  // 冪等再入
+                    return .occupied(path: add.path, remote: existing)
+                }
+            case .upsert(let base):
+                switch ThreeWayMerge.decideUpload(
+                    base: base, uploading: add.newEntry.sha256, remote: existing?.sha256
+                ) {
+                case .proceed:
+                    break
+                case .alreadyUpToDate:
+                    guard let existing, mustRepointVersion(existing: existing, uploaded: add.newEntry)
+                    else { continue }
+                case .conflict:
+                    // existing は .conflict のとき必ず非 nil（remote == nil なら .proceed）
+                    if let existing { return .occupied(path: add.path, remote: existing) }
+                }
+            }
+            shard.files[add.path] = add.newEntry
+            changed = true
+        }
+        return changed ? .changed(shard) : .unchanged(shard)
+    }
+
+    private func readForAdds(_ adds: [PendingAdd], shardId: String) async throws -> ShardAddRead {
+        let fetched = try await store.getShard(shardId)
+        let shard = fetched?.value ?? ManifestShard.empty(id: shardId)
+        return ShardAddRead(etag: fetched?.etag, evaluation: Self.evaluateAdds(adds, on: shard))
+    }
+
+    /// 二相のバッチ RMW の書き足しフェーズ（`moveFileEntries` / `writeFileEntries` の Phase A）。
+    ///
+    /// 先に対象の全シャードを読んで判定し、1 シャードでも衝突があれば **1 件も書かずに**返す
+    /// （PR #152 レビュー指摘 1: 書きながら判定すると、衝突したシャードより前に書いた分だけが正規パスに
+    /// 残り、パッケージの中身が「この Mac の版」と「他の端末の版」に混ざる）。書くときは読んだときの
+    /// ETag で CAS する（往復は増えない）。412 の再試行では読み直して判定し直すので、書いている数秒の
+    /// 間に他の端末がそのシャードを書けば、そこで衝突して中断しうる（残る窓 = docs/08「パッケージ」節）。
+    private func addEntries(_ adds: [PendingAdd]) async throws -> AddShardOutcome {
+        let groups = Dictionary(grouping: adds) { ManifestSharding.shardId(for: $0.path) }
+            .mapValues { $0.sorted { $0.path < $1.path } }
+        let shardIds = groups.keys.sorted()
+        let reads = try await runShardBatch(shardIds, stopsBatch: { (read: ShardAddRead) in
+            if case .occupied = read.evaluation { return true }
+            return false
+        }) { shardId in
+            try await readForAdds(groups[shardId]!, shardId: shardId)
+        }.get()
+        var readById: [String: ShardAddRead] = [:]
+        for (shardId, read) in reads {
+            if case .occupied(let path, let remote) = read.evaluation {
+                return .occupied(path: path, remote: remote)
+            }
+            readById[shardId] = read
+        }
+        let writes = try await runShardBatch(shardIds, stopsBatch: { (outcome: AddShardOutcome) in
+            if case .occupied = outcome { return true }
+            return false
+        }) { [readById] shardId in
+            var prefetched = readById[shardId]
+            return try await withConditionalRetry("shard \(shardId)") {
+                () -> AddShardOutcome in
+                let read: ShardAddRead
+                if let first = prefetched {
+                    read = first
+                    prefetched = nil
+                } else {
+                    read = try await readForAdds(groups[shardId]!, shardId: shardId)
+                }
+                switch read.evaluation {
+                case .occupied(let path, let remote):
+                    return .occupied(path: path, remote: remote)
+                case .unchanged(let shard):
+                    // 全て書き足し済み = no-op。分断の後始末だけ突合（removeFileEntries と同じ規約）。
+                    if let fetchedEtag = read.etag {
+                        try await repairIndexDeclarationIfStale(
+                            shardId: shardId, fetchedEtag: fetchedEtag, count: shard.files.count
+                        )
+                    } else {
+                        try await removeDanglingDeclarationIfShardAbsent(shardId: shardId)
+                    }
+                    return .committed
+                case .changed(let shard):
+                    try await commitShardWrite(shardId: shardId, shard: shard, etag: read.etag)
+                    return .committed
+                }
+            }
+        }.get()
+        for (_, outcome) in writes {
+            if case .occupied(let path, let remote) = outcome {
+                return .occupied(path: path, remote: remote)
+            }
+        }
+        return .committed
+    }
+
+    /// バッチ RMW で同時に処理するシャードの数（#140）。
+    static let shardConcurrency = 8
+
+    /// `runShardBatch` の結果: 完了したシャードの結果（シャード id の昇順）と、最初のエラー。
+    private struct ShardBatchResults<Outcome: Sendable> {
+        let results: [(shardId: String, outcome: Outcome)]
+        let firstError: (any Error)?
+
+        /// エラーがあれば投げ、無ければ結果を返す。
+        func get() throws -> [(shardId: String, outcome: Outcome)] {
+            if let firstError { throw firstError }
+            return results
+        }
+    }
+
+    /// バッチ RMW のシャードごとの処理を、限られた数（`shardConcurrency`）だけ並行に走らせる（#140）。
+    /// 1 シャードの RMW はシャードの GET・PUT と index の更新で 4 往復あり、順に回すとパッケージの
+    /// 中身 33 件の改名で約 25 秒かかった（index の更新は 1 件ずつで、コアレッサが束ねる相手がいない）。
+    /// 並行にすると、index の更新はコアレッサが 1 回の書込に束ねる（シャードと index の両方が確定して
+    /// から戻る確定点は変わらない）。
+    ///
+    /// - シャードは id の昇順に着手する。`stopsBatch` が true の結果（拒否・衝突など）が返るか、
+    ///   処理が throw したら新しいシャードには着手せず、走っているシャードの完了を待って返す
+    ///   （子タスクは取り消さない = シャードの PUT と index の更新の間で見捨てない）。
+    /// - throw があっても、完了したシャードの結果は捨てずに返す（除去が確定した分の marker を出すため・
+    ///   PR #152 レビュー指摘 8）。エラーで扱うだけなら `get()` で投げ直す。
+    private func runShardBatch<Outcome: Sendable>(
+        _ shardIds: [String],
+        stopsBatch: @escaping @Sendable (Outcome) -> Bool,
+        _ body: @escaping @Sendable (String) async throws -> Outcome
+    ) async -> ShardBatchResults<Outcome> {
+        var results: [(shardId: String, outcome: Outcome)] = []
+        var firstError: (any Error)?
+        await withTaskGroup(of: (String, Result<Outcome, any Error>).self) { group in
+            var next = 0
+            var stopped = false
+            func start() {
+                let shardId = shardIds[next]
+                next += 1
+                group.addTask {
+                    do {
+                        return (shardId, .success(try await body(shardId)))
+                    } catch {
+                        return (shardId, .failure(error))
+                    }
+                }
+            }
+            while next < shardIds.count, next < Self.shardConcurrency { start() }
+            while let (shardId, result) = await group.next() {
+                switch result {
+                case .success(let outcome):
+                    results.append((shardId, outcome))
+                    if stopsBatch(outcome) { stopped = true }
+                case .failure(let error):
+                    if firstError == nil { firstError = error }
+                    stopped = true
+                }
+                if !stopped, next < shardIds.count { start() }
+            }
+        }
+        return ShardBatchResults(results: results.sorted { $0.shardId < $1.shardId }, firstError: firstError)
     }
 
     public func updateShard(

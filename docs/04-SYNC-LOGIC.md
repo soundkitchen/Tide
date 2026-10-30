@@ -76,8 +76,12 @@ signal を消費しない）。世代の系譜は `ManifestGenerationLog`（App 
   （Issue #131・詳細は `docs/08`「File Provider 増分列挙」）。
 
 - item identifier は **kind 織り込み形式**（ファイル = `f:<path>` / ディレクトリ = `d:<path>`・
-  M5 Phase 5-1）。種別変化（file ⇄ dir）は「旧 kind ノードの delete + 新 kind ノードの update」=
-  別 id の独立した 2 変化になり、fileproviderd の同一 id ingest 合成問題を構造的に回避する（後述）。
+  M5 Phase 5-1 / パッケージ = `k:<path>`・#140）。種別変化（file ⇄ dir ⇄ package）は「旧 kind ノードの
+  delete + 新 kind ノードの update」= 別 id の独立した 2 変化になり、fileproviderd の同一 id ingest 合成問題を
+  構造的に回避する（後述）。
+- **パッケージ（#140・2026-10-30 有効化・2026-10-31 実機受け入れ済み）**: S3 とマニフェストにはパッケージの中身をファイルごとに置き、FP には
+  1 つの item（`k:<path>`・パッケージ型）として見せる。判定はその Mac の型情報（`PackageClassifier`）。
+  詳細は `docs/08`「パッケージ」節。
 - 実体化バッジ（Issue #65）は anchor 意味論と独立の eventual オーバーレイとして working set の
   enumerateChanges（**唯一の報告点**）に合流する。詳細は `docs/08`「FP 実体化連動バッジ」節。
 
@@ -139,7 +143,12 @@ M5 Track B-2）は再アップロードを本質的に伴うため、上限を *
 
 書込は全経路が **`ManifestUpdater`**（`TideCore/S3/Uploader.swift`）の共有チョークポイントを通る:
 `updateFileEntry(for:base:newEntry:)` / `removeFileEntry(for:base:)` /
-`removeFileEntries(expecting:)` / `moveFileEntries(_:)`。呼び出し元は FP 拡張（`ExtensionWriter`）と
+`removeFileEntries(expecting:)` / `moveFileEntries(_:)` / `writeFileEntries(upserting:removing:)`（#140・パッケージの
+中身をまとめて書く二相のバッチ RMW = 各 entry を `decideUpload` で判定して書き足し〈先に全シャードを読んで判定し、
+`.conflict` が 1 件でもあれば 1 件も書かずに中断。`moveFileEntries` の add も同じ〉→ 除去は `removeFileEntries` へ委譲）。バッチ RMW（`removeFileEntries` / `moveFileEntries` /
+`writeFileEntries`）は各フェーズの中でシャードを 8 つまで並行に処理し（`runShardBatch`・#140）、拒否や競合で
+中断するときも、走っているシャードは書き切ってから返す（新しいシャードには着手しない・別のシャードのエラーで
+中断しても、確定した除去は捨てずに返す = delete marker の根拠）。呼び出し元は FP 拡張（`ExtensionWriter`）と
 アプリの `S3RestoreService`・`.syncignore` seed（folderSync 世代では `Uploader` 本体）。
 
 楽観的ロック（CAS）の骨格:
@@ -239,12 +248,16 @@ M3 サブ C で **ベース / ローカル / リモートの 3 SHA による 3-w
 
 `HardcodedIgnoreRules`（`TideCore/Core/IgnoreRules.swift`）。プロパティは `exactNames`
 （OS ジャンク + `.tide` + `.aws`/`.ssh`/`id_rsa` 等の機密 dotfile）、`prefixPatterns`、
-`suffixPatterns`（`.pem`/`.key`/`.p12`/`.pfx`/`.keystore`）、判定メソッドは
+`suffixPatterns`（`.pem`/`.p12`/`.pfx`/`.keystore`）、判定メソッドは
 `shouldIgnore(relativePath:)`。**常に最優先**で効き、`.syncignore` の否定 `!` でも覆せない。
 照合は**大文字小文字を区別しない**（#136・全規則に一律）。APFS は既定で大文字小文字を区別しないため、
 区別すると `Server.PEM` / `.ENV` / `ID_RSA` が素通りして S3 へ上がる。副作用として `Credentials` や
 `.Config` という名前のフォルダも subtree ごと除外される（意図どおり）。
 新しい dotfile / 拡張子で機密が紛れ込みそうなら即追加する運用（CLAUDE.md 参照）。
+ただし**一般の書類と重なる拡張子は入れない**: `.key` は Keynote の書類（単一ファイル = zip /
+パッケージ = フォルダ）と同じ拡張子なので機密網に含めない（#140・2026-10-30 ユーザ確定）。入れると
+Keynote の書類がすべて黙ってバックアップから外れ、`!` でも戻せない。秘密鍵の `.key` は、置いている
+フォルダに限って各自 `.syncignore` で除外する（例 `certs/*.key`。既定テンプレートにコメントで例示）。
 
 ### `.syncignore`（ユーザ除外・M3）
 
@@ -292,9 +305,9 @@ gitignore 構文の一般的サブセット。詳細な確定仕様は `docs/07-
 
 ## エッジケース
 
-### 種別変化（file ⇄ dir）
+### 種別変化（file ⇄ dir ⇄ package）
 
-FP 経路では item identifier の kind 織り込み（`f:`/`d:`・M5 Phase 5-1）により「旧 kind の delete +
+FP 経路では item identifier の kind 織り込み（`f:`/`d:`・M5 Phase 5-1 / パッケージ = `k:`・#140）により「旧 kind の delete +
 新 kind の update」= 別 id の独立変化として配信され、fileproviderd の同一 id ingest 合成問題は
 構造的に存在しない。folderSync 世代の同名置換バグと三層防御（**ファイルが同名ディレクトリへ
 置換された** / Issue #52）の記録は `docs/04a` を参照（コア修正は温存コードに残存・回帰は

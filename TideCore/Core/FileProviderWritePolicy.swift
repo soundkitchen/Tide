@@ -5,7 +5,8 @@ import Foundation
 /// できないため、テスト可能なロジックは TideCore に置く。
 public enum FileProviderWritePolicy {
     /// `NSFileProviderItemVersion.contentVersion` に載せるバイト列をノードから作る。
-    /// file = sha256 hex（小文字）の UTF-8 / directory = `"dir"` の UTF-8。
+    /// file = sha256 hex（小文字）の UTF-8 / directory = `"dir"` の UTF-8 /
+    /// package = 中身の digest（`ManifestTree.packageDigest`・sha256 と同じ形・#140）の UTF-8。
     /// **符号化（これ）と復号（`baseSha`）を対で同居させる**（PR #58 レビュー #8）: 別モジュールに
     /// 分かれていると Phase 5-3/5-4 で片方だけ変えたとき、コンパイルもテストも通らないまま
     /// 「全 delete が拒否 / 全 modify が base:nil 劣化」の無言故障になる。往復は
@@ -14,6 +15,7 @@ public enum FileProviderWritePolicy {
         switch node {
         case .file(_, let entry): return Data(entry.sha256.utf8)
         case .directory: return Data("dir".utf8)
+        case .package(_, _, let digest, _): return Data(digest.utf8)
         }
     }
 
@@ -33,6 +35,10 @@ public enum FileProviderWritePolicy {
         switch node {
         case .file(_, let entry):
             base = entry.sha256
+        case .package(_, _, let digest, _):
+            // パッケージも digest を先頭に置く（ファイルと同じく rebind 後の 3-way ベースを
+            // metadataVersion から復元するため・#140）。
+            base = digest
         case .directory(_, let mtime):
             base = mtime.map { "dir-\(ISO8601.format($0))" } ?? "dir"
         }
@@ -146,6 +152,131 @@ public enum FileProviderWritePolicy {
         guard let latestVersionId, latestVersionId != entry.s3VersionId else { return nil }
         guard !latestEtag.isEmpty, latestEtag == entry.etag, latestSize == entry.size else { return nil }
         return latestVersionId
+    }
+
+    /// パッケージを書くか（FP の createItem / modifyItem・#140）。
+    public enum PackageWriteDecision: Equatable, Sendable {
+        /// 書く。`remoteMembers` は今のマニフェストの中身（中身ごとの 3-way のベースと、消す中身の一覧）。
+        case write(remoteMembers: [String: ManifestFileEntry])
+        /// マニフェストが同じ中身を既に持つ（再取り込みの問い直し・クラッシュ後の再送）= 何も書かない。
+        case unchanged
+        /// ベースの後でリモートが変わった・新規作成が他の端末の作成と重なった・同じパスに単一ファイルの
+        /// 書類がある = 競合コピーへ。
+        case conflict
+        /// 同じパスにフォルダがある = 名前の衝突（システムに名前をずらさせる）。
+        case kindCollision
+    }
+
+    /// パッケージの書込の判定（ファイルの `decideUpload` をパッケージの版 = digest で行う）。
+    /// - Parameters:
+    ///   - localShas: ローカルの中身（パッケージ内の相対パス → sha256）。版はここから出す。
+    ///   - base: システムが最後に見た版（新規作成は nil）。
+    ///   - remote: 今のツリーのそのパスのノード。
+    ///   - replacingFileSha: 書類の形式の切り替え（単一ファイル → パッケージ）で、置き換える旧いファイルの
+    ///     sha（ベースと照らし済みのもの）。それ以外は nil。
+    ///
+    /// 同じパスに**ファイル**があるときは、形式の切り替えで置き換えるそのファイル（sha が
+    /// `replacingFileSha` と一致）のときだけ書く（書いた後に呼び出し側がベースつきで消す。それまでは
+    /// ツリーでパッケージが勝つ）。それ以外 — 新規作成・`k:` の item の編集で、他の端末がそのパスを
+    /// 単一ファイルにしていた — は競合（PR #152 レビュー指摘 2: 書くとファイルの entry がパッケージの
+    /// 陰に隠れ、消す deleteItem も来ないまま残って、パッケージを消すと復活する）。リモートに無いときは
+    /// 書く（ベースつきなら、リモートの削除よりローカルの編集を残す側 = ファイルと同じ）。
+    ///
+    /// **新規作成（ベース無し）でリモートが書きかけ**のとき — リモートの中身がすべてローカルにあり
+    /// sha256 も一致する — は競合にせず、足りない中身を書き足す（#140 の受け入れで実踏: 改名・移動の
+    /// まとめ書きの途中で、返事を失ったシステムがローカルを新規作成として送り直し、途中までしか載って
+    /// いないツリーと版が食い違って、中身の同じ競合コピーができた）。リモートにだけある中身や sha の
+    /// 食い違いがあれば別の内容 = 従来どおり競合。ベースつき（編集）には当てない — リモートの中身が
+    /// 減っているのは他の端末の削除かもしれず、書き足すと消した中身を戻してしまう。
+    public static func packageWriteDecision(
+        localShas: [String: String], base: String?, remote: ManifestTree.Node?,
+        replacingFileSha: String? = nil
+    ) -> PackageWriteDecision {
+        switch remote {
+        case nil:
+            return .write(remoteMembers: [:])
+        case .file(_, let entry)?:
+            return replacingFileSha == entry.sha256 ? .write(remoteMembers: [:]) : .conflict
+        case .directory?:
+            return .kindCollision
+        case .package(_, let members, let digest, _)?:
+            if digest == ManifestTree.packageDigest(shas: localShas) { return .unchanged }
+            if base == digest { return .write(remoteMembers: members) }
+            if base == nil, members.allSatisfy({ localShas[$0.key] == $0.value.sha256 }) {
+                return .write(remoteMembers: members)
+            }
+            return .conflict
+        }
+    }
+
+    /// 書類の形式の切り替え（#140・Keynote の「ファイルタイプを変更」）の判定。fileproviderd は形式を
+    /// 変えた保存を、旧 id の削除 + 新 id の作成ではなく**同じ item の中身が別の形式になった
+    /// modifyItem** として送ってくる（2026-10-30 実機）。新しい形式で同じパスに書いてから旧い形式の
+    /// entry を消す（途中で止まっても旧い形式が残る側 = ツリーではパッケージが勝つ）。
+    public enum FormatChangeDecision: Equatable, Sendable {
+        /// パッケージ → 単一ファイル: ファイルを書いてから、この中身（パッケージ内の相対パス → entry）を消す。
+        case replacePackage(members: [String: ManifestFileEntry])
+        /// 単一ファイル → パッケージ: パッケージを書いてから、この sha のファイルの entry を消す
+        /// （nil = 消す根拠が無い = 消さない）。
+        case replaceFile(oldSha: String?)
+        /// 旧い形式はもう無い・既に新しい形式になっている = 新しい形式で普通に書く（ベース無し）。
+        case writeNew
+        /// ベースの後でリモートが変わった = ローカルの内容は競合コピーへ・正規パスはリモートのまま。
+        case conflict
+        /// 同じパスがフォルダ。
+        case kindCollision
+    }
+
+    /// パッケージ（`k:`）の item に単一ファイルの中身が届いたときの判定。
+    /// - Parameters:
+    ///   - baseDigest: システムが最後に見たパッケージの版。nil（版の形でない）は根拠が無いので競合側。
+    ///   - remote: 今のツリーのそのパスのノード。
+    public static func fileReplacingPackageDecision(
+        baseDigest: String?, remote: ManifestTree.Node?
+    ) -> FormatChangeDecision {
+        switch remote {
+        case .package(_, let members, let digest, _)?:
+            return baseDigest == digest ? .replacePackage(members: members) : .conflict
+        case .file?, nil:
+            // 切り替え済み（再試行）・他の端末が先にファイルにした・リモートで消えた = ファイルとして
+            // ベース無しで書く（同じ内容なら書かない・別の内容なら `decideUpload` が競合にする）。
+            return .writeNew
+        case .directory?:
+            return .kindCollision
+        }
+    }
+
+    /// 単一ファイル（`f:`）の item にパッケージの中身が届いたときの判定。
+    /// - Parameters:
+    ///   - baseSha: システムが最後に見たファイルの sha。nil（版の形でない）は根拠が無いので競合側。
+    ///   - remote: 今のツリーのそのパスのノード。
+    public static func packageReplacingFileDecision(
+        baseSha: String?, remote: ManifestTree.Node?
+    ) -> FormatChangeDecision {
+        switch remote {
+        case .file(_, let entry)?:
+            // ベースが版の形でない（id の付け替え直後など）ときは、消す根拠が無いので競合側に倒す
+            // （CLAUDE.md §7「ベース不明は拒否側」・PR #152 レビュー指摘 5: ツリーの sha で消すと、
+            // この Mac が見ていない他の端末の版を S3 から外しうる）。
+            guard let baseSha, baseSha == entry.sha256 else { return .conflict }
+            return .replaceFile(oldSha: entry.sha256)
+        case .package?:
+            // 再試行（パッケージは書き済み）。ツリーではパッケージが勝つので、旧いファイルの entry が
+            // 残っていてもツリーには見えない — ベースの sha で消しにいく（もう無ければ何もしない）。
+            return .replaceFile(oldSha: baseSha)
+        case nil:
+            return .writeNew
+        case .directory?:
+            return .kindCollision
+        }
+    }
+
+    /// 改名と同時に内容も変わった move（複合）で、旧 path の entry を消してよいか（PR #152 レビュー指摘 7）。
+    /// システムが最後に見た版（`baseSha`）が旧 path の今の sha と一致するときだけ消す。合わない・ベースが
+    /// 無い（版の形でない）ときは、他の端末の編集かもしれないので旧 path を残す（CLAUDE.md §7
+    /// 「ベース不明は拒否側」）。内容の変わらない改名には当てない（中身はツリーの今の版をそのまま運ぶ）。
+    public static func moveMayRemoveSource(baseSha: String?, current: String) -> Bool {
+        baseSha == current
     }
 
     /// パス自身と祖先（深い → 浅い順・ルート "" は含まない）。`a/b/c` → `[a/b/c, a/b, a]`。

@@ -77,7 +77,7 @@ F4 の是正内容（2026-06-11・M4 Sync Activity 対応に同梱）: `recentEr
 | M6 | ダウンロード書込の祖先 symlink によるルート脱出 | ✅ Fixed（2026-06-01・F2。`PathValidator.resolveForWrite`） |
 | M7 | 復元ストリーミングのサイズ無制限（M4 の回帰） | ✅ Fixed（2026-06-02。2026-06-04 サブ D-D3 で機構を `Downloader` sink の `total > entry.size` 判定へ移動） |
 | L1 | App Sandbox 無効 | ✅ Fixed（2026-07-02・M5 Phase 2。Sandbox 有効化 + 同期フォルダを security-scoped bookmark 化。欠落時は起動時パネルで再許可・パス不一致は拒否。**2026-08-08・v0.3.0 #97**: 新規セットアップは bookmark を発行しない〈fpOnly に syncRoot 面が無い〉・解決系は folderSync デッド経路として温存・`files.user-selected.read-write` は panel 系で引き続き必要。**2026-08-17・v0.3.0 #98**: 旧同期フォルダ `~/Tide` を実体削除〈`rm -rf` 直接・ゴミ箱経由禁止〉。bookmark キー / 凍結 DB は #97 受け入れの factoryReset で消滅済みを確認 = 稼働環境に bookmark 面は無い） |
-| L2 | 機密ファイル除外 | ✅ Fixed |
+| L2 | 機密ファイル除外 | ✅ Fixed（#140 で `.key` を外した） |
 | L3 | openSyncFolder URL 検証 | ✅ Fixed |
 | L4 | UI 経由のエラー詳細 | ✅ Fixed（H2 と一括） |
 | L5 | SHA1 のコメント | ✅ Fixed |
@@ -92,7 +92,7 @@ F4 の是正内容（2026-06-11・M4 Sync Activity 対応に同梱）: `recentEr
 | L14 | 設定 export/import の同梱範囲（プライバシー境界） | ✅ Reviewed（2026-07-01・Issue #29。AWS 認証情報・deviceId を構造的に含めない非機密設定のみ JSON 往復。`SettingsTransferTests` がシークレット非混入を回帰固定） |
 | L15 | 削除済み一覧キャッシュの at-rest 内容（プライバシー境界） | ✅ Reviewed（2026-07-01・Issue #29 (b)。Caches に削除済みパス + 版メタ + bucket のみ・認証情報なし・派生データで factoryReset 消去・bucket キー） |
 | L16 | File Provider 世代ログの at-rest 内容（プライバシー境界） | ✅ Reviewed（2026-07-04・M5 Phase 4。group Caches にマニフェスト由来メタデータ + bucket のみ・認証情報なし・派生データで factoryReset/make reset 消去・bucket キー・PathValidator ゲートを書込み時 + 読込時の両方で適用） |
-| L17 | File Provider 書込経路のゲート | ✅ Mitigated（2026-07-06・M5 Phase 5-2 / 2026-07-09・Phase 5-3 で createItem・dir 再帰削除へ拡大 / 2026-07-11・Phase 5-4 で rename/reparent へ拡大。PathValidator + `childPath` 構造検証・サイズ上限・SSE-S3・NoFollowFileReader・RMW 内ベースガード・copyObject は versionId 固定 + 最新版フォールバック禁止（例外 = 宣言版失効時、最新版の ETag・サイズが一致するときだけその版に固定・2026-10-17 #130）。**機密網/symlink/`.syncignore` の除外を FP の作成・改名でも強制** = `ExcludedFromSync` でローカル温存・S3 非汚染） |
+| L17 | File Provider 書込経路のゲート | ✅ Mitigated（2026-07-06・M5 Phase 5-2 / 2026-07-09・Phase 5-3 で createItem・dir 再帰削除へ拡大 / 2026-07-11・Phase 5-4 で rename/reparent へ拡大。PathValidator + `childPath` 構造検証・サイズ上限・SSE-S3・NoFollowFileReader・RMW 内ベースガード・copyObject は versionId 固定 + 最新版フォールバック禁止（例外 = 宣言版失効時、最新版の ETag・サイズが一致するときだけその版に固定・2026-10-17 #130）。**機密網/symlink/`.syncignore` の除外を FP の作成・改名でも強制** = `ExcludedFromSync` でローカル温存・S3 非汚染。2026-10-30 #140（有効化済み・2026-10-31 実機受け入れ済み）: パッケージは中身に symlink 等・10,000 件超があれば丸ごと除外） |
 | L18 | File Provider 実体化バッジレジストリの at-rest 内容（プライバシー境界） | ✅ Reviewed（2026-07-14・Issue #65。group Caches に相対パス + bucket のみ・認証情報/メタデータなし・派生データ = fileproviderd から再観測可能・`PersistedPathSet` 共通の読込ゲート） |
 | L19 | File Provider イベントログの at-rest 内容（プライバシー境界） | ✅ Reviewed（2026-07-26・Issue #83。group Caches に相対パス + bucket + 英語定型 message/details のみ・認証情報なし・診断ログ = サイズローテーションで有界・行単位の読込時再検証） |
 

@@ -18,6 +18,8 @@ Hardened Runtime は有効だが、App Sandbox は無効。直配布 + Notarize 
 
 **Status:** ✅ Fixed (2026-05-24) — `HardcodedIgnoreRules` を拡張: `.env` / `.envrc` / `.netrc` / `.npmrc` / `.pgpass` / `.aws` / `.ssh` / `.gnupg` / `.kube` / `.docker` / `.gitconfig` / `id_rsa` / `id_ed25519` / `credentials` を exactNames、`.env.` を prefixPatterns、`.pem` / `.key` / `.p12` / `.pfx` / `.keystore` を新設の suffixPatterns に追加。`SetupWizardWindow.validateSyncRoot` で home / Library / System / Applications 配下の選択を警告。
 
+**Status:** ✅ Fixed（2026-10-30 更新・#140）— 方針変更: suffixPatterns から `.key` を外した。Keynote の書類と同じ拡張子で、機密網が Keynote の書類をすべて黙ってバックアップから外していた（`!` でも戻せない）。復旧という主目的に対する損失のほうが大きいと判断（ユーザ確定）。残るリスク: `server.key` のような秘密鍵の `.key` は既定で S3 に上がる。対策は、置いているフォルダに限った `.syncignore`（例 `certs/*.key`・既定テンプレートにコメントで例示）。S3 側は SSE-S3 で暗号化され、バケットは非公開。稼働環境では `.key` の追跡済みキーは 0 件、レプリカの `.key` 8 件は `node_modules/` のフォルダ単位除外の中にあり除外のまま（`docs/08` 機密網の節）。
+
 **該当箇所:** `Tide/Core/IgnoreRules.swift`
 
 `HardcodedIgnoreRules` は `.DS_Store` 等 OS の雑多ファイルのみ。**`.env`, `.envrc`, `id_rsa`, `id_ed25519`, `.npmrc`, `.aws/`, `*.pem`, `*.key`** などの「明らかな秘匿ファイル」も既定除外推奨。`SetupWizardWindow` は「`.git/` も含まれます」とだけ明示しているが、ユーザがホームディレクトリを選んだら破滅する。`validateSyncRoot` でホーム直下や `/Library`、`/Users/.../Library` を警告する強化を。
@@ -319,6 +321,17 @@ FP 拡張の書込（deleteItem / modifyItem / createItem / move）は `Extensio
   他端末の同時更新）は `docs/09` に記録。ローカルの改名後のファイルを削除すれば後始末される
   `PersistedPathSet`（仮想フォルダ温存 / 後始末予約）は世代ログと同じ at-rest 規約 =
   App Group Caches・bucket キー・読込時 `validateRelativePath` 再適用・壊れは全体破棄
+- **Status（2026-10-30・#140・有効化済み = 判定の既定 `PackageClassifier.active` は `.system`・ドメインは `"main2"` で作り直し済み・2026-10-31 実機受け入れ済み = 中にシンボリックリンク・中身 10,001 件・あとからリンクを足した既存パッケージの 3 通りとも丸ごと除外を実機で確認）: パッケージの書込も同じゲートを通す**。
+  macOS のパッケージ（Keynote のパッケージ形式・`.xcodeproj` 等）は createItem / modifyItem に中身を持つ
+  1 つのフォルダとして届くため、中身を拡張自身が走査する（`PackageScanner`）。**中身にシンボリックリンク・
+  通常のファイルでない項目（FIFO 等）・同期できない名前が 1 つでもあればパッケージごと除外**（リンクは
+  追従もアップロードもしない。リンクだけ落として上げると復元したパッケージが壊れるため丸ごと）・中身が
+  10,000 件を超えるものも丸ごと除外（いずれもローカル温存 + 通知）。機密網に当たる中身は黙って飛ばす
+  （機密網は何にも優先）。ユーザ `.syncignore` はパッケージのパスにだけ当て、中身には当てない（中の
+  `.syncignore` も層として読まない = ツリーの `.file` ノードにならない）。中身の本体は従来どおり
+  `NoFollowFileReader` + SSE-S3、パスは `validateRelativePath`。fetchContents が組み立てる一時フォルダへの
+  書込は、リモート由来の中身の相対パスを `PathValidator.resolveForWrite`（一時フォルダを root）に通す。
+  フォルダの再帰削除・移動はパッケージの中身も対象に含める（`ManifestTree.trackedFiles`）
 
 ## L18. File Provider 実体化バッジレジストリの at-rest 内容（プライバシー境界）
 
@@ -348,7 +361,7 @@ FP 拡張の書込（deleteItem / modifyItem / createItem / move）は `Extensio
 - **読込ゲート**: 表示専用（path を FS 操作に使わない）のため**行単位破棄** — 壊れ行スキップ・bucket キー・未知 eventType 破棄・`validateRelativePath` 再適用・message / details の長さ上限・肥大ファイル（> 2×maxBytes・改ざん前提）は読込ごと拒否。UI 表示は `Text(verbatim:)`（ローカライズ解決に流さない）。
 - **書込は best-effort**: 追記失敗は os.Logger のみ（FP 操作を失敗させない）。単一書き手（拡張プロセス + actor 直列化）でローテーション競合なし。
 - **Status（2026-10-28・#147）: レコードに通知の印 `notice` を追加し、アプリが新着を OS 通知に使うようにした**。
-  印は `FPEventNotice` の rawValue（固定の 4 種）で、未知の値は読込時に外す（レコードは表示用に残す）。通知の
+  印は `FPEventNotice` の rawValue（固定の 6 種 = #140 でパッケージの丸ごと除外 2 種〈`packageHasUnsyncableItem` / `packageTooManyFiles`・通知に出すのは `path`〉を足した。at-rest の中身は相対パス・固定の英文の message / details のままで変わらない）で、未知の値は読込時に外す（レコードは表示用に残す）。通知の
   本文に出すのは表示用のパスの末尾の名前だけで、生エラー文字列は出さない（既存の通知と同じ・`security/README.md` の
   通知の注記どおり by-design）。検証できない名前の除外は `path` に入れられないため、親フォルダを含む表示用のパスを
   `details` に入れる（表示専用・FS 操作にも S3 キーにも使わない = 読込ゲートの前提は変わらない）。改ざんされたログは

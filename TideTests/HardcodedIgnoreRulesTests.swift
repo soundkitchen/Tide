@@ -53,15 +53,34 @@ final class HardcodedIgnoreRulesTests: XCTestCase {
 
     func testSuffixPatternsExcluded() {
         XCTAssertTrue(HardcodedIgnoreRules.shouldIgnore(relativePath: "server.pem"))
-        XCTAssertTrue(HardcodedIgnoreRules.shouldIgnore(relativePath: "certs/wildcard.key"))
         XCTAssertTrue(HardcodedIgnoreRules.shouldIgnore(relativePath: "store.p12"))
+        XCTAssertTrue(HardcodedIgnoreRules.shouldIgnore(relativePath: "id.pfx"))
         XCTAssertTrue(HardcodedIgnoreRules.shouldIgnore(relativePath: "app.keystore"))
+    }
+
+    // MARK: - Keynote の .key は除外しない（#140）
+
+    func testKeynoteDocumentsNotExcluded() {
+        // 単一ファイル形式と、パッケージ形式（フォルダ）の中身の両方
+        for path in [
+            "Slides.key", "Talks/2026/Keynote.KEY",
+            "Talks/Deck.key/Index.zip", "Talks/Deck.key/Data/image.png"
+        ] {
+            XCTAssertFalse(HardcodedIgnoreRules.shouldIgnore(relativePath: path), "\(path) should not be ignored")
+        }
+        XCTAssertFalse(HardcodedIgnoreRules.suffixPatterns.contains(".key"))
+    }
+
+    func testKeystoreStillExcludedAfterDroppingKey() {
+        // `.key` を外しても、`.keystore` の照合は残る（接尾辞が `.key` で終わらない）
+        XCTAssertTrue(HardcodedIgnoreRules.shouldIgnore(relativePath: "android/release.keystore"))
+        XCTAssertTrue(HardcodedIgnoreRules.shouldIgnore(relativePath: "Release.KEYSTORE"))
     }
 
     // MARK: - 大文字小文字を区別しない（#136）
 
     func testSuffixPatternsIgnoreCase() {
-        for name in ["Server.PEM", "certs/Wildcard.Key", "STORE.P12", "id.PFX", "App.KeyStore"] {
+        for name in ["Server.PEM", "certs/Wildcard.Pem", "STORE.P12", "id.PFX", "App.KeyStore"] {
             XCTAssertTrue(HardcodedIgnoreRules.shouldIgnore(relativePath: name), "\(name) should be ignored")
         }
     }
