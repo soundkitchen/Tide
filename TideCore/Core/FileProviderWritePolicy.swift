@@ -204,6 +204,67 @@ public enum FileProviderWritePolicy {
         }
     }
 
+    /// 書類の形式の切り替え（#140・Keynote の「ファイルタイプを変更」）の判定。fileproviderd は形式を
+    /// 変えた保存を、旧 id の削除 + 新 id の作成ではなく**同じ item の中身が別の形式になった
+    /// modifyItem** として送ってくる（2026-10-30 実機）。新しい形式で同じパスに書いてから旧い形式の
+    /// entry を消す（途中で止まっても旧い形式が残る側 = ツリーではパッケージが勝つ）。
+    public enum FormatChangeDecision: Equatable, Sendable {
+        /// パッケージ → 単一ファイル: ファイルを書いてから、この中身（パッケージ内の相対パス → entry）を消す。
+        case replacePackage(members: [String: ManifestFileEntry])
+        /// 単一ファイル → パッケージ: パッケージを書いてから、この sha のファイルの entry を消す
+        /// （nil = 消す根拠が無い = 消さない）。
+        case replaceFile(oldSha: String?)
+        /// 旧い形式はもう無い・既に新しい形式になっている = 新しい形式で普通に書く（ベース無し）。
+        case writeNew
+        /// ベースの後でリモートが変わった = ローカルの内容は競合コピーへ・正規パスはリモートのまま。
+        case conflict
+        /// 同じパスがフォルダ。
+        case kindCollision
+    }
+
+    /// パッケージ（`k:`）の item に単一ファイルの中身が届いたときの判定。
+    /// - Parameters:
+    ///   - baseDigest: システムが最後に見たパッケージの版。nil（版の形でない）は根拠が無いので競合側。
+    ///   - remote: 今のツリーのそのパスのノード。
+    public static func fileReplacingPackageDecision(
+        baseDigest: String?, remote: ManifestTree.Node?
+    ) -> FormatChangeDecision {
+        switch remote {
+        case .package(_, let members, let digest, _)?:
+            return baseDigest == digest ? .replacePackage(members: members) : .conflict
+        case .file?, nil:
+            // 切り替え済み（再試行）・他の端末が先にファイルにした・リモートで消えた = ファイルとして
+            // ベース無しで書く（同じ内容なら書かない・別の内容なら `decideUpload` が競合にする）。
+            return .writeNew
+        case .directory?:
+            return .kindCollision
+        }
+    }
+
+    /// 単一ファイル（`f:`）の item にパッケージの中身が届いたときの判定。
+    /// - Parameters:
+    ///   - baseSha: システムが最後に見たファイルの sha。
+    ///   - remote: 今のツリーのそのパスのノード。
+    public static func packageReplacingFileDecision(
+        baseSha: String?, remote: ManifestTree.Node?
+    ) -> FormatChangeDecision {
+        switch remote {
+        case .file(_, let entry)?:
+            // ベースが版の形でない（id の付け替え直後など）ときはツリーの sha を使う（移動と同じ方式。
+            // 消すのは書いた後で、RMW の中で sha をもう一度確かめる）。
+            if let baseSha, baseSha != entry.sha256 { return .conflict }
+            return .replaceFile(oldSha: entry.sha256)
+        case .package?:
+            // 再試行（パッケージは書き済み）。ツリーではパッケージが勝つので、旧いファイルの entry が
+            // 残っていてもツリーには見えない — ベースの sha で消しにいく（もう無ければ何もしない）。
+            return .replaceFile(oldSha: baseSha)
+        case nil:
+            return .writeNew
+        case .directory?:
+            return .kindCollision
+        }
+    }
+
     public static func pathAndAncestors(_ path: String) -> [String] {
         var result: [String] = []
         var current = Substring(path)

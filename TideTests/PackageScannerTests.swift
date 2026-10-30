@@ -161,6 +161,34 @@ final class PackageScannerTests: XCTestCase {
             .kindCollision)
     }
 
+    /// 書類の形式の切り替え（Keynote の「ファイルタイプを変更」）の判定。
+    func testFormatChangeDecisions() {
+        typealias P = FileProviderWritePolicy
+        let members = ["a": entry(sha: "1"), "b": entry(sha: "2")]
+        let package = ManifestTree.packageNode(path: "Deck.key", members: members)
+        let digest = ManifestTree.packageDigest(members: members)
+        let file = ManifestTree.Node.file(path: "Deck.key", entry: entry(sha: "f"))
+        let folder = ManifestTree.Node.directory(path: "Deck.key", mtime: nil)
+
+        // パッケージ → 単一ファイル: ベースが今の版なら中身を消す。違う・不明なら競合
+        XCTAssertEqual(P.fileReplacingPackageDecision(baseDigest: digest, remote: package), .replacePackage(members: members))
+        XCTAssertEqual(P.fileReplacingPackageDecision(baseDigest: "old", remote: package), .conflict)
+        XCTAssertEqual(P.fileReplacingPackageDecision(baseDigest: nil, remote: package), .conflict)
+        // 切り替え済み（再試行）・リモートで消えた = ファイルとして普通に書く
+        XCTAssertEqual(P.fileReplacingPackageDecision(baseDigest: digest, remote: file), .writeNew)
+        XCTAssertEqual(P.fileReplacingPackageDecision(baseDigest: digest, remote: nil), .writeNew)
+        XCTAssertEqual(P.fileReplacingPackageDecision(baseDigest: digest, remote: folder), .kindCollision)
+
+        // 単一ファイル → パッケージ: ベースが今の sha（または不明 = ツリーの sha）なら旧いファイルを消す
+        XCTAssertEqual(P.packageReplacingFileDecision(baseSha: "f", remote: file), .replaceFile(oldSha: "f"))
+        XCTAssertEqual(P.packageReplacingFileDecision(baseSha: nil, remote: file), .replaceFile(oldSha: "f"))
+        XCTAssertEqual(P.packageReplacingFileDecision(baseSha: "old", remote: file), .conflict)
+        // 再試行（パッケージは書き済み）= ベースの sha で陰に残るファイルを消しにいく
+        XCTAssertEqual(P.packageReplacingFileDecision(baseSha: "f", remote: package), .replaceFile(oldSha: "f"))
+        XCTAssertEqual(P.packageReplacingFileDecision(baseSha: "f", remote: nil), .writeNew)
+        XCTAssertEqual(P.packageReplacingFileDecision(baseSha: "f", remote: folder), .kindCollision)
+    }
+
     func testDigestFromShasMatchesDigestFromEntries() {
         let members = ["a": entry(sha: "1"), "b/c": entry(sha: "2")]
         XCTAssertEqual(

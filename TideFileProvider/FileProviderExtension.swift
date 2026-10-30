@@ -847,6 +847,23 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         // 競合検出できる（「拡張 = 第 3 のデバイス」の要・docs/08）。
         let baseSha = FileProviderWritePolicy.baseSha(
             contentVersion: version.contentVersion, metadataVersion: version.metadataVersion)
+        // 書類の形式の切り替え（#140・Keynote の「ファイルタイプを変更」）: fileproviderd は同じ item の
+        // 中身が別の形式になった modifyItem として送ってくる（2026-10-30 実機）。届いた中身の形式
+        // （lstat = リンクは追わない）が item の種類と違えば、新しい形式で書いて旧い形式を消す。
+        let contentsIsDirectory = Self.isDirectoryNoFollow(newContents)
+        if ref.isPackage, contentsIsDirectory == false {
+            return modifyFormatChange(
+                path: path, contents: newContents, toPackage: false, baseVersion: baseSha,
+                contentModified: item.contentModificationDate ?? nil, services: services,
+                progress: progress, completion: completion)
+        }
+        if ref.kind == .file, contentsIsDirectory == true,
+           PackageClassifier.active.isPackage(name: (path as NSString).lastPathComponent) {
+            return modifyFormatChange(
+                path: path, contents: newContents, toPackage: true, baseVersion: baseSha,
+                contentModified: nil, services: services,
+                progress: progress, completion: completion)
+        }
         if ref.isPackage {
             return modifyPackageContents(
                 path: path, contents: newContents, baseDigest: baseSha, services: services,
@@ -896,6 +913,86 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 }
             } catch {
                 AppLogger.fileProvider.error("modifyItem failed: \(String(describing: error), privacy: .private)")
+                if !(error is CancellationError) {
+                    await services.events.append(
+                        type: .error, path: path, message: "Upload failed",
+                        details: String(describing: error))
+                }
+                completion.value(nil, [], false, Self.wrapForCompletion(error))
+            }
+        }
+        progress.cancellationHandler = { task.cancel() }
+        return progress
+    }
+
+    /// 届いた中身がフォルダか（lstat = 最後の要素のリンクは追わない）。取れなければ nil（従来の経路へ）。
+    private static func isDirectoryNoFollow(_ url: URL) -> Bool? {
+        var st = stat()
+        guard lstat(url.path, &st) == 0 else { return nil }
+        return (st.st_mode & S_IFMT) == S_IFDIR
+    }
+
+    /// modifyItem の書類の形式の切り替え（#140）。パッケージ → 単一ファイル（`toPackage: false`）は
+    /// `ExtensionWriter.replacePackageWithFile`、単一ファイル → パッケージは `replaceFileWithPackage`。
+    /// 返す item は新しい形式の id（`f:` ⇄ `k:`）= 改名と同じ id の付け替え。
+    private func modifyFormatChange(
+        path: String, contents: URL, toPackage: Bool, baseVersion: String?, contentModified: Date?,
+        services: ExtensionServices, progress: Progress,
+        completion: UncheckedSendableBox<(NSFileProviderItem?, NSFileProviderItemFields, Bool, Error?) -> Void>
+    ) -> Progress {
+        let boxedURL = UncheckedSendableBox(value: contents)
+        let task = Task {
+            defer { progress.completedUnitCount = progress.totalUnitCount }
+            do {
+                let outcome = toPackage
+                    ? try await services.writer.replaceFileWithPackage(
+                        path: path, contentsURL: boxedURL.value, baseSha: baseVersion)
+                    : try await services.writer.replacePackageWithFile(
+                        path: path, contentsURL: boxedURL.value, baseDigest: baseVersion,
+                        contentModified: contentModified)
+                switch outcome {
+                case .changed(let node):
+                    await services.events.append(
+                        type: .upload, path: path,
+                        message: toPackage ? "Converted to package (\(node.memberCount) files)" : "Converted to single file")
+                    await services.virtualDirs.removeAncestors(of: path)
+                    let materialized = await services.returnedMaterializedFlag(for: path)
+                    completion.value(FileProviderItem(node: node, materialized: materialized), [], false, nil)
+                case .conflict(let remote, let copyPath):
+                    AppLogger.fileProvider.notice("modifyItem(format change): upload conflict — local edit preserved as copy: \(copyPath, privacy: .private)")
+                    await services.events.append(
+                        type: .conflict, path: path,
+                        message: "Upload conflict — local edit preserved as copy → \(copyPath)")
+                    guard let remote, !remote.isDirectory else {
+                        // 正規パスに今は書類が無い。一時エラーで再試行させ、次の差分配信に任せる
+                        // （ローカルの内容は競合コピーに上がっている）。
+                        completion.value(nil, [], false, Self.moveConflictError())
+                        return
+                    }
+                    let materialized = await services.toldMaterializedFlag(for: path)
+                    completion.value(FileProviderItem(node: remote, materialized: materialized), [], true, nil)
+                case .oldFormatChanged:
+                    // 新しい形式は書いた・旧い形式を消す前にリモートが進んだ（新旧両方が残る）。再試行させる。
+                    completion.value(nil, [], false, Self.moveConflictError())
+                case .packageNotWritable(let written):
+                    switch written {
+                    case .excluded(let reason):
+                        // 単一ファイルが除外の条件に当たるパッケージになった = 編集で除外になったパッケージと
+                        // 同じく、続く後片付けの deleteItem で旧いファイルを S3 から外す。
+                        await Self.recordPackageExclusion(reason, path: path, services: services)
+                        await services.exclusionCleanups.add(path)
+                        completion.value(nil, [], false, NSFileProviderError(.excludedFromSync))
+                    case .empty:
+                        AppLogger.fileProvider.notice("modifyItem(format change): nothing to sync (excluded; cleanup reserved): \(path, privacy: .private)")
+                        await services.exclusionCleanups.add(path)
+                        completion.value(nil, [], false, NSFileProviderError(.excludedFromSync))
+                    default:
+                        // 同じパスがフォルダ = その書類はもう無い
+                        completion.value(nil, [], false, NSFileProviderError(.noSuchItem))
+                    }
+                }
+            } catch {
+                AppLogger.fileProvider.error("modifyItem(format change) failed: \(String(describing: error), privacy: .private)")
                 if !(error is CancellationError) {
                     await services.events.append(
                         type: .error, path: path, message: "Upload failed",

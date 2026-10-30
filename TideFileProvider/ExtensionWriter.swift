@@ -47,6 +47,20 @@ struct ExtensionWriter: Sendable {
         case kindCollision
     }
 
+    /// 書類の形式の切り替え（#140・`replacePackageWithFile` / `replaceFileWithPackage`）の結果。
+    enum FormatChangeOutcome {
+        /// 新しい形式で書き、旧い形式の entry を消した（または既に新しい形式だった）。ノードは新しい形式。
+        case changed(ManifestTree.Node)
+        /// ベースの後でリモートが変わっていた = ローカルの内容は `copyPath` に上げ済み・正規パスは
+        /// リモートのまま（`remote` = 今のツリーのノード。無ければ nil）。
+        case conflict(remote: ManifestTree.Node?, copyPath: String)
+        /// 新しい形式は書いたが、旧い形式を消す前にリモートが進んでいた = 新旧両方が残っている
+        /// （ツリーではパッケージが勝つ）。呼び出し側は一時エラーで再試行させる。
+        case oldFormatChanged
+        /// パッケージにしようとしたが書けない（除外・空・フォルダ衝突）。`PackageWriteOutcome` を運ぶ。
+        case packageNotWritable(PackageWriteOutcome)
+    }
+
     enum DeleteOutcome {
         case removed
         /// マニフェスト除去は確定・marker も発行済みだが index 反映が未完（Issue #91 の部分完了）。
@@ -267,6 +281,113 @@ struct ExtensionWriter: Sendable {
             throw CocoaError(.fileWriteFileExists, userInfo: [NSFilePathErrorKey: copyPath])
         }
         return .conflict(copyPath: copyPath, copyNode: ManifestTree.packageNode(path: copyPath, members: uploaded))
+    }
+
+    /// パッケージ → 単一ファイルの形式の切り替え（#140・`k:` の item に単一ファイルの中身が届いた）。
+    /// 同じパスにファイルを書いてから、パッケージの中身をツリーの sha をベースに消す（書いてから消す =
+    /// 途中で止まっても旧いパッケージが残る側。それまではツリーでパッケージが勝つ）。
+    func replacePackageWithFile(
+        path: String, contentsURL: URL, baseDigest: String?, contentModified: Date?
+    ) async throws -> FormatChangeOutcome {
+        try PathValidator.validateRelativePath(path)
+        let remote = try await cache.current().tree.node(at: path)
+        switch FileProviderWritePolicy.fileReplacingPackageDecision(baseDigest: baseDigest, remote: remote) {
+        case .kindCollision:
+            return .packageNotWritable(.kindCollision)
+        case .conflict:
+            let copyPath = ConflictNamer.localCopyRelativePath(for: path)
+            try PathValidator.validateRelativePath(copyPath)
+            let copyEntry = try await uploadObject(
+                path: copyPath, contentsURL: contentsURL, contentModified: contentModified)
+            guard case .wrote = try await updater.updateFileEntry(for: copyPath, base: nil, newEntry: copyEntry) else {
+                throw CocoaError(.fileWriteFileExists, userInfo: [NSFilePathErrorKey: copyPath])
+            }
+            await cache.invalidateAfterLocalWrite()
+            return .conflict(remote: remote, copyPath: copyPath)
+        case .writeNew, .replaceFile:
+            switch try await modifyFileContents(
+                path: path, contentsURL: contentsURL, baseSha: nil, contentModified: contentModified)
+            {
+            case .written(let entry), .unchanged(let entry):
+                return .changed(.file(path: path, entry: entry))
+            case .conflict(let remoteEntry, let copyPath, _):
+                return .conflict(remote: .file(path: path, entry: remoteEntry), copyPath: copyPath)
+            }
+        case .replacePackage(let members):
+            let entry: ManifestFileEntry
+            switch try await modifyFileContents(
+                path: path, contentsURL: contentsURL, baseSha: nil, contentModified: contentModified)
+            {
+            case .written(let written), .unchanged(let written):
+                entry = written
+            case .conflict(_, let copyPath, _):
+                // パッケージの陰に別の内容のファイルの entry があった（他の端末も形式を変えた）。
+                // ローカルの内容は競合コピーに上がっている。正規パスは今のツリー（パッケージ）のまま。
+                return .conflict(remote: remote, copyPath: copyPath)
+            }
+            var expected: [String: String] = [:]
+            for (relative, member) in members {
+                expected[path + "/" + relative] = member.sha256
+            }
+            switch try await deleteDirectory(expecting: expected) {
+            case .removed:
+                return .changed(.file(path: path, entry: entry))
+            case .removedIndexStale(_, let detail):
+                throw SyncError.indexUpdateFailedAfterCommit(detail)
+            case .rejected(let rejectedPath, _):
+                AppLogger.fileProvider.notice("replacePackageWithFile: member changed remotely: \(rejectedPath, privacy: .private)")
+                return .oldFormatChanged
+            }
+        }
+    }
+
+    /// 単一ファイル → パッケージの形式の切り替え（#140・`f:` の item にパッケージの中身が届いた）。
+    /// 同じパスにパッケージの中身を書いてから（ツリーではパッケージが勝つ）、旧いファイルの entry を
+    /// sha をベースに消す。
+    func replaceFileWithPackage(
+        path: String, contentsURL: URL, baseSha: String?
+    ) async throws -> FormatChangeOutcome {
+        try PathValidator.validateRelativePath(path)
+        let remote = try await cache.current().tree.node(at: path)
+        let oldSha: String?
+        switch FileProviderWritePolicy.packageReplacingFileDecision(baseSha: baseSha, remote: remote) {
+        case .kindCollision:
+            return .packageNotWritable(.kindCollision)
+        case .conflict:
+            switch try PackageScanner.scan(root: contentsURL, packagePath: path) {
+            case .excluded(let reason):
+                return .packageNotWritable(.excluded(reason))
+            case .members(let members):
+                guard !members.isEmpty else { return .packageNotWritable(.empty) }
+                let copied = try await writePackageConflictCopy(path: path, members: members)
+                guard case .conflict(let copyPath, _) = copied else { return .packageNotWritable(copied) }
+                return .conflict(remote: remote, copyPath: copyPath)
+            }
+        case .writeNew, .replacePackage:
+            oldSha = nil
+        case .replaceFile(let sha):
+            oldSha = sha
+        }
+        let outcome = try await writePackage(path: path, contentsURL: contentsURL, baseDigest: nil)
+        let node: ManifestTree.Node
+        switch outcome {
+        case .written(let written), .unchanged(let written):
+            node = written
+        case .conflict(let copyPath, _):
+            return .conflict(remote: try await cache.current().tree.node(at: path), copyPath: copyPath)
+        case .excluded, .empty, .kindCollision:
+            return .packageNotWritable(outcome)
+        }
+        guard let oldSha else { return .changed(node) }
+        switch try await deleteFile(path: path, baseSha: oldSha) {
+        case .removed, .alreadyGone:
+            return .changed(node)
+        case .removedIndexStale(let detail):
+            throw SyncError.indexUpdateFailedAfterCommit(detail)
+        case .rejected:
+            AppLogger.fileProvider.notice("replaceFileWithPackage: old file changed remotely: \(path, privacy: .private)")
+            return .oldFormatChanged
+        }
     }
 
     /// パッケージの中身を限定並列（4）で上げる。返値は中身の相対パス → 上げた entry。
