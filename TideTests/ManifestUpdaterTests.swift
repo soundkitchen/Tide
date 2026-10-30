@@ -1193,7 +1193,9 @@ final class ManifestUpdaterTests: XCTestCase {
     }
 
     /// removeFileEntries: あるシャードで index 枯渇 = `.removedIndexStale` で中断。
-    /// `removedPaths` は当該シャードの除去確定分を含む（marker 発行対象）・後続シャードは非接触。
+    /// `removedPaths` は当該シャードの除去確定分を含む（marker 発行対象）。シャードは並行に処理する
+    /// （#140）ので、同時に走っていた別シャードは書き切ることがある — そのときはその分も報告する
+    /// （報告した分 = 実際に消えた分）。
     func testBatchRemoveIndexStaleAbortsAndReportsCommittedPaths() async throws {
         let store = InMemoryManifestStore()
         let counter = SignalCounter()
@@ -1226,15 +1228,19 @@ final class ManifestUpdaterTests: XCTestCase {
         guard case .removedIndexStale(let removedPaths, let detail) = outcome else {
             return XCTFail("expected .removedIndexStale, got \(outcome)")
         }
-        XCTAssertEqual(Set(removedPaths), Set([p1, p2]))
+        XCTAssertTrue(Set([p1, p2]).isSubset(of: Set(removedPaths)))
         XCTAssertTrue(detail.contains("index.json"))
-        XCTAssertEqual(counter.count, 0)
-        // shard A は除去確定・shard B は非接触（後続へ進まない）
+        // shard A は除去確定。shard B は同時に走っていれば書き切り、そのときは報告に入る
         let storedA = await store.shards[shardA]
         XCTAssertNil(storedA?.files[p1])
         XCTAssertNil(storedA?.files[p2])
         let storedB = await store.shards[shardB]
-        XCTAssertEqual(storedB?.files[p3]?.sha256, "s3")
+        if removedPaths.contains(p3) {
+            XCTAssertNil(storedB?.files[p3])
+        } else {
+            XCTAssertEqual(storedB?.files[p3]?.sha256, "s3")
+        }
+        XCTAssertLessThanOrEqual(counter.count, 1)
     }
 
     /// moveFileEntries: remove フェーズの index 枯渇 = `.movedIndexStale`（add は完了済み）。

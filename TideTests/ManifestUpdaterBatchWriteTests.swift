@@ -160,4 +160,74 @@ final class ManifestUpdaterBatchWriteTests: XCTestCase {
         guard case .written(let removedPaths) = outcome else { return XCTFail("\(outcome)") }
         XCTAssertEqual(Set(removedPaths), Set(paths))
     }
+
+    // MARK: - シャードの並行処理（同時に走る数を超える件数）
+
+    func testManyShardsAreAllWrittenMovedAndRemoved() async throws {
+        let store = InMemoryManifestStore()
+        let counter = SignalCounter()
+        let paths = memberPaths("Deck.key/many", count: 120)
+        let shardCount = Set(paths.map(ManifestSharding.shardId(for:))).count
+        XCTAssertGreaterThan(shardCount, 8 * 3)
+        let updater = makeUpdater(store: store, counter: counter)
+
+        let written = try await updater.writeFileEntries(
+            upserting: paths.map { ManifestFileUpsert(path: $0, base: nil, newEntry: makeManifestEntry(sha: "s")) },
+            removing: [:])
+        XCTAssertEqual(written, .written(removedPaths: []))
+        for path in paths { let e = await entry(at: path, in: store); XCTAssertEqual(e?.sha256, "s") }
+
+        let moved = try await updater.moveFileEntries(paths.map {
+            ManifestFileMove(
+                fromPath: $0, toPath: "Moved/" + $0, base: "s", newEntry: makeManifestEntry(sha: "s"))
+        })
+        guard case .moved(let removedPaths) = moved else { return XCTFail("\(moved)") }
+        XCTAssertEqual(Set(removedPaths), Set(paths))
+        for path in paths {
+            let old = await entry(at: path, in: store)
+            XCTAssertNil(old)
+            let new = await entry(at: "Moved/" + path, in: store)
+            XCTAssertEqual(new?.sha256, "s")
+        }
+        // index の宣言はシャードの実体と一致する（並行の index 更新が取りこぼされていない）
+        let index = await store.index
+        let shards = await store.shards
+        let etags = await store.shardEtags
+        XCTAssertEqual(Set(index?.shards.keys ?? [:].keys), Set(shards.keys))
+        for (shardId, info) in index?.shards ?? [:] {
+            XCTAssertEqual(info.etag, etags[shardId], shardId)
+            XCTAssertEqual(info.count, shards[shardId]?.files.count, shardId)
+        }
+    }
+
+    /// 拒否で中断しても、消えたと報告した分は実際に消え、報告していない分は残る（marker の根拠）。
+    func testRejectionAmongManyShardsReportsExactlyWhatWasRemoved() async throws {
+        let store = InMemoryManifestStore()
+        let counter = SignalCounter()
+        let paths = memberPaths("Deck.key/rej", count: 120)
+        // シャード id の順で真ん中あたりのパスだけ、リモートが先に進んでいる
+        let theirsPath = paths.sorted { ManifestSharding.shardId(for: $0) < ManifestSharding.shardId(for: $1) }[60]
+        var initial: [String: ManifestFileEntry] = [:]
+        for path in paths { initial[path] = makeManifestEntry(sha: path == theirsPath ? "theirs" : "old") }
+        await seed(store, initial)
+
+        let outcome = try await makeUpdater(store: store, counter: counter).writeFileEntries(
+            upserting: [], removing: Dictionary(uniqueKeysWithValues: paths.map { ($0, "old") }))
+
+        guard case .removalRejected(let path, _, let removedPaths) = outcome else { return XCTFail("\(outcome)") }
+        XCTAssertEqual(path, theirsPath)
+        XCTAssertLessThan(removedPaths.count, paths.count - 1)  // 新しいシャードへは進まない
+        let removed = Set(removedPaths)
+        for path in paths {
+            let e = await entry(at: path, in: store)
+            if removed.contains(path) {
+                XCTAssertNil(e, path)
+            } else {
+                XCTAssertNotNil(e, path)
+            }
+        }
+        // 拒否したシャードからは何も消さない
+        let rejectedShard = ManifestSharding.shardId(for: theirsPath)
+        XCTAssertFalse(removedPaths.contains { ManifestSharding.shardId(for: $0) == rejectedShard })
+    }
 }

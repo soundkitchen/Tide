@@ -178,7 +178,7 @@ struct ExtensionWriter: Sendable {
     ///    （`FileProviderWritePolicy.packageWriteDecision`）。
     /// 3. 変わった中身だけ上げ（限定並列 4・SSE は `uploadObject` が付ける）、`writeFileEntries` で
     ///    「全部書き足してから消す」。中身ごとのベースはツリーの今の sha（ツリーの版がベースと一致した
-    ///    ときだけここへ来る）。RMW の中で中身が 1 件でもリモートで進んでいたら、ローカルの中身を
+    ///    とき、または新規作成でリモートが同じ内容の書きかけのときだけここへ来る）。RMW の中で中身が 1 件でもリモートで進んでいたら、ローカルの中身を
     ///    競合コピーの名前のパッケージとして上げ直す（正規パスはリモートが勝つ = ファイルと同じ）。
     ///    シャードをまたぐので、そのときまでに書いたシャードの分は正規パスに残る（データは失われない）。
     func writePackage(
@@ -197,12 +197,10 @@ struct ExtensionWriter: Sendable {
         for member in members {
             localShas[member.relativePath] = try HashCalculator.sha256NoFollow(of: member.url)
         }
-        let localDigest = ManifestTree.packageDigest(shas: localShas)
-
         let tree = try await cache.current().tree
         let remote = tree.node(at: path)
         switch FileProviderWritePolicy.packageWriteDecision(
-            localDigest: localDigest, base: baseDigest, remote: remote)
+            localShas: localShas, base: baseDigest, remote: remote)
         {
         case .unchanged:
             return .unchanged(remote!)

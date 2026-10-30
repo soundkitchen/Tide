@@ -592,20 +592,22 @@ public struct ManifestUpdater: Sendable {
     /// ガードは `removeFileEntry` と同じく RMW 内（412 リトライごとにシャード内全対象を再評価）。
     ///
     /// 方針は「拒否で即中断」（2026-07-09 ユーザ確定）: あるシャードで 1 件でもベース不一致
-    /// （リモート先行）を見つけたら**そのシャードからは何も除去せず**、以降のシャードにも進まない。
-    /// 呼び出し側は `DirectoryNotEmpty` を返してシステムに残存分を復元させる。処理済みシャードの
-    /// 除去分はそのまま（ベース一致 = 未変更ファイルのみなので安全・再試行で収束）。
+    /// （リモート先行）を見つけたら**そのシャードからは何も除去せず**、新しいシャードには進まない
+    /// （シャードは `runShardBatch` で限られた数だけ並行に処理するので、そのとき走っていた
+    /// シャードは書き切る）。呼び出し側は `DirectoryNotEmpty` を返してシステムに残存分を復元させる。
+    /// 処理済みシャードの除去分はそのまま（ベース一致 = 未変更ファイルのみなので安全・再試行で収束）。
     /// - Parameter expectedByPath: 除去対象の相対パス → 期待 sha256（呼び出し側がキャッシュ済み
     ///   ツリーから取る）。ベース不明のパスはそもそも渡さないこと（「根拠なしに消さない」）。
     public func removeFileEntries(
         expecting expectedByPath: [String: String]
     ) async throws -> ShardBatchRemoveOutcome {
-        var removedAll: [String] = []
         let groups = Dictionary(grouping: expectedByPath.keys, by: ManifestSharding.shardId(for:))
-        // シャード順は決定的に（テスト再現性と、再試行時に同じ順で進んで途中中断点が安定するため）
-        for shardId in groups.keys.sorted() {
+        let results = try await runShardBatch(groups.keys.sorted(), stopsBatch: { (outcome: BatchShardOutcome) in
+            if case .committed = outcome { return false }
+            return true
+        }) { shardId in
             let paths = groups[shardId]!.sorted()
-            let outcome = try await withConditionalRetry("shard \(shardId)") {
+            return try await withConditionalRetry("shard \(shardId)") {
                 () -> BatchShardOutcome in
                 let fetched = try await store.getShard(shardId)
                 var shard = fetched?.value ?? ManifestShard.empty(id: shardId)
@@ -640,13 +642,24 @@ public struct ManifestUpdater: Sendable {
                 }
                 return .committed(toRemove)
             }
+        }
+        // 除去が確定した分は、中断の理由に関わらずすべて返す（呼び出し側が marker を発行する）。
+        var removedAll: [String] = []
+        for (_, outcome) in results {
             switch outcome {
-            case .committed(let removed):
+            case .committed(let removed), .committedIndexStale(let removed, _):
                 removedAll.append(contentsOf: removed)
-            case .committedIndexStale(let removed, let detail):
-                // index が失敗し続ける状況で後続シャードへ進んでも無駄打ちになるため中断。
-                // 除去確定分（先行 + 当該シャード）は marker 発行対象として返す。
-                removedAll.append(contentsOf: removed)
+            case .rejected:
+                break
+            }
+        }
+        // 中断の理由はシャード順で最初のもの。index の失敗（後続へ進んでも無駄打ち）も拒否も、
+        // 新しいシャードには進まない。
+        for (_, outcome) in results {
+            switch outcome {
+            case .committed:
+                continue
+            case .committedIndexStale(_, let detail):
                 return .removedIndexStale(removedPaths: removedAll, detail: detail)
             case .rejected(let path, let remote):
                 return .rejected(path: path, remote: remote, removedPaths: removedAll)
@@ -674,15 +687,20 @@ public struct ManifestUpdater: Sendable {
     ///   新たな競合窓を作るため不採用）。
     /// - 同一シャードが from/to 両方に関与する場合も 2 回の RMW に分かれる（往復は最大
     ///   2×シャード数で有界。1 RMW に畳むより中間状態の単純さを優先）。
+    /// - 各フェーズの中ではシャードを限られた数だけ並行に処理する（`runShardBatch`・#140）。
+    ///   フェーズの順（全 add → remove）は崩さない。
     ///
     /// 呼び出し側の前提: 本体オブジェクトのコピー（copyObject）は **add より前に**完了して
     /// いること（entry が指す versionId が実在してから可視化する）。
     public func moveFileEntries(_ moves: [ManifestFileMove]) async throws -> ShardMoveOutcome {
         // Phase A: add（移動先シャード順・決定的）
         let addGroups = Dictionary(grouping: moves) { ManifestSharding.shardId(for: $0.toPath) }
-        for shardId in addGroups.keys.sorted() {
+        let addResults = try await runShardBatch(addGroups.keys.sorted(), stopsBatch: { (outcome: AddShardOutcome) in
+            if case .occupied = outcome { return true }
+            return false
+        }) { shardId in
             let group = addGroups[shardId]!.sorted { $0.toPath < $1.toPath }
-            let outcome = try await withConditionalRetry("shard \(shardId)") {
+            return try await withConditionalRetry("shard \(shardId)") {
                 () -> AddShardOutcome in
                 let fetched = try await store.getShard(shardId)
                 var shard = fetched?.value ?? ManifestShard.empty(id: shardId)
@@ -710,6 +728,8 @@ public struct ManifestUpdater: Sendable {
                 try await commitShardWrite(shardId: shardId, shard: shard, etag: etag)
                 return .committed
             }
+        }
+        for (_, outcome) in addResults {
             if case .occupied(let path, let remote) = outcome {
                 return .destinationOccupied(path: path, remote: remote)
             }
@@ -747,6 +767,8 @@ public struct ManifestUpdater: Sendable {
     ///   （版 ID の向け直しは `mustRepointVersion` = #130 と同じ規則）。
     /// - **Phase B（除去）**: `removeFileEntries` に委譲する（ベースガード・拒否で即中断・空シャード
     ///   削除と index 突合も同じ機構）。
+    /// - 各フェーズの中ではシャードを限られた数だけ並行に処理する（`runShardBatch`）。競合で中断する
+    ///   ときも、そのとき走っていたシャードは書き切る（追加・置換は `decideUpload` を通った分だけ）。
     /// - シャード書込の確定後に index だけ失敗した場合は、Phase A では `SyncError.indexUpdateFailedAfterCommit`
     ///   をそのまま投げ（`updateFileEntry` と同じ）、Phase B では `.removedIndexStale` で返す。
     ///
@@ -758,9 +780,12 @@ public struct ManifestUpdater: Sendable {
         removing removals: [String: String]
     ) async throws -> ShardBatchWriteOutcome {
         let groups = Dictionary(grouping: upserts) { ManifestSharding.shardId(for: $0.path) }
-        for shardId in groups.keys.sorted() {
+        let results = try await runShardBatch(groups.keys.sorted(), stopsBatch: { (outcome: AddShardOutcome) in
+            if case .occupied = outcome { return true }
+            return false
+        }) { shardId in
             let group = groups[shardId]!.sorted { $0.path < $1.path }
-            let outcome = try await withConditionalRetry("shard \(shardId)") {
+            return try await withConditionalRetry("shard \(shardId)") {
                 () -> AddShardOutcome in
                 let fetched = try await store.getShard(shardId)
                 var shard = fetched?.value ?? ManifestShard.empty(id: shardId)
@@ -800,6 +825,8 @@ public struct ManifestUpdater: Sendable {
                 try await commitShardWrite(shardId: shardId, shard: shard, etag: etag)
                 return .committed
             }
+        }
+        for (_, outcome) in results {
             if case .occupied(let path, let remote) = outcome {
                 return .conflict(path: path, remote: remote)
             }
@@ -813,6 +840,58 @@ public struct ManifestUpdater: Sendable {
         case .rejected(let path, let remote, let removedPaths):
             return .removalRejected(path: path, remote: remote, removedPaths: removedPaths)
         }
+    }
+
+    /// バッチ RMW で同時に処理するシャードの数（#140）。
+    static let shardConcurrency = 8
+
+    /// バッチ RMW のシャードごとの処理を、限られた数（`shardConcurrency`）だけ並行に走らせる（#140）。
+    /// 1 シャードの RMW はシャードの GET・PUT と index の更新で 4 往復あり、順に回すとパッケージの
+    /// 中身 33 件の改名で約 25 秒かかった（index の更新は 1 件ずつで、コアレッサが束ねる相手がいない）。
+    /// 並行にすると、index の更新はコアレッサが 1 回の書込に束ねる（シャードと index の両方が確定して
+    /// から戻る確定点は変わらない）。
+    ///
+    /// - シャードは id の昇順に着手する。`stopsBatch` が true の結果（拒否・衝突など）が返るか、
+    ///   処理が throw したら新しいシャードには着手せず、走っているシャードの完了を待って返す
+    ///   （子タスクは取り消さない = シャードの PUT と index の更新の間で見捨てない）。
+    /// - throw があれば、完了を待ってから最初のエラーを投げ直す。
+    /// - Returns: 完了したシャードの結果（シャード id の昇順）。
+    private func runShardBatch<Outcome: Sendable>(
+        _ shardIds: [String],
+        stopsBatch: @escaping @Sendable (Outcome) -> Bool,
+        _ body: @escaping @Sendable (String) async throws -> Outcome
+    ) async throws -> [(shardId: String, outcome: Outcome)] {
+        var results: [(shardId: String, outcome: Outcome)] = []
+        var firstError: (any Error)?
+        await withTaskGroup(of: (String, Result<Outcome, any Error>).self) { group in
+            var next = 0
+            var stopped = false
+            func start() {
+                let shardId = shardIds[next]
+                next += 1
+                group.addTask {
+                    do {
+                        return (shardId, .success(try await body(shardId)))
+                    } catch {
+                        return (shardId, .failure(error))
+                    }
+                }
+            }
+            while next < shardIds.count, next < Self.shardConcurrency { start() }
+            while let (shardId, result) = await group.next() {
+                switch result {
+                case .success(let outcome):
+                    results.append((shardId, outcome))
+                    if stopsBatch(outcome) { stopped = true }
+                case .failure(let error):
+                    if firstError == nil { firstError = error }
+                    stopped = true
+                }
+                if !stopped, next < shardIds.count { start() }
+            }
+        }
+        if let firstError { throw firstError }
+        return results.sorted { $0.shardId < $1.shardId }
     }
 
     public func updateShard(

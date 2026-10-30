@@ -171,7 +171,7 @@ public enum FileProviderWritePolicy {
 
     /// パッケージの書込の判定（ファイルの `decideUpload` をパッケージの版 = digest で行う）。
     /// - Parameters:
-    ///   - localDigest: ローカルの中身の版（`ManifestTree.packageDigest(shas:)`）。
+    ///   - localShas: ローカルの中身（パッケージ内の相対パス → sha256）。版はここから出す。
     ///   - base: システムが最後に見た版（新規作成は nil）。
     ///   - remote: 今のツリーのそのパスのノード。
     ///
@@ -179,8 +179,15 @@ public enum FileProviderWritePolicy {
     /// 古いファイルの entry は、続いて届く旧 id の deleteItem がベースつきで消す。それまではツリーで
     /// パッケージが勝つ）。リモートに無いときも書く（ベースつきなら、リモートの削除よりローカルの
     /// 編集を残す側 = ファイルと同じ）。
+    ///
+    /// **新規作成（ベース無し）でリモートが書きかけ**のとき — リモートの中身がすべてローカルにあり
+    /// sha256 も一致する — は競合にせず、足りない中身を書き足す（#140 の受け入れで実踏: 改名・移動の
+    /// まとめ書きの途中で、返事を失ったシステムがローカルを新規作成として送り直し、途中までしか載って
+    /// いないツリーと版が食い違って、中身の同じ競合コピーができた）。リモートにだけある中身や sha の
+    /// 食い違いがあれば別の内容 = 従来どおり競合。ベースつき（編集）には当てない — リモートの中身が
+    /// 減っているのは他の端末の削除かもしれず、書き足すと消した中身を戻してしまう。
     public static func packageWriteDecision(
-        localDigest: String, base: String?, remote: ManifestTree.Node?
+        localShas: [String: String], base: String?, remote: ManifestTree.Node?
     ) -> PackageWriteDecision {
         switch remote {
         case nil, .file?:
@@ -188,8 +195,12 @@ public enum FileProviderWritePolicy {
         case .directory?:
             return .kindCollision
         case .package(_, let members, let digest, _)?:
-            if digest == localDigest { return .unchanged }
-            return base == digest ? .write(remoteMembers: members) : .conflict
+            if digest == ManifestTree.packageDigest(shas: localShas) { return .unchanged }
+            if base == digest { return .write(remoteMembers: members) }
+            if base == nil, members.allSatisfy({ localShas[$0.key] == $0.value.sha256 }) {
+                return .write(remoteMembers: members)
+            }
+            return .conflict
         }
     }
 

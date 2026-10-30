@@ -124,29 +124,40 @@ final class PackageScannerTests: XCTestCase {
         let members = ["a": entry(sha: "1"), "b": entry(sha: "2")]
         let remote = ManifestTree.packageNode(path: "Deck.key", members: members)
         let remoteDigest = ManifestTree.packageDigest(members: members)
-        let localDigest = ManifestTree.packageDigest(shas: ["a": "1", "b": "3"])
+        let local = ["a": "1", "b": "3"]
+        let same = ["a": "1", "b": "2"]
         typealias P = FileProviderWritePolicy
 
         // 新規作成（リモートに無い）・ベースつきでリモートが消えていた = 書く
-        XCTAssertEqual(P.packageWriteDecision(localDigest: localDigest, base: nil, remote: nil), .write(remoteMembers: [:]))
-        XCTAssertEqual(P.packageWriteDecision(localDigest: localDigest, base: remoteDigest, remote: nil), .write(remoteMembers: [:]))
+        XCTAssertEqual(P.packageWriteDecision(localShas: local, base: nil, remote: nil), .write(remoteMembers: [:]))
+        XCTAssertEqual(P.packageWriteDecision(localShas: local, base: remoteDigest, remote: nil), .write(remoteMembers: [:]))
         // ベースが今の版 = 中身ごとのベースつきで書く
         XCTAssertEqual(
-            P.packageWriteDecision(localDigest: localDigest, base: remoteDigest, remote: remote),
+            P.packageWriteDecision(localShas: local, base: remoteDigest, remote: remote),
             .write(remoteMembers: members))
         // 同じ中身 = 書かない（ベースに依らない）
-        XCTAssertEqual(P.packageWriteDecision(localDigest: remoteDigest, base: nil, remote: remote), .unchanged)
-        XCTAssertEqual(P.packageWriteDecision(localDigest: remoteDigest, base: "old", remote: remote), .unchanged)
+        XCTAssertEqual(P.packageWriteDecision(localShas: same, base: nil, remote: remote), .unchanged)
+        XCTAssertEqual(P.packageWriteDecision(localShas: same, base: "old", remote: remote), .unchanged)
         // リモートがベースから進んだ・新規作成が重なった = 競合
-        XCTAssertEqual(P.packageWriteDecision(localDigest: localDigest, base: "old", remote: remote), .conflict)
-        XCTAssertEqual(P.packageWriteDecision(localDigest: localDigest, base: nil, remote: remote), .conflict)
+        XCTAssertEqual(P.packageWriteDecision(localShas: local, base: "old", remote: remote), .conflict)
+        XCTAssertEqual(P.packageWriteDecision(localShas: local, base: nil, remote: remote), .conflict)
+        // 新規作成でリモートが書きかけ（リモートの中身がすべてローカルにあり sha も一致）= 書き足す
+        let partial = ManifestTree.packageNode(path: "Deck.key", members: ["a": entry(sha: "1")])
+        XCTAssertEqual(
+            P.packageWriteDecision(localShas: same, base: nil, remote: partial),
+            .write(remoteMembers: ["a": entry(sha: "1")]))
+        // 書きかけでも sha が違う・リモートにだけ中身がある = 競合
+        XCTAssertEqual(P.packageWriteDecision(localShas: ["a": "9", "b": "2"], base: nil, remote: partial), .conflict)
+        XCTAssertEqual(P.packageWriteDecision(localShas: ["b": "2"], base: nil, remote: partial), .conflict)
+        // ベースつき（編集）では書き足さない（リモートで減ったのは他の端末の削除かもしれない）
+        XCTAssertEqual(P.packageWriteDecision(localShas: same, base: "old", remote: partial), .conflict)
         // 同名のファイル（単一ファイル形式で保存されていた）= 書く。フォルダ = 名前の衝突
         XCTAssertEqual(
             P.packageWriteDecision(
-                localDigest: localDigest, base: nil, remote: .file(path: "Deck.key", entry: entry(sha: "9"))),
+                localShas: local, base: nil, remote: .file(path: "Deck.key", entry: entry(sha: "9"))),
             .write(remoteMembers: [:]))
         XCTAssertEqual(
-            P.packageWriteDecision(localDigest: localDigest, base: nil, remote: .directory(path: "Deck.key", mtime: nil)),
+            P.packageWriteDecision(localShas: local, base: nil, remote: .directory(path: "Deck.key", mtime: nil)),
             .kindCollision)
     }
 
