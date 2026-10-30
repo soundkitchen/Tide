@@ -1457,16 +1457,14 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                                 node: .directory(path: newPath, mtime: oldMtime),
                                 materialized: wasChecked),
                             [], false, nil)
-                        // 版スタンプの治癒は item 単位（ファイルとパッケージ）で頼む（#140: パッケージの
-                        // 中身は item ではない）
-                        let leaves = current.tree.leaves(under: oldPath)
+                        // 版スタンプの治癒は item 単位で、ファイルだけに頼む（#140: パッケージの中身は
+                        // item ではない。#151: パッケージへの再取り込みは fileproviderd が拡張ごと見限る
+                        // 引き金になる = `scheduleVersionRestamp` のコメント）
+                        let fileLeaves = current.tree.leaves(under: oldPath).filter { !$0.isPackage }
                         Self.scheduleVersionRestamp(
-                            moves: leaves.map {
+                            moves: fileLeaves.map {
                                 (from: $0.path, to: newPath + "/" + $0.path.dropFirst(prefix.count))
                             },
-                            packages: Set(leaves.filter(\.isPackage).map {
-                                newPath + "/" + $0.path.dropFirst(prefix.count)
-                            }),
                             services: services)
                     case .destinationOccupied:
                         completion.value(nil, [], false, NSFileProviderError(.filenameCollision))
@@ -1566,7 +1564,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                             materialized: wasMaterialized),
                         [], false, nil)
                     Self.scheduleVersionRestamp(
-                        moves: [(from: oldPath, to: newPath)], packages: [], services: services)
+                        moves: [(from: oldPath, to: newPath)], services: services)
                 case .destinationOccupied:
                     completion.value(nil, [], false, NSFileProviderError(.filenameCollision))
                 case .sourceChanged(let path, _):
@@ -1697,8 +1695,9 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     node: ManifestTree.packageNode(path: newPath, members: members),
                     materialized: wasMaterialized),
                 [], false, nil)
-            scheduleVersionRestamp(
-                moves: [(from: oldPath, to: newPath)], packages: [newPath], services: services)
+            // 版スタンプの治癒（#93）はパッケージには頼まない（#151: パッケージへの再取り込みで
+            // fileproviderd が拡張ごと見限り、処理中の書込の返事が届かなくなる）。移動したパッケージの
+            // クラウドアイコンは、次に編集するか開くまで残ることがある（表示だけ）。
         case .destinationOccupied:
             completion.value(nil, [], false, NSFileProviderError(.filenameCollision))
         case .sourceChanged(let path, _):
@@ -1734,9 +1733,16 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
     ///   ingest 猶予を**全件共有で一度だけ**待ってからまとめて再試行（per-file 直列待ちだと
     ///   dir move N 件でワーストケース N×2 秒に伸びる。PR #113 レビュー #2）。それでも失敗なら
     ///   諦める（「次の編集 or 開いて保存で自然治癒」の従来挙動に戻るだけ・安全側）。
-    /// - Parameter packages: 移動先のうちパッケージのパス（再取り込みを `k:` の id で頼む・#140）。
+    /// - **ファイルだけに頼む・パッケージには頼まない**（Issue #151・2026-10-31 実機で確定）:
+    ///   パッケージ（`k:`）に `reimportItems(below:)` を頼むと、fileproviderd はデータベースごと
+    ///   拡張のセッションを見限る（`invalidating database` → `extension session … invalidating`）。
+    ///   そのとき処理中だった書込（改名の直後に始まった移動など）の返事はシステムに届かず
+    ///   （LifetimeError）、システムはローカルを新規作成として送り直す。同じプロセスに新旧の
+    ///   インスタンスが同居し、index.json の更新を奪い合って index が古いまま残った。
+    ///   フォルダの中の 2,000 件のファイルへの再取り込みでは見限られなかった。移動したパッケージの
+    ///   クラウドアイコンは、次に編集するか開くまで残ることがある（表示だけ）。
     private static func scheduleVersionRestamp(
-        moves: [(from: String, to: String)], packages: Set<String>, services: ExtensionServices
+        moves: [(from: String, to: String)], services: ExtensionServices
     ) {
         Task.detached(priority: .utility) {
             try? await Task.sleep(for: restampInitialDelay)
@@ -1772,7 +1778,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             }
             var retryTargets: [String] = []
             for path in targets {
-                let error = await services.requestReimport(path, packages.contains(path) ? .package : .file)
+                let error = await services.requestReimport(path, .file)
                 if let fpError = error as? NSFileProviderError, fpError.code == .noSuchItem {
                     retryTargets.append(path)
                 } else {
@@ -1784,7 +1790,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 try? await Task.sleep(for: restampRetryDelay)
                 for path in retryTargets {
                     logOutcome(
-                        await services.requestReimport(path, packages.contains(path) ? .package : .file),
+                        await services.requestReimport(path, .file),
                         path: path)
                 }
             }
