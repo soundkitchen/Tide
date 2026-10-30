@@ -75,6 +75,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                         // **レジストリ外のマニフェスト外 dir id は noSuchItem**（M5 Phase 5-4）:
                         // 無条件合成にすると dir move/削除の reconcile 中の照会に生きた item を
                         // 返してしまい、消えたはずの旧 dir が空フォルダとして復活する（実機確定）。
+                        // 日時は保存していないので nil = 版 "dir"。modifyItem が返した `dir-<日時>`
+                        // から版が後退する（Issue #144・未確認の経路 = docs/09 #144 項）。
                         completion.value(FileProviderItem(node: .directory(path: path, mtime: nil)), nil)
                         return
                     }
@@ -470,7 +472,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             // metadataVersion に符号化しておいた日時を返す）。**modifyItem で nil を返すと、システムはそれを
             // 1970 としてディスクに書く**（Issue #144・2026-10-31 実機確定: 中にファイルを作ると
             // フォルダの日時の modifyItem が来る）。日時はマニフェストにもレジストリにも保存しない
-            // ので、item(for:) は nil のまま（そこから 1970 になる経路は未確認・docs/09 #144 項）。
+            // ので、item(for:) は nil のまま = 版は "dir" へ後退する（そこから 1970 になる経路と、
+            // 以後の baseVersion が "dir" になって改名の補完が効かなくなるかは未確認・docs/09 #144 項）。
             // 実体化後は配下最大 mtime の合成値に収束する。
             let dirMtime = itemTemplate.contentModificationDate ?? nil
             let dirCompletion = UncheckedSendableBox(value: completionHandler)
@@ -786,9 +789,13 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             // 保存先が無いので**黙って受理**する（ファイル側のメタデータのみ modify と同じ理由 =
             // remainingFields に残すと fileproviderd が永久再試行する）。権威 = 現ツリーの合成 dir、
             // ツリー外（ローカル仮想フォルダ）は合成 dir を返して温存。
-            // 仮想フォルダの日時は、システムが渡した item の日時をそのまま返す（Issue #144: nil で
-            // 返すとシステムが 1970 をディスクに書く。中にファイルを作るとこの経路を必ず通る）。
-            let virtualDirMtime = item.contentModificationDate ?? nil
+            // 仮想フォルダの日時（Issue #144: nil で返すとシステムが 1970 をディスクに書く。中に
+            // ファイルを作るとこの経路を必ず通る）。タグだけの変更などでは item に日時が入って
+            // いないので、前に返した版から補う（規則は `virtualDirectoryMtime`・改名と共有）。
+            let virtualDirMtime = FileProviderWritePolicy.virtualDirectoryMtime(
+                dateChanged: changedFields.contains(.contentModificationDate),
+                itemDate: item.contentModificationDate ?? nil,
+                baseMetadataVersion: version.metadataVersion)
             let task = Task {
                 defer { progress.completedUnitCount = progress.totalUnitCount }
                 do {
@@ -1162,8 +1169,11 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         // 仮想フォルダを返すときの日時（Issue #144）。改名の modifyItem では item に日時が入って
         // いない（`changedFields` が名前だけのとき・実機）ので、前に返した版（baseVersion の
         // metadataVersion = `dir-<日時>`）から取り出す。日時なしで返すとシステムが 1970 を書く。
-        let virtualDirMtime = (item.contentModificationDate ?? nil)
-            ?? FileProviderWritePolicy.directoryMtime(fromMetadataVersion: version.metadataVersion)
+        // 規則は `virtualDirectoryMtime`（メタデータ変更の経路と共有）。
+        let virtualDirMtime = FileProviderWritePolicy.virtualDirectoryMtime(
+            dateChanged: changedFields.contains(.contentModificationDate),
+            itemDate: item.contentModificationDate ?? nil,
+            baseMetadataVersion: version.metadataVersion)
         guard validNewPath != oldPath else {
             // 実質 no-op（同一 path への「移動」）。この分岐は実際に踏める — Swift の
             // `String ==` は正準等価（NFC/NFD 同一視）のため、正規化差だけの rename が該当する。

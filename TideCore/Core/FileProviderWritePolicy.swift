@@ -61,6 +61,20 @@ public enum FileProviderWritePolicy {
         return ISO8601.parse(String(s.dropFirst(prefix.count)))
     }
 
+    /// modifyItem で仮想フォルダを返すときの日時を決める（Issue #144・メタデータ変更と改名で共有）。
+    /// 日時なし（nil）で返すとシステムが 1970 をディスクに書くので、できるだけ日時を付ける。
+    /// 1. 日時が変わった（`changedFields` に contentModificationDate がある）なら item の日時
+    /// 2. そうでなければ前に返した版（baseVersion の metadataVersion = `dir-<日時>`）の日時 —
+    ///    `changedFields` に無いフィールドは item に入っている保証が無い（改名・タグだけの変更では
+    ///    入っていないことを実機で確認）ので、item の値より版を信じる
+    /// 3. 版にも無ければ item の日時（無ければ nil）
+    public static func virtualDirectoryMtime(
+        dateChanged: Bool, itemDate: Date?, baseMetadataVersion: Data?
+    ) -> Date? {
+        if dateChanged, let itemDate { return itemDate }
+        return directoryMtime(fromMetadataVersion: baseMetadataVersion) ?? itemDate
+    }
+
     /// FP の `NSFileProviderItemVersion.contentVersion` の中身から 3-way ベースの sha256 を
     /// 取り出す（`contentVersion(for:)` の逆写像 + 防御的検証）。
     /// - "dir" / 非 UTF-8 / 空 / sha256 hex（64 桁小文字）以外 → nil = 内容ベース不明。

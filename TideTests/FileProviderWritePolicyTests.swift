@@ -167,6 +167,33 @@ final class FileProviderWritePolicyTests: XCTestCase {
         XCTAssertNil(FileProviderWritePolicy.directoryMtime(fromMetadataVersion: nil))
     }
 
+    /// 仮想フォルダを返すときの日時の優先順位（Issue #144・PR #154 レビュー指摘 1・2）:
+    /// 日時が変わったなら item → そうでなければ版 → 版にも無ければ item。
+    func testVirtualDirectoryMtimePrefersChangedItemDateThenBaseVersion() {
+        let itemDate = ISO8601.parse("2026-10-31T00:00:00Z")
+        let baseDate = ISO8601.parse("2025-01-02T03:04:05Z")
+        let base = FileProviderWritePolicy.metadataVersion(
+            for: .directory(path: "d", mtime: baseDate), materialized: false)
+        let bare = Data("dir".utf8)
+        // 日時の変更（touch）: item の日時
+        XCTAssertEqual(FileProviderWritePolicy.virtualDirectoryMtime(
+            dateChanged: true, itemDate: itemDate, baseMetadataVersion: base), itemDate)
+        // 日時が変わったのに item に無い: 版で補う
+        XCTAssertEqual(FileProviderWritePolicy.virtualDirectoryMtime(
+            dateChanged: true, itemDate: nil, baseMetadataVersion: base), baseDate)
+        // 改名・タグだけの変更: item に何が入っていても版を優先（item の値は保証されない）
+        XCTAssertEqual(FileProviderWritePolicy.virtualDirectoryMtime(
+            dateChanged: false, itemDate: Date(timeIntervalSince1970: 0), baseMetadataVersion: base),
+            baseDate)
+        XCTAssertEqual(FileProviderWritePolicy.virtualDirectoryMtime(
+            dateChanged: false, itemDate: nil, baseMetadataVersion: base), baseDate)
+        // 版に日時が無い: item の日時（無ければ nil）
+        XCTAssertEqual(FileProviderWritePolicy.virtualDirectoryMtime(
+            dateChanged: false, itemDate: itemDate, baseMetadataVersion: bare), itemDate)
+        XCTAssertNil(FileProviderWritePolicy.virtualDirectoryMtime(
+            dateChanged: false, itemDate: nil, baseMetadataVersion: nil))
+    }
+
     // MARK: - childPath（createItem のパス合成・M5 Phase 5-3）
 
     func testChildPathJoinsParentAndFilename() {
