@@ -321,7 +321,7 @@ FP 拡張の書込（deleteItem / modifyItem / createItem / move）は `Extensio
   他端末の同時更新）は `docs/09` に記録。ローカルの改名後のファイルを削除すれば後始末される
   `PersistedPathSet`（仮想フォルダ温存 / 後始末予約）は世代ログと同じ at-rest 規約 =
   App Group Caches・bucket キー・読込時 `validateRelativePath` 再適用・壊れは全体破棄
-- **Status（2026-10-30・#140・実装中 = 判定の既定 `PackageClassifier.active` は `.none` のまま）: パッケージの書込も同じゲートを通す**。
+- **Status（2026-10-30・#140・有効化済み = 判定の既定 `PackageClassifier.active` は `.system`・ドメインは `"main2"` で作り直し済み・実機受け入れ待ち）: パッケージの書込も同じゲートを通す**。
   macOS のパッケージ（Keynote のパッケージ形式・`.xcodeproj` 等）は createItem / modifyItem に中身を持つ
   1 つのフォルダとして届くため、中身を拡張自身が走査する（`PackageScanner`）。**中身にシンボリックリンク・
   通常のファイルでない項目（FIFO 等）・同期できない名前が 1 つでもあればパッケージごと除外**（リンクは
