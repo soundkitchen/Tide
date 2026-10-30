@@ -1,4 +1,5 @@
 import Darwin
+import UniformTypeIdentifiers
 import XCTest
 import TideCore
 
@@ -151,11 +152,18 @@ final class PackageScannerTests: XCTestCase {
         XCTAssertEqual(P.packageWriteDecision(localShas: ["b": "2"], base: nil, remote: partial), .conflict)
         // ベースつき（編集）では書き足さない（リモートで減ったのは他の端末の削除かもしれない）
         XCTAssertEqual(P.packageWriteDecision(localShas: same, base: "old", remote: partial), .conflict)
-        // 同名のファイル（単一ファイル形式で保存されていた）= 書く。フォルダ = 名前の衝突
+        // 同名のファイル: 形式の切り替えで置き換えるそのファイル（sha 一致）のときだけ書く。それ以外
+        // （新規作成・k: の編集で他の端末が単一ファイルにしていた・sha が違う）は競合（PR #152 指摘 2）。
+        let singleFile = ManifestTree.Node.file(path: "Deck.key", entry: entry(sha: "9"))
         XCTAssertEqual(
-            P.packageWriteDecision(
-                localShas: local, base: nil, remote: .file(path: "Deck.key", entry: entry(sha: "9"))),
+            P.packageWriteDecision(localShas: local, base: nil, remote: singleFile, replacingFileSha: "9"),
             .write(remoteMembers: [:]))
+        XCTAssertEqual(P.packageWriteDecision(localShas: local, base: nil, remote: singleFile), .conflict)
+        XCTAssertEqual(P.packageWriteDecision(localShas: local, base: remoteDigest, remote: singleFile), .conflict)
+        XCTAssertEqual(
+            P.packageWriteDecision(localShas: local, base: nil, remote: singleFile, replacingFileSha: "8"),
+            .conflict)
+        // フォルダ = 名前の衝突
         XCTAssertEqual(
             P.packageWriteDecision(localShas: local, base: nil, remote: .directory(path: "Deck.key", mtime: nil)),
             .kindCollision)
@@ -179,14 +187,30 @@ final class PackageScannerTests: XCTestCase {
         XCTAssertEqual(P.fileReplacingPackageDecision(baseDigest: digest, remote: nil), .writeNew)
         XCTAssertEqual(P.fileReplacingPackageDecision(baseDigest: digest, remote: folder), .kindCollision)
 
-        // 単一ファイル → パッケージ: ベースが今の sha（または不明 = ツリーの sha）なら旧いファイルを消す
+        // 単一ファイル → パッケージ: ベースが今の sha なら旧いファイルを消す。不明は根拠が無いので
+        // 競合（ツリーの sha で消さない・PR #152 指摘 5）
         XCTAssertEqual(P.packageReplacingFileDecision(baseSha: "f", remote: file), .replaceFile(oldSha: "f"))
-        XCTAssertEqual(P.packageReplacingFileDecision(baseSha: nil, remote: file), .replaceFile(oldSha: "f"))
+        XCTAssertEqual(P.packageReplacingFileDecision(baseSha: nil, remote: file), .conflict)
         XCTAssertEqual(P.packageReplacingFileDecision(baseSha: "old", remote: file), .conflict)
         // 再試行（パッケージは書き済み）= ベースの sha で陰に残るファイルを消しにいく
         XCTAssertEqual(P.packageReplacingFileDecision(baseSha: "f", remote: package), .replaceFile(oldSha: "f"))
         XCTAssertEqual(P.packageReplacingFileDecision(baseSha: "f", remote: nil), .writeNew)
         XCTAssertEqual(P.packageReplacingFileDecision(baseSha: "f", remote: folder), .kindCollision)
+    }
+
+    /// 改名と同時に内容も変わった move で旧 path を消してよいか（PR #152 指摘 7）。
+    func testMoveMayRemoveSourceOnlyWhenBaseMatches() {
+        XCTAssertTrue(FileProviderWritePolicy.moveMayRemoveSource(baseSha: "a", current: "a"))
+        XCTAssertFalse(FileProviderWritePolicy.moveMayRemoveSource(baseSha: "a", current: "b"))
+        XCTAssertFalse(FileProviderWritePolicy.moveMayRemoveSource(baseSha: nil, current: "a"))
+    }
+
+    /// FP の item の型はツリーの判定と同じ引き方（フォルダの型）で取る（PR #152 指摘 6）。
+    func testPackageTypeUsesFolderTypeInformation() {
+        XCTAssertEqual(PackageClassifier.packageType(forExtension: "app"), .applicationBundle)
+        XCTAssertEqual(PackageClassifier.packageType(forExtension: "rtfd"), .rtfd)
+        XCTAssertNil(PackageClassifier.packageType(forExtension: "txt"))
+        XCTAssertNil(PackageClassifier.packageType(forExtension: ""))
     }
 
     func testDigestFromShasMatchesDigestFromEntries() {

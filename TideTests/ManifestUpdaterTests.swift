@@ -1030,9 +1030,9 @@ final class ManifestUpdaterTests: XCTestCase {
         }
     }
 
-    /// クロスシャードの複数 move で後続シャードが destinationOccupied → 先行シャードの add は
-    /// 「移動先の重複」として残り（ドキュメント化された挙動）、remove は一切走らない = 元は無傷。
-    func testMoveLaterShardOccupiedLeavesEarlierAddsAsDuplicates() async throws {
+    /// クロスシャードの複数 move で後続シャードが destinationOccupied → 先に全シャードを読んで判定する
+    /// ので、先行シャードにも add しない（#140・PR #152 指摘 1）。remove は一切走らない = 元は無傷。
+    func testMoveLaterShardOccupiedAddsNothing() async throws {
         let store = InMemoryManifestStore()
         let counter = SignalCounter()
         // add フェーズはシャード id 昇順に処理される — to 側の順序で first/second を確定する
@@ -1058,9 +1058,9 @@ final class ManifestUpdaterTests: XCTestCase {
         ])
 
         XCTAssertEqual(outcome, .destinationOccupied(path: toSecond, remote: theirs))
-        // 先行シャードの add は確定済み（重複として残る = 冪等リトライ / pull で収束）
+        // 先行シャードにも add しない
         let firstShard = await store.shards[ManifestSharding.shardId(for: toFirst)]
-        XCTAssertEqual(firstShard?.files[toFirst]?.sha256, "sha-a")
+        XCTAssertNil(firstShard?.files[toFirst])
         // remove フェーズ未実施 = 元 entry は両方無傷
         let srcA = await store.shards[ManifestSharding.shardId(for: fromA)]
         XCTAssertEqual(srcA?.files[fromA]?.sha256, "sha-a")

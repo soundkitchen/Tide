@@ -41,12 +41,23 @@ public struct PackageClassifier: Sendable {
             // フォルダの型として引く。既定（`conformingTo: .data`）はファイルの型を探すので、`.key` は
             // 単一ファイル形式の Keynote に、`.xcodeproj` は仮の型（dynamic）になってパッケージに当たらない。
             // 宣言の無い拡張子はここでも仮の型が返り、`.package` への適合を名乗ることがあるので外す。
-            let type = UTType(filenameExtension: ext, conformingTo: .directory)
-            let result = type.map { !$0.isDynamic && $0.conforms(to: .package) } ?? false
+            let result = packageType(forExtension: ext) != nil
             cache.withLock { $0[ext] = result }
             return result
         }
     }()
+
+    /// 拡張子が表すパッケージの型（Keynote なら `com.apple.iwork.keynote.key`）。パッケージでなければ nil。
+    /// `.system` の判定と、FP の item の型（`FileProviderItem.contentType`）の両方がこれで引く
+    /// （引き方が食い違うと、パッケージと判定したのに汎用の `.package` を名乗り、Finder のアイコンや
+    /// 既定のアプリが書類の型にならない・PR #152 レビュー指摘 6）。
+    public static func packageType(forExtension ext: String) -> UTType? {
+        guard !ext.isEmpty,
+              let type = UTType(filenameExtension: ext, conformingTo: .directory),
+              !type.isDynamic, type.conforms(to: .package)
+        else { return nil }
+        return type
+    }
 
     /// ツリーの既定の判定（#140）。ドメイン identifier の変更（"main" → "main2" = 作り直し）と
     /// 対で `.system` にした。作り直さずに判定だけ変えると、稼働中のレプリカの `.xcodeproj` などが

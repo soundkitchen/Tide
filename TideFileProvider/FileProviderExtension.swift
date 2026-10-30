@@ -149,39 +149,57 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     progress.totalUnitCount = max(members.values.reduce(0) { $0 + $1.size }, 1)
                     try FileManager.default.createDirectory(at: tmpURL, withIntermediateDirectories: false)
                     cleanupURL = tmpURL
-                    var completed: Int64 = 0
-                    for (member, entry) in members.sorted(by: { $0.key < $1.key }) {
-                        try Task.checkCancellation()
+                    // 置き場所を先に順に決めて空のファイルで押さえる（大文字小文字だけ違う中身が重なると
+                    // 上書きになる = 一部が黙って欠けるので、並行に取る前に見つけて検証失敗扱いにする）。
+                    let sorted = members.sorted(by: { $0.key < $1.key })
+                    var placed: [(member: String, entry: ManifestFileEntry, url: URL)] = []
+                    for (member, entry) in sorted {
                         // 中身の相対パスはリモート由来 = PathValidator を通して一時フォルダの外へ出さない。
                         let memberURL = try PathValidator.resolveForWrite(relativePath: member, syncRoot: tmpURL)
                         try FileManager.default.createDirectory(
                             at: memberURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-                        // 大文字小文字だけ違う中身が重なると上書きになる = 一部が黙って欠ける。検証失敗扱い。
-                        let outcome: FetchedObject = FileManager.default.fileExists(atPath: memberURL.path)
-                            ? .mismatch(written: 0)
-                            : try await Self.fetchVerified(
-                                s3: services.s3, path: path + "/" + member, entry: entry, to: memberURL,
-                                progress: progress, completedBefore: completed)
+                        guard !FileManager.default.fileExists(atPath: memberURL.path),
+                              FileManager.default.createFile(atPath: memberURL.path, contents: nil)
+                        else {
+                            await Self.reportPackageMemberFailure(
+                                path: path, member: member, detail: "size 0/\(entry.size)", services: services)
+                            completion.value(nil, nil, Self.integrityError())
+                            return
+                        }
+                        placed.append((member, entry, memberURL))
+                    }
+                    // 中身は限られた数だけ並行に取る（小さい中身が数千件あるパッケージを順に取ると数分かかる・
+                    // PR #152 レビュー指摘 9）。進み具合は中身ごとの子の Progress で親へ積む。
+                    let s3 = services.s3
+                    let fetched = try await ExtensionWriter.mapConcurrently(placed) { placed in
+                        let child = Progress(
+                            totalUnitCount: max(placed.entry.size, 1), parent: progress,
+                            pendingUnitCount: placed.entry.size)
+                        let outcome = try await Self.fetchVerified(
+                            s3: s3, path: path + "/" + placed.member, entry: placed.entry, to: placed.url,
+                            progress: child, completedBefore: 0)
+                        child.completedUnitCount = child.totalUnitCount
+                        return outcome
+                    }
+                    var completed: Int64 = 0
+                    for (placed, outcome) in zip(placed, fetched) {
                         guard case .fetched = outcome else {
                             // 中身が 1 つでも取れない・合わないときは noSuchItem に**しない**（デーモンが
                             // パッケージごと item を消す）。I/O エラーで後の再試行に回す。
                             let detail = switch outcome {
-                            case .mismatch(let written): "size \(written)/\(entry.size)"
+                            case .mismatch(let written): "size \(written)/\(placed.entry.size)"
                             default: "object not found"
                             }
-                            AppLogger.fileProvider.error("fetchContents: package member failed verification \(path, privacy: .private)/\(member, privacy: .private) (\(detail, privacy: .private))")
-                            await services.events.append(
-                                type: .error, path: path,
-                                message: "Materialize failed: integrity verification of a package member (\(detail))",
-                                details: member)
+                            await Self.reportPackageMemberFailure(
+                                path: path, member: placed.member, detail: detail, services: services)
                             completion.value(nil, nil, Self.integrityError())
                             return
                         }
-                        completed += entry.size
+                        completed += placed.entry.size
                         // 中身の更新日時もマニフェストに揃える（パッケージ自体の日付は item が運ぶ）。
-                        if let mtime = ISO8601.parse(entry.mtime) {
+                        if let mtime = ISO8601.parse(placed.entry.mtime) {
                             try? FileManager.default.setAttributes(
-                                [.modificationDate: mtime], ofItemAtPath: memberURL.path)
+                                [.modificationDate: mtime], ofItemAtPath: placed.url.path)
                         }
                     }
                     cleanupURL = nil
@@ -305,6 +323,17 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         try handle.close()
         guard written == entry.size, sha == entry.sha256 else { return .mismatch(written: written) }
         return .fetched
+    }
+
+    /// パッケージの中身の取得・検証の失敗を記録する（#140）。
+    private static func reportPackageMemberFailure(
+        path: String, member: String, detail: String, services: ExtensionServices
+    ) async {
+        AppLogger.fileProvider.error("fetchContents: package member failed verification \(path, privacy: .private)/\(member, privacy: .private) (\(detail, privacy: .private))")
+        await services.events.append(
+            type: .error, path: path,
+            message: "Materialize failed: integrity verification of a package member (\(detail))",
+            details: member)
     }
 
     /// 取得した中身がマニフェストと合わないときのエラー（item を消させない I/O エラー）。
@@ -480,7 +509,9 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 // （dir は合成物でシャード横断のため）ので、直後にリモートで dir が生える狭い
                 // レースは塞げない（既知の記録レースと同クラス・ManifestTree は directory-wins で
                 // 破綻しない）。
-                if let node = current.tree.node(at: path), node.isDirectory {
+                // パッケージも同じ（PR #152 レビュー指摘 3: パッケージの上に単一ファイルの entry を書くと、
+                // ツリーでパッケージが勝って誰にも見えないままバックアップから外れる）。
+                if let node = current.tree.node(at: path), node.isDirectory || node.isPackage {
                     completion.value(nil, [], false, NSFileProviderError(.filenameCollision))
                     return
                 }
@@ -503,7 +534,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 // dataless プレースホルダを掃除する（SDK 契約・実体データは失われない）。
                 guard let contentsURL = boxedURL.value else {
                     if mayAlreadyExist {
-                        if let node = current.tree.node(at: path), !node.isDirectory {
+                        // ファイルの要求にはファイルのノードだけを束ねる（パッケージを返すと種類が合わない）
+                        if let node = current.tree.node(at: path), case .file = node {
                             completion.value(FileProviderItem(node: node), [], false, nil)
                         } else {
                             completion.value(nil, [], false, nil)
@@ -971,9 +1003,6 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     }
                     let materialized = await services.toldMaterializedFlag(for: path)
                     completion.value(FileProviderItem(node: remote, materialized: materialized), [], true, nil)
-                case .oldFormatChanged:
-                    // 新しい形式は書いた・旧い形式を消す前にリモートが進んだ（新旧両方が残る）。再試行させる。
-                    completion.value(nil, [], false, Self.moveConflictError())
                 case .packageNotWritable(let written):
                     switch written {
                     case .excluded(let reason):
@@ -1215,6 +1244,9 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         let boxedURL = UncheckedSendableBox(value: newContents)
         let contentModified = item.contentModificationDate ?? nil
         let isDirectory = ref.isDirectory
+        // 改名と同時に内容も変わった move（複合）で旧 path を消してよいかのベース（PR #152 レビュー指摘 7）
+        let moveBase = FileProviderWritePolicy.baseSha(
+            contentVersion: version.contentVersion, metadataVersion: version.metadataVersion)
         let task = Task {
             defer { progress.completedUnitCount = progress.totalUnitCount }
             do {
@@ -1295,7 +1327,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                         return nil
                     }()
                     switch try await services.writer.moveDirectory(descendants: descendants) {
-                    case .moved:
+                    case .moved, .movedKeepingSource:
                         AppLogger.fileProvider.notice("modifyItem(move): dir moved (\(descendants.count) files): -> \(newPath, privacy: .private)")
                         await services.events.append(
                             type: .move, path: oldPath,
@@ -1338,7 +1370,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 if ref.isPackage {
                     try await Self.movePackage(
                         from: oldPath, to: validNewPath, newDisplayPath: newDisplayPath,
-                        contents: hasNewContents ? boxedURL.value : nil,
+                        contents: hasNewContents ? boxedURL.value : nil, baseDigest: moveBase,
                         current: current, services: services, completion: completion)
                     return
                 }
@@ -1373,8 +1405,10 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     return
                 }
                 let newPath = validNewPath!  // excluded が nil ケースを吸収済み
-                if let node = current.tree.node(at: newPath), node.isDirectory {
-                    // kind 衝突（新 path にマニフェスト dir が実在）→ 名前バウンス
+                if let node = current.tree.node(at: newPath), node.isDirectory || node.isPackage {
+                    // kind 衝突（新 path にマニフェスト dir・パッケージが実在）→ 名前バウンス。パッケージの
+                    // 上に単一ファイルの entry を書くと、ツリーでパッケージが勝って誰にも見えないまま
+                    // バックアップから外れる（PR #152 レビュー指摘 3）
                     completion.value(nil, [], false, NSFileProviderError(.filenameCollision))
                     return
                 }
@@ -1386,16 +1420,30 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 let outcome = try await services.writer.moveFile(
                     from: oldPath, to: newPath, entry: entry,
                     contentsURL: hasNewContents ? boxedURL.value : nil,
-                    contentModified: contentModified
+                    baseSha: moveBase, contentModified: contentModified
                 )
+                let movedEntry: ManifestFileEntry?
+                let keptSource: Bool
                 switch outcome {
                 case .moved(let newEntry):
+                    (movedEntry, keptSource) = (newEntry, false)
+                case .movedKeepingSource(let newEntry):
+                    (movedEntry, keptSource) = (newEntry, true)
+                case .destinationOccupied, .sourceChanged:
+                    (movedEntry, keptSource) = (nil, false)
+                }
+                switch outcome {
+                case .moved, .movedKeepingSource:
                     // 返却 item は新 id（rebind）。newEntry は単一 move では必ず非 nil。
                     // 実体化バッジ（Issue #65）: move は内容を動かさない = 実体化状態は旧 path を
                     // 引き継ぎ、報告済みレジストリも新 path へ追従（チャーン防止）。
-                    let entry = newEntry ?? entry
+                    // 旧 path を残したとき（他の端末の版）は、次の差分配信で別の item として現れる。
+                    let entry = movedEntry ?? entry
                     await services.events.append(
-                        type: .move, path: oldPath, message: "Moved → \(newPath)")
+                        type: .move, path: oldPath,
+                        message: keptSource
+                            ? "Moved → \(newPath) (with changes; original kept: changed on another device)"
+                            : "Moved → \(newPath)")
                     // live と返却分の台帳も追従させる（Issue #138: 追従しないと次の観測までの
                     // 差分配信が移動先を未実体化として再送し、版が変わる）。
                     let told = await services.toldMaterialized()
@@ -1434,9 +1482,13 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
     ///
     /// 改名と同時に内容も変わったとき（`contents` あり）は、新しいパスへ新規作成として書いて
     /// （`writePackage(baseDigest: nil)`）から旧の中身を消す。途中で止まっても新旧両方が残る側に倒れ、
-    /// 再試行では新しいパスが同じ中身 = 書かずに旧の削除へ進む。
+    /// 再試行では新しいパスが同じ中身 = 書かずに旧の削除へ進む。旧の中身を消すのは、システムが最後に
+    /// 見た版（`baseDigest`）が旧パスの今の版と一致するときだけ — 合わない・ベースが無い・消す段で
+    /// 他の端末の更新に気づいたときは、旧パスを他の端末の版のまま残す（ファイルの複合 move と同じ・
+    /// PR #152 レビュー指摘 7）。
     private static func movePackage(
         from oldPath: String, to validNewPath: String?, newDisplayPath: String, contents: URL?,
+        baseDigest: String?,
         current: ManifestGenerationCache.Current, services: ExtensionServices,
         completion: UncheckedSendableBox<(NSFileProviderItem?, NSFileProviderItemFields, Bool, Error?) -> Void>
     ) async throws {
@@ -1463,7 +1515,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             return
         }
         let newPath = validNewPath!  // excluded が nil ケースを吸収済み
-        guard case .package(_, let members, _, _)? = oldNode else {
+        guard case .package(_, let members, let oldDigest, _)? = oldNode else {
             completion.value(nil, [], false, NSFileProviderError(.noSuchItem))
             return
         }
@@ -1489,20 +1541,28 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 completion.value(nil, [], false, NSFileProviderError(.excludedFromSync))
                 return
             }
-            var expected: [String: String] = [:]
-            for (relative, entry) in members { expected[oldPath + "/" + relative] = entry.sha256 }
-            switch try await services.writer.deleteDirectory(expecting: expected) {
-            case .removed:
-                break
-            case .removedIndexStale(_, let detail):
-                throw SyncError.indexUpdateFailedAfterCommit(detail)
-            case .rejected(let path, _):
-                AppLogger.fileProvider.notice("modifyItem(move package): source changed (retry later): \(path, privacy: .private)")
-                completion.value(nil, [], false, moveConflictError())
-                return
+            var keptSource = !FileProviderWritePolicy.moveMayRemoveSource(baseSha: baseDigest, current: oldDigest)
+            if !keptSource {
+                var expected: [String: String] = [:]
+                for (relative, entry) in members { expected[oldPath + "/" + relative] = entry.sha256 }
+                switch try await services.writer.deleteDirectory(expecting: expected) {
+                case .removed:
+                    break
+                case .removedIndexStale(_, let detail):
+                    throw SyncError.indexUpdateFailedAfterCommit(detail)
+                case .rejected(let path, _):
+                    // 旧パスの中身を他の端末が書き換えていた = 旧パスは残す（新しいパスは書き済み）
+                    AppLogger.fileProvider.notice("modifyItem(move package): source changed while moving; keeping it: \(path, privacy: .private)")
+                    keptSource = true
+                }
+            } else {
+                AppLogger.fileProvider.notice("modifyItem(move package): source changed since base; keeping it: \(oldPath, privacy: .private)")
             }
             await services.events.append(
-                type: .move, path: oldPath, message: "Moved → \(newPath) (with changes)")
+                type: .move, path: oldPath,
+                message: keptSource
+                    ? "Moved → \(newPath) (with changes; original kept: changed on another device)"
+                    : "Moved → \(newPath) (with changes)")
             await services.followMaterializedFileMove(from: oldPath, to: newPath)
             let materialized = await services.returnedMaterializedFlag(for: newPath)
             completion.value(FileProviderItem(node: written, materialized: materialized), [], false, nil)
@@ -1517,7 +1577,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             (from: oldPath + "/" + $0.key, to: newPath + "/" + $0.key, entry: $0.value)
         }
         switch try await services.writer.moveDirectory(descendants: descendants) {
-        case .moved:
+        case .moved, .movedKeepingSource:
             await services.events.append(
                 type: .move, path: oldPath, message: "Moved → \(newPath)")
             // 実体化状態は旧 path を引き継ぐ（ファイルの move と同じ）

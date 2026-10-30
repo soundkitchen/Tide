@@ -52,11 +52,10 @@ struct ExtensionWriter: Sendable {
         /// 新しい形式で書き、旧い形式の entry を消した（または既に新しい形式だった）。ノードは新しい形式。
         case changed(ManifestTree.Node)
         /// ベースの後でリモートが変わっていた = ローカルの内容は `copyPath` に上げ済み・正規パスは
-        /// リモートのまま（`remote` = 今のツリーのノード。無ければ nil）。
+        /// リモートのまま（`remote` = 今のツリーのノード。無ければ nil）。新しい形式を書いた後に、
+        /// 旧い形式を消す段でリモートの更新に気づいたときも、新しい形式を正規パスから外してこれで返す
+        /// （PR #152 レビュー指摘 4: 再試行に任せると収まらず、他の端末の版が陰に隠れたままになる）。
         case conflict(remote: ManifestTree.Node?, copyPath: String)
-        /// 新しい形式は書いたが、旧い形式を消す前にリモートが進んでいた = 新旧両方が残っている
-        /// （ツリーではパッケージが勝つ）。呼び出し側は一時エラーで再試行させる。
-        case oldFormatChanged
         /// パッケージにしようとしたが書けない（除外・空・フォルダ衝突）。`PackageWriteOutcome` を運ぶ。
         case packageNotWritable(PackageWriteOutcome)
     }
@@ -86,6 +85,10 @@ struct ExtensionWriter: Sendable {
     enum MoveOutcome {
         /// move 成功。`newEntry` は新 path の確定 identity（dir move では未使用）。
         case moved(newEntry: ManifestFileEntry?)
+        /// 改名と同時に内容も変わった move で、旧 path が他の端末で変わっていた（ベースと合わない・
+        /// ベースが無い）= 新しい path へこの Mac の内容を書き、旧 path は消さずに残した（他の端末の版が
+        /// 旧 path に残る・PR #152 レビュー指摘 7）。`newEntry` は新 path の確定 identity。
+        case movedKeepingSource(newEntry: ManifestFileEntry)
         /// 移動先に別内容の entry が実在 = 衝突（呼び出し側 = `FilenameCollision` で
         /// システムに名前バウンスさせる）。
         case destinationOccupied(path: String)
@@ -195,8 +198,10 @@ struct ExtensionWriter: Sendable {
     ///    とき、または新規作成でリモートが同じ内容の書きかけのときだけここへ来る）。RMW の中で中身が 1 件でもリモートで進んでいたら、ローカルの中身を
     ///    競合コピーの名前のパッケージとして上げ直す（正規パスはリモートが勝つ = ファイルと同じ）。
     ///    シャードをまたぐので、そのときまでに書いたシャードの分は正規パスに残る（データは失われない）。
+    /// - Parameter replacingFileSha: 書類の形式の切り替え（単一ファイル → パッケージ）で置き換える旧い
+    ///   ファイルの sha（`FileProviderWritePolicy.packageWriteDecision` 参照）。それ以外は nil。
     func writePackage(
-        path: String, contentsURL: URL, baseDigest: String?
+        path: String, contentsURL: URL, baseDigest: String?, replacingFileSha: String? = nil
     ) async throws -> PackageWriteOutcome {
         try PathValidator.validateRelativePath(path)
         let members: [PackageScanner.Member]
@@ -214,7 +219,7 @@ struct ExtensionWriter: Sendable {
         let tree = try await cache.current().tree
         let remote = tree.node(at: path)
         switch FileProviderWritePolicy.packageWriteDecision(
-            localShas: localShas, base: baseDigest, remote: remote)
+            localShas: localShas, base: baseDigest, remote: remote, replacingFileSha: replacingFileSha)
         {
         case .unchanged:
             return .unchanged(remote!)
@@ -303,6 +308,9 @@ struct ExtensionWriter: Sendable {
                 throw CocoaError(.fileWriteFileExists, userInfo: [NSFilePathErrorKey: copyPath])
             }
             await cache.invalidateAfterLocalWrite()
+            // 前の試行がファイルを書いたところで止まっていれば、同じ内容のファイルの entry がパッケージの
+            // 陰に残っている（ツリーには見えない）。同じ sha のときだけ消す（違えば他の端末のもの = 触らない）。
+            _ = try await deleteFile(path: path, baseSha: copyEntry.sha256)
             return .conflict(remote: remote, copyPath: copyPath)
         case .writeNew, .replaceFile:
             switch try await modifyFileContents(
@@ -335,8 +343,26 @@ struct ExtensionWriter: Sendable {
             case .removedIndexStale(_, let detail):
                 throw SyncError.indexUpdateFailedAfterCommit(detail)
             case .rejected(let rejectedPath, _):
+                // ファイルを書いた後に、他の端末がパッケージを更新していた = リモートが正規パスで勝つ
+                // （PR #152 レビュー指摘 4）。書いたファイルを競合コピーの名前へ上げ直してから、正規パスの
+                // ファイルの entry を消す（パッケージが見えるように戻す）。
                 AppLogger.fileProvider.notice("replacePackageWithFile: member changed remotely: \(rejectedPath, privacy: .private)")
-                return .oldFormatChanged
+                let copyPath = ConflictNamer.localCopyRelativePath(for: path)
+                try PathValidator.validateRelativePath(copyPath)
+                let copyEntry = try await uploadObject(
+                    path: copyPath, contentsURL: contentsURL, contentModified: contentModified)
+                guard case .wrote = try await updater.updateFileEntry(for: copyPath, base: nil, newEntry: copyEntry) else {
+                    throw CocoaError(.fileWriteFileExists, userInfo: [NSFilePathErrorKey: copyPath])
+                }
+                switch try await deleteFile(path: path, baseSha: entry.sha256) {
+                case .removed, .alreadyGone, .rejected:
+                    // rejected = 正規パスのファイルも他の端末が書き換えた = その版はそのまま
+                    break
+                case .removedIndexStale(let detail):
+                    throw SyncError.indexUpdateFailedAfterCommit(detail)
+                }
+                await cache.invalidateAfterLocalWrite()
+                return .conflict(remote: try await cache.current().tree.node(at: path), copyPath: copyPath)
             }
         }
     }
@@ -368,7 +394,8 @@ struct ExtensionWriter: Sendable {
         case .replaceFile(let sha):
             oldSha = sha
         }
-        let outcome = try await writePackage(path: path, contentsURL: contentsURL, baseDigest: nil)
+        let outcome = try await writePackage(
+            path: path, contentsURL: contentsURL, baseDigest: nil, replacingFileSha: oldSha)
         let node: ManifestTree.Node
         switch outcome {
         case .written(let written), .unchanged(let written):
@@ -384,37 +411,74 @@ struct ExtensionWriter: Sendable {
             return .changed(node)
         case .removedIndexStale(let detail):
             throw SyncError.indexUpdateFailedAfterCommit(detail)
-        case .rejected:
+        case .rejected(let remoteFile):
+            // パッケージを書いた後に、他の端末が旧いファイルを更新していた = リモートが正規パスで勝つ
+            // （PR #152 レビュー指摘 4）。書いた中身を競合コピーの名前のパッケージへ上げ直してから、正規
+            // パスの中身を消す（陰に隠れていた他の端末のファイルが見えるように戻す）。
             AppLogger.fileProvider.notice("replaceFileWithPackage: old file changed remotely: \(path, privacy: .private)")
-            return .oldFormatChanged
+            guard case .package(_, let written, _, _) = node else { return .changed(node) }
+            guard case .members(let members) = try PackageScanner.scan(root: contentsURL, packagePath: path),
+                  !members.isEmpty
+            else {
+                // 書いた直後に中身が除外の条件に当たった・空になった = 上げ直せない。新旧両方を残して再試行させる。
+                throw SyncError.uploadConflict(path: path, remoteEntry: remoteFile)
+            }
+            let copied = try await writePackageConflictCopy(path: path, members: members)
+            guard case .conflict(let copyPath, _) = copied else { return .packageNotWritable(copied) }
+            var expected: [String: String] = [:]
+            for (relative, entry) in written { expected[path + "/" + relative] = entry.sha256 }
+            switch try await deleteDirectory(expecting: expected) {
+            case .removed, .rejected:
+                // rejected = 書いたパッケージの中身も他の端末が書き換えた = その版はそのまま
+                break
+            case .removedIndexStale(_, let detail):
+                throw SyncError.indexUpdateFailedAfterCommit(detail)
+            }
+            return .conflict(remote: try await cache.current().tree.node(at: path), copyPath: copyPath)
         }
     }
 
-    /// パッケージの中身を限定並列（4）で上げる。返値は中身の相対パス → 上げた entry。
+    /// 転送（PUT・copyObject・取得）を同時に走らせる数。
+    static let transferConcurrency = 4
+
+    /// `items` を限られた数（`limit`）だけ並行に `transform` へ通し、結果を入力の順で返す
+    /// （パッケージの中身の上げ下ろし・フォルダの移動のコピー・delete marker の発行が共有する）。
+    /// 1 件でも throw したら新しい項目には着手せず、残りの子タスクを取り消して最初のエラーを投げる。
+    static func mapConcurrently<Item: Sendable, Output: Sendable>(
+        _ items: [Item], limit: Int = transferConcurrency,
+        _ transform: @escaping @Sendable (Item) async throws -> Output
+    ) async throws -> [Output] {
+        try await withThrowingTaskGroup(of: (Int, Output).self) { group in
+            var outputs = [Output?](repeating: nil, count: items.count)
+            var next = 0
+            func start() {
+                let index = next
+                next += 1
+                let item = items[index]
+                group.addTask { (index, try await transform(item)) }
+            }
+            while next < items.count, next < limit { start() }
+            while let (index, output) = try await group.next() {
+                outputs[index] = output
+                if next < items.count { start() }
+            }
+            return outputs.map { $0! }
+        }
+    }
+
+    /// パッケージの中身を限定並列で上げる。返値は中身の相対パス → 上げた entry。
+    /// 中身はスキャン時にも sha を取っているが、上げるときは `uploadObject` が同じ FD から読み直して
+    /// sha を出す（送った内容と entry の sha を一致させる = TOCTOU の不変条件・CLAUDE.md §3）。
     private func uploadMembers(
         _ members: [PackageScanner.Member], packagePath: String
     ) async throws -> [String: ManifestFileEntry] {
-        let upload: @Sendable (PackageScanner.Member) async throws -> (String, ManifestFileEntry) = { member in
+        let uploaded = try await Self.mapConcurrently(members) { member in
             let entry = try await self.uploadObject(
                 path: packagePath + "/" + member.relativePath,
                 contentsURL: member.url, contentModified: member.modified)
             return (member.relativePath, entry)
         }
-        return try await withThrowingTaskGroup(of: (String, ManifestFileEntry).self) { group in
-            var results: [String: ManifestFileEntry] = [:]
-            var pending = members[...]
-            for _ in 0..<min(4, pending.count) {
-                guard let member = pending.popFirst() else { break }
-                group.addTask { try await upload(member) }
-            }
-            while let (relative, entry) = try await group.next() {
-                results[relative] = entry
-                if let member = pending.popFirst() {
-                    group.addTask { try await upload(member) }
-                }
-            }
-            return results
-        }
+        return Dictionary(uniqueKeysWithValues: uploaded)
     }
 
     /// ディレクトリ再帰削除（deleteItem の dir 版・M5 Phase 5-3）。
@@ -478,9 +542,15 @@ struct ExtensionWriter: Sendable {
     ///     remove ガードの出所）。
     ///   - contentsURL: 非 nil なら「内容変更 + 改名」の複合 modifyItem — copy ではなく
     ///     新内容を新 path へアップロードする（filename と contents は同時同期が SDK の推奨）。
+    ///   - baseSha: システムが最後に見た旧 path の sha（複合のときだけ使う）。
+    ///
+    /// 複合（rename + contents）で、旧 path が他の端末で変わっていた（`baseSha` がツリーの sha と合わない・
+    /// `baseSha` が無い）ときは、新しい path へこの Mac の内容を新規作成として書き、旧 path は消さない
+    /// （`.movedKeepingSource`・PR #152 レビュー指摘 7: ツリーの sha で消すと、この Mac が見ていない他の端末の
+    /// 編集が競合コピーにもならずに消える）。旧 path を消す段で他の端末の更新に気づいたときも同じ。
     func moveFile(
         from: String, to: String,
-        entry: ManifestFileEntry, contentsURL: URL?, contentModified: Date?
+        entry: ManifestFileEntry, contentsURL: URL?, baseSha: String?, contentModified: Date?
     ) async throws -> MoveOutcome {
         try PathValidator.validateRelativePath(from)
         try PathValidator.validateRelativePath(to)
@@ -490,12 +560,37 @@ struct ExtensionWriter: Sendable {
             // 複合（rename + contents）: 新内容を新 path へ直接アップロード
             newEntry = try await uploadObject(
                 path: to, contentsURL: contentsURL, contentModified: contentModified)
+            guard FileProviderWritePolicy.moveMayRemoveSource(baseSha: baseSha, current: entry.sha256) else {
+                AppLogger.fileProvider.notice("moveFile: source changed since base; keeping it: \(from, privacy: .private)")
+                return try await writeKeepingSource(to: to, newEntry: newEntry)
+            }
         } else {
             newEntry = try await copyEntry(from: from, to: to, entry: entry)
         }
-        return try await commitMoves(
+        let outcome = try await commitMoves(
             [ManifestFileMove(fromPath: from, toPath: to, base: entry.sha256, newEntry: newEntry)]
         )
+        if contentsURL != nil, case .sourceChanged = outcome {
+            // 新しい path は書き済み（全 add → remove）。旧 path は他の端末の版のまま残す。
+            AppLogger.fileProvider.notice("moveFile: source changed while moving; keeping it: \(from, privacy: .private)")
+            return .movedKeepingSource(newEntry: newEntry)
+        }
+        return outcome
+    }
+
+    /// 複合 move で旧 path を残すときの新しい path の書込（新規作成 = ベース無し）。
+    private func writeKeepingSource(to: String, newEntry: ManifestFileEntry) async throws -> MoveOutcome {
+        do {
+            let outcome = try await updater.updateFileEntry(for: to, base: nil, newEntry: newEntry)
+            await cache.invalidateAfterLocalWrite()
+            if case .alreadyUpToDate(let authoritative) = outcome {
+                return .movedKeepingSource(newEntry: authoritative)
+            }
+            return .movedKeepingSource(newEntry: newEntry)
+        } catch SyncError.uploadConflict {
+            // 新しい path に別の内容がある = 移動先の衝突（システムに名前をずらさせる）
+            return .destinationOccupied(path: to)
+        }
     }
 
     /// ディレクトリの move（rename/reparent・M5 Phase 5-4）。子孫を限定並列（4）で
@@ -511,25 +606,11 @@ struct ExtensionWriter: Sendable {
             try PathValidator.validateRelativePath(d.from)
             try PathValidator.validateRelativePath(d.to)
         }
-        // copy フェーズ（限定並列 4・1 件でも失敗したら throw = マニフェスト非接触のまま。
+        // copy フェーズ（限定並列・1 件でも失敗したら throw = マニフェスト非接触のまま。
         // 出来かけのコピー先オブジェクトは未参照 orphan 版としてライフサイクル失効に委ねる）
-        let copied: [String: ManifestFileEntry] = try await withThrowingTaskGroup(
-            of: (String, ManifestFileEntry).self
-        ) { group in
-            var results: [String: ManifestFileEntry] = [:]
-            var pending = descendants[...]
-            for _ in 0..<min(4, pending.count) {
-                guard let d = pending.popFirst() else { break }
-                group.addTask { (d.from, try await self.copyEntry(from: d.from, to: d.to, entry: d.entry)) }
-            }
-            while let (from, entry) = try await group.next() {
-                results[from] = entry
-                if let d = pending.popFirst() {
-                    group.addTask { (d.from, try await self.copyEntry(from: d.from, to: d.to, entry: d.entry)) }
-                }
-            }
-            return results
-        }
+        let copied = Dictionary(uniqueKeysWithValues: try await Self.mapConcurrently(descendants) { d in
+            (d.from, try await self.copyEntry(from: d.from, to: d.to, entry: d.entry))
+        })
         let moves = descendants.compactMap { d -> ManifestFileMove? in
             guard let newEntry = copied[d.from] else { return nil }
             return ManifestFileMove(
@@ -611,16 +692,9 @@ struct ExtensionWriter: Sendable {
     private func emitDeleteMarkers(paths: [String]) async {
         guard !paths.isEmpty else { return }
         let s3 = self.s3
-        await withTaskGroup(of: Void.self) { group in
-            var pending = paths[...]
-            for _ in 0..<min(4, pending.count) {
-                guard let path = pending.popFirst() else { break }
-                group.addTask { await Self.emitDeleteMarker(s3: s3, path: path) }
-            }
-            while await group.next() != nil {
-                guard let path = pending.popFirst() else { continue }
-                group.addTask { await Self.emitDeleteMarker(s3: s3, path: path) }
-            }
+        // emitDeleteMarker は失敗をログに残して戻る（throw しない）= 全件に打つ
+        _ = try? await Self.mapConcurrently(paths) { path in
+            await Self.emitDeleteMarker(s3: s3, path: path)
         }
     }
 

@@ -144,10 +144,11 @@ M5 Track B-2）は再アップロードを本質的に伴うため、上限を *
 書込は全経路が **`ManifestUpdater`**（`TideCore/S3/Uploader.swift`）の共有チョークポイントを通る:
 `updateFileEntry(for:base:newEntry:)` / `removeFileEntry(for:base:)` /
 `removeFileEntries(expecting:)` / `moveFileEntries(_:)` / `writeFileEntries(upserting:removing:)`（#140・パッケージの
-中身をまとめて書く二相のバッチ RMW = 各 entry を `decideUpload` で判定して書き足し〈`.conflict` が 1 件でもあれば
-そのシャードは書かずに中断〉→ 除去は `removeFileEntries` へ委譲）。バッチ RMW（`removeFileEntries` / `moveFileEntries` /
+中身をまとめて書く二相のバッチ RMW = 各 entry を `decideUpload` で判定して書き足し〈先に全シャードを読んで判定し、
+`.conflict` が 1 件でもあれば 1 件も書かずに中断。`moveFileEntries` の add も同じ〉→ 除去は `removeFileEntries` へ委譲）。バッチ RMW（`removeFileEntries` / `moveFileEntries` /
 `writeFileEntries`）は各フェーズの中でシャードを 8 つまで並行に処理し（`runShardBatch`・#140）、拒否や競合で
-中断するときも、走っているシャードは書き切ってから返す（新しいシャードには着手しない）。呼び出し元は FP 拡張（`ExtensionWriter`）と
+中断するときも、走っているシャードは書き切ってから返す（新しいシャードには着手しない・別のシャードのエラーで
+中断しても、確定した除去は捨てずに返す = delete marker の根拠）。呼び出し元は FP 拡張（`ExtensionWriter`）と
 アプリの `S3RestoreService`・`.syncignore` seed（folderSync 世代では `Uploader` 本体）。
 
 楽観的ロック（CAS）の骨格:

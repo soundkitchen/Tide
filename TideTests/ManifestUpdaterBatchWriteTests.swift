@@ -230,4 +230,89 @@ final class ManifestUpdaterBatchWriteTests: XCTestCase {
         let rejectedShard = ManifestSharding.shardId(for: theirsPath)
         XCTAssertFalse(removedPaths.contains { ManifestSharding.shardId(for: $0) == rejectedShard })
     }
+
+    /// 競合が 1 シャードでもあれば、どのシャードにも書かない（先に全部読んで判定する・PR #152 指摘 1）。
+    /// 書きながら判定すると、競合したシャードより前に書いた分だけが残り、パッケージの中身が混ざる。
+    func testConflictInAnyShardWritesNothing() async throws {
+        let store = InMemoryManifestStore()
+        let counter = SignalCounter()
+        let paths = memberPaths("Deck.key/pre", count: 120)
+        let theirsPath = paths.sorted { ManifestSharding.shardId(for: $0) < ManifestSharding.shardId(for: $1) }[100]
+        var initial: [String: ManifestFileEntry] = [:]
+        for path in paths { initial[path] = makeManifestEntry(sha: path == theirsPath ? "theirs" : "old") }
+        await seed(store, initial)
+
+        let outcome = try await makeUpdater(store: store, counter: counter).writeFileEntries(
+            upserting: paths.map { ManifestFileUpsert(path: $0, base: "old", newEntry: makeManifestEntry(sha: "mine")) },
+            removing: [:])
+
+        XCTAssertEqual(outcome, .conflict(path: theirsPath, remote: makeManifestEntry(sha: "theirs")))
+        for path in paths {
+            let e = await entry(at: path, in: store)
+            XCTAssertEqual(e?.sha256, path == theirsPath ? "theirs" : "old", path)
+        }
+        XCTAssertEqual(counter.count, 0)
+    }
+
+    /// 移動先の衝突も同じく、どの移動先にも書き足さない（PR #152 指摘 1）。
+    func testDestinationOccupiedInAnyShardAddsNothing() async throws {
+        let store = InMemoryManifestStore()
+        let counter = SignalCounter()
+        let from = memberPaths("Old.key", count: 120)
+        let to = from.map { "New.key" + $0.dropFirst("Old.key".count) }
+        let occupied = to.sorted { ManifestSharding.shardId(for: $0) < ManifestSharding.shardId(for: $1) }[100]
+        var initial: [String: ManifestFileEntry] = [:]
+        for path in from { initial[path] = makeManifestEntry(sha: "old") }
+        initial[occupied] = makeManifestEntry(sha: "other")
+        await seed(store, initial)
+
+        let outcome = try await makeUpdater(store: store, counter: counter).moveFileEntries(
+            zip(from, to).map { ManifestFileMove(fromPath: $0, toPath: $1, base: "old", newEntry: makeManifestEntry(sha: "old")) })
+
+        XCTAssertEqual(outcome, .destinationOccupied(path: occupied, remote: makeManifestEntry(sha: "other")))
+        for path in to where path != occupied {
+            let e = await entry(at: path, in: store)
+            XCTAssertNil(e, path)
+        }
+        for path in from {
+            let e = await entry(at: path, in: store)
+            XCTAssertNotNil(e, path)
+        }
+    }
+
+    /// 並行に走っていた別のシャードがエラーになっても、確定した除去は捨てずに返す（marker の根拠・
+    /// PR #152 指摘 8）。確定した分が無ければエラーのまま投げる。
+    func testFailureInOneShardStillReportsCommittedRemovals() async throws {
+        let store = InMemoryManifestStore()
+        let counter = SignalCounter()
+        let paths = memberPaths("Deck.key/err", count: 120)
+        await seed(store, Dictionary(uniqueKeysWithValues: paths.map { ($0, makeManifestEntry(sha: "old")) }))
+        let shardIds = Set(paths.map(ManifestSharding.shardId(for:))).sorted()
+        // 最初の 8 シャードは同時に走る = 5 番目が失敗しても、ほかの 7 つは除去を確定させる
+        await store.failGetShard(shardIds[4])
+
+        let outcome = try await makeUpdater(store: store, counter: counter)
+            .removeFileEntries(expecting: Dictionary(uniqueKeysWithValues: paths.map { ($0, "old") }))
+
+        guard case .removedIndexStale(let removedPaths, _) = outcome else { return XCTFail("\(outcome)") }
+        XCTAssertFalse(removedPaths.isEmpty)
+        let removed = Set(removedPaths)
+        for path in paths {
+            let e = await entry(at: path, in: store)
+            if removed.contains(path) {
+                XCTAssertNil(e, path)
+            } else {
+                XCTAssertNotNil(e, path)
+            }
+        }
+
+        // 確定した除去が無い（失敗するシャードだけ）ならエラーのまま
+        let only = paths.filter { ManifestSharding.shardId(for: $0) == shardIds[4] }
+        do {
+            _ = try await makeUpdater(store: store, counter: counter)
+                .removeFileEntries(expecting: Dictionary(uniqueKeysWithValues: only.map { ($0, "old") }))
+            XCTFail("expected an error")
+        } catch is InMemoryManifestStore.SimulatedNetworkFailure {
+        }
+    }
 }

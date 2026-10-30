@@ -55,9 +55,9 @@ final class FileProviderItem: NSObject, NSFileProviderItem, NSFileProviderItemDe
         case .package(let path, _, _, _):
             // その Mac の型情報のパッケージ型（Keynote なら `com.apple.iwork.keynote.key`）。
             // ツリーは同じ型情報でパッケージと判定しているので、通常は `.package` に落ちない（#140）。
-            let ext = (path as NSString).pathExtension
-            if let type = UTType(filenameExtension: ext), type.conforms(to: .package) { return type }
-            return .package
+            // 型の引き方はツリーの判定と同じ（`conformingTo: .directory`。既定の `.data` だとファイルの型が
+            // 返り、Keynote なら単一ファイル形式の型になってパッケージに当たらない）。
+            return PackageClassifier.packageType(forExtension: (path as NSString).pathExtension) ?? .package
         }
     }
 

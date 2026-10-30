@@ -154,16 +154,14 @@ public enum FileProviderWritePolicy {
         return latestVersionId
     }
 
-    /// パス自身と祖先（深い → 浅い順・ルート "" は含まない）。`a/b/c` → `[a/b/c, a/b, a]`。
-    /// 除外の予約は除外したフォルダの path で積まれるが、後始末の deleteItem は配下の
-    /// 仮想フォルダ（以前に受理済みの `d:` item）単位でも届くため、祖先まで照合する。
     /// パッケージを書くか（FP の createItem / modifyItem・#140）。
     public enum PackageWriteDecision: Equatable, Sendable {
         /// 書く。`remoteMembers` は今のマニフェストの中身（中身ごとの 3-way のベースと、消す中身の一覧）。
         case write(remoteMembers: [String: ManifestFileEntry])
         /// マニフェストが同じ中身を既に持つ（再取り込みの問い直し・クラッシュ後の再送）= 何も書かない。
         case unchanged
-        /// ベースの後でリモートが変わった・新規作成が他の端末の作成と重なった = 競合コピーへ。
+        /// ベースの後でリモートが変わった・新規作成が他の端末の作成と重なった・同じパスに単一ファイルの
+        /// 書類がある = 競合コピーへ。
         case conflict
         /// 同じパスにフォルダがある = 名前の衝突（システムに名前をずらさせる）。
         case kindCollision
@@ -174,11 +172,15 @@ public enum FileProviderWritePolicy {
     ///   - localShas: ローカルの中身（パッケージ内の相対パス → sha256）。版はここから出す。
     ///   - base: システムが最後に見た版（新規作成は nil）。
     ///   - remote: 今のツリーのそのパスのノード。
+    ///   - replacingFileSha: 書類の形式の切り替え（単一ファイル → パッケージ）で、置き換える旧いファイルの
+    ///     sha（ベースと照らし済みのもの）。それ以外は nil。
     ///
-    /// 同じパスに**ファイル**があるときは書く（Keynote が単一ファイルの書類をパッケージで保存し直した。
-    /// 古いファイルの entry は、続いて届く旧 id の deleteItem がベースつきで消す。それまではツリーで
-    /// パッケージが勝つ）。リモートに無いときも書く（ベースつきなら、リモートの削除よりローカルの
-    /// 編集を残す側 = ファイルと同じ）。
+    /// 同じパスに**ファイル**があるときは、形式の切り替えで置き換えるそのファイル（sha が
+    /// `replacingFileSha` と一致）のときだけ書く（書いた後に呼び出し側がベースつきで消す。それまでは
+    /// ツリーでパッケージが勝つ）。それ以外 — 新規作成・`k:` の item の編集で、他の端末がそのパスを
+    /// 単一ファイルにしていた — は競合（PR #152 レビュー指摘 2: 書くとファイルの entry がパッケージの
+    /// 陰に隠れ、消す deleteItem も来ないまま残って、パッケージを消すと復活する）。リモートに無いときは
+    /// 書く（ベースつきなら、リモートの削除よりローカルの編集を残す側 = ファイルと同じ）。
     ///
     /// **新規作成（ベース無し）でリモートが書きかけ**のとき — リモートの中身がすべてローカルにあり
     /// sha256 も一致する — は競合にせず、足りない中身を書き足す（#140 の受け入れで実踏: 改名・移動の
@@ -187,11 +189,14 @@ public enum FileProviderWritePolicy {
     /// 食い違いがあれば別の内容 = 従来どおり競合。ベースつき（編集）には当てない — リモートの中身が
     /// 減っているのは他の端末の削除かもしれず、書き足すと消した中身を戻してしまう。
     public static func packageWriteDecision(
-        localShas: [String: String], base: String?, remote: ManifestTree.Node?
+        localShas: [String: String], base: String?, remote: ManifestTree.Node?,
+        replacingFileSha: String? = nil
     ) -> PackageWriteDecision {
         switch remote {
-        case nil, .file?:
+        case nil:
             return .write(remoteMembers: [:])
+        case .file(_, let entry)?:
+            return replacingFileSha == entry.sha256 ? .write(remoteMembers: [:]) : .conflict
         case .directory?:
             return .kindCollision
         case .package(_, let members, let digest, _)?:
@@ -243,16 +248,17 @@ public enum FileProviderWritePolicy {
 
     /// 単一ファイル（`f:`）の item にパッケージの中身が届いたときの判定。
     /// - Parameters:
-    ///   - baseSha: システムが最後に見たファイルの sha。
+    ///   - baseSha: システムが最後に見たファイルの sha。nil（版の形でない）は根拠が無いので競合側。
     ///   - remote: 今のツリーのそのパスのノード。
     public static func packageReplacingFileDecision(
         baseSha: String?, remote: ManifestTree.Node?
     ) -> FormatChangeDecision {
         switch remote {
         case .file(_, let entry)?:
-            // ベースが版の形でない（id の付け替え直後など）ときはツリーの sha を使う（移動と同じ方式。
-            // 消すのは書いた後で、RMW の中で sha をもう一度確かめる）。
-            if let baseSha, baseSha != entry.sha256 { return .conflict }
+            // ベースが版の形でない（id の付け替え直後など）ときは、消す根拠が無いので競合側に倒す
+            // （CLAUDE.md §7「ベース不明は拒否側」・PR #152 レビュー指摘 5: ツリーの sha で消すと、
+            // この Mac が見ていない他の端末の版を S3 から外しうる）。
+            guard let baseSha, baseSha == entry.sha256 else { return .conflict }
             return .replaceFile(oldSha: entry.sha256)
         case .package?:
             // 再試行（パッケージは書き済み）。ツリーではパッケージが勝つので、旧いファイルの entry が
@@ -265,6 +271,17 @@ public enum FileProviderWritePolicy {
         }
     }
 
+    /// 改名と同時に内容も変わった move（複合）で、旧 path の entry を消してよいか（PR #152 レビュー指摘 7）。
+    /// システムが最後に見た版（`baseSha`）が旧 path の今の sha と一致するときだけ消す。合わない・ベースが
+    /// 無い（版の形でない）ときは、他の端末の編集かもしれないので旧 path を残す（CLAUDE.md §7
+    /// 「ベース不明は拒否側」）。内容の変わらない改名には当てない（中身はツリーの今の版をそのまま運ぶ）。
+    public static func moveMayRemoveSource(baseSha: String?, current: String) -> Bool {
+        baseSha == current
+    }
+
+    /// パス自身と祖先（深い → 浅い順・ルート "" は含まない）。`a/b/c` → `[a/b/c, a/b, a]`。
+    /// 除外の予約は除外したフォルダの path で積まれるが、後始末の deleteItem は配下の
+    /// 仮想フォルダ（以前に受理済みの `d:` item）単位でも届くため、祖先まで照合する。
     public static func pathAndAncestors(_ path: String) -> [String] {
         var result: [String] = []
         var current = Substring(path)
