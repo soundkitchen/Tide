@@ -310,7 +310,14 @@ struct ExtensionWriter: Sendable {
             await cache.invalidateAfterLocalWrite()
             // 前の試行がファイルを書いたところで止まっていれば、同じ内容のファイルの entry がパッケージの
             // 陰に残っている（ツリーには見えない）。同じ sha のときだけ消す（違えば他の端末のもの = 触らない）。
-            _ = try await deleteFile(path: path, baseSha: copyEntry.sha256)
+            switch try await deleteFile(path: path, baseSha: copyEntry.sha256) {
+            case .removed, .alreadyGone, .rejected:
+                break
+            case .removedIndexStale(let detail):
+                // marker は発行済み。エラーで返して再試行に stale index の治癒を委ねる（Issue #91・
+                // PR #152 再レビュー）
+                throw SyncError.indexUpdateFailedAfterCommit(detail)
+            }
             return .conflict(remote: remote, copyPath: copyPath)
         case .writeNew, .replaceFile:
             switch try await modifyFileContents(
