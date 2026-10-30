@@ -374,6 +374,35 @@ public enum ShardMoveOutcome: Equatable, Sendable {
     case movedIndexStale(removedPaths: [String], detail: String)
 }
 
+/// 1 ファイルぶんの追加・置換の指示（`writeFileEntries`・#140）。
+public struct ManifestFileUpsert: Sendable {
+    public let path: String
+    /// 3-way のベース sha256（新規は nil）。`updateFileEntry` の `base` と同じ意味。
+    public let base: String?
+    public let newEntry: ManifestFileEntry
+
+    public init(path: String, base: String?, newEntry: ManifestFileEntry) {
+        self.path = path
+        self.base = base
+        self.newEntry = newEntry
+    }
+}
+
+/// `writeFileEntries` の結果（#140）。
+public enum ShardBatchWriteOutcome: Equatable, Sendable {
+    /// 追加・置換と除去がすべて完了した。`removedPaths` は実際にマニフェストから除去したパス
+    /// （呼び出し側が delete marker を発行する対象）。
+    case written(removedPaths: [String])
+    /// 追加・置換の途中で、`path` のリモートがベースから進んでいた = 中断（除去は未実施）。
+    /// 先行シャードの追加・置換は残る。
+    case conflict(path: String, remote: ManifestFileEntry)
+    /// 除去で `path` のリモートがベースから進んでいた = 中断（追加・置換は全完了済み）。
+    /// `removedPaths` は中断より前に除去が確定したパス。
+    case removalRejected(path: String, remote: ManifestFileEntry, removedPaths: [String])
+    /// 除去で「シャード書込確定 × index 反映失敗」の部分完了（Issue #91）。追加・置換は全完了済み。
+    case removedIndexStale(removedPaths: [String], detail: String)
+}
+
 /// シャードと index.json を楽観的ロックで更新する。
 /// アプリ（Uploader 経由）と File Provider 拡張（M5 Phase 5〜）が共有する
 /// **マニフェスト書込の唯一のチョークポイント**。
@@ -705,6 +734,85 @@ public struct ManifestUpdater: Sendable {
     private enum AddShardOutcome {
         case committed
         case occupied(path: String, remote: ManifestFileEntry)
+    }
+
+    /// 複数 entry の追加・置換と除去を**二相のシャード単位バッチ RMW** で行う（#140・パッケージの
+    /// 中身をまとめて書く）。`moveFileEntries` と同じく「全部書き足してから消す」順にして、どこで
+    /// 中断・クラッシュしても中間状態が「旧の中身が残る」側に倒れるようにする（「データ損失 < 重複」）。
+    ///
+    /// - **Phase A（追加・置換）**: シャードごとに、各 entry を `updateFileEntry` と同じ
+    ///   `decideUpload(base:uploading:remote:)` で判定する。`.conflict` が 1 件でもあれば、その
+    ///   シャードからは何も書かずに `.conflict` で中断し、Phase B にも進まない（先行シャードの書込は
+    ///   残る = 同じ内容の再試行は `.alreadyUpToDate` で素通しになる）。`.alreadyUpToDate` は書かない
+    ///   （版 ID の向け直しは `mustRepointVersion` = #130 と同じ規則）。
+    /// - **Phase B（除去）**: `removeFileEntries` に委譲する（ベースガード・拒否で即中断・空シャード
+    ///   削除と index 突合も同じ機構）。
+    /// - シャード書込の確定後に index だけ失敗した場合は、Phase A では `SyncError.indexUpdateFailedAfterCommit`
+    ///   をそのまま投げ（`updateFileEntry` と同じ）、Phase B では `.removedIndexStale` で返す。
+    ///
+    /// 呼び出し側の前提: 追加・置換する entry が指す本体オブジェクトの PUT は、この呼び出しより前に
+    /// 完了していること（entry が指す versionId が実在してから可視化する）。
+    /// - Parameter removals: 除去する相対パス → 期待 sha256（ベース不明のパスは渡さないこと）。
+    public func writeFileEntries(
+        upserting upserts: [ManifestFileUpsert],
+        removing removals: [String: String]
+    ) async throws -> ShardBatchWriteOutcome {
+        let groups = Dictionary(grouping: upserts) { ManifestSharding.shardId(for: $0.path) }
+        for shardId in groups.keys.sorted() {
+            let group = groups[shardId]!.sorted { $0.path < $1.path }
+            let outcome = try await withConditionalRetry("shard \(shardId)") {
+                () -> AddShardOutcome in
+                let fetched = try await store.getShard(shardId)
+                var shard = fetched?.value ?? ManifestShard.empty(id: shardId)
+                let etag = fetched?.etag
+                var changed = false
+                for upsert in group {
+                    let existing = shard.files[upsert.path]
+                    let decision = ThreeWayMerge.decideUpload(
+                        base: upsert.base, uploading: upsert.newEntry.sha256, remote: existing?.sha256
+                    )
+                    switch decision {
+                    case .proceed:
+                        break
+                    case .alreadyUpToDate:
+                        guard let existing,
+                              Self.mustRepointVersion(existing: existing, uploaded: upsert.newEntry)
+                        else { continue }
+                    case .conflict:
+                        // existing は .conflict のとき必ず非 nil（remote == nil なら .proceed）
+                        guard let existing else { break }
+                        return .occupied(path: upsert.path, remote: existing)
+                    }
+                    shard.files[upsert.path] = upsert.newEntry
+                    changed = true
+                }
+                guard changed else {
+                    // 全て書込済み = no-op。分断の後始末だけ突合（moveFileEntries と同じ規約）。
+                    if let fetchedEtag = etag {
+                        try await repairIndexDeclarationIfStale(
+                            shardId: shardId, fetchedEtag: fetchedEtag, count: shard.files.count
+                        )
+                    } else {
+                        try await removeDanglingDeclarationIfShardAbsent(shardId: shardId)
+                    }
+                    return .committed
+                }
+                try await commitShardWrite(shardId: shardId, shard: shard, etag: etag)
+                return .committed
+            }
+            if case .occupied(let path, let remote) = outcome {
+                return .conflict(path: path, remote: remote)
+            }
+        }
+        guard !removals.isEmpty else { return .written(removedPaths: []) }
+        switch try await removeFileEntries(expecting: removals) {
+        case .removed(let paths):
+            return .written(removedPaths: paths)
+        case .removedIndexStale(let removedPaths, let detail):
+            return .removedIndexStale(removedPaths: removedPaths, detail: detail)
+        case .rejected(let path, let remote, let removedPaths):
+            return .removalRejected(path: path, remote: remote, removedPaths: removedPaths)
+        }
     }
 
     public func updateShard(
