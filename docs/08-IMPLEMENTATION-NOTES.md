@@ -354,6 +354,14 @@ FP ドメイン内のファイル編集（`modifyItem` の .contents）と削除
 - **仕組み**: 各書込系コールバックの冒頭で completion を包む（`trackWrite`）。どの経路で返しても終了が 1 回だけ記録される（二重呼び出しでも数を崩さない）。**読み取り系（`item(for:)` / `fetchContents` / 列挙）は対象外** — `writes in flight: 0` は「処理中の書込系コールバックが無かった」の意味で、長い `fetchContents` や列挙が走っていた可能性は残る（そちらは既存のログ = `fetchContents failed` / `enumerateItems: working set started` 等で見る）。
 - **採り方**: `/usr/bin/log show --last 10m --info --predicate 'subsystem == "org.izukawa.Tide" AND category == "fileprovider"'`。fileproviderd 側（`LifetimeError`・接続の invalidate）は `process == "fileproviderd"` で同じ時刻を採る。Info ログは 10〜15 分で消えるので、起きたらすぐに採る。
 
+#### 拡張のサービスはプロセスで共有（Issue #151・2026-10-31）
+
+- **何をするか**: `ExtensionServices.fromSharedConfig` は、作ったサービス（S3 クライアント・マニフェストのキャッシュ・書き手〈`ManifestUpdater` = `IndexUpdateCoalescer`〉・`.syncignore` のキャッシュ・レジストリ 5 本・実体化の観測・イベントログ）をプロセスの静的な置き場に持ち、同じプロセスの次のインスタンスにも同じものを返す。
+- **なぜ**: fileproviderd は同じプロセスの中で拡張のインスタンスを作り直し、見限った古いインスタンスが処理中の書込を抱えたまま新しいインスタンスと同居することがある（#151 の再現: パッケージへの再取り込みで見限られた古いインスタンスが、移動を抱えて約 90 秒生き続けた）。インスタンスごとにサービスを作ると、index の更新をまとめる仕組みが別々になって index.json を奪い合い（CAS 8 回失敗 → index が古いまま = `soak-check-fp` の persistent DRIFT）、レジストリは同じ JSON を別々の actor が読み書きして互いの追加を上書きしうる。
+- **作り直す条件**: 構築に使う値 = ドメインの識別子・ドメインの epoch（#104）・バケット・リージョン・deviceId・認証情報・アップロードの上限・帯域（`SharingKey`）のどれかが変われば、新しく作って置き換える（設定画面での帯域・上限の変更、認証情報の入れ替え、ドメインの作り直しを取りこぼさない = 共有する前の「インスタンスを作るたびに読み直す」と同じ追従）。置き換えたあとも古いインスタンスは古いサービスを持ち続ける（置き換えは設定の変更のときだけなので、同居の害が出る窓は狭い）。epoch はキーに入れた値をそのままレジストリに渡す（2 回読んで食い違わない）。
+- **ログ**: 使い回したときは `Extension: reusing shared services in this process`、作ったときは従来どおり `Extension: captured domain epoch …`。
+- **認証情報**: キーに入れた認証情報はプロセスのメモリに持つ（S3 クライアントが元々持っているものと同じ・ファイルには書かない）。
+
 #### FP 実体化連動バッジ（Issue #65・2026-07-14）
 
 - **要件**: 「実体化されているときだけ Finder にチェックバッジ」（静的バッジは dataless にも付き誤読される — 2026-07-12 試作 → 撤去の再挑戦）。対象は**ファイル + ディレクトリ両方**（ユーザ確定）。dir のチェック基準 = **配下に 1 ファイル以上あり、かつ配下全ファイルが実体化済み**（空フォルダ・仮想フォルダはチェックなし）。バッジは S3 非接触の純ローカル機能。
@@ -1389,7 +1397,10 @@ revert 復帰ランブックを含む）。実施 3 段の記録は本ファイ�
   残余のみ。**意味論は不変（load-bearing）**: 呼び出し側は自分の transform を含む putIndex の
   確定を await してから戻る =「shard + index 双方確定時のみ発火」の確定点維持・CAS 中止
   （false）の per-caller 返値維持・枯渇はバッチ全員へ伝播。コアレッサは ManifestUpdater
-  1 個につき 1 個（struct コピーは同一 actor 共有）。
+  1 個につき 1 個（struct コピーは同一 actor 共有）。**FP 拡張では ManifestUpdater がプロセスに
+  1 個になるよう、拡張のサービスをプロセスで共有する**（#151・下記「拡張のサービスはプロセスで共有」）。
+  インスタンスごとに作っていた間は、同じプロセスに同居した新旧のインスタンスがそれぞれのコアレッサで
+  index.json を奪い合い、CAS が 8 回失敗して index が古いまま残った（2026-10-31 実機）。
 - **③ 部分完了の孤児根絶**（`SyncError.indexUpdateFailedAfterCommit` + `.removedIndexStale`
   系 outcome）: シャード書込（putShard / deleteShard）**確定後**の index 反映失敗を
   `commitShardWrite` が専用エラーに包み、削除系 RMW（`removeFileEntry` / `removeFileEntries` /

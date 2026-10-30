@@ -1,6 +1,7 @@
 import CryptoKit
 import FileProvider
 import Foundation
+import os
 import TideCore
 
 /// FileProvider の observer / completion handler のような「どのスレッドから呼んでも良い契約だが
@@ -180,6 +181,55 @@ struct ExtensionServices: Sendable {
             AppLogger.fileProvider.error("Extension: AWS credentials not found in shared Keychain")
             return nil
         }
+        // プロセス内で共有する（Issue #151）: fileproviderd は同じプロセスの中で拡張のインスタンスを
+        // 作り直し、見限った古いインスタンスが処理中の書込を抱えたまま新しいインスタンスと同居する
+        // ことがある。インスタンスごとにサービスを作ると、index の更新をまとめる仕組み
+        // （`IndexUpdateCoalescer`）・キャッシュ・レジストリ（同じ JSON）が別物になり、互いに
+        // index.json を奪い合って index が古いまま残った（2026-10-31 実機）。構築に使う値（ドメイン・
+        // epoch・設定・認証情報）がすべて同じなら、前に作ったものを返す。どれかが変われば作り直す
+        // （設定画面での帯域・上限の変更、認証情報の入れ替え、ドメインの作り直しを取りこぼさない）。
+        let key = SharingKey(
+            domainIdentifier: domain.identifier.rawValue,
+            domainEpoch: config.fileProviderDomainEpoch,
+            bucket: bucket, region: region, deviceId: config.deviceId,
+            credentials: credentials,
+            uploadSizeLimitBytes: config.uploadSizeLimitBytes,
+            uploadBandwidthBytesPerSec: config.uploadBandwidthBytesPerSec)
+        let boxedDomain = UncheckedSendableBox(value: domain)
+        return shared.withLockUnchecked { cached -> ExtensionServices? in
+            if let cached, cached.key == key {
+                AppLogger.fileProvider.notice("Extension: reusing shared services in this process")
+                return cached.services
+            }
+            guard let built = build(
+                domain: boxedDomain.value, config: config, credentials: credentials,
+                bucket: bucket, region: region, domainEpoch: key.domainEpoch)
+            else { return nil }
+            cached = (key, built)
+            return built
+        }
+    }
+
+    /// プロセス内で共有しているサービスと、それを作った値（Issue #151）。
+    private static let shared = OSAllocatedUnfairLock<(key: SharingKey, services: ExtensionServices)?>(
+        initialState: nil)
+
+    /// サービスの構築に使う値。すべて同じときだけ共有したものを使い回す。
+    private struct SharingKey: Equatable, Sendable {
+        let domainIdentifier: String
+        let domainEpoch: String?
+        let bucket: String
+        let region: String
+        let deviceId: String
+        let credentials: AWSCredentials
+        let uploadSizeLimitBytes: Int64
+        let uploadBandwidthBytesPerSec: Int64
+    }
+
+    private static func build(
+        domain: NSFileProviderDomain, config: ConfigStore, credentials: AWSCredentials,
+        bucket: String, region: String, domainEpoch: String?
+    ) -> ExtensionServices? {
         do {
             let s3 = try TideS3Client(
                 credentials: credentials, region: region, bucket: bucket,
@@ -275,8 +325,8 @@ struct ExtensionServices: Sendable {
             // ドメイン作り直しを跨いだ stale レジストリ（バッジ永久不点灯・消えた dir の合成・
             // 無意味な削除受理予約）は epoch 不一致で読込時に全体破棄される。プロセス生存中に
             // アプリが bump しても capture 値は変えない — 遅延 persist は旧 epoch でスタンプされ
-            // 次プロセスが破棄する（`PersistedPathSet` の capture 意味論）。
-            let domainEpoch = config.fileProviderDomainEpoch
+            // 次プロセスが破棄する（`PersistedPathSet` の capture 意味論）。値は共有のキーに入れたもの
+            // （同じ読み取り）を使う = キーとレジストリの epoch が食い違わない（Issue #151）。
             // capture 値の観測点（PR #106 レビュー指摘 5）: group defaults のプロセス間伝播に
             // タイミング保証は無く、stale capture が起きるとバッジ不点灯 / 仮想フォルダ消失の
             // 症状から本機構へ辿れない。アプリ側の bump ログと突合できるよう notice（永続）で
