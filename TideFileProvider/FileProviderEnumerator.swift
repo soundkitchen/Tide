@@ -215,11 +215,14 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @uncheck
                         currentAnchor = current.anchor
                         target = (current.anchor, current.tree)
                     }
-                    originFilePaths = Array(origin.files.keys)
+                    // 起点のファイル一覧はツリーの葉（パッケージは 1 件・#140）で取る — マニフェストの
+                    // キーそのままだとパッケージの中身が並び、目標側（`tree.filePaths`）と食い違う。
+                    let originTree = ManifestTree(files: origin.files)
+                    originFilePaths = originTree.filePaths
                     if target.anchor == originAnchor {
                         changes = ManifestTreeDiff.Changes(updated: [], deleted: [])
                     } else {
-                        changes = ManifestTreeDiff.changes(from: ManifestTree(files: origin.files), to: target.tree)
+                        changes = ManifestTreeDiff.changes(from: originTree, to: target.tree)
                         let computed = PendingChanges(
                             origin: originAnchor, target: target.anchor, tree: target.tree,
                             changes: changes, originFilePaths: originFilePaths)

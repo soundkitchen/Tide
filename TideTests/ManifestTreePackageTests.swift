@@ -109,6 +109,29 @@ final class ManifestTreePackageTests: XCTestCase {
         XCTAssertEqual(tree.node(at: "Deck.key/a")?.kind, .file)
     }
 
+    // MARK: - バッジ
+
+    func testBadgeCountsPackageAsOneLeaf() {
+        // 実体化セットにはパッケージ（`k:`）が 1 件で載る。フォルダのチェックもツリーの葉で数えるので、
+        // 中身のパスではなくパッケージのパスが実体化していれば親フォルダにチェックが付く。
+        let tree = ManifestTree(files: [
+            "t/Deck.key/Index/Document.iwa": entry(), "t/Deck.key/Data/a.png": entry(),
+            "t/x.txt": entry(),
+        ], packages: packages)
+        XCTAssertEqual(
+            MaterializedBadge.checkedDirectories(
+                filePaths: tree.filePaths, materialized: ["t/Deck.key", "t/x.txt"]),
+            ["t"])
+        XCTAssertEqual(
+            MaterializedBadge.checkedDirectories(filePaths: tree.filePaths, materialized: ["t/x.txt"]),
+            [])
+        // パッケージの中にフォルダのチェックは作らない
+        XCTAssertFalse(
+            MaterializedBadge.checkedDirectories(
+                filePaths: tree.filePaths, materialized: ["t/Deck.key"]
+            ).contains("t/Deck.key/Index"))
+    }
+
     // MARK: - digest
 
     func testDigestDependsOnPathsAndContentNotMtime() {

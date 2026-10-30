@@ -82,11 +82,11 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     completion.value(nil, NSFileProviderError(.noSuchItem))
                     return
                 }
-                // kind 不一致（id は f: なのに tree ではディレクトリ等）は「その kind の item は
+                // kind 不一致（id は f: なのに tree ではディレクトリ・パッケージ等）は「その kind の item は
                 // もう無い」= noSuchItem（kind 変化後の stale 旧 id が必ず通る正常系なので notice。
                 // path 自体はツリーに実在するため「not in manifest tree」ログとは分ける —
                 // 共用すると shard に entry が在るのに無いと出る誤診誘導になる。PR #57 レビュー #3）。
-                guard node.isDirectory == ref.isDirectory else {
+                guard node.kind == ref.kind else {
                     AppLogger.fileProvider.notice("item(for:): kind mismatch (stale id, noSuchItem): \(path, privacy: .private)")
                     completion.value(nil, NSFileProviderError(.noSuchItem))
                     return
@@ -136,7 +136,64 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             defer { if let cleanupURL { try? FileManager.default.removeItem(at: cleanupURL) } }
             do {
                 let tree = try await services.cache.current().tree
-                guard case .file(_, let entry)? = tree.node(at: path) else {
+                let node = tree.node(at: path)
+                // 一時ファイルは system 推奨のドメイン用 tmp（同一ボリューム）へ書く
+                let tmpDir = (try? NSFileProviderManager(for: domain)?.temporaryDirectoryURL())
+                    ?? FileManager.default.temporaryDirectory
+                let tmpURL = tmpDir.appendingPathComponent("fetch-\(UUID().uuidString)")
+
+                if ref.isPackage, case .package(_, let members, _, _)? = node, let node {
+                    // パッケージ（#140）: 中身をファイルごとに一時フォルダへ組み立て、フォルダの URL を
+                    // 返す（2026-10-30 PoC で fileproviderd の受理を実機確定。SDK ヘッダは「通常ファイル」
+                    // とだけ書くので、ここは文書化されていない挙動に依っている）。
+                    progress.totalUnitCount = max(members.values.reduce(0) { $0 + $1.size }, 1)
+                    try FileManager.default.createDirectory(at: tmpURL, withIntermediateDirectories: false)
+                    cleanupURL = tmpURL
+                    var completed: Int64 = 0
+                    for (member, entry) in members.sorted(by: { $0.key < $1.key }) {
+                        try Task.checkCancellation()
+                        // 中身の相対パスはリモート由来 = PathValidator を通して一時フォルダの外へ出さない。
+                        let memberURL = try PathValidator.resolveForWrite(relativePath: member, syncRoot: tmpURL)
+                        try FileManager.default.createDirectory(
+                            at: memberURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+                        // 大文字小文字だけ違う中身が重なると上書きになる = 一部が黙って欠ける。検証失敗扱い。
+                        let outcome: FetchedObject = FileManager.default.fileExists(atPath: memberURL.path)
+                            ? .mismatch(written: 0)
+                            : try await Self.fetchVerified(
+                                s3: services.s3, path: path + "/" + member, entry: entry, to: memberURL,
+                                progress: progress, completedBefore: completed)
+                        guard case .fetched = outcome else {
+                            // 中身が 1 つでも取れない・合わないときは noSuchItem に**しない**（デーモンが
+                            // パッケージごと item を消す）。I/O エラーで後の再試行に回す。
+                            let detail = switch outcome {
+                            case .mismatch(let written): "size \(written)/\(entry.size)"
+                            default: "object not found"
+                            }
+                            AppLogger.fileProvider.error("fetchContents: package member failed verification \(path, privacy: .private)/\(member, privacy: .private) (\(detail, privacy: .private))")
+                            await services.events.append(
+                                type: .error, path: path,
+                                message: "Materialize failed: integrity verification of a package member (\(detail))",
+                                details: member)
+                            completion.value(nil, nil, Self.integrityError())
+                            return
+                        }
+                        completed += entry.size
+                        // 中身の更新日時もマニフェストに揃える（パッケージ自体の日付は item が運ぶ）。
+                        if let mtime = ISO8601.parse(entry.mtime) {
+                            try? FileManager.default.setAttributes(
+                                [.modificationDate: mtime], ofItemAtPath: memberURL.path)
+                        }
+                    }
+                    cleanupURL = nil
+                    await services.events.append(
+                        type: .download, path: path,
+                        message: "Materialized package (\(members.count) files, \(completed) bytes)")
+                    let materialized = await services.returnedMaterializedFlag(for: path)
+                    completion.value(tmpURL, FileProviderItem(node: node, materialized: materialized), nil)
+                    return
+                }
+
+                guard !ref.isPackage, case .file(_, let entry)? = node else {
                     // noSuchItem を返すとデーモンはプレースホルダごと item を削除する（実機確認）。
                     // 本当に「無い」時以外に返さないこと。診断のため必ずログを残す。
                     AppLogger.fileProvider.error("fetchContents: path not in manifest tree (noSuchItem): \(path, privacy: .private)")
@@ -144,68 +201,26 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     return
                 }
                 progress.totalUnitCount = max(entry.size, 1)
-
-                // 一時ファイルは system 推奨のドメイン用 tmp（同一ボリューム）へ書く
-                let tmpDir = (try? NSFileProviderManager(for: domain)?.temporaryDirectoryURL())
-                    ?? FileManager.default.temporaryDirectory
-                let tmpURL = tmpDir.appendingPathComponent("fetch-\(UUID().uuidString)")
-                FileManager.default.createFile(atPath: tmpURL.path, contents: nil)
                 cleanupURL = tmpURL
-                let handle = try FileHandle(forWritingTo: tmpURL)
-                defer { try? handle.close() }
-
-                // 1 回ぶんのストリーミング取得（tmp 先頭から書き直し）。404 系は nil。
-                let s3 = services.s3
-                func download(_ versionId: String?) async throws -> (sha: String, written: Int64)? {
-                    try handle.truncate(atOffset: 0)
-                    var hasher = SHA256()
-                    var written: Int64 = 0
-                    progress.completedUnitCount = 0
-                    let result = try await s3.streamObject(
-                        key: "files/\(path)", versionId: versionId, rangeStart: nil
-                    ) { chunk in
-                        if progress.isCancelled { throw CancellationError() }
-                        hasher.update(data: chunk)
-                        try handle.write(contentsOf: chunk)
-                        written += Int64(chunk.count)
-                        progress.completedUnitCount = written
-                    }
-                    guard result != nil else { return nil }
-                    return (HashCalculator.hex(hasher.finalize()), written)
-                }
-
-                // マニフェストが指す版を第一候補で取得（enumerate と fetch の間に最新版が
-                // 変わっても、提示した itemVersion と中身が食い違わない）。その版が消えている
-                // 場合（ライフサイクルの旧版失効・stale な manifest versionId）は最新版へ
-                // フォールバックする — 内容の同一性は下の SHA-256 ゲートが保証する。
-                var outcome = try await download(entry.s3VersionId)
-                if outcome == nil, entry.s3VersionId != nil {
-                    AppLogger.fileProvider.notice("fetchContents: pinned version missing; falling back to latest: \(path, privacy: .private)")
-                    outcome = try await download(nil)
-                }
-                guard let (sha, written) = outcome else {
+                switch try await Self.fetchVerified(
+                    s3: services.s3, path: path, entry: entry, to: tmpURL,
+                    progress: progress, completedBefore: 0)
+                {
+                case .notFound:
                     // 最新版も無い＝本当に消えている時だけ noSuchItem（デーモンが item を削除する）
                     AppLogger.fileProvider.error("fetchContents: object not found on S3 (noSuchItem): \(path, privacy: .private)")
                     completion.value(nil, nil, NSFileProviderError(.noSuchItem))
                     return
-                }
-                try handle.close()
-
-                // commit 前検証（Downloader と同じ不変条件: サイズ一致 + SHA-256 一致）。
-                // 不一致は noSuchItem では**なく** I/O エラー（item を消させず後で再試行可能に）。
-                guard written == entry.size, sha == entry.sha256 else {
+                case .mismatch(let written):
+                    // 不一致は noSuchItem では**なく** I/O エラー（item を消させず後で再試行可能に）。
                     AppLogger.fileProvider.error("fetchContents verification failed for \(path, privacy: .private) (size \(written)/\(entry.size))")
                     await services.events.append(
                         type: .error, path: path,
                         message: "Materialize failed: integrity verification (size \(written)/\(entry.size))")
-                    completion.value(nil, nil, NSError(
-                        domain: NSCocoaErrorDomain, code: NSFileReadCorruptFileError,
-                        userInfo: [
-                            NSLocalizedDescriptionKey:
-                                String(localized: "Downloaded content failed integrity verification.")
-                        ]
-                    ))
+                    completion.value(nil, nil, Self.integrityError())
                     return
+                case .fetched:
+                    break
                 }
 
                 // 成功: tmp はシステムが引き取るので掃除対象から外す（Progress 完了は Task 冒頭の defer）
@@ -216,7 +231,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 cleanupURL = nil
                 // FP 版 Sync Activity（Issue #83）: materialize 成功 = folderSync の download 相当。
                 await services.events.append(
-                    type: .download, path: path, message: "Materialized (\(written) bytes)")
+                    type: .download, path: path, message: "Materialized (\(entry.size) bytes)")
                 let materialized = await services.returnedMaterializedFlag(for: path)
                 completion.value(
                     tmpURL,
@@ -235,6 +250,72 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         }
         progress.cancellationHandler = { task.cancel() }
         return progress
+    }
+
+    /// `fetchVerified` の結果。
+    private enum FetchedObject {
+        case fetched
+        /// 最新版も無い（404 系）。
+        case notFound
+        /// サイズか SHA-256 がマニフェストと合わない。
+        case mismatch(written: Int64)
+    }
+
+    /// `files/<path>` を `url`（新しく作る）へ取得し、サイズと SHA-256 をマニフェストと照らす
+    /// （Downloader と同じ commit 前検証）。`progress` は `completedBefore` + 書いたバイト数まで進める。
+    ///
+    /// マニフェストが指す版を第一候補で取得する（enumerate と fetch の間に最新版が変わっても、
+    /// 提示した itemVersion と中身が食い違わない）。その版が消えている場合（ライフサイクルの旧版失効・
+    /// stale な manifest versionId）は最新版へフォールバックする — 内容の同一性は SHA-256 の照合が保証する。
+    private static func fetchVerified(
+        s3: TideS3Client, path: String, entry: ManifestFileEntry, to url: URL,
+        progress: Progress, completedBefore: Int64
+    ) async throws -> FetchedObject {
+        guard FileManager.default.createFile(atPath: url.path, contents: nil) else {
+            throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: url.path])
+        }
+        let handle = try FileHandle(forWritingTo: url)
+        defer { try? handle.close() }
+
+        // 1 回ぶんのストリーミング取得（先頭から書き直し）。404 系は nil。
+        func download(_ versionId: String?) async throws -> (sha: String, written: Int64)? {
+            try handle.truncate(atOffset: 0)
+            var hasher = SHA256()
+            var written: Int64 = 0
+            progress.completedUnitCount = completedBefore
+            let result = try await s3.streamObject(
+                key: "files/\(path)", versionId: versionId, rangeStart: nil
+            ) { chunk in
+                if progress.isCancelled { throw CancellationError() }
+                hasher.update(data: chunk)
+                try handle.write(contentsOf: chunk)
+                written += Int64(chunk.count)
+                progress.completedUnitCount = completedBefore + written
+            }
+            guard result != nil else { return nil }
+            return (HashCalculator.hex(hasher.finalize()), written)
+        }
+
+        var outcome = try await download(entry.s3VersionId)
+        if outcome == nil, entry.s3VersionId != nil {
+            AppLogger.fileProvider.notice("fetchContents: pinned version missing; falling back to latest: \(path, privacy: .private)")
+            outcome = try await download(nil)
+        }
+        guard let (sha, written) = outcome else { return .notFound }
+        try handle.close()
+        guard written == entry.size, sha == entry.sha256 else { return .mismatch(written: written) }
+        return .fetched
+    }
+
+    /// 取得した中身がマニフェストと合わないときのエラー（item を消させない I/O エラー）。
+    private static func integrityError() -> Error {
+        NSError(
+            domain: NSCocoaErrorDomain, code: NSFileReadCorruptFileError,
+            userInfo: [
+                NSLocalizedDescriptionKey:
+                    String(localized: "Downloaded content failed integrity verification.")
+            ]
+        )
     }
 
     // MARK: - 実体化バッジ（Issue #65）
@@ -1351,6 +1432,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             // FruitBasket 同様、working set = ドメイン全 item として列挙する（Phase 4）。
             return FileProviderEnumerator(dirPath: nil, services: services)
         }
+        // パッケージ（`k:`・#140）はコンテナではない（中身は item にせず fetchContents が丸ごと返す）。
         guard let ref = containerItemIdentifier.tidePathAndKind, ref.isDirectory else {
             throw NSFileProviderError(.noSuchItem)
         }
