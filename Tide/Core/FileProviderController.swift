@@ -12,9 +12,11 @@ import TideCore
 enum FileProviderController {
     /// FP ドメイン。identifier は安定文字列（変えると別ドメイン＝別フォルダになる）。
     /// 変更時は `migrateStaleDomainsIfNeeded` が旧 identifier ドメインを作り直す。
+    /// 履歴: "poc" → "main"（2026-07-12）→ "main2"（#140 = パッケージの id `k:` の導入。既存の
+    /// `.xcodeproj` などをフォルダの item からパッケージの item に切り替えるため）。
     static let domain: NSFileProviderDomain = {
         let domain = NSFileProviderDomain(
-            identifier: NSFileProviderDomainIdentifier(rawValue: "main"),
+            identifier: NSFileProviderDomainIdentifier(rawValue: "main2"),
             displayName: "Tide"
         )
         // ゴミ箱同期は扱わない。宣言しないとデーモンが .trashContainer の列挙を
@@ -207,12 +209,15 @@ enum FileProviderController {
     /// （PR #61 レビュー #1: remove 成功 → add 失敗だと stale 検出が no-op になり移行が再走しない）。
     private static let migrationPendingAddKey = "fileProviderMigrationPendingAdd"
 
-    /// 旧 identifier（PoC 世代の "poc"）のドメインが残っていたら現行 identifier で作り直す。
+    /// 旧 identifier（PoC 世代の "poc"・パッケージ対応前の "main"）のドメインが残っていたら
+    /// 現行 identifier で作り直す。
     /// identifier スキーマの変更は必ずドメイン作り直しで行う — 既存レプリカへの無再作成移行では
     /// 旧 id item が「名前 2」リネームで恒久残存する（docs/09 M5 節・Phase 5-1 実機確定）。
     /// 作り直しは旧ドメインのレプリカごと破棄する＝旧ドメイン内の S3 未到達の保留書込は失われる
-    /// （identifier 変更時に作り直しを了承済み・一度きり）。
-    /// stale は per-domain `remove(_:)` で外す — 現行 "main" が共存していてもそのレプリカ・
+    /// （identifier 変更時に作り直しを了承済み・一度きり）。除外されてローカルにしか無いファイル
+    /// （`.env` など）もレプリカと一緒に消えるので、新しい identifier のビルドを**初めて起動する前に**
+    /// レプリカの外へ退避する（#140 の切り替え手順 = docs/08「パッケージ」節）。
+    /// stale は per-domain `remove(_:)` で外す — 現行 "main2" が共存していてもそのレプリカ・
     /// 保留書込は温存する（PR #61 レビュー #2。`removeAllDomains` は使わない）。
     /// 「有効化済み」というユーザ意図は remove 前に立てる pending フラグ + 再登録で引き継ぐ。
     /// ドメイン無し/現行のみ（かつ pending なし）なら no-op。

@@ -203,4 +203,24 @@ final class ManifestTreePackageTests: XCTestCase {
             changes.deleted.map { "\($0.kind):\($0.path)" },
             ["directory:p/Deck.key", "file:p/Deck.key/a", "directory:p/Deck.key/sub", "file:p/Deck.key/sub/b"])
     }
+
+    // MARK: - 本番の判定
+
+    /// 本番の判定（`.system`）はその Mac の型情報で決まり、ツリーの既定（`.active`）はそれを使う。
+    /// OS が宣言する型（`.app`）だけで確かめ、入っているアプリで変わる型（`.key` など）には頼らない。
+    func testSystemClassifierUsesTypeInformation() {
+        let system = PackageClassifier.system
+        XCTAssertTrue(system.isPackage(name: "Tool.app"))
+        XCTAssertTrue(system.isPackage(name: "Tool.APP"))
+        XCTAssertTrue(system.isPackage(name: "Notes.rtfd"))
+        // フレームワークは Finder でもフォルダとして見える
+        XCTAssertFalse(system.isPackage(name: "Lib.framework"))
+        // ファイルの型・宣言の無い拡張子（仮の型）・拡張子なし
+        XCTAssertFalse(system.isPackage(name: "notes.txt"))
+        XCTAssertFalse(system.isPackage(name: "paper.pdf"))
+        XCTAssertFalse(system.isPackage(name: "repo.git"))
+        XCTAssertFalse(system.isPackage(name: "Makefile"))
+        let tree = ManifestTree(files: ["bin/Tool.app/Contents/Info.plist": entry()])
+        XCTAssertEqual(members(of: tree.node(at: "bin/Tool.app")), ["Contents/Info.plist"])
+    }
 }
