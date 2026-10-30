@@ -76,8 +76,12 @@ signal を消費しない）。世代の系譜は `ManifestGenerationLog`（App 
   （Issue #131・詳細は `docs/08`「File Provider 増分列挙」）。
 
 - item identifier は **kind 織り込み形式**（ファイル = `f:<path>` / ディレクトリ = `d:<path>`・
-  M5 Phase 5-1）。種別変化（file ⇄ dir）は「旧 kind ノードの delete + 新 kind ノードの update」=
-  別 id の独立した 2 変化になり、fileproviderd の同一 id ingest 合成問題を構造的に回避する（後述）。
+  M5 Phase 5-1 / パッケージ = `k:<path>`・#140）。種別変化（file ⇄ dir ⇄ package）は「旧 kind ノードの
+  delete + 新 kind ノードの update」= 別 id の独立した 2 変化になり、fileproviderd の同一 id ingest 合成問題を
+  構造的に回避する（後述）。
+- **パッケージ（#140・実装中）**: S3 とマニフェストにはパッケージの中身をファイルごとに置き、FP には
+  1 つの item（`k:<path>`・パッケージ型）として見せる。判定はその Mac の型情報（`PackageClassifier`）。
+  詳細は `docs/08`「パッケージ」節。
 - 実体化バッジ（Issue #65）は anchor 意味論と独立の eventual オーバーレイとして working set の
   enumerateChanges（**唯一の報告点**）に合流する。詳細は `docs/08`「FP 実体化連動バッジ」節。
 

@@ -7,7 +7,7 @@ import Foundation
 /// - ファイル: entry の変化（sha/size/mtime/versionId 等）・新規出現を `updated` に含める。
 /// - ディレクトリ: 出現、および合成 mtime の変化（配下ファイル更新で前進する）を `updated` に
 ///   含める。
-/// - **種別変化（file⇄directory・同一 path）は「旧ノードの delete + 新ノードの update」に
+/// - **種別変化（file⇄directory⇄package・同一 path）は「旧ノードの delete + 新ノードの update」に
 ///   分解する**（M5 Phase 5-1）: fileproviderd は同一 id の kind 変化を受理しない（update 単発は
 ///   itemKindMismatch でゾンビ化、単一レスポンス/moreComing ページ/近接別セッションの
 ///   delete+update は ingest 合成で delete が勝つ = 2026-07-05〜06 実機確定）。item identifier は
@@ -43,7 +43,9 @@ public enum ManifestTreeDiff {
             if oldNode != node {
                 updated.append(node)
                 // 種別変化は旧 kind ノードの delete も併せて出す（M5 Phase 5-1・ヘッダ参照）。
-                if oldNode.isDirectory != node.isDirectory {
+                // パッケージ（#140）も別の種類 = 別 id（`k:`）なので、ファイル ⇄ パッケージ ⇄
+                // ディレクトリの変化はすべてここを通る。
+                if oldNode.kind != node.kind {
                     deleted.append(oldNode)
                 }
             }

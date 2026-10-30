@@ -52,6 +52,12 @@ final class FileProviderItem: NSObject, NSFileProviderItem, NSFileProviderItemDe
         case .file(let path, _):
             let ext = (path as NSString).pathExtension
             return ext.isEmpty ? .data : (UTType(filenameExtension: ext) ?? .data)
+        case .package(let path, _, _, _):
+            // その Mac の型情報のパッケージ型（Keynote なら `com.apple.iwork.keynote.key`）。
+            // ツリーは同じ型情報でパッケージと判定しているので、通常は `.package` に落ちない（#140）。
+            let ext = (path as NSString).pathExtension
+            if let type = UTType(filenameExtension: ext), type.conforms(to: .package) { return type }
+            return .package
         }
     }
 
@@ -75,8 +81,9 @@ final class FileProviderItem: NSObject, NSFileProviderItem, NSFileProviderItemDe
                 caps.insert(.allowsEvicting)
             }
             return caps
-        case .file:
+        case .file, .package:
             // M5 Phase 5-2: 内容編集と削除、Phase 5-4: 改名/移動、Issue #105: evict を解放。
+            // パッケージ（#140）は中身を持つ 1 つの item なのでファイルと同じ。
             return [
                 .allowsReading, .allowsWriting, .allowsDeleting,
                 .allowsRenaming, .allowsReparenting, .allowsEvicting,
@@ -104,17 +111,21 @@ final class FileProviderItem: NSObject, NSFileProviderItem, NSFileProviderItemDe
     }
 
     var documentSize: NSNumber? {
-        if case .file(_, let entry) = node { return NSNumber(value: entry.size) }
-        return nil
+        switch node {
+        case .file(_, let entry): return NSNumber(value: entry.size)
+        case .package(_, let members, _, _):
+            return NSNumber(value: members.values.reduce(Int64(0)) { $0 + $1.size })
+        case .directory: return nil
+        }
     }
 
     var contentModificationDate: Date? {
         switch node {
         case .file(_, let entry):
             return ISO8601.parse(entry.mtime)
-        case .directory(_, let mtime):
-            // 合成 mtime（配下ファイルの最大値）。無指定 nil のままだと Finder が 1970 を
-            // 表示する（Phase 3 PoC の既知の癖）。
+        case .directory(_, let mtime), .package(_, _, _, let mtime):
+            // 合成 mtime（配下ファイルの最大値。パッケージは中身の最大値・#140）。無指定 nil の
+            // ままだと Finder が 1970 を表示する（Phase 3 PoC の既知の癖）。
             return mtime
         }
     }

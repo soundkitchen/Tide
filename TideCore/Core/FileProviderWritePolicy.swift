@@ -5,7 +5,8 @@ import Foundation
 /// できないため、テスト可能なロジックは TideCore に置く。
 public enum FileProviderWritePolicy {
     /// `NSFileProviderItemVersion.contentVersion` に載せるバイト列をノードから作る。
-    /// file = sha256 hex（小文字）の UTF-8 / directory = `"dir"` の UTF-8。
+    /// file = sha256 hex（小文字）の UTF-8 / directory = `"dir"` の UTF-8 /
+    /// package = 中身の digest（`ManifestTree.packageDigest`・sha256 と同じ形・#140）の UTF-8。
     /// **符号化（これ）と復号（`baseSha`）を対で同居させる**（PR #58 レビュー #8）: 別モジュールに
     /// 分かれていると Phase 5-3/5-4 で片方だけ変えたとき、コンパイルもテストも通らないまま
     /// 「全 delete が拒否 / 全 modify が base:nil 劣化」の無言故障になる。往復は
@@ -14,6 +15,7 @@ public enum FileProviderWritePolicy {
         switch node {
         case .file(_, let entry): return Data(entry.sha256.utf8)
         case .directory: return Data("dir".utf8)
+        case .package(_, _, let digest, _): return Data(digest.utf8)
         }
     }
 
@@ -33,6 +35,10 @@ public enum FileProviderWritePolicy {
         switch node {
         case .file(_, let entry):
             base = entry.sha256
+        case .package(_, _, let digest, _):
+            // パッケージも digest を先頭に置く（ファイルと同じく rebind 後の 3-way ベースを
+            // metadataVersion から復元するため・#140）。
+            base = digest
         case .directory(_, let mtime):
             base = mtime.map { "dir-\(ISO8601.format($0))" } ?? "dir"
         }
