@@ -145,6 +145,28 @@ final class FileProviderWritePolicyTests: XCTestCase {
         XCTAssertNil(FileProviderWritePolicy.baseSha(fromContentVersion: datedMeta))
     }
 
+    /// dir の metadataVersion から日時を取り出す（Issue #144）: 符号化との往復（実体化形も）と、
+    /// 日時を持たない・dir でない・読めない版は nil。
+    func testDirectoryMtimeRoundTripsThroughMetadataVersion() {
+        let date = ISO8601.parse("2025-01-02T03:04:05Z")
+        let dated = ManifestTree.Node.directory(path: "d", mtime: date)
+        for materialized in [false, true] {
+            XCTAssertEqual(
+                FileProviderWritePolicy.directoryMtime(
+                    fromMetadataVersion: FileProviderWritePolicy.metadataVersion(
+                        for: dated, materialized: materialized)),
+                date)
+        }
+        let bare = ManifestTree.Node.directory(path: "d", mtime: nil)
+        XCTAssertNil(FileProviderWritePolicy.directoryMtime(
+            fromMetadataVersion: FileProviderWritePolicy.metadataVersion(for: bare, materialized: false)))
+        let sha = String(repeating: "0123456789abcdef", count: 4)
+        XCTAssertNil(FileProviderWritePolicy.directoryMtime(fromMetadataVersion: Data(sha.utf8)))
+        XCTAssertNil(FileProviderWritePolicy.directoryMtime(fromMetadataVersion: Data("dir-garbage".utf8)))
+        XCTAssertNil(FileProviderWritePolicy.directoryMtime(fromMetadataVersion: Data([0xff, 0xfe])))
+        XCTAssertNil(FileProviderWritePolicy.directoryMtime(fromMetadataVersion: nil))
+    }
+
     // MARK: - childPath（createItem のパス合成・M5 Phase 5-3）
 
     func testChildPathJoinsParentAndFilename() {

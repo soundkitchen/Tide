@@ -465,12 +465,13 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             // ツリー（cache.current()）を引く（cold 時は S3 往復）が、取得に失敗したら受理へ倒す
             // ので「フォルダ作成はオフラインでも成功」は維持している。
             //
-            // 仮想 dir の mtime 規約（PR #59 レビュー #3・三経路で共通）: **作成時のみテンプレート
-            // 値を載せ、再照会（item(for:) / dir メタデータ modifyItem）は nil** — mtime は
-            // マニフェストに保存されず再照会時には知り得ないため。metadataVersion が
-            // "dir-<日時>" → "dir" へ一度揺れ得るが、contentVersion（"dir"）は不変なので
-            // 再取得等の副作用はない（実機 bounce ゼロ確認済み）。実体化後は配下最大 mtime の
-            // 合成値に収束する。
+            // 仮想 dir の mtime 規約: createItem と modifyItem（メタデータ変更・改名）は、システムが
+            // 渡した item の日時をそのまま返す（改名は item に日時が無いので、baseVersion の
+            // metadataVersion に符号化しておいた日時を返す）。**modifyItem で nil を返すと、システムはそれを
+            // 1970 としてディスクに書く**（Issue #144・2026-10-31 実機確定: 中にファイルを作ると
+            // フォルダの日時の modifyItem が来る）。日時はマニフェストにもレジストリにも保存しない
+            // ので、item(for:) は nil のまま（そこから 1970 になる経路は未確認・docs/09 #144 項）。
+            // 実体化後は配下最大 mtime の合成値に収束する。
             let dirMtime = itemTemplate.contentModificationDate ?? nil
             let dirCompletion = UncheckedSendableBox(value: completionHandler)
             let task = Task {
@@ -785,6 +786,9 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             // 保存先が無いので**黙って受理**する（ファイル側のメタデータのみ modify と同じ理由 =
             // remainingFields に残すと fileproviderd が永久再試行する）。権威 = 現ツリーの合成 dir、
             // ツリー外（ローカル仮想フォルダ）は合成 dir を返して温存。
+            // 仮想フォルダの日時は、システムが渡した item の日時をそのまま返す（Issue #144: nil で
+            // 返すとシステムが 1970 をディスクに書く。中にファイルを作るとこの経路を必ず通る）。
+            let virtualDirMtime = item.contentModificationDate ?? nil
             let task = Task {
                 defer { progress.completedUnitCount = progress.totalUnitCount }
                 do {
@@ -835,7 +839,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                             BadgeFlags(tree: tree, told: told).item(node), [], false, nil)
                     } else {
                         completion.value(
-                            FileProviderItem(node: .directory(path: path, mtime: nil)),
+                            FileProviderItem(node: .directory(path: path, mtime: virtualDirMtime)),
                             [], false, nil)
                     }
                 } catch {
@@ -1155,6 +1159,11 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         }
         // 除外したときの通知に出す新しい名前（検証できない名前もそのまま・表示専用・#147）
         let newDisplayPath = FileProviderWritePolicy.displayPath(parentPath: newParentPath, filename: item.filename)
+        // 仮想フォルダを返すときの日時（Issue #144）。改名の modifyItem では item に日時が入って
+        // いない（`changedFields` が名前だけのとき・実機）ので、前に返した版（baseVersion の
+        // metadataVersion = `dir-<日時>`）から取り出す。日時なしで返すとシステムが 1970 を書く。
+        let virtualDirMtime = (item.contentModificationDate ?? nil)
+            ?? FileProviderWritePolicy.directoryMtime(fromMetadataVersion: version.metadataVersion)
         guard validNewPath != oldPath else {
             // 実質 no-op（同一 path への「移動」）。この分岐は実際に踏める — Swift の
             // `String ==` は正準等価（NFC/NFD 同一視）のため、正規化差だけの rename が該当する。
@@ -1228,8 +1237,9 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                         // パッケージに仮想の受け皿は無い（#140）= もう無い
                         completion.value(nil, [], false, NSFileProviderError(.noSuchItem))
                     } else {
+                        // 仮想フォルダ: 日時を付けて返す（Issue #144: nil は 1970 になる）
                         completion.value(
-                            FileProviderItem(node: .directory(path: oldPath, mtime: nil)),
+                            FileProviderItem(node: .directory(path: oldPath, mtime: virtualDirMtime)),
                             [], false, nil)
                     }
                 } catch {
@@ -1313,8 +1323,9 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                         // レジストリ未登録の仮想フォルダも rename を機に保護下へ入れる）。
                         await services.virtualDirs.renameSubtree(from: oldPath, to: newPath)
                         await services.virtualDirs.add(newPath)
+                        // 日時を付けて返す（Issue #144: nil は 1970 になる）
                         completion.value(
-                            FileProviderItem(node: .directory(path: newPath, mtime: nil)),
+                            FileProviderItem(node: .directory(path: newPath, mtime: virtualDirMtime)),
                             [], false, nil)
                         return
                     }
