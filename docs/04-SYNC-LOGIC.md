@@ -143,7 +143,11 @@ M5 Track B-2）は再アップロードを本質的に伴うため、上限を *
 
 書込は全経路が **`ManifestUpdater`**（`TideCore/S3/Uploader.swift`）の共有チョークポイントを通る:
 `updateFileEntry(for:base:newEntry:)` / `removeFileEntry(for:base:)` /
-`removeFileEntries(expecting:)` / `moveFileEntries(_:)`。呼び出し元は FP 拡張（`ExtensionWriter`）と
+`removeFileEntries(expecting:)` / `moveFileEntries(_:)` / `writeFileEntries(upserting:removing:)`（#140・パッケージの
+中身をまとめて書く二相のバッチ RMW = 各 entry を `decideUpload` で判定して書き足し〈`.conflict` が 1 件でもあれば
+そのシャードは書かずに中断〉→ 除去は `removeFileEntries` へ委譲）。バッチ RMW（`removeFileEntries` / `moveFileEntries` /
+`writeFileEntries`）は各フェーズの中でシャードを 8 つまで並行に処理し（`runShardBatch`・#140）、拒否や競合で
+中断するときも、走っているシャードは書き切ってから返す（新しいシャードには着手しない）。呼び出し元は FP 拡張（`ExtensionWriter`）と
 アプリの `S3RestoreService`・`.syncignore` seed（folderSync 世代では `Uploader` 本体）。
 
 楽観的ロック（CAS）の骨格:
@@ -300,9 +304,9 @@ gitignore 構文の一般的サブセット。詳細な確定仕様は `docs/07-
 
 ## エッジケース
 
-### 種別変化（file ⇄ dir）
+### 種別変化（file ⇄ dir ⇄ package）
 
-FP 経路では item identifier の kind 織り込み（`f:`/`d:`・M5 Phase 5-1）により「旧 kind の delete +
+FP 経路では item identifier の kind 織り込み（`f:`/`d:`・M5 Phase 5-1 / パッケージ = `k:`・#140）により「旧 kind の delete +
 新 kind の update」= 別 id の独立変化として配信され、fileproviderd の同一 id ingest 合成問題は
 構造的に存在しない。folderSync 世代の同名置換バグと三層防御（**ファイルが同名ディレクトリへ
 置換された** / Issue #52）の記録は `docs/04a` を参照（コア修正は温存コードに残存・回帰は

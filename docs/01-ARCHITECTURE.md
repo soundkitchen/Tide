@@ -79,6 +79,8 @@ Tide/（リポジトリルート）
 │   │   ├── FileProviderEnumerationPaging.swift  FP 列挙のページ / バッチ分割（推奨サイズ × 10・#131）
 │   │   ├── MaterializedBadge.swift    実体化連動バッジ判定（#65）
 │   │   ├── FileProviderWritePolicy.swift  FP 書込のパス合成 / 検証 (M5 Phase 5)
+│   │   ├── PackageClassifier.swift    パッケージの判定（その Mac の型情報 = UTType・#140）
+│   │   ├── PackageScanner.swift       パッケージの中身の走査と丸ごと除外の判定（#140）
 │   │   ├── ConflictNamer.swift        コンフリクト時のリネーム命名 (M2)
 │   │   ├── NoFollowFileReader.swift   O_NOFOLLOW 単一 FD 読み出し（TOCTOU 解消）(M3)
 │   │   ├── RateLimiter.swift          帯域制御（トークンバケット）(M3)
@@ -137,13 +139,13 @@ Tide/（リポジトリルート）
 ├── TideFileProvider/                 【appex: NSFileProviderReplicatedExtension・DB 非接触】
 │   ├── FileProviderExtension.swift    コールバック本体（列挙 anchor / fetchContents / 書込系）
 │   ├── FileProviderEnumerator.swift   working set / ディレクトリ列挙・enumerateChanges
-│   ├── FileProviderItem.swift         item 表現（f:/d: identifier・capabilities・バッジ / evict）
+│   ├── FileProviderItem.swift         item 表現（f:/d:/k: identifier・capabilities・バッジ / evict）
 │   ├── ExtensionWriter.swift          書込系の実務（S3 PUT / delete / move → ManifestUpdater 合流）
 │   ├── ExtensionServices.swift        共有サービス束（S3 client / ignore / ログ・DB 非接触の不変条件）
 │   ├── MaterializedSetObserver.swift  実体化セット観測（バッジ live 側）
 │   └── Resources/Localizable.xcstrings  拡張の user-facing 文言（app 側とは別カタログ）
 │
-├── TideTests/                        ユニットテスト（67 ファイル・folderSync 回帰網含む）
+├── TideTests/                        ユニットテスト（folderSync 回帰網含む）
 └── tools/soak/                       soak 監視（consistency_check.py。launchd 常駐は 2026-09-19 で運用終了・#40 #84）
 ```
 
@@ -199,7 +201,9 @@ FPEventLog / signal）だけを接点にする**。
 
 - **列挙**: `ManifestSnapshotLoader`（全シャード読み・DB 非依存）→ `ManifestTree` 合成 →
   世代 SyncAnchor + `enumerateChanges`（`ManifestTreeDiff`）で増分配信。item identifier は
-  kind 織り込み（`f:<path>` / `d:<path>`・Phase 5-1）。
+  kind 織り込み（`f:<path>` / `d:<path>`・Phase 5-1 / `k:<path>` = パッケージ・#140）。パッケージ（Keynote の
+  パッケージ形式・`.xcodeproj` など）は中身をまとめた 1 つの item として見せ、コンテナにしない（`k:` の列挙は
+  `noSuchItem`）。`fetchContents` は中身を 1 つずつ取って検証し、フォルダに組み立てて返す。詳細 = `docs/08`「パッケージ」節。
 - **実体化**: `fetchContents` = versionId 固定の `streamObject` + サイズ / SHA-256 検証。
 - **書込**: `createItem` / `modifyItem` / `deleteItem` / rename・reparent を `ExtensionWriter` が処理し、
   S3 本体 + `ManifestUpdater`（3-way `decideUpload`・CAS）へ合流。除外（機密網 / symlink /
@@ -269,7 +273,8 @@ Version History / 削除済み復元の実行系。tmp DL → 現行版 PUT → 
 
 FP 拡張が書く App Group Caches の追記型 JSONL（書き手 = 拡張のみ・サイズ上限ローテーション）。
 Sync Activity ウィンドウは fpOnly でこれを読む（#83）。アプリの `FPEventNoticeWatcher` も読み、
-拡張が印 `notice` を付けたレコード（同期できない名前・symlink・同期しない名前への改名）を
+拡張が印 `notice` を付けたレコード（同期できない名前・symlink・同期しない名前への改名・丸ごと除外したパッケージ
+= 中にリンクや同期できない項目がある / 中身が 10,000 件を超える〈#140〉）を
 「ファイルが未バックアップ」の OS 通知にする（#147。5 秒ごとに stat の署名 `changeSignature` で
 変化を見て、変わったときだけ読む）。
 
