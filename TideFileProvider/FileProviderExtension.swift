@@ -3,6 +3,7 @@ import CryptoKit
 import Foundation
 import TideCore
 import UniformTypeIdentifiers
+import os
 
 /// Tide の File Provider 拡張（M5 Phase 3 読み取り materialize → Phase 5 双方向書込）。
 ///
@@ -24,15 +25,96 @@ import UniformTypeIdentifiers
 final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, @unchecked Sendable {
     private let domain: NSFileProviderDomain
     private let services: ExtensionServices?
+    /// インスタンスの識別子（寿命のログ用・Issue #151）。fileproviderd は同じプロセスの中で拡張の
+    /// インスタンスを作り直すことがあるので、どのインスタンスの初期化・invalidate・コールバックかを
+    /// ログで突き合わせられるようにする。ランダムな値で機密ではない。
+    private let instanceID = String(UUID().uuidString.prefix(8)).lowercased()
+    /// このインスタンスで処理中の書込系コールバック（呼び出しごとの連番 → 名前）。invalidate の時点で
+    /// 残っているものを連番で出し、started / finished の行と突き合わせる（PR #155 レビュー指摘 1）。
+    private let writesInFlight = OSAllocatedUnfairLock(initialState: WritesInFlight())
+
+    private struct WritesInFlight {
+        var nextSeq = 1
+        var active: [Int: String] = [:]
+    }
 
     required init(domain: NSFileProviderDomain) {
         self.domain = domain
         self.services = ExtensionServices.fromSharedConfig(domain: domain)
         super.init()
-        AppLogger.fileProvider.notice("FileProviderExtension initialized (configured: \(self.services != nil))")
+        AppLogger.fileProvider.notice("FileProviderExtension initialized [\(self.instanceID, privacy: .public)] (configured: \(self.services != nil))")
     }
 
-    func invalidate() {}
+    func invalidate() {
+        // 寿命のログ（Issue #151）: 処理中のコールバックが残ったまま invalidate されると、その返事は
+        // システムに届かない（LifetimeError）。残っているものは連番と名前で出す（パスは出さない）。
+        let active = writesInFlight.withLock { $0.active }
+        let list = active.keys.sorted().map { "#\($0) \(active[$0] ?? "")" }.joined(separator: ", ")
+        AppLogger.fileProvider.notice("FileProviderExtension invalidated [\(self.instanceID, privacy: .public)] (writes in flight: \(active.count)\(list.isEmpty ? "" : " = " + list, privacy: .public))")
+    }
+
+    deinit {
+        // invalidate されずに捨てられた・invalidate の後もタスクに掴まれて生き続けたインスタンスを
+        // 見分けるため、解放の時刻も残す（PR #155 レビュー指摘 2）。
+        AppLogger.fileProvider.notice("FileProviderExtension deinitialized [\(self.instanceID, privacy: .public)]")
+    }
+
+    /// 書込系コールバックの開始と終了（かかった時間・エラー）を寿命のログに残す（Issue #151）。
+    /// 各コールバックの冒頭で completion を包めば、どの経路で返しても終了が記録される。
+    private func trackWrite(
+        _ name: String, target: String,
+        completion: @escaping (NSFileProviderItem?, NSFileProviderItemFields, Bool, Error?) -> Void
+    ) -> (NSFileProviderItem?, NSFileProviderItemFields, Bool, Error?) -> Void {
+        let finish = beginWrite(name, target: target)
+        return { item, remaining, shouldFetch, error in
+            finish(error)
+            completion(item, remaining, shouldFetch, error)
+        }
+    }
+
+    private func trackWrite(
+        _ name: String, target: String, completion: @escaping (Error?) -> Void
+    ) -> (Error?) -> Void {
+        let finish = beginWrite(name, target: target)
+        return { error in
+            finish(error)
+            completion(error)
+        }
+    }
+
+    /// 開始を記録し、終了を記録する関数を返す。二重に呼ばれても数を崩さない（SDK 契約上は 1 回だけ）。
+    /// 呼び出しごとの連番（`#N`）を started / finished の両方に出す（PR #155 レビュー指摘 1）。
+    /// 行数を抑えるため、started と速く成功した finished は info、遅い（1 秒以上）かエラーの finished だけ
+    /// notice にする（同 指摘 5・調査が済んだら外してよい = docs/08）。
+    private func beginWrite(_ name: String, target: String) -> @Sendable (Error?) -> Void {
+        let id = instanceID
+        let tracker = writesInFlight
+        let (seq, inFlight) = tracker.withLock { state -> (Int, Int) in
+            let seq = state.nextSeq
+            state.nextSeq += 1
+            state.active[seq] = name
+            return (seq, state.active.count)
+        }
+        let start = ContinuousClock.now
+        let finished = OSAllocatedUnfairLock(initialState: false)
+        AppLogger.fileProvider.info("\(name, privacy: .public) #\(seq) started [\(id, privacy: .public)] (writes in flight: \(inFlight)): \(target, privacy: .private)")
+        return { error in
+            let first = finished.withLock { done -> Bool in
+                defer { done = true }
+                return !done
+            }
+            guard first else { return }
+            tracker.withLock { _ = $0.active.removeValue(forKey: seq) }
+            let ms = Int((ContinuousClock.now - start) / .milliseconds(1))
+            if let error {
+                AppLogger.fileProvider.notice("\(name, privacy: .public) #\(seq) finished [\(id, privacy: .public)] after \(ms) ms with error: \(String(describing: error), privacy: .private)")
+            } else if ms >= 1000 {
+                AppLogger.fileProvider.notice("\(name, privacy: .public) #\(seq) finished [\(id, privacy: .public)] after \(ms) ms (slow)")
+            } else {
+                AppLogger.fileProvider.info("\(name, privacy: .public) #\(seq) finished [\(id, privacy: .public)] after \(ms) ms")
+            }
+        }
+    }
 
     // MARK: - Items
 
@@ -379,6 +461,10 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         request: NSFileProviderRequest,
         completionHandler: @escaping (NSFileProviderItem?, NSFileProviderItemFields, Bool, Error?) -> Void
     ) -> Progress {
+        let completionHandler = trackWrite(
+            "createItem",
+            target: "\(itemTemplate.parentItemIdentifier.rawValue) / \(itemTemplate.filename)",
+            completion: completionHandler)
         let progress = Progress(totalUnitCount: 1)
         guard let services else {
             progress.completedUnitCount = 1
@@ -761,6 +847,9 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         request: NSFileProviderRequest,
         completionHandler: @escaping (NSFileProviderItem?, NSFileProviderItemFields, Bool, Error?) -> Void
     ) -> Progress {
+        let completionHandler = trackWrite(
+            "modifyItem(fields: \(changedFields.rawValue))", target: item.itemIdentifier.rawValue,
+            completion: completionHandler)
         let progress = Progress(totalUnitCount: 1)
         guard let services else {
             progress.completedUnitCount = 1
@@ -1709,6 +1798,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         request: NSFileProviderRequest,
         completionHandler: @escaping (Error?) -> Void
     ) -> Progress {
+        let completionHandler = trackWrite(
+            "deleteItem", target: identifier.rawValue, completion: completionHandler)
         let progress = Progress(totalUnitCount: 1)
         guard let services else {
             progress.completedUnitCount = 1
