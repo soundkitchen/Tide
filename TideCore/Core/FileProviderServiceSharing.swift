@@ -86,29 +86,6 @@ public enum FileProviderServiceSharing {
         return Plan(reuseState: reuseState, reuseConnection: reuseConnection, reuseWriter: reuseWriter)
     }
 
-    /// サービスを作れなかった理由（Issue #158）。
-    public enum Unavailable: Equatable, Sendable {
-        /// 未セットアップ（setupCompleted が false・バケット / リージョンが無い）。factoryReset のあとなど。
-        case notConfigured
-        /// Keychain に認証情報が無い（`KeychainStore.load()` が nil）。
-        case missingCredentials
-        /// Keychain の読み取りが失敗した（`KeychainStore.load()` が throw = 一時的な失敗）。
-        case credentialsReadFailed
-    }
-
-    /// サービスを作れなかったときに、認証情報を持つ段（② 接続・③ 書き手）を共有の置き場から外すか。
-    ///
-    /// 設定が本当に欠けたとき（未セットアップ・認証情報が無い）は外す。Keychain の読み取りの一時的な
-    /// 失敗では外さない — 外すと次のインスタンスが段 ② を作り直し、書込を抱えた古いインスタンスと
-    /// 同じプロセスにコアレッサとキャッシュが 2 つできて index.json を奪い合う（#151 と同じ構図）。
-    /// 認証情報が入れ替わっていれば、読み取りが戻ったあとのキーの比較で段 ② は作り直される。
-    public static func dropsConnection(when reason: Unavailable) -> Bool {
-        switch reason {
-        case .notConfigured, .missingCredentials: true
-        case .credentialsReadFailed: false
-        }
-    }
-
     /// 認証情報の比較用の値 = アクセスキー ID + シークレットの SHA-256。シークレットの入れ替えも
     /// 見分けつつ、共有の置き場にシークレットを平文で持たない（PR #157 レビュー指摘 6）。
     public static func credentialsDigest(_ credentials: AWSCredentials) -> String {

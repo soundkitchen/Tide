@@ -66,14 +66,6 @@ final class FileProviderServiceSharingTests: XCTestCase {
         XCTAssertEqual(Sharing.plan(cached: key(), new: key(bucket: "prod-tide")), rebuildAll)
     }
 
-    /// 設定が本当に欠けたときだけ接続の段を外し、Keychain の読み取りの一時的な失敗では外さない
-    /// （Issue #158: 外すと次のインスタンスがコアレッサを作り直し、古いインスタンスと同居する）。
-    func testConnectionIsDroppedOnlyWhenConfigurationIsMissing() {
-        XCTAssertTrue(Sharing.dropsConnection(when: .notConfigured))
-        XCTAssertTrue(Sharing.dropsConnection(when: .missingCredentials))
-        XCTAssertFalse(Sharing.dropsConnection(when: .credentialsReadFailed))
-    }
-
     /// 比較用の値はシークレットを平文で含まず、シークレットの入れ替えは見分ける。
     func testCredentialsDigestHidesSecretButDistinguishesIt() {
         let digest = Sharing.credentialsDigest(AWSCredentials(accessKeyId: "AKIA1", secretAccessKey: "secret-1"))
