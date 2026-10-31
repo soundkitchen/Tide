@@ -156,20 +156,22 @@ struct ExtensionServices: Sendable {
         guard config.setupCompleted, hasBucket, hasRegion,
               let bucket = config.bucketName, let region = config.region else {
             AppLogger.fileProvider.notice("Extension not configured (setup incomplete)")
-            dropSharedConnection()
+            dropSharedConnection(when: .notConfigured)
             return nil
         }
         let credentials: AWSCredentials?
         do {
             credentials = try KeychainStore().load()
         } catch {
+            // 一時的な失敗では共有の接続を外さない（Issue #158）。このインスタンスは
+            // notAuthenticated を返し、次のインスタンスが読み直す。
             AppLogger.fileProvider.error("Extension: Keychain read failed: \(String(describing: error), privacy: .private)")
-            dropSharedConnection()
+            dropSharedConnection(when: .credentialsReadFailed)
             return nil
         }
         guard let credentials else {
             AppLogger.fileProvider.error("Extension: AWS credentials not found in shared Keychain")
-            dropSharedConnection()
+            dropSharedConnection(when: .missingCredentials)
             return nil
         }
         // プロセス内で共有する（Issue #151）: fileproviderd は同じプロセスの中で拡張のインスタンスを
@@ -293,7 +295,9 @@ struct ExtensionServices: Sendable {
 
     /// 設定が欠けたとき（factoryReset のあと・認証情報が無いとき）、認証情報を持つ段を置き場から
     /// 外す。状態の段は残す（認証情報を持たず、設定が戻ったときに同じものを使い回す）。
-    private static func dropSharedConnection() {
+    /// Keychain の読み取りの一時的な失敗では外さない（Issue #158・`FileProviderServiceSharing.dropsConnection`）。
+    private static func dropSharedConnection(when reason: FileProviderServiceSharing.Unavailable) {
+        guard FileProviderServiceSharing.dropsConnection(when: reason) else { return }
         sharedLock.lock()
         defer { sharedLock.unlock() }
         guard let entry = shared, entry.connected != nil else { return }
