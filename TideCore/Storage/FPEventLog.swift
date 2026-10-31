@@ -97,16 +97,16 @@ public enum FPEventNotice: String, Sendable, CaseIterable {
     }
 
     /// 書込の失敗に付ける印（#148）。一過性のエラー（ネットワーク・並行書込の衝突 = fileproviderd の
-    /// 再試行で直りうる）とキャンセルには付けない（nil）。
-    /// - Parameter sizeLimitApplies: サイズ超過が設定のアップロード上限によるものか。移動のコピーの上限
-    ///   （5 GiB）は設定を変えても直らないので、`fileTooLarge` ではなく `writeFailed` として数える。
-    public static func forWriteFailure(_ error: Error, sizeLimitApplies: Bool = true) -> FPEventNotice? {
+    /// 再試行で直りうる）とキャンセルには付けない（nil）。`SyncError.fileTooLarge`（設定のアップロード上限）は
+    /// `fileTooLarge`。移動のコピーの上限（5 GiB）は拡張が別のエラーで投げる（設定を変えても直らない）ので
+    /// `writeFailed` になる。
+    public static func forWriteFailure(_ error: Error) -> FPEventNotice? {
         if error is CancellationError { return nil }
         switch SyncIssueClassifier.category(for: error) {
         case .network, .remoteConflict:
             return nil
         case .fileTooLarge:
-            return sizeLimitApplies ? .fileTooLarge : .writeFailed
+            return .fileTooLarge
         case .accessDenied, .notFound, .unstableFile, .localIO, .database, .configuration,
              .unsafePath, .other:
             return .writeFailed

@@ -338,7 +338,7 @@ final class FPEventLogTests: XCTestCase {
     }
 
     /// 書込の失敗の印（#148）: 一過性（ネットワーク・並行書込の衝突）とキャンセルには付けない。
-    /// サイズ超過は設定の上限のときだけ `fileTooLarge`、移動のコピーの上限では `writeFailed`。
+    /// サイズ超過（`SyncError.fileTooLarge` = 設定の上限）は `fileTooLarge`、それ以外の書込の失敗は `writeFailed`。
     func testNoticeForWriteFailure() {
         XCTAssertNil(FPEventNotice.forWriteFailure(CancellationError()))
         XCTAssertNil(FPEventNotice.forWriteFailure(URLError(.notConnectedToInternet)))
@@ -346,7 +346,6 @@ final class FPEventLogTests: XCTestCase {
         XCTAssertNil(FPEventNotice.forWriteFailure(SyncError.indexUpdateFailedAfterCommit("cas")))
         let tooLarge = SyncError.fileTooLarge(path: "big.mov", size: 2_000_000_000)
         XCTAssertEqual(FPEventNotice.forWriteFailure(tooLarge), .fileTooLarge)
-        XCTAssertEqual(FPEventNotice.forWriteFailure(tooLarge, sizeLimitApplies: false), .writeFailed)
         XCTAssertEqual(FPEventNotice.forWriteFailure(SyncError.ioError(underlying: CocoaError(.fileReadNoPermission))), .writeFailed)
         XCTAssertEqual(FPEventNotice.forWriteFailure(NSError(domain: "x", code: 1)), .writeFailed)
     }

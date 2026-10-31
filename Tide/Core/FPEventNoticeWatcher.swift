@@ -18,7 +18,7 @@ import Foundation
 ///   記録が上限（`maxNotifiedKeys`）に達したら空にする（常駐中に際限なく増やさない・指摘 7）。
 /// - 書込の失敗（`writeFailed`）は 1 回では知らせない。同じパスで続いた回数を数え、
 ///   `failureThreshold` 回に達したら 1 回知らせる（folderSync の give-up に当たる・#148）。
-///   そのパスの書込が成功した記録（作成・更新・移動・削除・競合コピー）で数え直す。回数は起動前の
+///   そのパスの書込が成功した記録（作成・更新・移動・削除・競合コピー）で数え直す（サイズ超過の通知済みも外す）。回数は起動前の
 ///   記録も数えるが、知らせるのは起動後の失敗で回数に達したときだけ（起動直後にまとめて出さない）。
 /// - 1 回の確認で多数出るとき（symlink を多く含むフォルダを入れた等）は、バックアップされない出来事・
 ///   失敗が続く出来事それぞれで最初の `individualLimit` 件だけ個別に出し、残りを「ほか N 件」の 1 件に
@@ -103,7 +103,8 @@ final class FPEventNoticeWatcher {
     func start() {
         stop()
         // 拡張の追記の通知を受けたら読む
-        observation = observeChanges {
+        // 受信のクロージャは self を弱く持つ（登録が self を持ち続ける循環を作らない・PR #160 レビュー指摘 3）
+        observation = observeChanges { [weak self] in
             Task { @MainActor [weak self] in await self?.checkOnce() }
         }
         if observation == nil {
@@ -179,8 +180,12 @@ final class FPEventNoticeWatcher {
             next.sinceLaunch = max(next.sinceLaunch, record.timestamp)
             next.saved = max(next.saved, record.timestamp)
             if successEventTypes.contains(record.eventType), let path = record.path {
+                // 成功したら、そのパスの「再送される失敗」の通知済みも外す（上限を上げて一度上がったあとに、
+                // 同じ起動中にまた上限を超えたら知らせる・PR #160 レビュー指摘 5）
                 state.failureCounts[path] = nil
-                state.notified.remove("\(FPEventNotice.writeFailed.rawValue):\(path)")
+                for notice in [FPEventNotice.writeFailed, .fileTooLarge] {
+                    state.notified.remove("\(notice.rawValue):\(path)")
+                }
             }
             guard let raw = record.notice, let notice = FPEventNotice(rawValue: raw),
                   let subject = notice.subject(of: record), !subject.isEmpty

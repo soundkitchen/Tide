@@ -160,6 +160,19 @@ final class FPEventNoticeWatcherTests: XCTestCase {
         XCTAssertEqual(result.events, [.fileTooLarge(path: "big.mov")])
     }
 
+    /// 上限を上げて一度上がったら、同じ起動中にまた上限を超えたときにもう一度知らせる（PR #160 レビュー指摘 5）。
+    func testSuccessAllowsFileTooLargeAgain() {
+        var state = FPEventNoticeWatcher.State()
+        let result = FPEventNoticeWatcher.notices(
+            in: [
+                record(110, path: "big.mov", notice: .fileTooLarge, eventType: .error),
+                record(120, path: "big.mov", eventType: .upload),
+                record(130, path: "big.mov", notice: .fileTooLarge, eventType: .error),
+            ],
+            after: cursors(100, 100), state: &state)
+        XCTAssertEqual(result.events, [.fileTooLarge(path: "big.mov"), .fileTooLarge(path: "big.mov")])
+    }
+
     /// 書込の失敗は同じパスで閾値の回数に達したら 1 回だけ知らせる。回数は呼び出しをまたいで数える。
     func testWriteFailuresAreNotifiedAtThreshold() {
         var state = FPEventNoticeWatcher.State()

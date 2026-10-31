@@ -1731,8 +1731,10 @@ fpOnly では `SyncEngine` を作らないため、`SyncEngine` から出して�
     パスは `details` に入れる（Sync Activity で見える）。書込は成功として終わるので**再送されない種類** = 位置を保存し、
     アプリが止まっていた間の競合コピーも次の起動で知らせる（ユーザ確定）。まとめない（1 件ずつ手で直す必要がある）。
   - `fileTooLarge`: 作成・更新の catch で `SyncError.fileTooLarge` のとき。fileproviderd が再試行するので**再送される種類**
-    = 起動後の分を、同じファイルは起動中 1 回だけ。移動のコピーの上限（5 GiB）による拒否は設定を変えても直らないので
-    `writeFailed` として数える（`FPEventNotice.forWriteFailure(_:sizeLimitApplies:)`）。
+    = 起動後の分を、同じファイルは起動中 1 回だけ。内容つきの移動（改名と同時の編集）で新しい内容が設定の上限を超えたときも
+    これになる。移動のコピーの上限（5 GiB）による拒否は設定を変えても直らないので、拡張は別のエラー
+    （`ExtensionWriter.MoveError.copyTooLarge`）で投げ、`writeFailed` として数える（PR #160 レビュー指摘 1: 移動の
+    catch で一律に `writeFailed` にすると、内容つきの移動の上限超過まで「上限を調整して」が出なくなる）。
   - `writeFailed`: 書込（作成・更新・移動・削除）の catch 9 か所。**一過性のエラーには付けない**（`SyncIssueClassifier` の
     `network` と `remoteConflict` = 並行書込の衝突・index の部分完了・ユーザ確定）。キャンセルにも付けない。実体化（読み取り）の
     失敗は数えない。
@@ -1743,7 +1745,8 @@ fpOnly では `SyncEngine` を作らないため、`SyncEngine` から出して�
   知らせるのは起動後の失敗で回数に達したときだけ（起動直後にまとめて出さない）。回数の記録はメモリだけで、1 万件で空にする。
   1 回の確認で 4 件以上なら 3 件 +「ほか N 件」（`writeKeepsFailingMore`）にまとめる。
 - **④ 不安定は出さない（ユーザ確定）**: 拡張は fileproviderd が用意した静止したファイルを受け取るので、書きかけのファイルを
-  読む出来事が無い。
+  読む出来事が無い。万一起きたとき（`SyncError.fileChangedDuringUpload` = `unstableFile`）は、一過性ではない書込の失敗として
+  `writeFailed` に数える（続けば「失敗が続く」で知らせる・PR #160 レビュー指摘 2）。
 - **まとめ方**: 「バックアップされない」出来事（#147 の 6 種 + サイズ超過）と「失敗が続く」出来事を別々に数え、それぞれ 3 件 +
   「ほか N 件」。競合コピーはまとめない。
 - **文面**: ① ② は folderSync と同じ。③ の代わりは新しい文面（「「名前」の同期が 5 回続けて失敗しました。Tide は再試行を

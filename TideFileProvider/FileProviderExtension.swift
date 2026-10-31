@@ -1588,7 +1588,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     await services.events.append(
                         type: .error, path: oldPath, message: "Move failed",
                         details: String(describing: error),
-                        notice: FPEventNotice.forWriteFailure(error, sizeLimitApplies: false))
+                        notice: FPEventNotice.forWriteFailure(error))
                 }
                 completion.value(nil, [], false, Self.wrapForCompletion(error))
             }

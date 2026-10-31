@@ -107,6 +107,9 @@ struct ExtensionWriter: Sendable {
         /// `FileProviderWritePolicy.copySourceFallbackVersion`）— コピーは内容検証ができず、
         /// 宣言 sha と実体が乖離した entry を作るとマニフェスト真実が壊れるため（`S3Client.copyObject` の規約）。
         case sourceVersionMissing(path: String)
+        /// コピー元が CopyObject の単発上限（5 GiB）を超える。設定のアップロード上限（`SyncError.fileTooLarge`）とは
+        /// 別のエラーにする — 設定を変えても直らないので「上限を調整して」の通知に回さない（#148・PR #160 レビュー指摘 1）。
+        case copyTooLarge(path: String, size: Int64)
     }
 
     /// ファイル内容の書込（modifyItem の .contents、および createItem = `baseSha: nil`・M5 Phase 5-3）。
@@ -635,7 +638,7 @@ struct ExtensionWriter: Sendable {
         // 5 GiB 超 entry の rename は恒久保留になる既知の制限（docs/09・PR #60 レビュー #3）。
         let copyLimit: Int64 = 5 * 1024 * 1024 * 1024
         guard entry.size <= copyLimit else {
-            throw SyncError.fileTooLarge(path: from, size: entry.size)
+            throw MoveError.copyTooLarge(path: from, size: entry.size)
         }
         // versionId 不明の entry は copy しない（PR #60 レビュー #2）: nil のまま copyObject へ
         // 渡すと「最新版コピー」= 内容検証不能で宣言 sha と実体が乖離しうる形そのもの。
