@@ -1,4 +1,5 @@
 import Foundation
+import notify
 
 /// FP 拡張の同期活動 1 件ぶんの軽量ログレコード（Issue #83・fpOnly の Sync Activity 復権）。
 /// DB の `SyncLogRecord` と同じ表示語彙へ写像できる形で持つ（`eventType` =
@@ -98,15 +99,27 @@ public actor FPEventLog {
     public static let maxMessageLength = 500
     public static let maxDetailsLength = 4096
 
+    /// 追記したことをアプリへ知らせる Darwin 通知の名前（Issue #148）。sandbox の中から
+    /// プロセスをまたいで届けるため、App Group の ID を前に付ける。
+    public static let defaultChangeNotificationName = "\(TideAppGroup.identifier).fp-events"
+
     private let bucket: String
     private let fileURL: URL?
     private let maxBytes: Int
+    private let changeNotificationName: String?
 
-    /// - Parameter fileURL: nil = 永続化なし（構築失敗時の縮退。append は no-op・load は空）。
-    public init(bucket: String, fileURL: URL?, maxBytes: Int = FPEventLog.defaultMaxBytes) {
+    /// - Parameters:
+    ///   - fileURL: nil = 永続化なし（構築失敗時の縮退。append は no-op・load は空）。
+    ///   - changeNotificationName: 追記のたびに送る Darwin 通知の名前（書き手 = 拡張だけが渡す・Issue #148）。
+    ///     nil = 送らない（読み手のアプリ・テスト）。
+    public init(
+        bucket: String, fileURL: URL?, maxBytes: Int = FPEventLog.defaultMaxBytes,
+        changeNotificationName: String? = nil
+    ) {
         self.bucket = bucket
         self.fileURL = fileURL
         self.maxBytes = maxBytes
+        self.changeNotificationName = changeNotificationName
     }
 
     /// 永続ファイルの既定 URL（App Group コンテナ内 `Library/Caches/Tide/`）。
@@ -156,6 +169,9 @@ public actor FPEventLog {
             if end + UInt64(data.count) >= UInt64(maxBytes) {
                 try rotate()
             }
+            if let changeNotificationName {
+                notify_post(changeNotificationName)
+            }
         } catch {
             AppLogger.fileProvider.error("FP event log append failed: \(String(describing: error), privacy: .private)")
         }
@@ -173,6 +189,36 @@ public actor FPEventLog {
     }
 
     // MARK: - 読込（アプリプロセス）
+
+    /// 追記の Darwin 通知（`changeNotificationName`）を受け取る（Issue #148）。受け取りは `queue` で行う。
+    /// 返した値を捨てると受け取りをやめる。登録できなければ nil（呼び出し側は定期の確認だけで動く）。
+    /// 通知は合体しうる（続けて送られた複数の通知が 1 回になる）ので、受け取ったら新着をまとめて読むこと。
+    public nonisolated static func observeChanges(
+        name: String = FPEventLog.defaultChangeNotificationName,
+        queue: DispatchQueue = .main,
+        handler: @escaping @Sendable () -> Void
+    ) -> ChangeObservation? {
+        var token: Int32 = 0
+        let status = notify_register_dispatch(name, &token, queue) { _ in handler() }
+        guard status == NOTIFY_STATUS_OK else {
+            AppLogger.ui.error("FP event log: cannot observe change notifications (status \(status))")
+            return nil
+        }
+        return ChangeObservation(token: token)
+    }
+
+    /// `observeChanges` の受け取りの登録。解放すると受け取りをやめる。
+    public final class ChangeObservation: Sendable {
+        private let token: Int32
+
+        fileprivate init(token: Int32) {
+            self.token = token
+        }
+
+        deinit {
+            notify_cancel(token)
+        }
+    }
 
     /// 全レコードを時系列（古い → 新しい）で返す。呼ぶたびにディスクを読み直す。
     /// 書き手（拡張）が追記中の書きかけ末尾行はデコード失敗 = スキップされ、次回読込で載る。

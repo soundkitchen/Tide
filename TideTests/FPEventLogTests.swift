@@ -299,6 +299,22 @@ final class FPEventLogTests: XCTestCase {
         XCTAssertEqual(messages(result.records), ["ok"])
     }
 
+    // MARK: - 追記の Darwin 通知（Issue #148）
+
+    /// 通知の名前を渡したログは追記のたびに送り、受け取り側に届く。渡さないログは送らない。
+    func testAppendPostsChangeNotificationOnlyWhenNamed() async throws {
+        let name = "\(TideAppGroup.identifier).fp-events-test-\(UUID().uuidString)"
+        let received = expectation(description: "change notification")
+        let observation = FPEventLog.observeChanges(name: name, queue: .main) { received.fulfill() }
+        XCTAssertNotNil(observation)
+
+        await makeLog().append(type: .upload, path: "silent.txt", message: "m")
+        let notifying = FPEventLog(bucket: "b", fileURL: fileURL, changeNotificationName: name)
+        await notifying.append(type: .upload, path: "a.txt", message: "m")
+        await fulfillment(of: [received], timeout: 5)
+        withExtendedLifetime(observation) {}
+    }
+
     /// 通知に出す名前: symlink は path、それ以外は details（表示用のパス）。
     func testNoticeSubject() {
         let record = FPEventRecord(

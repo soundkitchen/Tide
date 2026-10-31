@@ -1670,7 +1670,10 @@ FP 拡張が `excludedFromSync` で拒否したファイルは、ローカルに
   （`packageTooManyFiles`）。どちらも作成時の除外と同じく再送される種類（同じパッケージは起動中 1 回だけ）。
 - **経路**: 拡張がアプリへ伝える手段は共有ログ `FPEventLog` だけなので、拡張がイベントに印（`FPEventRecord.notice` =
   `FPEventNotice` の rawValue）を付け、アプリの `FPEventNoticeWatcher`（`Tide/Core/`・fpOnly 起動で signaler と
-  一緒に立てて一緒に止める）が 5 秒ごとに新着を見る。読むのは前回読んだ位置から先だけ（`FPEventLog.readNew` =
+  一緒に立てて一緒に止める）が新着を見る。拡張は追記のたびに Darwin 通知（`notify_post`・名前 =
+  `FPEventLog.defaultChangeNotificationName` = App Group の ID + `.fp-events`）を送り、アプリは受けたら読む（#148。
+  当初は 5 秒ごとのポーリングだけだった）。通知を取りこぼしたときの保険として 60 秒ごとの確認も残す。確認の途中で
+  通知が来たら、終わったあとにもう一度読む。読むのは前回読んだ位置から先だけ（`FPEventLog.readNew` =
   現行の inode とバイト位置・下記「新着の差分読み」・#148。当初は stat の署名で変化を見て、変わるたびに最大 4MB を
   全部読み直していた）。印は他の出来事にも付けられる形にしてあり、
   #148 で競合コピー等を載せる予定。未知の印は読込時に外す（レコードは表示用に残す）。

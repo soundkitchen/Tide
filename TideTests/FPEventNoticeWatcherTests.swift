@@ -198,6 +198,76 @@ final class FPEventNoticeWatcherTests: XCTestCase {
         ], "初回は全部、以後は前回の位置から読む")
     }
 
+    /// 確認の途中で頼まれた確認は捨てず、終わったあとにもう一度読む（その間の追記を読み逃さない）。
+    func testCheckRequestedDuringCheckRereadsAfterward() async {
+        final class SlowLog: @unchecked Sendable {
+            var reads = 0
+            var gate: CheckedContinuation<Void, Never>?
+            var started: CheckedContinuation<Void, Never>?
+        }
+        let log = SlowLog()
+        let watcher = FPEventNoticeWatcher(
+            savedRenamedCursor: nil,
+            readNew: { position in
+                log.reads += 1
+                if log.reads == 1 {
+                    await withCheckedContinuation { continuation in
+                        log.gate = continuation
+                        log.started?.resume()
+                    }
+                }
+                return ([], position)
+            },
+            saveRenamedCursor: { _ in },
+            post: { _ in })
+
+        let first = Task { await watcher.checkOnce() }
+        await withCheckedContinuation { log.started = $0 }
+        await watcher.checkOnce()  // 1 回目の途中 = すぐ戻り、再確認を頼むだけ
+        XCTAssertEqual(log.reads, 1)
+        log.gate?.resume()
+        await first.value
+        XCTAssertEqual(log.reads, 2, "途中で頼まれた分をもう一度読む")
+    }
+
+    /// 起動すると追記の通知を受け取る登録を作り、通知が来たら読む。止めると登録を手放す。
+    func testStartObservesChangeNotifications() async throws {
+        final class Registry: @unchecked Sendable {
+            var handler: (@Sendable () -> Void)?
+            var token: NSObject?
+        }
+        let registry = Registry()
+        let log = FakeLog()
+        var posted: [NotificationEvent] = []
+        let watcher = FPEventNoticeWatcher(
+            intervalSeconds: 3600,
+            startedAt: Date(timeIntervalSince1970: 0),
+            savedRenamedCursor: nil,
+            readNew: { log.readNew($0) },
+            saveRenamedCursor: { _ in },
+            post: { posted.append($0) },
+            observeChanges: { handler in
+                registry.handler = handler
+                let token = NSObject()
+                registry.token = token
+                return token
+            })
+        watcher.start()
+        XCTAssertNotNil(registry.handler)
+        // 初回の確認が終わるのを待つ
+        while log.positionsAsked.isEmpty { await Task.yield() }
+
+        log.pending = [record(10, path: "link", notice: .symbolicLink)]
+        registry.handler?()
+        for _ in 0..<1000 where posted.isEmpty { await Task.yield() }
+        XCTAssertEqual(posted, [.notBackedUp(path: "link", reason: .symbolicLink)])
+
+        weak var weakToken = registry.token
+        registry.token = nil
+        watcher.stop()
+        XCTAssertNil(weakToken, "止めると登録を手放す")
+    }
+
     /// 保存が無いとき（初回・factoryReset 後）は、改名も起動時刻から始める。
     func testRenamedCursorStartsAtLaunchWithoutSavedValue() async {
         let log = FakeLog()

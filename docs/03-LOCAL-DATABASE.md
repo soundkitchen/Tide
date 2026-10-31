@@ -34,7 +34,7 @@ App Group の Caches（`~/Library/Group Containers/G5G54TCH8W.org.izukawa.Tide/L
 
 | 実体 | 型 | 役割 |
 |---|---|---|
-| `fp-events-ext.jsonl`（+ `.1`） | `FPEventLog`（追記型 JSONL） | Sync Activity のソース（#83）と、「ファイルが未バックアップ」の OS 通知のソース（#147 = 拡張が印 `notice` を付けたレコードを、アプリの `FPEventNoticeWatcher` が 5 秒ごとに前回読んだ位置から先の新着だけを読み〈`readNew` = inode + バイト位置・#148〉、作成時の除外は起動後の新着を、改名の除外は保存した位置〈`fpNoticeRenameCursor`〉より後を通知する）。30 日刈りではなく**サイズ上限 2MiB × 2 世代ローテーション** |
+| `fp-events-ext.jsonl`（+ `.1`） | `FPEventLog`（追記型 JSONL） | Sync Activity のソース（#83）と、「ファイルが未バックアップ」の OS 通知のソース（#147 = 拡張が印 `notice` を付けたレコードを、アプリの `FPEventNoticeWatcher` が 拡張の追記の Darwin 通知〈保険で 60 秒ごと〉を受けて前回読んだ位置から先の新着だけを読み〈`readNew` = inode + バイト位置・#148〉、作成時の除外は起動後の新着を、改名の除外は保存した位置〈`fpNoticeRenameCursor`〉より後を通知する）。30 日刈りではなく**サイズ上限 2MiB × 2 世代ローテーション** |
 | `fileprovider-materialized.json` | `PersistedPathSet` | 実体化バッジの「報告済み」レジストリ（#65・上限 10,000） |
 | `fileprovider-virtual-dirs.json` | `PersistedPathSet` | 空フォルダのローカル仮想受理の温存（Phase 5-3。未使用なら未作成） |
 | `fileprovider-exclusion-cleanups.json` | `PersistedPathSet` | 除外後始末の予約（Phase 5-4。未使用なら未作成） |

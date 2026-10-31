@@ -365,7 +365,10 @@ struct ExtensionServices: Sendable {
                 bucket: bucket, fileURL: materializedURL, epoch: domainEpoch,
                 maxEntries: Self.materializedBadgeCap),
             materializedObserver: MaterializedObserver(),
-            events: FPEventLog(bucket: bucket, fileURL: eventsURL),
+            // 追記のたびにアプリへ Darwin 通知を送る（Issue #148・アプリの通知の見張りが受けて新着を読む）
+            events: FPEventLog(
+                bucket: bucket, fileURL: eventsURL,
+                changeNotificationName: FPEventLog.defaultChangeNotificationName),
             queryMaterializedFilePaths: {
                 await MaterializedSetQuery.filePaths(domain: boxedDomain.value)
             },

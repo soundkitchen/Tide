@@ -4,8 +4,9 @@ import Foundation
 /// fpOnly: FP 拡張のイベントログ（`FPEventLog`）の新着のうち、通知の印（`FPEventNotice`）が
 /// 付いたものを OS 通知へつなぐ（Issue #147）。
 ///
-/// - 拡張からアプリへ伝える手段は共有ログしかないため、一定間隔でログを見に行く。読むのは
-///   前回読んだ位置から先の新着だけ（`FPEventLog.readNew`・Issue #148）。
+/// - 拡張は追記のたびに Darwin 通知（`FPEventLog.defaultChangeNotificationName`）を送り、受けたら
+///   新着を読む（Issue #148）。通知を取りこぼしたときの保険として、間隔をあけた定期の確認も残す。
+///   読むのは前回読んだ位置から先の新着だけ（`FPEventLog.readNew`）。
 /// - どこまで通知したかの位置（カーソル）は種類で 2 本に分ける（PR #149 レビュー指摘 2）:
 ///   - 作成時の除外（fileproviderd が再送する種類）: 起動した時点から。起動前の分は通知しない
 ///     （起動直後にまとめて出さない・ユーザ確定）。止まっていた間の分も、再送されたときに知らせる。
@@ -42,6 +43,8 @@ final class FPEventNoticeWatcher {
         -> (records: [FPEventRecord], position: FPEventLog.ReadPosition?)
     private let saveRenamedCursor: (Double) -> Void
     private let post: (NotificationEvent) -> Void
+    /// 追記の通知を受け取る登録を作る（返した値を手放すと受け取りをやめる）。nil = 登録できない。
+    private let observeChanges: (@escaping @Sendable () -> Void) -> AnyObject?
     private let intervalSeconds: Int
 
     private var cursors: Cursors
@@ -50,16 +53,20 @@ final class FPEventNoticeWatcher {
     /// ログをどこまで読んだか（nil = まだ読んでいない = 初回は全部読む）。
     private var position: FPEventLog.ReadPosition?
     private var isChecking = false
+    /// 確認の途中で次の確認を頼まれた（その間の追記を読み逃さないよう、終わったらもう一度読む）。
+    private var recheckRequested = false
     private var pollTask: Task<Void, Never>?
+    private var observation: AnyObject?
 
     init(
-        intervalSeconds: Int = 5,
+        intervalSeconds: Int = 60,
         startedAt: Date = Date(),
         savedRenamedCursor: Double?,
         readNew: @escaping @Sendable (FPEventLog.ReadPosition?) async
             -> (records: [FPEventRecord], position: FPEventLog.ReadPosition?),
         saveRenamedCursor: @escaping (Double) -> Void,
-        post: @escaping (NotificationEvent) -> Void
+        post: @escaping (NotificationEvent) -> Void,
+        observeChanges: @escaping (@escaping @Sendable () -> Void) -> AnyObject? = { _ in nil }
     ) {
         let launch = startedAt.timeIntervalSince1970
         self.intervalSeconds = intervalSeconds
@@ -67,6 +74,7 @@ final class FPEventNoticeWatcher {
         self.readNew = readNew
         self.saveRenamedCursor = saveRenamedCursor
         self.post = post
+        self.observeChanges = observeChanges
     }
 
     convenience init(log: FPEventLog, config: ConfigStore, post: @escaping (NotificationEvent) -> Void) {
@@ -74,12 +82,20 @@ final class FPEventNoticeWatcher {
             savedRenamedCursor: config.fpNoticeRenameCursor,
             readNew: { await log.readNew(since: $0) },
             saveRenamedCursor: { config.fpNoticeRenameCursor = $0 },
-            post: post
+            post: post,
+            observeChanges: { FPEventLog.observeChanges(handler: $0) }
         )
     }
 
     func start() {
         stop()
+        // 拡張の追記の通知を受けたら読む
+        observation = observeChanges {
+            Task { @MainActor [weak self] in await self?.checkOnce() }
+        }
+        if observation == nil {
+            AppLogger.ui.error("FP event notices: falling back to periodic checks only")
+        }
         // 初回はすぐに確認する（止まっていた間の改名を、起動直後に知らせるため）
         Task { [weak self] in await self?.checkOnce() }
         let interval = intervalSeconds
@@ -95,18 +111,28 @@ final class FPEventNoticeWatcher {
     func stop() {
         pollTask?.cancel()
         pollTask = nil
+        observation = nil
     }
 
     deinit {
         pollTask?.cancel()
     }
 
-    /// 1 回分の確認（テストから直接駆動する）。
+    /// 1 回分の確認（テストから直接駆動する）。確認の途中で頼まれたら、終わったあとにもう一度読む。
     func checkOnce() async {
-        if isChecking { return }
+        if isChecking {
+            recheckRequested = true
+            return
+        }
         isChecking = true
         defer { isChecking = false }
+        repeat {
+            recheckRequested = false
+            await readAndPost()
+        } while recheckRequested
+    }
 
+    private func readAndPost() async {
         let (records, next) = await readNew(position)
         position = next
         guard !records.isEmpty else { return }
