@@ -4,8 +4,8 @@ import Foundation
 /// fpOnly: FP 拡張のイベントログ（`FPEventLog`）の新着のうち、通知の印（`FPEventNotice`）が
 /// 付いたものを OS 通知へつなぐ（Issue #147）。
 ///
-/// - 拡張からアプリへ伝える手段は共有ログしかないため、一定間隔でログを見に行く。ログが
-///   変わったかはまず stat の署名（`FPEventLog.changeSignature`）で確かめ、変わったときだけ読む。
+/// - 拡張からアプリへ伝える手段は共有ログしかないため、一定間隔でログを見に行く。読むのは
+///   前回読んだ位置から先の新着だけ（`FPEventLog.readNew`・Issue #148）。
 /// - どこまで通知したかの位置（カーソル）は種類で 2 本に分ける（PR #149 レビュー指摘 2）:
 ///   - 作成時の除外（fileproviderd が再送する種類）: 起動した時点から。起動前の分は通知しない
 ///     （起動直後にまとめて出さない・ユーザ確定）。止まっていた間の分も、再送されたときに知らせる。
@@ -20,8 +20,7 @@ import Foundation
 /// - 他の出来事も印を足せば載る形にしてある（#148 で競合コピー等を載せる予定）。
 ///
 /// 取りこぼしうる場合（どちらも通知が 1 件欠けるだけ・同期には影響しない）:
-/// - `loadRecords()` の `.1` と現行の読み取りの合間に拡張がローテーションすると、その 1 回だけ
-///   旧現行の世代が欠けて見え、カーソルがそれより新しいイベントまで進む（ローテーションは 2MB ごと）。
+/// - 前回読んだあとに 2 回以上ローテーションした（読まないまま 2MB 以上たまった）とき、失われた世代。
 /// - タイムスタンプが同じ値のイベントの片方だけを先に読んだ場合（マイクロ秒単位で同時の書込）。
 /// - 時計が戻ったとき、戻る前に進めたカーソルに追いつくまでの新着（カーソルは壁時計の時刻）。
 @MainActor
@@ -39,8 +38,8 @@ final class FPEventNoticeWatcher {
         var renamed: Double
     }
 
-    private let loadRecords: @Sendable () async -> [FPEventRecord]
-    private let changeSignature: @Sendable () -> String
+    private let readNew: @Sendable (FPEventLog.ReadPosition?) async
+        -> (records: [FPEventRecord], position: FPEventLog.ReadPosition?)
     private let saveRenamedCursor: (Double) -> Void
     private let post: (NotificationEvent) -> Void
     private let intervalSeconds: Int
@@ -48,7 +47,8 @@ final class FPEventNoticeWatcher {
     private var cursors: Cursors
     /// 再送される種類のうち、通知済みのもの（`"<種類>:<表示パス>"`）。
     private var notifiedKeys: Set<String> = []
-    private var lastSignature: String?
+    /// ログをどこまで読んだか（nil = まだ読んでいない = 初回は全部読む）。
+    private var position: FPEventLog.ReadPosition?
     private var isChecking = false
     private var pollTask: Task<Void, Never>?
 
@@ -56,16 +56,15 @@ final class FPEventNoticeWatcher {
         intervalSeconds: Int = 5,
         startedAt: Date = Date(),
         savedRenamedCursor: Double?,
-        loadRecords: @escaping @Sendable () async -> [FPEventRecord],
-        changeSignature: @escaping @Sendable () -> String,
+        readNew: @escaping @Sendable (FPEventLog.ReadPosition?) async
+            -> (records: [FPEventRecord], position: FPEventLog.ReadPosition?),
         saveRenamedCursor: @escaping (Double) -> Void,
         post: @escaping (NotificationEvent) -> Void
     ) {
         let launch = startedAt.timeIntervalSince1970
         self.intervalSeconds = intervalSeconds
         self.cursors = Cursors(created: launch, renamed: savedRenamedCursor ?? launch)
-        self.loadRecords = loadRecords
-        self.changeSignature = changeSignature
+        self.readNew = readNew
         self.saveRenamedCursor = saveRenamedCursor
         self.post = post
     }
@@ -73,8 +72,7 @@ final class FPEventNoticeWatcher {
     convenience init(log: FPEventLog, config: ConfigStore, post: @escaping (NotificationEvent) -> Void) {
         self.init(
             savedRenamedCursor: config.fpNoticeRenameCursor,
-            loadRecords: { await log.loadRecords() },
-            changeSignature: { log.changeSignature() },
+            readNew: { await log.readNew(since: $0) },
             saveRenamedCursor: { config.fpNoticeRenameCursor = $0 },
             post: post
         )
@@ -109,11 +107,9 @@ final class FPEventNoticeWatcher {
         isChecking = true
         defer { isChecking = false }
 
-        let signature = changeSignature()
-        guard signature != lastSignature else { return }
-        lastSignature = signature
-
-        let records = await loadRecords()
+        let (records, next) = await readNew(position)
+        position = next
+        guard !records.isEmpty else { return }
         let result = Self.notices(in: records, after: cursors, notified: &notifiedKeys)
         if result.cursors.renamed != cursors.renamed {
             saveRenamedCursor(result.cursors.renamed)

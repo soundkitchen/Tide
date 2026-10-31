@@ -143,63 +143,70 @@ final class FPEventNoticeWatcherTests: XCTestCase {
             Array(events.prefix(3)) + [.notBackedUpMore(count: 7)])
     }
 
-    // MARK: - checkOnce（署名のゲート・起動時刻・改名カーソルの保存）
+    // MARK: - checkOnce（差分読み・起動時刻・改名カーソルの保存）
 
-    /// 起動時刻より前の作成時の除外は通知しない。署名が変わらなければログを読まない。
-    /// 改名カーソルは進んだときだけ保存する。
-    func testCheckOnceGatesOnSignatureAndPersistsRenamedCursor() async {
-        final class Box: @unchecked Sendable {
-            var records: [FPEventRecord] = []
-            var signature = "s0"
-            var loads = 0
+    /// 差分読みの代役: 渡された位置を記録し、たまった新着を返して空にする。位置は読んだ件数。
+    private final class FakeLog: @unchecked Sendable {
+        var pending: [FPEventRecord] = []
+        var positionsAsked: [FPEventLog.ReadPosition?] = []
+        private var count: UInt64 = 0
+
+        func readNew(_ position: FPEventLog.ReadPosition?)
+            -> (records: [FPEventRecord], position: FPEventLog.ReadPosition?) {
+            positionsAsked.append(position)
+            let records = pending
+            pending = []
+            count += UInt64(records.count)
+            return (records, FPEventLog.ReadPosition(inode: 1, offset: count))
         }
-        let box = Box()
+    }
+
+    /// 起動時刻より前の作成時の除外は通知しない。2 回目からは前回の位置を渡して新着だけを読む。
+    /// 改名カーソルは進んだときだけ保存する。
+    func testCheckOnceReadsNewRecordsAndPersistsRenamedCursor() async {
+        let log = FakeLog()
         var posted: [NotificationEvent] = []
         var saved: [Double] = []
         let watcher = FPEventNoticeWatcher(
             startedAt: Date(timeIntervalSince1970: 100),
             savedRenamedCursor: 40,
-            loadRecords: { box.loads += 1; return box.records },
-            changeSignature: { box.signature },
+            readNew: { log.readNew($0) },
             saveRenamedCursor: { saved.append($0) },
             post: { posted.append($0) })
 
-        box.records = [
+        log.pending = [
             record(30, path: "x.txt", details: "x.pem", notice: .renamedFileExcluded),  // 保存位置より前
             record(50, path: "before-launch", notice: .symbolicLink),                   // 起動前の作成
             record(60, path: "y.txt", details: "y.pem", notice: .renamedFileExcluded),  // 停止中の改名
         ]
         await watcher.checkOnce()
         XCTAssertEqual(posted, [.notBackedUp(path: "y.pem", reason: .renamedFileExcluded)])
-        XCTAssertEqual(box.loads, 1)
         XCTAssertEqual(saved, [60])
 
-        box.records.append(record(150, path: "after-launch", notice: .symbolicLink))
         await watcher.checkOnce()
-        XCTAssertEqual(box.loads, 1, "署名が変わらなければ読まない")
-        XCTAssertEqual(posted.count, 1)
+        XCTAssertEqual(posted.count, 1, "新着が無ければ通知しない")
+        XCTAssertEqual(saved, [60])
 
-        box.signature = "s1"
+        log.pending = [record(150, path: "after-launch", notice: .symbolicLink)]
         await watcher.checkOnce()
-        XCTAssertEqual(box.loads, 2)
         XCTAssertEqual(posted.last, .notBackedUp(path: "after-launch", reason: .symbolicLink))
         XCTAssertEqual(saved, [60, 150])
-
-        box.signature = "s2"
-        await watcher.checkOnce()
-        XCTAssertEqual(posted.count, 2, "同じイベントを二度通知しない")
-        XCTAssertEqual(saved, [60, 150], "カーソルが進まなければ保存しない")
+        XCTAssertEqual(log.positionsAsked, [
+            nil,
+            FPEventLog.ReadPosition(inode: 1, offset: 3),
+            FPEventLog.ReadPosition(inode: 1, offset: 3),
+        ], "初回は全部、以後は前回の位置から読む")
     }
 
     /// 保存が無いとき（初回・factoryReset 後）は、改名も起動時刻から始める。
     func testRenamedCursorStartsAtLaunchWithoutSavedValue() async {
+        let log = FakeLog()
+        log.pending = [record(50, path: "y.txt", details: "y.pem", notice: .renamedFileExcluded)]
         var posted: [NotificationEvent] = []
-        let records = [record(50, path: "y.txt", details: "y.pem", notice: .renamedFileExcluded)]
         let watcher = FPEventNoticeWatcher(
             startedAt: Date(timeIntervalSince1970: 100),
             savedRenamedCursor: nil,
-            loadRecords: { records },
-            changeSignature: { "s" },
+            readNew: { log.readNew($0) },
             saveRenamedCursor: { _ in },
             post: { posted.append($0) })
         await watcher.checkOnce()

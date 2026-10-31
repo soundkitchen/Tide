@@ -174,21 +174,6 @@ public actor FPEventLog {
 
     // MARK: - 読込（アプリプロセス）
 
-    /// ログが前回から変わったかを安く確かめるための署名（現行と `.1` のサイズ・更新時刻）。
-    /// 中身は読まない（stat のみ）。新着を見張る側（`FPEventNoticeWatcher`・Issue #147）が、
-    /// 署名が変わったときだけ `loadRecords()` を呼ぶのに使う。
-    public nonisolated func changeSignature() -> String {
-        guard let fileURL else { return "" }
-        let fm = FileManager.default
-        func stamp(_ url: URL) -> String {
-            guard let attributes = try? fm.attributesOfItem(atPath: url.path) else { return "-" }
-            let size = (attributes[.size] as? Int) ?? -1
-            let mtime = (attributes[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
-            return "\(size)@\(mtime)"
-        }
-        return stamp(fileURL) + "|" + stamp(URL(fileURLWithPath: fileURL.path + ".1"))
-    }
-
     /// 全レコードを時系列（古い → 新しい）で返す。呼ぶたびにディスクを読み直す。
     /// 書き手（拡張）が追記中の書きかけ末尾行はデコード失敗 = スキップされ、次回読込で載る。
     /// `.1` → 現行の 2 ファイル読取は非アトミック（クロスプロセス）— 読取の合間に拡張側の
@@ -203,11 +188,109 @@ public actor FPEventLog {
         return records
     }
 
+    /// 差分読みの位置（Issue #148）: 最後に読んだファイルの inode と、そのファイルで読み終えたバイト位置。
+    public struct ReadPosition: Equatable, Sendable {
+        public let inode: UInt64
+        public let offset: UInt64
+
+        public init(inode: UInt64, offset: UInt64) {
+            self.inode = inode
+            self.offset = offset
+        }
+    }
+
+    /// 前回の位置から先の新着だけを、時系列（古い → 新しい）で読む（Issue #148）。
+    /// 新着を見張る側（`FPEventNoticeWatcher`）が、拡張の書込のたびに全体を読み直さないために使う。
+    ///
+    /// - 位置が nil（初回）: `.1` と現行を頭から全部読む。
+    /// - 位置の inode が現行と同じ: 現行を位置から読む。現行が位置より短ければ（作り直された）頭から読む。
+    /// - 位置の inode が `.1` と同じ（前回読んだあとにローテーションした）: `.1` を位置から読み、現行を頭から読む。
+    /// - どちらとも違う（2 回以上ローテーションした等）: `.1` と現行を頭から読む（その間の世代は失われている）。
+    ///
+    /// 改行で終わっていない末尾の行（拡張が書きかけ）は読まず、次回その行の頭から読む。
+    /// 現行を `.1` より先に開くので、開く合間にローテーションしても 2 つが同じ inode になるだけで
+    /// （そのときは 1 つとして扱う）、読み飛ばしは起きない。
+    /// - Returns: 読んだレコードと次の位置。ファイルが 1 つも無ければ位置は渡したまま。
+    public func readNew(since position: ReadPosition?) -> (records: [FPEventRecord], position: ReadPosition?) {
+        guard let fileURL, let rotatedURL else { return ([], position) }
+        let current = OpenedLog(url: fileURL)
+        var rotated = OpenedLog(url: rotatedURL)
+        if let c = current, let r = rotated, c.inode == r.inode { rotated = nil }
+        defer {
+            current?.close()
+            rotated?.close()
+        }
+        let ceiling = UInt64(maxBytes * 2)
+
+        // 読む順（古い → 新しい）と、それぞれの読み始めの位置
+        var plan: [(OpenedLog, UInt64)] = []
+        if let position, let current, position.inode == current.inode {
+            plan = [(current, position.offset <= current.size ? position.offset : 0)]
+        } else if let position, let rotated, position.inode == rotated.inode {
+            plan = [(rotated, min(position.offset, rotated.size))]
+            if let current { plan.append((current, 0)) }
+        } else {
+            if let rotated { plan.append((rotated, 0)) }
+            if let current { plan.append((current, 0)) }
+        }
+        guard !plan.isEmpty else { return ([], position) }
+
+        var records: [FPEventRecord] = []
+        var next = position
+        for (log, start) in plan {
+            // 肥大ファイル（改ざん）は読まずに末尾まで読んだことにする（loadRecords と同じ上限）
+            guard log.size <= ceiling else {
+                next = ReadPosition(inode: log.inode, offset: log.size)
+                continue
+            }
+            let data = log.read(from: start)
+            // 最後の改行まで（書きかけの末尾行は次回へ）
+            let consumed = data.lastIndex(of: 0x0A).map { data.distance(from: data.startIndex, to: $0) + 1 } ?? 0
+            records.append(contentsOf: Self.parse(data: data.prefix(consumed), bucket: bucket))
+            next = ReadPosition(inode: log.inode, offset: start + UInt64(consumed))
+        }
+        return (records, next)
+    }
+
+    /// 読むために開いたログファイル 1 つ（inode とサイズは開いた FD から取る）。
+    private struct OpenedLog {
+        let handle: FileHandle
+        let inode: UInt64
+        let size: UInt64
+
+        init?(url: URL) {
+            guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+            var st = stat()
+            guard fstat(handle.fileDescriptor, &st) == 0 else {
+                try? handle.close()
+                return nil
+            }
+            self.handle = handle
+            self.inode = UInt64(st.st_ino)
+            self.size = UInt64(st.st_size)
+        }
+
+        /// `start` から開いた時点のサイズまでを読む（その後の追記は次回）。
+        func read(from start: UInt64) -> Data {
+            guard start < size, (try? handle.seek(toOffset: start)) != nil else { return Data() }
+            return (try? handle.read(upToCount: Int(size - start))) ?? Data()
+        }
+
+        func close() {
+            try? handle.close()
+        }
+    }
+
     private static func parse(url: URL, bucket: String, byteCeiling: Int) -> [FPEventRecord] {
         guard let size = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int,
               size <= byteCeiling,
               let data = try? Data(contentsOf: url)
         else { return [] }
+        return parse(data: data, bucket: bucket)
+    }
+
+    /// JSONL の行を検証してレコードにする（壊れ行・bucket 不一致・未知の種類・不正 path は捨てる）。
+    private static func parse(data: Data, bucket: String) -> [FPEventRecord] {
         let decoder = JSONDecoder()
         var records: [FPEventRecord] = []
         for line in data.split(separator: 0x0A) {
