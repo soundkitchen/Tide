@@ -79,6 +79,7 @@ Tide/（リポジトリルート）
 │   │   ├── FileProviderEnumerationPaging.swift  FP 列挙のページ / バッチ分割（推奨サイズ × 10・#131）
 │   │   ├── MaterializedBadge.swift    実体化連動バッジ判定（#65）
 │   │   ├── FileProviderWritePolicy.swift  FP 書込のパス合成 / 検証 (M5 Phase 5)
+│   │   ├── FileProviderServiceSharing.swift  FP 拡張サービスのプロセス内共有の段判定（状態 / 接続 / 書き手・#151）
 │   │   ├── PackageClassifier.swift    パッケージの判定（その Mac の型情報 = UTType・#140）
 │   │   ├── PackageScanner.swift       パッケージの中身の走査と丸ごと除外の判定（#140）
 │   │   ├── ConflictNamer.swift        コンフリクト時のリネーム命名 (M2)
@@ -141,7 +142,7 @@ Tide/（リポジトリルート）
 │   ├── FileProviderEnumerator.swift   working set / ディレクトリ列挙・enumerateChanges
 │   ├── FileProviderItem.swift         item 表現（f:/d:/k: identifier・capabilities・バッジ / evict）
 │   ├── ExtensionWriter.swift          書込系の実務（S3 PUT / delete / move → ManifestUpdater 合流）
-│   ├── ExtensionServices.swift        共有サービス束（S3 client / ignore / ログ・DB 非接触の不変条件）
+│   ├── ExtensionServices.swift        共有サービス束（S3 client / ignore / ログ・DB 非接触の不変条件）。プロセス内で共有し、変わった段だけ作り直す（#151・`docs/08`「拡張のサービスはプロセスで共有」）
 │   ├── MaterializedSetObserver.swift  実体化セット観測（バッジ live 側）
 │   └── Resources/Localizable.xcstrings  拡張の user-facing 文言（app 側とは別カタログ）
 │
