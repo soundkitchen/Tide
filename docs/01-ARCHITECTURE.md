@@ -132,7 +132,7 @@ Tide/（リポジトリルート）
 │   │   ├── RemoteChangeSignaler.swift リモート変化検知（index HEAD ETag → FP signal）【現行の駆動】
 │   │   ├── FileProviderController.swift  FP ドメイン登録 / 解除・signal 配線・status 観測
 │   │   ├── NotificationPolicy.swift   通知発火判定（純粋関数・6 事象のみ）(M4 + #103 + #147)
-│   │   ├── FPEventNoticeWatcher.swift FP 拡張イベントログの新着 → OS 通知（fpOnly・#147）
+│   │   ├── FPEventNoticeWatcher.swift FP 拡張イベントログの新着 → OS 通知（fpOnly・#147 / #148）
 │   │   ├── DiagnosticsExporter.swift / SettingsTransfer.swift
 │   │   └── （folderSync 世代: SyncEngine(+FullScan) / FileWatcher / DebounceQueue / RemoteOpGate）
 │   └── Resources/                     Assets.xcassets / Localizable.xcstrings（en source / ja 翻訳）
@@ -333,7 +333,7 @@ struct HashCalculator {
     │       ├─ Keychain から資格情報 → TideS3Client 構築
     │       ├─ FP ドメイン status 観測（#103 の OFF 検出）+ stale 通知掃除
     │       ├─ RemoteChangeSignaler.start()（ベースライン確立 + 初回 signal）
-    │       ├─ FPEventNoticeWatcher.start()（FPEventLog の新着 → 未バックアップ通知・#147。ログ URL が取れなければ起動しない）
+    │       ├─ FPEventNoticeWatcher.start()（FPEventLog の印 → 未バックアップ・競合コピー・サイズ超過・書込の失敗が続くの OS 通知・#147 / #148。拡張の追記の Darwin 通知を受けて `readNew` で新着だけを読む〈保険で 60 秒ごとに確認〉。ログ URL が取れなければ起動しない）
     │       └─ TLS ポリシー自己修復を detached で冪等適用
     │       ※ DB / syncRoot / bookmark には一切触れない（SyncEngine は構築されない）
     │
