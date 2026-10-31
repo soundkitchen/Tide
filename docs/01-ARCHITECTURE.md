@@ -179,7 +179,9 @@ Tide.app                                TideFileProvider.appex
 
 依存は常に下向き（UI / コールバック層 → 駆動層 → TideCore）。逆方向の依存は禁止。
 app と拡張の間に直接のプロセス間依存は無く、**S3（マニフェスト）と App Group（設定 / Keychain /
-FPEventLog / signal）だけを接点にする**。
+FPEventLog / signal）と、FPEventLog の追記を知らせる Darwin 通知だけを接点にする**。Darwin 通知
+（`<App Group ID>.fp-events`・#148）は拡張が送り、アプリが受ける。名前だけで中身は運ばない起床の合図で、
+受けたアプリは FPEventLog を読む（取りこぼしても 60 秒ごとの確認で拾う）。
 
 ## 主要コンポーネント（現行 = fpOnly）
 
