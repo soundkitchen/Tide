@@ -95,6 +95,7 @@
 		791BBD96F7BB71CF477A21BB /* TideCore.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 5239E4D2F62809A68F07CFCE /* TideCore.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		7983C647A8E29146C17EA171 /* LegacyStateMigratorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4FA64F8C47733294DDECC49C /* LegacyStateMigratorTests.swift */; };
 		7D72F4E1AA2BD6C25DED31D8 /* SyncIssueClassifierTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59F23CB94F833EC830FA6227 /* SyncIssueClassifierTests.swift */; };
+		7DD94EE0AA0926458483B38E /* FileProviderServiceSharingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EEE619C20B4297ED54C3EC6F /* FileProviderServiceSharingTests.swift */; };
 		7EA58BAA4FBF6CA861AA6366 /* ManifestSnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = 263CE52DDFC37C0F3B3FA41C /* ManifestSnapshot.swift */; };
 		819303744001AB587D5760BD /* DebounceQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29A0EA5C034CFDEE0E2994AE /* DebounceQueue.swift */; };
 		828EBD9EFC5BF9E0DB2276DC /* TransferStateStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B1FCEBC900F68780C8C5561 /* TransferStateStoreTests.swift */; };
@@ -117,6 +118,7 @@
 		9779D5E5CF6A521C2FB6B58C /* RemoteOpGateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9FD545711AF3F55FD805DD20 /* RemoteOpGateTests.swift */; };
 		97F05A6602848F714764765E /* AboutWindowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DC06B8D465A6783D6EC5327A /* AboutWindowTests.swift */; };
 		99F9EE4A6DC9EC6905F09A21 /* SyncIssueClassifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8815BF2DB0DE7101D71508D5 /* SyncIssueClassifier.swift */; };
+		9A8557FA1DF614351EA9EEB8 /* FileProviderServiceSharing.swift in Sources */ = {isa = PBXBuildFile; fileRef = 084B092F1481A65B1AC90F4F /* FileProviderServiceSharing.swift */; };
 		9B42F81B45D3BF526B70570B /* FullScanSinglePassTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F2555C9F91FD02C04A002D7 /* FullScanSinglePassTests.swift */; };
 		9B793A724C6B1B17CE22B11F /* HashCalculatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 16ED0B8D39615582C0CD3596 /* HashCalculatorTests.swift */; };
 		9E1D2DCF1D31132539923B49 /* FPEventLogTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85E7AEBB1325822C20880EF5 /* FPEventLogTests.swift */; };
@@ -273,6 +275,7 @@
 		072F35488FAFA4BFE2EC6119 /* ManifestReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManifestReader.swift; sourceTree = "<group>"; };
 		07469A1E1298444CBCE94849 /* PersistedPathSetTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PersistedPathSetTests.swift; sourceTree = "<group>"; };
 		075300181A2D09025E384D3B /* SyncEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncEngine.swift; sourceTree = "<group>"; };
+		084B092F1481A65B1AC90F4F /* FileProviderServiceSharing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileProviderServiceSharing.swift; sourceTree = "<group>"; };
 		0A9D07B18D634F5BF949E38C /* FileProviderEnumerationPaging.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileProviderEnumerationPaging.swift; sourceTree = "<group>"; };
 		0B1FCEBC900F68780C8C5561 /* TransferStateStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TransferStateStoreTests.swift; sourceTree = "<group>"; };
 		0D95DADDA96CB84EE0944646 /* NotificationPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationPolicy.swift; sourceTree = "<group>"; };
@@ -417,6 +420,7 @@
 		EA4C088042585A13712AC5A9 /* BucketPolicyBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BucketPolicyBuilder.swift; sourceTree = "<group>"; };
 		EDB70AC0906913E041151774 /* PackageScanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PackageScanner.swift; sourceTree = "<group>"; };
 		EE08152918F7A54DA6988A54 /* S3ErrorClassifierTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = S3ErrorClassifierTests.swift; sourceTree = "<group>"; };
+		EEE619C20B4297ED54C3EC6F /* FileProviderServiceSharingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileProviderServiceSharingTests.swift; sourceTree = "<group>"; };
 		EF18F96672340265B0CAE32E /* ConfigStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfigStore.swift; sourceTree = "<group>"; };
 		EF76EA7236010317B9F4211C /* ManifestTreeDiff.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManifestTreeDiff.swift; sourceTree = "<group>"; };
 		EF8E7684D0B1A5D8C577F7E8 /* FileProviderItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileProviderItem.swift; sourceTree = "<group>"; };
@@ -485,6 +489,7 @@
 				04D0D58407498910750005E2 /* ConflictNamer.swift */,
 				87F41F6596FBDE842F109EBA /* DeletedFilesCache.swift */,
 				0A9D07B18D634F5BF949E38C /* FileProviderEnumerationPaging.swift */,
+				084B092F1481A65B1AC90F4F /* FileProviderServiceSharing.swift */,
 				39988C65076F91E8A1FFE50C /* FileProviderWritePolicy.swift */,
 				3CC16C4CA791E02B071BEB37 /* HashCalculator.swift */,
 				A7A0A251F46AE378434E0924 /* IgnoreDecision.swift */,
@@ -572,6 +577,7 @@
 				B74CDACF3FB8B7119A278A9C /* DiagnosticsExporterTests.swift */,
 				349319C7D3078F35B4467348 /* DownloaderTests.swift */,
 				78FFB1CC2790CF0DBF71B9F1 /* FileProviderEnumerationPagingTests.swift */,
+				EEE619C20B4297ED54C3EC6F /* FileProviderServiceSharingTests.swift */,
 				F56B1604CEDCF384057355A4 /* FileProviderWritePolicyTests.swift */,
 				85E7AEBB1325822C20880EF5 /* FPEventLogTests.swift */,
 				F53408BEE0E477DFE54D895A /* FPEventNoticeWatcherTests.swift */,
@@ -981,6 +987,7 @@
 				315782CA13D2126395951D88 /* FPEventLog.swift in Sources */,
 				126761A58F68052F91BC6A84 /* FileEntry.swift in Sources */,
 				04E587A84AC20B10B66DB49E /* FileProviderEnumerationPaging.swift in Sources */,
+				9A8557FA1DF614351EA9EEB8 /* FileProviderServiceSharing.swift in Sources */,
 				6F1728DA029468D493B3B022 /* FileProviderWritePolicy.swift in Sources */,
 				11E50A79B475E1293F6DC43F /* HashCalculator.swift in Sources */,
 				D855190C2CC7DFA4BB316C5A /* IgnoreDecision.swift in Sources */,
@@ -1062,6 +1069,7 @@
 				9E1D2DCF1D31132539923B49 /* FPEventLogTests.swift in Sources */,
 				D997356F738F89071066B134 /* FPEventNoticeWatcherTests.swift in Sources */,
 				6717B40F76416E232D7153F8 /* FileProviderEnumerationPagingTests.swift in Sources */,
+				7DD94EE0AA0926458483B38E /* FileProviderServiceSharingTests.swift in Sources */,
 				EDCFEA1B530614F67D973244 /* FileProviderWritePolicyTests.swift in Sources */,
 				9B42F81B45D3BF526B70570B /* FullScanSinglePassTests.swift in Sources */,
 				0BEC55FBA93D4E4AC6559F94 /* FullScanSymlinkTests.swift in Sources */,
