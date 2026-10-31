@@ -24,6 +24,12 @@ enum NotificationEvent: Equatable, Sendable {
     /// `notBackedUp` が 1 回の確認で多数出るとき（symlink を多く含むフォルダを入れた等）に、
     /// 個別に出した残りの件数をまとめる 1 件（Issue #147・PR #149 レビュー指摘 1）。
     case notBackedUpMore(count: Int)
+    /// fpOnly: 同じファイルの書込（作成・更新・移動・削除）が一過性でないエラーで続けて
+    /// `FPEventNoticeWatcher.failureThreshold` 回失敗した（folderSync の `uploadGaveUp` に当たる・Issue #148）。
+    /// FP では fileproviderd が再試行を続けるので「諦めた」ではなく「失敗が続いている」と知らせる。
+    case writeKeepsFailing(path: String)
+    /// `writeKeepsFailing` が 1 回の確認で多数出るときに、個別に出した残りの件数をまとめる 1 件（Issue #148）。
+    case writeKeepsFailingMore(count: Int)
 }
 
 /// OS 通知 1 件分の表示内容。`NotificationManager` が `UNMutableNotificationContent` へ詰め替える。
@@ -77,6 +83,14 @@ enum NotificationPolicy {
                 body: String(localized: "The Tide File Provider extension is turned off in System Settings. Turn it on to resume syncing.")
             )
         case let .notBackedUp(path, reason):
+            // #148 の 3 種は専用の出来事で渡す（`FPEventNoticeWatcher.event`）。型の上ではここにも
+            // 来うるので、同じ文面に回す。
+            switch reason {
+            case .conflictCopyCreated: return content(for: .conflictCopyCreated(path: path, localCopyPath: ""))
+            case .fileTooLarge: return content(for: .fileTooLarge(path: path))
+            case .writeFailed: return content(for: .writeKeepsFailing(path: path))
+            default: break
+            }
             let name = lastComponent(path)
             let body: String
             switch reason {
@@ -92,6 +106,8 @@ enum NotificationPolicy {
                 body = String(localized: "“\(name)” contains a link or an item Tide can’t sync, so Tide doesn’t back it up. It stays only on this Mac.")
             case .packageTooManyFiles:
                 body = String(localized: "“\(name)” contains more than \(PackageScanner.memberLimit) files, so Tide doesn’t back it up. It stays only on this Mac.")
+            case .conflictCopyCreated, .fileTooLarge, .writeFailed:
+                preconditionFailure("handled above")
             }
             return NotificationContent(
                 identifier: "notBackedUp:\(reason.rawValue):\(path)",
@@ -104,6 +120,21 @@ enum NotificationPolicy {
                 identifier: "notBackedUp:more",
                 title: String(localized: "File not backed up"),
                 body: String(localized: "\(count) more files aren’t backed up. They stay only on this Mac.")
+            )
+        case let .writeKeepsFailing(path):
+            let name = lastComponent(path)
+            let times = FPEventNoticeWatcher.failureThreshold
+            return NotificationContent(
+                identifier: "keepsFailing:\(path)",
+                title: String(localized: "Sync keeps failing"),
+                body: String(localized: "“\(name)” failed to sync \(times) times in a row. Tide will keep trying. See Sync Activity for details.")
+            )
+        case let .writeKeepsFailingMore(count):
+            // identifier は固定 = 次のまとめが来たら置き換える（notBackedUpMore と同じ）
+            return NotificationContent(
+                identifier: "keepsFailing:more",
+                title: String(localized: "Sync keeps failing"),
+                body: String(localized: "\(count) more files keep failing to sync.")
             )
         }
     }

@@ -662,7 +662,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 if !(error is CancellationError) {
                     await services.events.append(
                         type: .error, path: path, message: "Create failed",
-                        details: String(describing: error))
+                        details: String(describing: error),
+                        notice: FPEventNotice.forWriteFailure(error))
                 }
                 completion.value(nil, [], false, Self.wrapForCompletion(error))
             }
@@ -724,7 +725,9 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 case .conflict(let copyPath, let copyNode):
                     AppLogger.fileProvider.notice("createItem(package): collision with remote — created as conflict copy: \(copyPath, privacy: .private)")
                     await services.events.append(
-                        type: .conflict, path: path, message: "Created as conflict copy → \(copyPath)")
+                        type: .conflict, path: path, message: "Created as conflict copy → \(copyPath)",
+                        details: copyPath,
+                        notice: .conflictCopyCreated)
                     await services.virtualDirs.removeAncestors(of: path)
                     let materialized = await services.returnedMaterializedFlag(for: copyPath)
                     completion.value(FileProviderItem(node: copyNode, materialized: materialized), [], false, nil)
@@ -742,7 +745,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 if !(error is CancellationError) {
                     await services.events.append(
                         type: .error, path: path, message: "Create failed",
-                        details: String(describing: error))
+                        details: String(describing: error),
+                        notice: FPEventNotice.forWriteFailure(error))
                 }
                 completion.value(nil, [], false, Self.wrapForCompletion(error))
             }
@@ -830,7 +834,9 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             //（modifyItem 競合と同じ「正規パスはリモート勝ち」・データ損失ゼロ）。
             AppLogger.fileProvider.notice("createItem: collision with remote — created as conflict copy: \(copyPath, privacy: .private)")
             await services.events.append(
-                type: .conflict, path: path, message: "Created as conflict copy → \(copyPath)")
+                type: .conflict, path: path, message: "Created as conflict copy → \(copyPath)",
+                details: copyPath,
+                notice: .conflictCopyCreated)
             let materialized = await services.returnedMaterializedFlag(for: copyPath)
             completion.value(
                 FileProviderItem(node: .file(path: copyPath, entry: copyEntry), materialized: materialized),
@@ -1036,7 +1042,9 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     AppLogger.fileProvider.notice("modifyItem: upload conflict — local edit preserved as copy: \(copyPath, privacy: .private)")
                     await services.events.append(
                         type: .conflict, path: path,
-                        message: "Upload conflict — local edit preserved as copy → \(copyPath)")
+                        message: "Upload conflict — local edit preserved as copy → \(copyPath)",
+                        details: copyPath,
+                        notice: .conflictCopyCreated)
                     // 内容はこれから取り直すので台帳に記録しない（伝え済みの状態のまま返す）。
                     let materialized = await services.toldMaterializedFlag(for: path)
                     completion.value(
@@ -1048,7 +1056,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 if !(error is CancellationError) {
                     await services.events.append(
                         type: .error, path: path, message: "Upload failed",
-                        details: String(describing: error))
+                        details: String(describing: error),
+                        notice: FPEventNotice.forWriteFailure(error))
                 }
                 completion.value(nil, [], false, Self.wrapForCompletion(error))
             }
@@ -1094,7 +1103,9 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     AppLogger.fileProvider.notice("modifyItem(format change): upload conflict — local edit preserved as copy: \(copyPath, privacy: .private)")
                     await services.events.append(
                         type: .conflict, path: path,
-                        message: "Upload conflict — local edit preserved as copy → \(copyPath)")
+                        message: "Upload conflict — local edit preserved as copy → \(copyPath)",
+                        details: copyPath,
+                        notice: .conflictCopyCreated)
                     guard let remote, !remote.isDirectory else {
                         // 正規パスに今は書類が無い。一時エラーで再試行させ、次の差分配信に任せる
                         // （ローカルの内容は競合コピーに上がっている）。
@@ -1125,7 +1136,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 if !(error is CancellationError) {
                     await services.events.append(
                         type: .error, path: path, message: "Upload failed",
-                        details: String(describing: error))
+                        details: String(describing: error),
+                        notice: FPEventNotice.forWriteFailure(error))
                 }
                 completion.value(nil, [], false, Self.wrapForCompletion(error))
             }
@@ -1165,7 +1177,9 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     AppLogger.fileProvider.notice("modifyItem(package): upload conflict — local edit preserved as copy: \(copyPath, privacy: .private)")
                     await services.events.append(
                         type: .conflict, path: path,
-                        message: "Upload conflict — local edit preserved as copy → \(copyPath)")
+                        message: "Upload conflict — local edit preserved as copy → \(copyPath)",
+                        details: copyPath,
+                        notice: .conflictCopyCreated)
                     guard let remote = try await services.cache.current().tree.node(at: path), remote.isPackage else {
                         // リモートの正規パスが今はパッケージでない（さらに消えた等）。一時エラーで再試行させ、
                         // 次の差分配信に任せる（ローカルの中身は競合コピーに上がっている）。
@@ -1191,7 +1205,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 if !(error is CancellationError) {
                     await services.events.append(
                         type: .error, path: path, message: "Upload failed",
-                        details: String(describing: error))
+                        details: String(describing: error),
+                        notice: FPEventNotice.forWriteFailure(error))
                 }
                 completion.value(nil, [], false, Self.wrapForCompletion(error))
             }
@@ -1316,7 +1331,9 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                             AppLogger.fileProvider.notice("modifyItem(move noop): upload conflict — local edit preserved as copy: \(copyPath, privacy: .private)")
                             await services.events.append(
                                 type: .conflict, path: oldPath,
-                                message: "Upload conflict — local edit preserved as copy → \(copyPath)")
+                                message: "Upload conflict — local edit preserved as copy → \(copyPath)",
+                                details: copyPath,
+                                notice: .conflictCopyCreated)
                             // 内容はこれから取り直すので台帳に記録しない（上の modifyItem 競合と同じ）。
                             let materialized = await services.toldMaterializedFlag(for: oldPath)
                             completion.value(
@@ -1570,7 +1587,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 if !(error is CancellationError) {
                     await services.events.append(
                         type: .error, path: oldPath, message: "Move failed",
-                        details: String(describing: error))
+                        details: String(describing: error),
+                        notice: FPEventNotice.forWriteFailure(error, sizeLimitApplies: false))
                 }
                 completion.value(nil, [], false, Self.wrapForCompletion(error))
             }
@@ -1821,7 +1839,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     if !(error is CancellationError) {
                         await services.events.append(
                             type: .error, path: dirPath, message: "Delete failed",
-                            details: String(describing: error))
+                            details: String(describing: error),
+                            notice: FPEventNotice.forWriteFailure(error))
                     }
                     dirCompletion.value(Self.wrapForCompletion(error))
                 }
@@ -1908,7 +1927,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 if !(error is CancellationError) {
                     await services.events.append(
                         type: .error, path: ref.path, message: "Delete failed",
-                        details: String(describing: error))
+                        details: String(describing: error),
+                        notice: FPEventNotice.forWriteFailure(error))
                 }
                 completion.value(Self.wrapForCompletion(error))
             }
@@ -1987,7 +2007,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 if !(error is CancellationError) {
                     await services.events.append(
                         type: .error, path: path, message: "Delete failed",
-                        details: String(describing: error))
+                        details: String(describing: error),
+                        notice: FPEventNotice.forWriteFailure(error))
                 }
                 completion.value(Self.wrapForCompletion(error))
             }

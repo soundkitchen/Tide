@@ -154,10 +154,11 @@ public final class ConfigStore: @unchecked Sendable {
         set { defaults.set(newValue, forKey: Key.launchAtLoginMigrated) }
     }
 
-    /// 改名による除外の通知を、どのイベントまで済ませたか（`FPEventLog` のタイムスタンプ・Issue #147）。
-    /// 改名の除外は再送されないので、アプリが止まっていた間の分を次の起動で知らせるために保存する
-    /// （`FPEventNoticeWatcher`）。nil = 未保存（初回・`reset()` 後）= 起動時刻から始める。
-    public var fpNoticeRenameCursor: Double? {
+    /// 再送されない出来事（改名による除外・競合コピー）の通知を、どのイベントまで済ませたか
+    /// （`FPEventLog` のタイムスタンプ・Issue #147 / #148）。再送されないので、アプリが止まっていた間の分を
+    /// 次の起動で知らせるために保存する（`FPEventNoticeWatcher`）。nil = 未保存（初回・`reset()` 後）=
+    /// 起動時刻から始める。キーの文字列は #147 のまま（保存済みの位置を引き継ぐ）。
+    public var fpNoticeCursor: Double? {
         get { defaults.object(forKey: Key.fpNoticeRenameCursor) as? Double }
         set {
             if let newValue {

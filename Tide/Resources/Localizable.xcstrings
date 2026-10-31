@@ -2546,6 +2546,39 @@
           }
         }
       }
+    },
+    "Sync keeps failing" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "同期の失敗が続いています"
+          }
+        }
+      }
+    },
+    "“%@” failed to sync %lld times in a row. Tide will keep trying. See Sync Activity for details." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "「%@」の同期が %lld 回続けて失敗しました。Tide は再試行を続けます。詳しくは同期アクティビティで確認できます。"
+          }
+        }
+      }
+    },
+    "%lld more files keep failing to sync." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ほか %lld 件のファイルの同期が続けて失敗しています。"
+          }
+        }
+      }
     }
   },
   "version" : "1.1"

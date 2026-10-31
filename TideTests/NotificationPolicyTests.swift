@@ -46,8 +46,9 @@ final class NotificationPolicyTests: XCTestCase {
             NotificationPolicy.content(for: .fileTooLarge(path: path)).identifier,
             NotificationPolicy.content(for: .uploadGaveUp(path: path)).identifier,
             NotificationPolicy.content(for: .fileKeepsChanging(path: path)).identifier,
+            NotificationPolicy.content(for: .writeKeepsFailing(path: path)).identifier,
         ]
-        XCTAssertEqual(Set(ids).count, 4)
+        XCTAssertEqual(Set(ids).count, 5)
     }
 
     // MARK: - 表示内容（タイトル / 本文）
@@ -60,6 +61,8 @@ final class NotificationPolicyTests: XCTestCase {
             .uploadGaveUp(path: "p"),
             .fileKeepsChanging(path: "p"),
             .fileProviderDisabled,
+            .writeKeepsFailing(path: "p"),
+            .writeKeepsFailingMore(count: 2),
         ]
         for e in events {
             let c = NotificationPolicy.content(for: e)
@@ -114,5 +117,22 @@ final class NotificationPolicyTests: XCTestCase {
         XCTAssertEqual(a.identifier, b.identifier)
         XCTAssertFalse(a.title.isEmpty)
         XCTAssertTrue(a.body.contains("7"), "body should mention the count: \(a.body)")
+    }
+
+    // MARK: - 書込の失敗が続く（Issue #148）
+
+    /// 本文はファイル名と回数を含み、identifier はパスごと。まとめは identifier 固定で件数を含む。
+    func testWriteKeepsFailingContent() {
+        let c = NotificationPolicy.content(for: .writeKeepsFailing(path: "deep/report.pdf"))
+        XCTAssertEqual(c.identifier, "keepsFailing:deep/report.pdf")
+        XCTAssertTrue(c.body.contains("report.pdf"), c.body)
+        XCTAssertFalse(c.body.contains("deep/"), c.body)
+        XCTAssertTrue(c.body.contains("\(FPEventNoticeWatcher.failureThreshold)"), c.body)
+
+        let a = NotificationPolicy.content(for: .writeKeepsFailingMore(count: 7))
+        let b = NotificationPolicy.content(for: .writeKeepsFailingMore(count: 9))
+        XCTAssertEqual(a.identifier, "keepsFailing:more")
+        XCTAssertEqual(a.identifier, b.identifier)
+        XCTAssertTrue(a.body.contains("7"), a.body)
     }
 }

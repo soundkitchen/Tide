@@ -110,7 +110,7 @@ macOS のクリーンインストール後の復旧を主目的とした、Dropb
   - **現行（fpOnly）の読み替え**: Sync Activity のソースは DB の sync_log ではなく **`FPEventLog`**（FP 拡張が書く App Group Caches の JSONL・Issue #83。#147 以降は通知のソースも兼ねる）。
 - ✅ 通知（競合発生時・未バックアップ確定時）
   - macOS 通知（UserNotifications）。発火は「ユーザの介入が要る／取りこぼしが起きうる確定的な事象」だけに絞る: ① 競合コピー作成、② サイズ上限超過、③ リトライ give-up、④ 不安定ファイル（変化し続けて未バックアップ）、⑤ FP 拡張のユーザ OFF = 全同期停止（#103 で追加）、⑥ バックアップされないファイル（同期できない名前・symlink の新規作成と、追跡中のファイル / フォルダの同期しない名前への改名・#147 で追加。シンボリックリンク等を含む・中身が多すぎるパッケージの丸ごと除外・#140 で追加）。一過性のネットワークエラー等は出さない。許可は**初回発火時**にリクエスト。Settings の「Notifications」トグル（既定 on）で抑止可。通知クリックで Sync Activity を開く。判定は純粋関数 `NotificationPolicy`。詳細は `docs/08-IMPLEMENTATION-NOTES.md`。
-  - **現行（fpOnly）の読み替え**: ①〜④ は `SyncEngine` から出すため fpOnly では出ない（#148 で ⑥ と同じ経路に載せる予定）。⑥ は FP 拡張が `FPEventLog` に付けた印をアプリの `FPEventNoticeWatcher` が拾って出す。
+  - **現行（fpOnly）の読み替え**: ①〜④ は `SyncEngine` から出すため fpOnly では出ない。#148 で ① 競合コピー・② サイズ上限超過を ⑥ と同じ経路（FP 拡張が `FPEventLog` に付けた印をアプリの `FPEventNoticeWatcher` が拾う）に載せ、③ give-up は「同じファイルの書込が一過性でないエラーで続けて 5 回失敗した」通知（fileproviderd は再試行を続けるので「失敗が続いている」と知らせる）に置き換えた。④ 不安定は FP に当たる出来事が無い（拡張は書きかけのファイルを受け取らない）ので出さない。
 - ✅ パフォーマンス最適化（pull コスト削減）
   - リモート pull の取り込み（`reconcileRemoteEntry`）に **stat ゲート**を追加。未変化シャードは entry が DB から再合成されるため、ローカルが DB と一致し DB がリモートをそのまま反映していれば hash も DB write もせずスキップする（証明可能な no-op）。内容一致時の DB 最新化は `download()` から専用 `markSynced` に分離し、残る hash も off-main 化（pull 中のメインスレッドブロックを解消）。判定は純粋関数 `ChangeDetector.reconcileIsNoop`。詳細は `docs/08-IMPLEMENTATION-NOTES.md`「reconcile 入口の stat ゲート」と `docs/04a-SYNC-LOGIC-FOLDERSYNC.md`。
   - **現行（fpOnly）の読み替え**: pull 経路ごと folderSync 世代（fpOnly に pull は無い）。

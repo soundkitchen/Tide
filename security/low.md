@@ -361,11 +361,14 @@ FP 拡張の書込（deleteItem / modifyItem / createItem / move）は `Extensio
 - **読込ゲート**: 表示専用（path を FS 操作に使わない）のため**行単位破棄** — 壊れ行スキップ・bucket キー・未知 eventType 破棄・`validateRelativePath` 再適用・message / details の長さ上限・肥大ファイル（> 2×maxBytes・改ざん前提）は読込ごと拒否。UI 表示は `Text(verbatim:)`（ローカライズ解決に流さない）。
 - **書込は best-effort**: 追記失敗は os.Logger のみ（FP 操作を失敗させない）。単一書き手（拡張プロセス + actor 直列化）でローテーション競合なし。
 - **Status（2026-10-28・#147）: レコードに通知の印 `notice` を追加し、アプリが新着を OS 通知に使うようにした**。
-  印は `FPEventNotice` の rawValue（固定の 6 種 = #140 でパッケージの丸ごと除外 2 種〈`packageHasUnsyncableItem` / `packageTooManyFiles`・通知に出すのは `path`〉を足した。at-rest の中身は相対パス・固定の英文の message / details のままで変わらない）で、未知の値は読込時に外す（レコードは表示用に残す）。通知の
+  印は `FPEventNotice` の rawValue（#147 時点で固定の 6 種 = #140 でパッケージの丸ごと除外 2 種〈`packageHasUnsyncableItem` / `packageTooManyFiles`・通知に出すのは `path`〉を足した。at-rest の中身は相対パス・固定の英文の message / details のままで変わらない）で、未知の値は読込時に外す（レコードは表示用に残す）。通知の
   本文に出すのは表示用のパスの末尾の名前だけで、生エラー文字列は出さない（既存の通知と同じ・`security/README.md` の
   通知の注記どおり by-design）。検証できない名前の除外は `path` に入れられないため、親フォルダを含む表示用のパスを
   `details` に入れる（表示専用・FS 操作にも S3 キーにも使わない = 読込ゲートの前提は変わらない）。改ざんされたログは
   偽の通知を出しうるが、書けるのは本人の App Group コンテナに書ける者だけで、通知は表示のみ（同期に影響しない）。
+- **Status（2026-10-31・#148）: 印を 3 種足した（`conflictCopyCreated` / `fileTooLarge` / `writeFailed`・通知に出すのは `path`）**。
+  競合のレコードは退避先の相対パスを `details` に入れる（表示専用・FS 操作にも S3 キーにも使わない）。書込の失敗の
+  `details` は従来どおりエラー記述で、通知の本文には出さない（ファイル名と回数だけ）。at-rest の中身の種類は変わらない。
 - **Status（2026-10-31・#148）: 拡張は追記のたびに Darwin 通知（`notify_post`）を送り、アプリは受けて新着を読む**。
   通知は名前だけで中身を運ばない（名前 = App Group の ID + `.fp-events`）。同じ名前の通知は他のプロセスからも送れるが、
   受けたアプリは前回の位置から先のログを読むだけで、新着が無ければ何もしない（読込ゲートは従来どおり）。偽の通知で

@@ -31,16 +31,18 @@ public struct FPEventRecord: Codable, Sendable, Equatable {
     }
 }
 
-/// FP 拡張のイベントのうち、アプリが OS 通知で知らせるものの種類（Issue #147）。
+/// FP 拡張のイベントのうち、アプリが OS 通知で知らせるものの種類（Issue #147 / #148）。
 /// 拡張が `FPEventLog.append(notice:)` で印を付け、アプリの `FPEventNoticeWatcher` が新着を
-/// 拾って通知する。どれも「ファイルがこの Mac にだけ残り、バックアップされない」出来事で、
-/// ユーザが意図していない可能性があるものに限る（機密網・`.syncignore` による新規作成の除外は、
-/// 意図した除外なので印を付けない）。
+/// 拾って通知する。どれもユーザの対応が要るか、バックアップの取りこぼしが起きうる出来事に限る:
+/// - バックアップされない（#147）: ファイルがこの Mac にだけ残る除外のうち、ユーザが意図していない
+///   可能性があるもの（機密網・`.syncignore` による新規作成の除外は、意図した除外なので印を付けない）
+/// - 競合コピー・サイズ上限の超過・書込の失敗が続く（#148）: fpOnly では `SyncEngine` を作らないため、
+///   folderSync で `SyncEngine` が出していた通知を、拡張の出来事から出す
 ///
 /// 通知に出す名前の出どころ（`subject`）は種類で決まる:
 /// - `unsyncableName` / `renamedFileExcluded` / `renamedFolderExcluded`: `details`（表示用の
 ///   パス。検証できない名前は `path` に入れられず、改名は新しい名前を出したいため）
-/// - `symbolicLink` / `packageHasUnsyncableItem` / `packageTooManyFiles`: `path`
+/// - それ以外: `path`
 public enum FPEventNotice: String, Sendable, CaseIterable {
     /// 同期できない名前（バックスラッシュ等）で新規作成された
     case unsyncableName
@@ -55,22 +57,59 @@ public enum FPEventNotice: String, Sendable, CaseIterable {
     case packageHasUnsyncableItem
     /// パッケージの中身が上限（`PackageScanner.memberLimit`）を超えていて、パッケージごと除外した（#140）
     case packageTooManyFiles
+    /// 他の端末の変更とぶつかり、この Mac の編集を競合コピーへ退避した（#148・手で直す必要がある）
+    case conflictCopyCreated
+    /// アップロードのサイズ上限（設定）を超えていて、上げられなかった（#148）
+    case fileTooLarge
+    /// 書込（作成・更新・移動・削除）が失敗した（#148）。一過性のエラー（ネットワーク・並行書込の衝突）
+    /// には付けない。アプリは同じパスで続いた回数を数え、`FPEventNoticeWatcher.failureThreshold` 回に
+    /// 達したら知らせる（`isCountedFailure`）。
+    case writeFailed
 
     /// fileproviderd が同じアイテムの除外を再送する種類か（#120 の再送嵐）。再送される種類は、
     /// アプリ側で同じアイテムを 1 回だけ通知する。改名の除外は後片付けの deleteItem で終わり、
     /// 再送されない。
+    /// サイズ超過・書込の失敗は、fileproviderd がエラーを一時的なものとして再試行するので再送される。
+    /// 競合コピーは書込が成功として終わるので再送されない。
     public var isResentByDaemon: Bool {
         switch self {
-        case .unsyncableName, .symbolicLink, .packageHasUnsyncableItem, .packageTooManyFiles: return true
-        case .renamedFileExcluded, .renamedFolderExcluded: return false
+        case .unsyncableName, .symbolicLink, .packageHasUnsyncableItem, .packageTooManyFiles,
+             .fileTooLarge, .writeFailed:
+            return true
+        case .renamedFileExcluded, .renamedFolderExcluded, .conflictCopyCreated:
+            return false
         }
+    }
+
+    /// 1 回では知らせず、同じパスで続いた回数を数える種類か（#148）。
+    public var isCountedFailure: Bool {
+        self == .writeFailed
     }
 
     /// 通知に出す名前（表示用のパス）。上の型コメントの規約どおり。
     public func subject(of record: FPEventRecord) -> String? {
         switch self {
-        case .symbolicLink, .packageHasUnsyncableItem, .packageTooManyFiles: return record.path
+        case .symbolicLink, .packageHasUnsyncableItem, .packageTooManyFiles,
+             .conflictCopyCreated, .fileTooLarge, .writeFailed:
+            return record.path
         case .unsyncableName, .renamedFileExcluded, .renamedFolderExcluded: return record.details
+        }
+    }
+
+    /// 書込の失敗に付ける印（#148）。一過性のエラー（ネットワーク・並行書込の衝突 = fileproviderd の
+    /// 再試行で直りうる）とキャンセルには付けない（nil）。
+    /// - Parameter sizeLimitApplies: サイズ超過が設定のアップロード上限によるものか。移動のコピーの上限
+    ///   （5 GiB）は設定を変えても直らないので、`fileTooLarge` ではなく `writeFailed` として数える。
+    public static func forWriteFailure(_ error: Error, sizeLimitApplies: Bool = true) -> FPEventNotice? {
+        if error is CancellationError { return nil }
+        switch SyncIssueClassifier.category(for: error) {
+        case .network, .remoteConflict:
+            return nil
+        case .fileTooLarge:
+            return sizeLimitApplies ? .fileTooLarge : .writeFailed
+        case .accessDenied, .notFound, .unstableFile, .localIO, .database, .configuration,
+             .unsafePath, .other:
+            return .writeFailed
         }
     }
 }
