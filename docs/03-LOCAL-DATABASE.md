@@ -41,7 +41,7 @@ App Group の Caches（`~/Library/Group Containers/G5G54TCH8W.org.izukawa.Tide/L
 | `fileprovider-dir-exclusion-holds.json` | `PersistedPathSet` | フォルダ単位除外の予約（#120・後始末の deleteItem を S3 非接触にする根拠。未使用なら未作成） |
 | `fileprovider-dir-cleanup-freezes.json` | `PersistedPathSet` | フォルダを除外名へ改名したときのバッジ凍結の予約（#138・後片付けの deleteItem(dir) の完了か拒否まで配下のバッジを凍結する。削除の受理判定には使わない。未使用なら未作成） |
 | `fileprovider-manifest-log.json` | `ManifestGenerationLog` | マニフェスト世代ログ（`enumerateChanges` の anchor 解決。書き手 = 拡張の `ManifestGenerationCache` アクター） |
-| group defaults | `ConfigStore`（`TideAppGroup.sharedDefaults()`） | 設定（bucket / region / deviceId / setupCompleted / syncMode〈外部ツール契約キー〉/ fileProviderDomainEpoch / fpNoticeRenameCursor〈改名による除外の通知をどこまで済ませたか・#147〉） |
+| group defaults | `ConfigStore`（`TideAppGroup.sharedDefaults()`） | 設定（bucket / region / deviceId / setupCompleted / syncMode〈外部ツール契約キー〉/ fileProviderDomainEpoch / fpNoticeCursor〈再送されない出来事（改名による除外・競合コピー）の通知をどこまで済ませたか・#147 / #148。キー文字列は #147 のまま〉） |
 | Data Protection Keychain | `KeychainStore` | AWS 認証情報 |
 
 `PersistedPathSet` 5 本（materialized / virtual-dirs / exclusion-cleanups / dir-exclusion-holds / dir-cleanup-freezes）はドメイン epoch（`fileProviderDomainEpoch`）を構築時 capture し、
