@@ -23,8 +23,8 @@ struct ExtensionWriter: Sendable {
         /// 書込成功（または別書き手が同一内容を確定済み）。entry は正規パスの確定 identity。
         case written(ManifestFileEntry)
         /// createItem（base nil）の冪等リプレイ: ツリー現行 entry と同一内容だったため
-        /// **S3 もマニフェストも書かず**既存 identity を返した（#93 の reimport 問い直し・
-        /// クラッシュ後の再送が該当。2026-08-25 ユーザ確定）。呼び出し側はアップロード系の
+        /// **S3 もマニフェストも書かず**既存 identity を返した（fileproviderd の再取り込みの問い直し・
+        /// 見限られた書込の送り直し〈#151〉・クラッシュ後の再送が該当。2026-08-25 ユーザ確定）。呼び出し側はアップロード系の
         /// イベントを記録しないこと（実際には何も書いていない）。
         case unchanged(ManifestFileEntry)
         /// 並行更新と競合: ローカル編集は copyPath へ退避済み・リモートが正規パスで勝つ
@@ -121,8 +121,8 @@ struct ExtensionWriter: Sendable {
         try PathValidator.validateRelativePath(path)
         // createItem（base nil）の同一 sha ファストパス（#93・2026-08-25 ユーザ確定）:
         // ツリー現行 entry が同一パスに同一内容を既に宣言しているなら、アップロードも RMW も
-        // せず既存 identity を返す。該当ケースは reimportItems の問い直し（createItem
-        // (mayAlreadyExist)・#93 の版スタンプ治癒）とクラッシュ後リプレイ — 従来は同一バイトを
+        // せず既存 identity を返す。該当ケースは再取り込みの問い直し（createItem
+        // (mayAlreadyExist)。#93 の版スタンプ治癒は #151 でやめた）・見限られた書込の送り直しとクラッシュ後リプレイ — 従来は同一バイトを
         // PUT してから `.alreadyUpToDate` で識別しており、orphan version と紛らわしい
         // 「Created」イベントを量産していた。
         // - 判定はキャッシュ済みツリー（stale の可能性）だが安全側: 一致 = 「宣言済み内容の
