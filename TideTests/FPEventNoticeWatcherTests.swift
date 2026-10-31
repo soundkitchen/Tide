@@ -210,17 +210,18 @@ final class FPEventNoticeWatcherTests: XCTestCase {
             "知らせたあとは成功するまで知らせない")
     }
 
-    /// 起動前の失敗も数えるが、知らせるのは起動後の失敗で回数に達したときだけ。
-    func testWriteFailuresBeforeLaunchCountButNotifyAfterLaunch() {
+    /// 数えるのは起動後の失敗だけ（古い失敗で後日 1 回の失敗から知らせない・PR #160 レビュー指摘 6）。
+    func testWriteFailuresBeforeLaunchAreNotCounted() {
         var state = FPEventNoticeWatcher.State()
         let beforeLaunch = FPEventNoticeWatcher.notices(
             in: (1...4).map { record(Double($0), path: "a.txt", notice: .writeFailed, eventType: .error) },
             after: cursors(100, 100), state: &state, failureThreshold: 3)
         XCTAssertTrue(beforeLaunch.events.isEmpty)
+        XCTAssertEqual(state.failureCounts, [:])
         let afterLaunch = FPEventNoticeWatcher.notices(
-            in: [record(110, path: "a.txt", notice: .writeFailed, eventType: .error)],
+            in: (110...112).map { record(Double($0), path: "a.txt", notice: .writeFailed, eventType: .error) },
             after: cursors(100, 100), state: &state, failureThreshold: 3)
-        XCTAssertEqual(afterLaunch.events, [.writeKeepsFailing(path: "a.txt")])
+        XCTAssertEqual(afterLaunch.events, [.writeKeepsFailing(path: "a.txt")], "起動後の 3 回目で知らせる")
     }
 
     /// 失敗の回数の記録も上限に達したら空にする。

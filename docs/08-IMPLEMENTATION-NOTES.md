@@ -1741,8 +1741,9 @@ fpOnly では `SyncEngine` を作らないため、`SyncEngine` から出して�
 - **③ give-up の置き換え（ユーザ確定）**: FP では fileproviderd が上限なしに再試行するので「諦めた」出来事は無い。代わりに、
   アプリが同じパスの `writeFailed` を数え、**続けて 5 回**（folderSync の give-up と同じ・`FPEventNoticeWatcher.failureThreshold`）
   に達したら「同期の失敗が続いています」（`NotificationEvent.writeKeepsFailing`）を 1 回知らせる。そのパスの書込が成功した記録
-  （`upload` / `delete` / `move` / `conflict`）で数え直し、また 5 回続けばもう一度知らせる。回数は起動前の記録も数えるが、
-  知らせるのは起動後の失敗で回数に達したときだけ（起動直後にまとめて出さない）。回数の記録はメモリだけで、1 万件で空にする。
+  （`upload` / `delete` / `move` / `conflict`）で数え直し、また 5 回続けばもう一度知らせる。数えるのは起動後の失敗だけ
+  （起動前の記録も数えると、成功の記録が出ないまま残った古い失敗が効き、後日 1 回失敗しただけで「5 回続けて」と出る・
+  PR #160 レビュー指摘 6 でユーザ確定。アプリを再起動すると数え直しになる）。回数の記録はメモリだけで、1 万件で空にする。
   1 回の確認で 4 件以上なら 3 件 +「ほか N 件」（`writeKeepsFailingMore`）にまとめる。
 - **④ 不安定は出さない（ユーザ確定）**: 拡張は fileproviderd が用意した静止したファイルを受け取るので、書きかけのファイルを
   読む出来事が無い。万一起きたとき（`SyncError.fileChangedDuringUpload` = `unstableFile`）は、一過性ではない書込の失敗として

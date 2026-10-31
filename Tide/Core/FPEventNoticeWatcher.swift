@@ -18,8 +18,9 @@ import Foundation
 ///   記録が上限（`maxNotifiedKeys`）に達したら空にする（常駐中に際限なく増やさない・指摘 7）。
 /// - 書込の失敗（`writeFailed`）は 1 回では知らせない。同じパスで続いた回数を数え、
 ///   `failureThreshold` 回に達したら 1 回知らせる（folderSync の give-up に当たる・#148）。
-///   そのパスの書込が成功した記録（作成・更新・移動・削除・競合コピー）で数え直す（サイズ超過の通知済みも外す）。回数は起動前の
-///   記録も数えるが、知らせるのは起動後の失敗で回数に達したときだけ（起動直後にまとめて出さない）。
+///   そのパスの書込が成功した記録（作成・更新・移動・削除・競合コピー）で数え直す（サイズ超過の通知済みも外す）。数えるのは
+///   起動後の失敗だけ（成功の記録が出ないまま残った古い失敗で、後日 1 回の失敗から知らせない・PR #160 レビュー指摘 6・
+///   ユーザ確定）。
 /// - 1 回の確認で多数出るとき（symlink を多く含むフォルダを入れた等）は、バックアップされない出来事・
 ///   失敗が続く出来事それぞれで最初の `individualLimit` 件だけ個別に出し、残りを「ほか N 件」の 1 件に
 ///   まとめる（指摘 1）。競合コピーはまとめない（1 件ずつ手で直す必要がある）。
@@ -191,6 +192,7 @@ final class FPEventNoticeWatcher {
                   let subject = notice.subject(of: record), !subject.isEmpty
             else { continue }
             if notice.isCountedFailure {
+                guard record.timestamp > cursors.sinceLaunch else { continue }
                 if state.failureCounts[subject] == nil, state.failureCounts.count >= maxNotifiedKeys {
                     state.failureCounts.removeAll()
                 }
