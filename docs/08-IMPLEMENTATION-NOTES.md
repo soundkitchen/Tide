@@ -355,6 +355,22 @@ FP ドメイン内のファイル編集（`modifyItem` の .contents）と削除
 - **仕組み**: 各書込系コールバックの冒頭で completion を包む（`trackWrite`）。どの経路で返しても終了が 1 回だけ記録される（二重呼び出しでも数を崩さない）。**読み取り系（`item(for:)` / `fetchContents` / 列挙）は対象外** — `writes in flight: 0` は「処理中の書込系コールバックが無かった」の意味で、長い `fetchContents` や列挙が走っていた可能性は残る（そちらは既存のログ = `fetchContents failed` / `enumerateItems: working set started` 等で見る）。
 - **採り方**: `/usr/bin/log show --last 10m --info --predicate 'subsystem == "org.izukawa.Tide" AND category == "fileprovider"'`。fileproviderd 側（`LifetimeError`・接続の invalidate）は `process == "fileproviderd"` で同じ時刻を採る。Info ログは 10〜15 分で消えるので、起きたらすぐに採る。
 
+#### 拡張のサービスはプロセスで共有（Issue #151・2026-10-31）
+
+- **何をするか**: `ExtensionServices.fromSharedConfig` は、作ったサービス（S3 クライアント・マニフェストのキャッシュ・書き手〈`ManifestUpdater` = `IndexUpdateCoalescer`〉・`.syncignore` のキャッシュ・レジストリ 5 本・実体化の観測・イベントログ）をプロセスの静的な置き場に持ち、同じプロセスの次のインスタンスにも同じものを返す。
+- **なぜ**: fileproviderd は同じプロセスの中で拡張のインスタンスを作り直し、見限った古いインスタンスが処理中の書込を抱えたまま新しいインスタンスと同居することがある（#151 の再現: パッケージへの再取り込みで見限られた古いインスタンスが、移動を抱えて約 90 秒生き続けた）。インスタンスごとにサービスを作ると、index の更新をまとめる仕組みが別々になって index.json を奪い合い（CAS 8 回失敗 → index が古いまま = `soak-check-fp` の persistent DRIFT）、レジストリは同じ JSON を別々の actor が読み書きして互いの追加を上書きしうる。
+- **3 段に分けて、変わった段だけ作り直す**（PR #157 レビュー指摘 1）: サービスを丸ごと作り直すと、古いインスタンスが書込を抱えて生きている間、同じプロセスにコアレッサとレジストリが 2 つずつでき、#151 と同じ奪い合いが戻る（レジストリの上書きで除外の予約 = `dirExclusionHolds` などが落ちれば、#120 の「予約つきの後始末は S3 に触れない」も崩れうる）。そこで値を 3 段に分け、変わった段とその下の段だけを作り直す（判定 = `FileProviderServiceSharing.plan`・回帰 = `FileProviderServiceSharingTests`）。
+  - **① 状態**（レジストリ 5 本・実体化の観測・イベントログ・ドメインへの signal）: ドメインの識別子・epoch（#104）・バケット。ドメインの作り直し（epoch が変わる）でだけ作り直す。
+  - **② 接続**（S3 クライアント・マニフェストのキャッシュ・`ManifestUpdater` = `IndexUpdateCoalescer`・`.syncignore` のキャッシュ）: リージョン・deviceId・認証情報。
+  - **③ 書き手**（アップロードの上限・帯域の `RateLimiter`）: 上限・帯域。② の S3 クライアントと updater を使い回して書き手だけを作るので、設定画面での帯域・上限の変更では奪い合いは起きない。
+- **残る窓**: ② を作り直したとき（認証情報の入れ替え・deviceId の作り直し〈#121〉・リージョンの変更 = どれもまれ）に、古いインスタンスが書込を抱えて生きていれば、コアレッサとマニフェストのキャッシュが 2 つずつになる。index.json の奪い合いで CAS が尽きると index が古いまま残りうる（`soak-check-fp` の DRIFT・後の書込で治る）。キャッシュは同じ世代ログに書きうる。レジストリ（①）は 2 つにならない。① を作り直すのはドメインの作り直しのときで、古い epoch のレジストリは次のプロセスが読込時に捨てる（#104 の意味論のまま）。
+- **値は 1 度だけ読む**: キーに入れた値（epoch・deviceId・上限・帯域）をそのまま構築に使う。構築の中で設定を読み直すと、キーが作った値を表さなくなる（PR #157 レビュー指摘 3）。
+- **設定が欠けたとき**（factoryReset のあと・認証情報が無いとき）: 認証情報を持つ段（② と ③）を置き場から外す。① は残し、設定が戻ったら使い回す（PR #157 レビュー指摘 5）。
+- **ログ**: `Extension: shared services in this process: state=… connection=… writer=…`（各段が `reused` か `built` か）。① を作ったときは従来どおり `Extension: captured domain epoch …` も出る。
+- **認証情報**: 比べるのはアクセスキー ID とシークレットの SHA-256（`FileProviderServiceSharing.credentialsDigest`）で、置き場のキーにシークレットを平文で持たない。S3 クライアントは元々どおり認証情報をメモリに持つ（ファイルには書かない）。
+- **置き場のロック**: 構築（S3 クライアント・App Group コンテナの解決）を握ったまま行うので NSLock で守る（PR #157 レビュー指摘 2）。
+- **据え置き**: 古い設定を読んだインスタンスが、あとから新しい設定のサービスを上書きする競合（A が帯域 L1 を読む → アプリが L2 に変える → B が L2 で作る → A が L1 で作り直す）は残る（PR #157 レビュー指摘 4・狭い）。次のインスタンスが来れば正しい値に戻る。
+
 #### FP 実体化連動バッジ（Issue #65・2026-07-14）
 
 - **要件**: 「実体化されているときだけ Finder にチェックバッジ」（静的バッジは dataless にも付き誤読される — 2026-07-12 試作 → 撤去の再挑戦）。対象は**ファイル + ディレクトリ両方**（ユーザ確定）。dir のチェック基準 = **配下に 1 ファイル以上あり、かつ配下全ファイルが実体化済み**（空フォルダ・仮想フォルダはチェックなし）。バッジは S3 非接触の純ローカル機能。
@@ -1390,7 +1406,11 @@ revert 復帰ランブックを含む）。実施 3 段の記録は本ファイ�
   残余のみ。**意味論は不変（load-bearing）**: 呼び出し側は自分の transform を含む putIndex の
   確定を await してから戻る =「shard + index 双方確定時のみ発火」の確定点維持・CAS 中止
   （false）の per-caller 返値維持・枯渇はバッチ全員へ伝播。コアレッサは ManifestUpdater
-  1 個につき 1 個（struct コピーは同一 actor 共有）。
+  1 個につき 1 個（struct コピーは同一 actor 共有）。**FP 拡張では ManifestUpdater がプロセスに
+  1 個になるよう、拡張のサービスをプロセスで共有する**（#151・下記「拡張のサービスはプロセスで共有」。
+  認証情報・deviceId・リージョンを変えたときだけ作り直す）。
+  インスタンスごとに作っていた間は、同じプロセスに同居した新旧のインスタンスがそれぞれのコアレッサで
+  index.json を奪い合い、CAS が 8 回失敗して index が古いまま残った（2026-10-31 実機）。
 - **③ 部分完了の孤児根絶**（`SyncError.indexUpdateFailedAfterCommit` + `.removedIndexStale`
   系 outcome）: シャード書込（putShard / deleteShard）**確定後**の index 反映失敗を
   `commitShardWrite` が専用エラーに包み、削除系 RMW（`removeFileEntry` / `removeFileEntries` /

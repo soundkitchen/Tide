@@ -156,6 +156,7 @@ struct ExtensionServices: Sendable {
         guard config.setupCompleted, hasBucket, hasRegion,
               let bucket = config.bucketName, let region = config.region else {
             AppLogger.fileProvider.notice("Extension not configured (setup incomplete)")
+            dropSharedConnection()
             return nil
         }
         let credentials: AWSCredentials?
@@ -163,129 +164,264 @@ struct ExtensionServices: Sendable {
             credentials = try KeychainStore().load()
         } catch {
             AppLogger.fileProvider.error("Extension: Keychain read failed: \(String(describing: error), privacy: .private)")
+            dropSharedConnection()
             return nil
         }
         guard let credentials else {
             AppLogger.fileProvider.error("Extension: AWS credentials not found in shared Keychain")
+            dropSharedConnection()
             return nil
         }
-        do {
-            let s3 = try TideS3Client(
-                credentials: credentials, region: region, bucket: bucket,
-                deviceId: config.deviceId
-            )
-            let logURL = try? ManifestGenerationLog.defaultURL()
-            if logURL == nil {
-                AppLogger.fileProvider.error("Extension: generation log URL unavailable (persisting disabled)")
-            }
-            // NSFileProviderDomain は Sendable 注釈が無いが、signalEnumerator は
-            // どのスレッド/プロセスから呼んでもよい契約なので箱で closure へ運ぶ。
-            let boxedDomain = UncheckedSendableBox(value: domain)
-            let signalWorkingSet: @Sendable () -> Void = {
-                // replicated 拡張への signal は .workingSet のみ有効（他は無視される）。
-                NSFileProviderManager(for: boxedDomain.value)?.signalEnumerator(for: .workingSet) { error in
-                    if let error {
-                        AppLogger.fileProvider.error("Self-signal failed: \(String(describing: error), privacy: .private)")
-                    }
-                }
-            }
-            let cache = ManifestGenerationCache(
-                loader: ManifestSnapshotLoader(source: s3),
-                bucket: bucket,
-                logURL: logURL,
-                onNewGeneration: {
-                    // ブラウズ契機のリフレッシュがリモート変化に気づいた時の自己 signal。
-                    // アプリ側の pull 後 signal が主経路で、これはアプリ非起動時の補完。
-                    // Phase 5-2 の自世代 append（recordLocalChange）もここを通る =
-                    // 拡張自身の書込の anchor 前進もこの 1 本に集約。
-                    signalWorkingSet()
-                }
-            )
-            // 拡張の ManifestUpdater は onManifestDidWrite を**明示 nil**にする: 拡張の signal は
-            // 書込後の `invalidateAfterLocalWrite` → onNewGeneration が担う。ここでも発火させると
-            // 「無効化前の signal → enumerateChanges → 旧世代ロード」の無駄往復になる
-            // （アプリ側は世代ログを持たないため書込確定点の hook が signal の正位置、という
-            // 役割分担。docs/08 Phase 5-2 節参照）。
-            let writer = ExtensionWriter(
-                s3: s3,
-                cache: cache,
-                updater: ManifestUpdater(store: s3, deviceId: config.deviceId, onManifestDidWrite: nil),
-                deviceId: config.deviceId,
+        // プロセス内で共有する（Issue #151）: fileproviderd は同じプロセスの中で拡張のインスタンスを
+        // 作り直し、見限った古いインスタンスが処理中の書込を抱えたまま新しいインスタンスと同居する
+        // ことがある。インスタンスごとにサービスを作ると、index の更新をまとめる仕組み
+        // （`IndexUpdateCoalescer`）・キャッシュ・レジストリ（同じ JSON）が別物になり、互いに
+        // index.json を奪い合って index が古いまま残った（2026-10-31 実機）。サービスを 3 段
+        // （状態 / 接続 / 書き手）に分け、変わった値の段とその下の段だけを作り直す
+        // （`FileProviderServiceSharing`）。値はここで 1 度だけ読み、キーと構築の両方に使う
+        // （読み直すと、キーが作った値を表さなくなる・PR #157 レビュー指摘 3）。
+        let deviceId = config.deviceId
+        let key = FileProviderServiceSharing.Key(
+            state: .init(
+                domainIdentifier: domain.identifier.rawValue,
+                domainEpoch: config.fileProviderDomainEpoch, bucket: bucket),
+            connection: .init(
+                region: region, deviceId: deviceId,
+                credentialsDigest: FileProviderServiceSharing.credentialsDigest(credentials)),
+            writer: .init(
                 uploadSizeLimitBytes: config.uploadSizeLimitBytes,
-                uploadLimiter: RateLimiter(ratePerSec: Double(config.uploadBandwidthBytesPerSec))
+                uploadBandwidthBytesPerSec: config.uploadBandwidthBytesPerSec))
+
+        sharedLock.lock()
+        defer { sharedLock.unlock() }
+        let reuseState = shared?.stateKey == key.state
+        let plan = FileProviderServiceSharing.plan(cached: shared?.connected?.key, new: key)
+        let state: SharedState
+        if reuseState, let cached = shared?.state {
+            state = cached
+        } else {
+            state = makeState(domain: domain, key: key.state)
+        }
+        let connection: SharedConnection
+        if reuseState, plan.reuseConnection, let cached = shared?.connected?.connection {
+            connection = cached
+        } else {
+            guard let built = makeConnection(
+                bucket: bucket, region: region, deviceId: deviceId,
+                credentials: credentials, signalWorkingSet: state.signalWorkingSet)
+            else {
+                shared = SharedEntry(stateKey: key.state, state: state, connected: nil)
+                return nil
+            }
+            connection = built
+        }
+        let writer: ExtensionWriter
+        if reuseState, plan.reuseWriter, let cached = shared?.connected?.writer {
+            writer = cached
+        } else {
+            writer = ExtensionWriter(
+                s3: connection.s3,
+                cache: connection.cache,
+                updater: connection.updater,
+                deviceId: deviceId,
+                uploadSizeLimitBytes: key.writer.uploadSizeLimitBytes,
+                uploadLimiter: RateLimiter(ratePerSec: Double(key.writer.uploadBandwidthBytesPerSec))
             )
-            let ignore = ManifestIgnoreCache { path, versionId, maxPrefixBytes in
-                // `.syncignore` 本体の取得。path はマニフェスト（リモート）由来なので S3 キー
-                // 組み立て前に必ず検証する。sha256 は**全バイト**から計算しつつ、保持は先頭
-                // maxPrefixBytes のみ（超過分は打ち切りパース = アプリ側の読込打ち切りと同じ）。
-                // 404 / NoSuchVersion は nil（呼び出し側が最新版フォールバック / 層スキップ）。
-                try PathValidator.validateRelativePath(path)
-                var hasher = SHA256()
-                var prefix = Data()
-                let result = try await s3.streamObject(
-                    key: "files/\(path)", versionId: versionId, rangeStart: nil
-                ) { chunk in
-                    hasher.update(data: chunk)
-                    if prefix.count < maxPrefixBytes {
-                        prefix.append(chunk.prefix(maxPrefixBytes - prefix.count))
-                    }
+        }
+        let reuseConnection = reuseState && plan.reuseConnection
+        let reuseWriter = reuseState && plan.reuseWriter
+        AppLogger.fileProvider.notice("Extension: shared services in this process: state=\(reuseState ? "reused" : "built", privacy: .public) connection=\(reuseConnection ? "reused" : "built", privacy: .public) writer=\(reuseWriter ? "reused" : "built", privacy: .public)")
+        shared = SharedEntry(
+            stateKey: key.state, state: state,
+            connected: SharedConnected(key: key, connection: connection, writer: writer))
+        return ExtensionServices(
+            s3: connection.s3, cache: connection.cache, writer: writer, ignore: connection.ignore,
+            virtualDirs: state.virtualDirs,
+            exclusionCleanups: state.exclusionCleanups,
+            dirCleanupFreezes: state.dirCleanupFreezes,
+            dirExclusionHolds: state.dirExclusionHolds,
+            materializedReported: state.materializedReported,
+            materializedObserver: state.materializedObserver,
+            events: state.events,
+            queryMaterializedFilePaths: state.queryMaterializedFilePaths,
+            signalWorkingSet: state.signalWorkingSet
+        )
+    }
+
+    // MARK: - プロセス内の共有（Issue #151）
+
+    /// 段 ①: 状態。ドメイン・epoch・バケットが同じ限り作り直さない — レジストリ（同じ JSON）を
+    /// 別々の actor が読み書きすると、互いの追加（除外の予約など）を上書きで落としうる。
+    private struct SharedState: Sendable {
+        let virtualDirs: PersistedPathSet
+        let exclusionCleanups: PersistedPathSet
+        let dirCleanupFreezes: PersistedPathSet
+        let dirExclusionHolds: PersistedPathSet
+        let materializedReported: PersistedPathSet
+        let materializedObserver: MaterializedObserver
+        let events: FPEventLog
+        let queryMaterializedFilePaths: @Sendable () async -> Set<String>?
+        let signalWorkingSet: @Sendable () -> Void
+    }
+
+    /// 段 ②: S3 への接続。認証情報・deviceId・リージョンが変わったときだけ作り直す。
+    private struct SharedConnection: Sendable {
+        let s3: TideS3Client
+        let cache: ManifestGenerationCache
+        /// 書込の `ManifestUpdater`。中の `IndexUpdateCoalescer` を書き手の作り直しを跨いで共有する。
+        let updater: ManifestUpdater
+        let ignore: ManifestIgnoreCache
+    }
+
+    /// 段 ② と ③（認証情報を持つ段）。設定が欠けたときはこれだけを外す（PR #157 レビュー指摘 5）。
+    private struct SharedConnected: Sendable {
+        let key: FileProviderServiceSharing.Key
+        let connection: SharedConnection
+        let writer: ExtensionWriter
+    }
+
+    private struct SharedEntry: Sendable {
+        let stateKey: FileProviderServiceSharing.StateKey
+        let state: SharedState
+        let connected: SharedConnected?
+    }
+
+    /// 共有の置き場。構築（S3 クライアント・App Group コンテナの解決など）を握ったまま行うので、
+    /// 短い区間向けの unfair lock ではなく NSLock で守る（PR #157 レビュー指摘 2）。
+    private static let sharedLock = NSLock()
+    nonisolated(unsafe) private static var shared: SharedEntry?
+
+    /// 設定が欠けたとき（factoryReset のあと・認証情報が無いとき）、認証情報を持つ段を置き場から
+    /// 外す。状態の段は残す（認証情報を持たず、設定が戻ったときに同じものを使い回す）。
+    private static func dropSharedConnection() {
+        sharedLock.lock()
+        defer { sharedLock.unlock() }
+        guard let entry = shared, entry.connected != nil else { return }
+        shared = SharedEntry(stateKey: entry.stateKey, state: entry.state, connected: nil)
+    }
+
+    private static func makeState(
+        domain: NSFileProviderDomain, key: FileProviderServiceSharing.StateKey
+    ) -> SharedState {
+        // NSFileProviderDomain は Sendable 注釈が無いが、signalEnumerator は
+        // どのスレッド/プロセスから呼んでもよい契約なので箱で closure へ運ぶ。
+        // 共有の段はドメインの識別子が同じ限り使い回すので、最初に作ったインスタンスの
+        // domain をそのまま持つ（NSFileProviderManager(for:) が引くのは識別子）。
+        let boxedDomain = UncheckedSendableBox(value: domain)
+        let signalWorkingSet: @Sendable () -> Void = {
+            // replicated 拡張への signal は .workingSet のみ有効（他は無視される）。
+            NSFileProviderManager(for: boxedDomain.value)?.signalEnumerator(for: .workingSet) { error in
+                if let error {
+                    AppLogger.fileProvider.error("Self-signal failed: \(String(describing: error), privacy: .private)")
                 }
-                guard result != nil else { return nil }
-                return .init(sha256: HashCalculator.hex(hasher.finalize()), prefix: prefix)
             }
-            let virtualDirsURL = try? PersistedPathSet.defaultURL(
-                filename: "fileprovider-virtual-dirs.json")
-            let cleanupsURL = try? PersistedPathSet.defaultURL(
-                filename: "fileprovider-exclusion-cleanups.json")
-            let materializedURL = try? PersistedPathSet.defaultURL(
-                filename: "fileprovider-materialized.json")
-            let dirHoldsURL = try? PersistedPathSet.defaultURL(
-                filename: "fileprovider-dir-exclusion-holds.json")
-            let dirFreezesURL = try? PersistedPathSet.defaultURL(
-                filename: "fileprovider-dir-cleanup-freezes.json")
-            if virtualDirsURL == nil || cleanupsURL == nil || materializedURL == nil
-                || dirHoldsURL == nil || dirFreezesURL == nil {
-                AppLogger.fileProvider.error("Extension: path-set registry URL unavailable (persisting disabled)")
-            }
-            // ドメイン epoch（Issue #104）: アプリがドメイン除去のたびに進める世代値をここで
-            // 一度だけ capture し、レジストリ 5 本の payload スタンプ / 読込検証に使う。
-            // ドメイン作り直しを跨いだ stale レジストリ（バッジ永久不点灯・消えた dir の合成・
-            // 無意味な削除受理予約）は epoch 不一致で読込時に全体破棄される。プロセス生存中に
-            // アプリが bump しても capture 値は変えない — 遅延 persist は旧 epoch でスタンプされ
-            // 次プロセスが破棄する（`PersistedPathSet` の capture 意味論）。
-            let domainEpoch = config.fileProviderDomainEpoch
-            // capture 値の観測点（PR #106 レビュー指摘 5）: group defaults のプロセス間伝播に
-            // タイミング保証は無く、stale capture が起きるとバッジ不点灯 / 仮想フォルダ消失の
-            // 症状から本機構へ辿れない。アプリ側の bump ログと突合できるよう notice（永続）で
-            // 残す。値はローカル生成のランダム UUID = 機密性なし（.public で相関可能に）。
-            AppLogger.fileProvider.notice("Extension: captured domain epoch \(domainEpoch ?? "none", privacy: .public)")
-            let eventsURL = try? FPEventLog.defaultURL()
-            if eventsURL == nil {
-                AppLogger.fileProvider.error("Extension: event log URL unavailable (activity logging disabled)")
-            }
-            return ExtensionServices(
-                s3: s3, cache: cache, writer: writer, ignore: ignore,
-                virtualDirs: PersistedPathSet(
-                    bucket: bucket, fileURL: virtualDirsURL, epoch: domainEpoch),
-                exclusionCleanups: PersistedPathSet(
-                    bucket: bucket, fileURL: cleanupsURL, epoch: domainEpoch),
-                dirCleanupFreezes: PersistedPathSet(
-                    bucket: bucket, fileURL: dirFreezesURL, epoch: domainEpoch),
-                dirExclusionHolds: PersistedPathSet(
-                    bucket: bucket, fileURL: dirHoldsURL, epoch: domainEpoch),
-                materializedReported: PersistedPathSet(
-                    bucket: bucket, fileURL: materializedURL, epoch: domainEpoch,
-                    maxEntries: Self.materializedBadgeCap),
-                materializedObserver: MaterializedObserver(),
-                events: FPEventLog(bucket: bucket, fileURL: eventsURL),
-                queryMaterializedFilePaths: {
-                    await MaterializedSetQuery.filePaths(domain: boxedDomain.value)
-                },
-                signalWorkingSet: signalWorkingSet
-            )
+        }
+        let virtualDirsURL = try? PersistedPathSet.defaultURL(
+            filename: "fileprovider-virtual-dirs.json")
+        let cleanupsURL = try? PersistedPathSet.defaultURL(
+            filename: "fileprovider-exclusion-cleanups.json")
+        let materializedURL = try? PersistedPathSet.defaultURL(
+            filename: "fileprovider-materialized.json")
+        let dirHoldsURL = try? PersistedPathSet.defaultURL(
+            filename: "fileprovider-dir-exclusion-holds.json")
+        let dirFreezesURL = try? PersistedPathSet.defaultURL(
+            filename: "fileprovider-dir-cleanup-freezes.json")
+        if virtualDirsURL == nil || cleanupsURL == nil || materializedURL == nil
+            || dirHoldsURL == nil || dirFreezesURL == nil {
+            AppLogger.fileProvider.error("Extension: path-set registry URL unavailable (persisting disabled)")
+        }
+        // ドメイン epoch（Issue #104）: アプリがドメイン除去のたびに進める世代値をここで
+        // 一度だけ capture し、レジストリ 5 本の payload スタンプ / 読込検証に使う。
+        // ドメイン作り直しを跨いだ stale レジストリ（バッジ永久不点灯・消えた dir の合成・
+        // 無意味な削除受理予約）は epoch 不一致で読込時に全体破棄される。作ったレジストリの
+        // capture 値は変えない — 遅延 persist は旧 epoch でスタンプされ次プロセスが破棄する
+        // （`PersistedPathSet` の capture 意味論）。epoch は共有のキーに入っているので、アプリが
+        // bump したあとに来たインスタンスには新しい epoch の状態の段を作る（Issue #151）。
+        // capture 値の観測点（PR #106 レビュー指摘 5）: group defaults のプロセス間伝播に
+        // タイミング保証は無く、stale capture が起きるとバッジ不点灯 / 仮想フォルダ消失の
+        // 症状から本機構へ辿れない。アプリ側の bump ログと突合できるよう notice（永続）で
+        // 残す。値はローカル生成のランダム UUID = 機密性なし（.public で相関可能に）。
+        let domainEpoch = key.domainEpoch
+        AppLogger.fileProvider.notice("Extension: captured domain epoch \(domainEpoch ?? "none", privacy: .public)")
+        let eventsURL = try? FPEventLog.defaultURL()
+        if eventsURL == nil {
+            AppLogger.fileProvider.error("Extension: event log URL unavailable (activity logging disabled)")
+        }
+        let bucket = key.bucket
+        return SharedState(
+            virtualDirs: PersistedPathSet(
+                bucket: bucket, fileURL: virtualDirsURL, epoch: domainEpoch),
+            exclusionCleanups: PersistedPathSet(
+                bucket: bucket, fileURL: cleanupsURL, epoch: domainEpoch),
+            dirCleanupFreezes: PersistedPathSet(
+                bucket: bucket, fileURL: dirFreezesURL, epoch: domainEpoch),
+            dirExclusionHolds: PersistedPathSet(
+                bucket: bucket, fileURL: dirHoldsURL, epoch: domainEpoch),
+            materializedReported: PersistedPathSet(
+                bucket: bucket, fileURL: materializedURL, epoch: domainEpoch,
+                maxEntries: Self.materializedBadgeCap),
+            materializedObserver: MaterializedObserver(),
+            events: FPEventLog(bucket: bucket, fileURL: eventsURL),
+            queryMaterializedFilePaths: {
+                await MaterializedSetQuery.filePaths(domain: boxedDomain.value)
+            },
+            signalWorkingSet: signalWorkingSet
+        )
+    }
+
+    private static func makeConnection(
+        bucket: String, region: String, deviceId: String, credentials: AWSCredentials,
+        signalWorkingSet: @escaping @Sendable () -> Void
+    ) -> SharedConnection? {
+        let s3: TideS3Client
+        do {
+            s3 = try TideS3Client(
+                credentials: credentials, region: region, bucket: bucket, deviceId: deviceId)
         } catch {
             AppLogger.fileProvider.error("Extension: failed to construct S3 client: \(String(describing: error), privacy: .private)")
             return nil
         }
+        let logURL = try? ManifestGenerationLog.defaultURL()
+        if logURL == nil {
+            AppLogger.fileProvider.error("Extension: generation log URL unavailable (persisting disabled)")
+        }
+        let cache = ManifestGenerationCache(
+            loader: ManifestSnapshotLoader(source: s3),
+            bucket: bucket,
+            logURL: logURL,
+            onNewGeneration: {
+                // ブラウズ契機のリフレッシュがリモート変化に気づいた時の自己 signal。
+                // アプリ側の pull 後 signal が主経路で、これはアプリ非起動時の補完。
+                // Phase 5-2 の自世代 append（recordLocalChange）もここを通る =
+                // 拡張自身の書込の anchor 前進もこの 1 本に集約。
+                signalWorkingSet()
+            }
+        )
+        // 拡張の ManifestUpdater は onManifestDidWrite を**明示 nil**にする: 拡張の signal は
+        // 書込後の `invalidateAfterLocalWrite` → onNewGeneration が担う。ここでも発火させると
+        // 「無効化前の signal → enumerateChanges → 旧世代ロード」の無駄往復になる
+        // （アプリ側は世代ログを持たないため書込確定点の hook が signal の正位置、という
+        // 役割分担。docs/08 Phase 5-2 節参照）。
+        let updater = ManifestUpdater(store: s3, deviceId: deviceId, onManifestDidWrite: nil)
+        let ignore = ManifestIgnoreCache { path, versionId, maxPrefixBytes in
+            // `.syncignore` 本体の取得。path はマニフェスト（リモート）由来なので S3 キー
+            // 組み立て前に必ず検証する。sha256 は**全バイト**から計算しつつ、保持は先頭
+            // maxPrefixBytes のみ（超過分は打ち切りパース = アプリ側の読込打ち切りと同じ）。
+            // 404 / NoSuchVersion は nil（呼び出し側が最新版フォールバック / 層スキップ）。
+            try PathValidator.validateRelativePath(path)
+            var hasher = SHA256()
+            var prefix = Data()
+            let result = try await s3.streamObject(
+                key: "files/\(path)", versionId: versionId, rangeStart: nil
+            ) { chunk in
+                hasher.update(data: chunk)
+                if prefix.count < maxPrefixBytes {
+                    prefix.append(chunk.prefix(maxPrefixBytes - prefix.count))
+                }
+            }
+            guard result != nil else { return nil }
+            return .init(sha256: HashCalculator.hex(hasher.finalize()), prefix: prefix)
+        }
+        return SharedConnection(s3: s3, cache: cache, updater: updater, ignore: ignore)
     }
 }
