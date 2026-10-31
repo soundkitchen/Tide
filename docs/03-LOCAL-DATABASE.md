@@ -34,14 +34,14 @@ App Group の Caches（`~/Library/Group Containers/G5G54TCH8W.org.izukawa.Tide/L
 
 | 実体 | 型 | 役割 |
 |---|---|---|
-| `fp-events-ext.jsonl`（+ `.1`） | `FPEventLog`（追記型 JSONL） | Sync Activity のソース（#83）と、「ファイルが未バックアップ」の OS 通知のソース（#147 = 拡張が印 `notice` を付けたレコードを、アプリの `FPEventNoticeWatcher` が 5 秒ごとの stat 署名〈`changeSignature`〉で変化を見て読み、作成時の除外は起動後の新着を、改名の除外は保存した位置〈`fpNoticeRenameCursor`〉より後を通知する）。30 日刈りではなく**サイズ上限 2MiB × 2 世代ローテーション** |
+| `fp-events-ext.jsonl`（+ `.1`） | `FPEventLog`（追記型 JSONL） | Sync Activity のソース（#83）と、「ファイルが未バックアップ」の OS 通知のソース（#147 = 拡張が印 `notice` を付けたレコードを、アプリの `FPEventNoticeWatcher` が 拡張の追記の Darwin 通知〈保険で 60 秒ごと〉を受けて前回読んだ位置から先の新着だけを読み〈`readNew` = inode + バイト位置・#148〉、再送される種類〈作成時の除外・サイズ超過・書込の失敗〉は起動後の新着を、再送されない種類〈改名の除外・競合コピー〉は保存した位置〈`fpNoticeCursor`〉より後を通知する。書込の失敗は同じパスで 5 回続いたら知らせる = #148）。30 日刈りではなく**サイズ上限 2MiB × 2 世代ローテーション** |
 | `fileprovider-materialized.json` | `PersistedPathSet` | 実体化バッジの「報告済み」レジストリ（#65・上限 10,000） |
 | `fileprovider-virtual-dirs.json` | `PersistedPathSet` | 空フォルダのローカル仮想受理の温存（Phase 5-3。未使用なら未作成） |
 | `fileprovider-exclusion-cleanups.json` | `PersistedPathSet` | 除外後始末の予約（Phase 5-4。未使用なら未作成） |
 | `fileprovider-dir-exclusion-holds.json` | `PersistedPathSet` | フォルダ単位除外の予約（#120・後始末の deleteItem を S3 非接触にする根拠。未使用なら未作成） |
 | `fileprovider-dir-cleanup-freezes.json` | `PersistedPathSet` | フォルダを除外名へ改名したときのバッジ凍結の予約（#138・後片付けの deleteItem(dir) の完了か拒否まで配下のバッジを凍結する。削除の受理判定には使わない。未使用なら未作成） |
 | `fileprovider-manifest-log.json` | `ManifestGenerationLog` | マニフェスト世代ログ（`enumerateChanges` の anchor 解決。書き手 = 拡張の `ManifestGenerationCache` アクター） |
-| group defaults | `ConfigStore`（`TideAppGroup.sharedDefaults()`） | 設定（bucket / region / deviceId / setupCompleted / syncMode〈外部ツール契約キー〉/ fileProviderDomainEpoch / fpNoticeRenameCursor〈改名による除外の通知をどこまで済ませたか・#147〉） |
+| group defaults | `ConfigStore`（`TideAppGroup.sharedDefaults()`） | 設定（bucket / region / deviceId / setupCompleted / syncMode〈外部ツール契約キー〉/ fileProviderDomainEpoch / fpNoticeCursor〈再送されない出来事（改名による除外・競合コピー）の通知をどこまで済ませたか・#147 / #148。キー文字列は #147 のまま〉） |
 | Data Protection Keychain | `KeychainStore` | AWS 認証情報 |
 
 `PersistedPathSet` 5 本（materialized / virtual-dirs / exclusion-cleanups / dir-exclusion-holds / dir-cleanup-freezes）はドメイン epoch（`fileProviderDomainEpoch`）を構築時 capture し、

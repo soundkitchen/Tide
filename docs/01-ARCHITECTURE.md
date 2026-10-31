@@ -132,7 +132,7 @@ Tide/（リポジトリルート）
 │   │   ├── RemoteChangeSignaler.swift リモート変化検知（index HEAD ETag → FP signal）【現行の駆動】
 │   │   ├── FileProviderController.swift  FP ドメイン登録 / 解除・signal 配線・status 観測
 │   │   ├── NotificationPolicy.swift   通知発火判定（純粋関数・6 事象のみ）(M4 + #103 + #147)
-│   │   ├── FPEventNoticeWatcher.swift FP 拡張イベントログの新着 → OS 通知（fpOnly・#147）
+│   │   ├── FPEventNoticeWatcher.swift FP 拡張イベントログの新着 → OS 通知（fpOnly・#147 / #148）
 │   │   ├── DiagnosticsExporter.swift / SettingsTransfer.swift
 │   │   └── （folderSync 世代: SyncEngine(+FullScan) / FileWatcher / DebounceQueue / RemoteOpGate）
 │   └── Resources/                     Assets.xcassets / Localizable.xcstrings（en source / ja 翻訳）
@@ -179,7 +179,9 @@ Tide.app                                TideFileProvider.appex
 
 依存は常に下向き（UI / コールバック層 → 駆動層 → TideCore）。逆方向の依存は禁止。
 app と拡張の間に直接のプロセス間依存は無く、**S3（マニフェスト）と App Group（設定 / Keychain /
-FPEventLog / signal）だけを接点にする**。
+FPEventLog / signal）と、FPEventLog の追記を知らせる Darwin 通知だけを接点にする**。Darwin 通知
+（`<App Group ID>.fp-events`・#148）は拡張が送り、アプリが受ける。名前だけで中身は運ばない起床の合図で、
+受けたアプリは FPEventLog を読む（取りこぼしても 60 秒ごとの確認で拾う）。
 
 ## 主要コンポーネント（現行 = fpOnly）
 
@@ -276,8 +278,9 @@ FP 拡張が書く App Group Caches の追記型 JSONL（書き手 = 拡張の�
 Sync Activity ウィンドウは fpOnly でこれを読む（#83）。アプリの `FPEventNoticeWatcher` も読み、
 拡張が印 `notice` を付けたレコード（同期できない名前・symlink・同期しない名前への改名・丸ごと除外したパッケージ
 = 中にリンクや同期できない項目がある / 中身が 10,000 件を超える〈#140〉）を
-「ファイルが未バックアップ」の OS 通知にする（#147。5 秒ごとに stat の署名 `changeSignature` で
-変化を見て、変わったときだけ読む）。
+「ファイルが未バックアップ」の OS 通知にする（#147）。競合コピー・サイズ上限の超過・書込の失敗が続くこと
+（同じパスで 5 回）も同じ経路で知らせる（#148。fpOnly は `SyncEngine` を作らないため）。（拡張が追記のたびに送る Darwin 通知を受けて、
+前回読んだ位置から先の新着だけを `readNew` で読む = #148。保険として 60 秒ごとにも確認する）。
 
 ### HashCalculator
 
@@ -332,7 +335,7 @@ struct HashCalculator {
     │       ├─ Keychain から資格情報 → TideS3Client 構築
     │       ├─ FP ドメイン status 観測（#103 の OFF 検出）+ stale 通知掃除
     │       ├─ RemoteChangeSignaler.start()（ベースライン確立 + 初回 signal）
-    │       ├─ FPEventNoticeWatcher.start()（FPEventLog の新着 → 未バックアップ通知・#147。ログ URL が取れなければ起動しない）
+    │       ├─ FPEventNoticeWatcher.start()（FPEventLog の印 → 未バックアップ・競合コピー・サイズ超過・書込の失敗が続くの OS 通知・#147 / #148。拡張の追記の Darwin 通知を受けて `readNew` で新着だけを読む〈保険で 60 秒ごとに確認〉。ログ URL が取れなければ起動しない）
     │       └─ TLS ポリシー自己修復を detached で冪等適用
     │       ※ DB / syncRoot / bookmark には一切触れない（SyncEngine は構築されない）
     │

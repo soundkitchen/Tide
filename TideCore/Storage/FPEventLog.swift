@@ -1,4 +1,5 @@
 import Foundation
+import notify
 
 /// FP 拡張の同期活動 1 件ぶんの軽量ログレコード（Issue #83・fpOnly の Sync Activity 復権）。
 /// DB の `SyncLogRecord` と同じ表示語彙へ写像できる形で持つ（`eventType` =
@@ -30,16 +31,18 @@ public struct FPEventRecord: Codable, Sendable, Equatable {
     }
 }
 
-/// FP 拡張のイベントのうち、アプリが OS 通知で知らせるものの種類（Issue #147）。
+/// FP 拡張のイベントのうち、アプリが OS 通知で知らせるものの種類（Issue #147 / #148）。
 /// 拡張が `FPEventLog.append(notice:)` で印を付け、アプリの `FPEventNoticeWatcher` が新着を
-/// 拾って通知する。どれも「ファイルがこの Mac にだけ残り、バックアップされない」出来事で、
-/// ユーザが意図していない可能性があるものに限る（機密網・`.syncignore` による新規作成の除外は、
-/// 意図した除外なので印を付けない）。
+/// 拾って通知する。どれもユーザの対応が要るか、バックアップの取りこぼしが起きうる出来事に限る:
+/// - バックアップされない（#147）: ファイルがこの Mac にだけ残る除外のうち、ユーザが意図していない
+///   可能性があるもの（機密網・`.syncignore` による新規作成の除外は、意図した除外なので印を付けない）
+/// - 競合コピー・サイズ上限の超過・書込の失敗が続く（#148）: fpOnly では `SyncEngine` を作らないため、
+///   folderSync で `SyncEngine` が出していた通知を、拡張の出来事から出す
 ///
 /// 通知に出す名前の出どころ（`subject`）は種類で決まる:
 /// - `unsyncableName` / `renamedFileExcluded` / `renamedFolderExcluded`: `details`（表示用の
 ///   パス。検証できない名前は `path` に入れられず、改名は新しい名前を出したいため）
-/// - `symbolicLink` / `packageHasUnsyncableItem` / `packageTooManyFiles`: `path`
+/// - それ以外: `path`
 public enum FPEventNotice: String, Sendable, CaseIterable {
     /// 同期できない名前（バックスラッシュ等）で新規作成された
     case unsyncableName
@@ -54,22 +57,59 @@ public enum FPEventNotice: String, Sendable, CaseIterable {
     case packageHasUnsyncableItem
     /// パッケージの中身が上限（`PackageScanner.memberLimit`）を超えていて、パッケージごと除外した（#140）
     case packageTooManyFiles
+    /// 他の端末の変更とぶつかり、この Mac の編集を競合コピーへ退避した（#148・手で直す必要がある）
+    case conflictCopyCreated
+    /// アップロードのサイズ上限（設定）を超えていて、上げられなかった（#148）
+    case fileTooLarge
+    /// 書込（作成・更新・移動・削除）が失敗した（#148）。一過性のエラー（ネットワーク・並行書込の衝突）
+    /// には付けない。アプリは同じパスで続いた回数を数え、`FPEventNoticeWatcher.failureThreshold` 回に
+    /// 達したら知らせる（`isCountedFailure`）。
+    case writeFailed
 
     /// fileproviderd が同じアイテムの除外を再送する種類か（#120 の再送嵐）。再送される種類は、
     /// アプリ側で同じアイテムを 1 回だけ通知する。改名の除外は後片付けの deleteItem で終わり、
     /// 再送されない。
+    /// サイズ超過・書込の失敗は、fileproviderd がエラーを一時的なものとして再試行するので再送される。
+    /// 競合コピーは書込が成功として終わるので再送されない。
     public var isResentByDaemon: Bool {
         switch self {
-        case .unsyncableName, .symbolicLink, .packageHasUnsyncableItem, .packageTooManyFiles: return true
-        case .renamedFileExcluded, .renamedFolderExcluded: return false
+        case .unsyncableName, .symbolicLink, .packageHasUnsyncableItem, .packageTooManyFiles,
+             .fileTooLarge, .writeFailed:
+            return true
+        case .renamedFileExcluded, .renamedFolderExcluded, .conflictCopyCreated:
+            return false
         }
+    }
+
+    /// 1 回では知らせず、同じパスで続いた回数を数える種類か（#148）。
+    public var isCountedFailure: Bool {
+        self == .writeFailed
     }
 
     /// 通知に出す名前（表示用のパス）。上の型コメントの規約どおり。
     public func subject(of record: FPEventRecord) -> String? {
         switch self {
-        case .symbolicLink, .packageHasUnsyncableItem, .packageTooManyFiles: return record.path
+        case .symbolicLink, .packageHasUnsyncableItem, .packageTooManyFiles,
+             .conflictCopyCreated, .fileTooLarge, .writeFailed:
+            return record.path
         case .unsyncableName, .renamedFileExcluded, .renamedFolderExcluded: return record.details
+        }
+    }
+
+    /// 書込の失敗に付ける印（#148）。一過性のエラー（ネットワーク・並行書込の衝突 = fileproviderd の
+    /// 再試行で直りうる）とキャンセルには付けない（nil）。`SyncError.fileTooLarge`（設定のアップロード上限）は
+    /// `fileTooLarge`。移動のコピーの上限（5 GiB）は拡張が別のエラーで投げる（設定を変えても直らない）ので
+    /// `writeFailed` になる。
+    public static func forWriteFailure(_ error: Error) -> FPEventNotice? {
+        if error is CancellationError { return nil }
+        switch SyncIssueClassifier.category(for: error) {
+        case .network, .remoteConflict:
+            return nil
+        case .fileTooLarge:
+            return .fileTooLarge
+        case .accessDenied, .notFound, .unstableFile, .localIO, .database, .configuration,
+             .unsafePath, .other:
+            return .writeFailed
         }
     }
 }
@@ -98,15 +138,27 @@ public actor FPEventLog {
     public static let maxMessageLength = 500
     public static let maxDetailsLength = 4096
 
+    /// 追記したことをアプリへ知らせる Darwin 通知の名前（Issue #148）。sandbox の中から
+    /// プロセスをまたいで届けるため、App Group の ID を前に付ける。
+    public static let defaultChangeNotificationName = "\(TideAppGroup.identifier).fp-events"
+
     private let bucket: String
     private let fileURL: URL?
     private let maxBytes: Int
+    private let changeNotificationName: String?
 
-    /// - Parameter fileURL: nil = 永続化なし（構築失敗時の縮退。append は no-op・load は空）。
-    public init(bucket: String, fileURL: URL?, maxBytes: Int = FPEventLog.defaultMaxBytes) {
+    /// - Parameters:
+    ///   - fileURL: nil = 永続化なし（構築失敗時の縮退。append は no-op・load は空）。
+    ///   - changeNotificationName: 追記のたびに送る Darwin 通知の名前（書き手 = 拡張だけが渡す・Issue #148）。
+    ///     nil = 送らない（読み手のアプリ・テスト）。
+    public init(
+        bucket: String, fileURL: URL?, maxBytes: Int = FPEventLog.defaultMaxBytes,
+        changeNotificationName: String? = nil
+    ) {
         self.bucket = bucket
         self.fileURL = fileURL
         self.maxBytes = maxBytes
+        self.changeNotificationName = changeNotificationName
     }
 
     /// 永続ファイルの既定 URL（App Group コンテナ内 `Library/Caches/Tide/`）。
@@ -156,6 +208,9 @@ public actor FPEventLog {
             if end + UInt64(data.count) >= UInt64(maxBytes) {
                 try rotate()
             }
+            if let changeNotificationName {
+                notify_post(changeNotificationName)
+            }
         } catch {
             AppLogger.fileProvider.error("FP event log append failed: \(String(describing: error), privacy: .private)")
         }
@@ -174,19 +229,34 @@ public actor FPEventLog {
 
     // MARK: - 読込（アプリプロセス）
 
-    /// ログが前回から変わったかを安く確かめるための署名（現行と `.1` のサイズ・更新時刻）。
-    /// 中身は読まない（stat のみ）。新着を見張る側（`FPEventNoticeWatcher`・Issue #147）が、
-    /// 署名が変わったときだけ `loadRecords()` を呼ぶのに使う。
-    public nonisolated func changeSignature() -> String {
-        guard let fileURL else { return "" }
-        let fm = FileManager.default
-        func stamp(_ url: URL) -> String {
-            guard let attributes = try? fm.attributesOfItem(atPath: url.path) else { return "-" }
-            let size = (attributes[.size] as? Int) ?? -1
-            let mtime = (attributes[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
-            return "\(size)@\(mtime)"
+    /// 追記の Darwin 通知（`changeNotificationName`）を受け取る（Issue #148）。受け取りは `queue` で行う。
+    /// 返した値を捨てると受け取りをやめる。登録できなければ nil（呼び出し側は定期の確認だけで動く）。
+    /// 通知は合体しうる（続けて送られた複数の通知が 1 回になる）ので、受け取ったら新着をまとめて読むこと。
+    public nonisolated static func observeChanges(
+        name: String = FPEventLog.defaultChangeNotificationName,
+        queue: DispatchQueue = .main,
+        handler: @escaping @Sendable () -> Void
+    ) -> ChangeObservation? {
+        var token: Int32 = 0
+        let status = notify_register_dispatch(name, &token, queue) { _ in handler() }
+        guard status == NOTIFY_STATUS_OK else {
+            AppLogger.ui.error("FP event log: cannot observe change notifications (status \(status))")
+            return nil
         }
-        return stamp(fileURL) + "|" + stamp(URL(fileURLWithPath: fileURL.path + ".1"))
+        return ChangeObservation(token: token)
+    }
+
+    /// `observeChanges` の受け取りの登録。解放すると受け取りをやめる。
+    public final class ChangeObservation: Sendable {
+        private let token: Int32
+
+        fileprivate init(token: Int32) {
+            self.token = token
+        }
+
+        deinit {
+            notify_cancel(token)
+        }
     }
 
     /// 全レコードを時系列（古い → 新しい）で返す。呼ぶたびにディスクを読み直す。
@@ -203,11 +273,109 @@ public actor FPEventLog {
         return records
     }
 
+    /// 差分読みの位置（Issue #148）: 最後に読んだファイルの inode と、そのファイルで読み終えたバイト位置。
+    public struct ReadPosition: Equatable, Sendable {
+        public let inode: UInt64
+        public let offset: UInt64
+
+        public init(inode: UInt64, offset: UInt64) {
+            self.inode = inode
+            self.offset = offset
+        }
+    }
+
+    /// 前回の位置から先の新着だけを、時系列（古い → 新しい）で読む（Issue #148）。
+    /// 新着を見張る側（`FPEventNoticeWatcher`）が、拡張の書込のたびに全体を読み直さないために使う。
+    ///
+    /// - 位置が nil（初回）: `.1` と現行を頭から全部読む。
+    /// - 位置の inode が現行と同じ: 現行を位置から読む。現行が位置より短ければ（作り直された）頭から読む。
+    /// - 位置の inode が `.1` と同じ（前回読んだあとにローテーションした）: `.1` を位置から読み、現行を頭から読む。
+    /// - どちらとも違う（2 回以上ローテーションした等）: `.1` と現行を頭から読む（その間の世代は失われている）。
+    ///
+    /// 改行で終わっていない末尾の行（拡張が書きかけ）は読まず、次回その行の頭から読む。
+    /// 現行を `.1` より先に開くので、開く合間にローテーションしても 2 つが同じ inode になるだけで
+    /// （そのときは 1 つとして扱う）、読み飛ばしは起きない。
+    /// - Returns: 読んだレコードと次の位置。ファイルが 1 つも無ければ位置は渡したまま。
+    public func readNew(since position: ReadPosition?) -> (records: [FPEventRecord], position: ReadPosition?) {
+        guard let fileURL, let rotatedURL else { return ([], position) }
+        let current = OpenedLog(url: fileURL)
+        var rotated = OpenedLog(url: rotatedURL)
+        if let c = current, let r = rotated, c.inode == r.inode { rotated = nil }
+        defer {
+            current?.close()
+            rotated?.close()
+        }
+        let ceiling = UInt64(maxBytes * 2)
+
+        // 読む順（古い → 新しい）と、それぞれの読み始めの位置
+        var plan: [(OpenedLog, UInt64)] = []
+        if let position, let current, position.inode == current.inode {
+            plan = [(current, position.offset <= current.size ? position.offset : 0)]
+        } else if let position, let rotated, position.inode == rotated.inode {
+            plan = [(rotated, min(position.offset, rotated.size))]
+            if let current { plan.append((current, 0)) }
+        } else {
+            if let rotated { plan.append((rotated, 0)) }
+            if let current { plan.append((current, 0)) }
+        }
+        guard !plan.isEmpty else { return ([], position) }
+
+        var records: [FPEventRecord] = []
+        var next = position
+        for (log, start) in plan {
+            // 肥大ファイル（改ざん）は読まずに末尾まで読んだことにする（loadRecords と同じ上限）
+            guard log.size <= ceiling else {
+                next = ReadPosition(inode: log.inode, offset: log.size)
+                continue
+            }
+            let data = log.read(from: start)
+            // 最後の改行まで（書きかけの末尾行は次回へ）
+            let consumed = data.lastIndex(of: 0x0A).map { data.distance(from: data.startIndex, to: $0) + 1 } ?? 0
+            records.append(contentsOf: Self.parse(data: data.prefix(consumed), bucket: bucket))
+            next = ReadPosition(inode: log.inode, offset: start + UInt64(consumed))
+        }
+        return (records, next)
+    }
+
+    /// 読むために開いたログファイル 1 つ（inode とサイズは開いた FD から取る）。
+    private struct OpenedLog {
+        let handle: FileHandle
+        let inode: UInt64
+        let size: UInt64
+
+        init?(url: URL) {
+            guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+            var st = stat()
+            guard fstat(handle.fileDescriptor, &st) == 0 else {
+                try? handle.close()
+                return nil
+            }
+            self.handle = handle
+            self.inode = UInt64(st.st_ino)
+            self.size = UInt64(st.st_size)
+        }
+
+        /// `start` から開いた時点のサイズまでを読む（その後の追記は次回）。
+        func read(from start: UInt64) -> Data {
+            guard start < size, (try? handle.seek(toOffset: start)) != nil else { return Data() }
+            return (try? handle.read(upToCount: Int(size - start))) ?? Data()
+        }
+
+        func close() {
+            try? handle.close()
+        }
+    }
+
     private static func parse(url: URL, bucket: String, byteCeiling: Int) -> [FPEventRecord] {
         guard let size = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int,
               size <= byteCeiling,
               let data = try? Data(contentsOf: url)
         else { return [] }
+        return parse(data: data, bucket: bucket)
+    }
+
+    /// JSONL の行を検証してレコードにする（壊れ行・bucket 不一致・未知の種類・不正 path は捨てる）。
+    private static func parse(data: Data, bucket: String) -> [FPEventRecord] {
         let decoder = JSONDecoder()
         var records: [FPEventRecord] = []
         for line in data.split(separator: 0x0A) {

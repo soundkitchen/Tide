@@ -190,17 +190,129 @@ final class FPEventLogTests: XCTestCase {
         XCTAssertNil(records[0].notice)
     }
 
-    /// 署名は追記で変わり、何もしなければ変わらない（新着の見張りの stat ゲート）。
-    func testChangeSignatureTracksAppends() async throws {
+    // MARK: - 差分読み（Issue #148）
+
+    private func messages(_ records: [FPEventRecord]) -> [String] { records.map(\.message) }
+
+    /// 初回は全部、2 回目からは新着だけを読む。新着が無ければ空で位置は動かない。
+    func testReadNewReturnsOnlyNewRecords() async throws {
         let log = makeLog()
-        let empty = log.changeSignature()
-        XCTAssertEqual(empty, log.changeSignature())
-        await log.append(type: .upload, path: "a.txt", message: "m")
-        let afterOne = log.changeSignature()
-        XCTAssertNotEqual(empty, afterOne)
-        XCTAssertEqual(afterOne, log.changeSignature())
-        await log.append(type: .upload, path: "b.txt", message: "m")
-        XCTAssertNotEqual(afterOne, log.changeSignature())
+        await log.append(type: .upload, path: "a.txt", message: "m1")
+        await log.append(type: .upload, path: "b.txt", message: "m2")
+        let first = await log.readNew(since: nil)
+        XCTAssertEqual(messages(first.records), ["m1", "m2"])
+
+        let none = await log.readNew(since: first.position)
+        XCTAssertTrue(none.records.isEmpty)
+        XCTAssertEqual(none.position, first.position)
+
+        await log.append(type: .upload, path: "c.txt", message: "m3")
+        let second = await log.readNew(since: first.position)
+        XCTAssertEqual(messages(second.records), ["m3"])
+    }
+
+    /// ファイルが無ければ空で、位置は渡したまま。
+    func testReadNewWithoutFileKeepsPosition() async throws {
+        let log = makeLog()
+        let result = await log.readNew(since: nil)
+        XCTAssertTrue(result.records.isEmpty)
+        XCTAssertNil(result.position)
+    }
+
+    /// 前回読んだあとにローテーションしても、`.1` の残りと新しい現行を読み、取りこぼさない。
+    func testReadNewFollowsRotation() async throws {
+        let log = makeLog(maxBytes: 150)
+        await log.append(type: .upload, path: "f0.txt", message: "m0")
+        let first = await log.readNew(since: nil)
+        XCTAssertEqual(messages(first.records), ["m0"])
+        // 1 レコード ≈ 95 bytes。m1 の追記でローテーション（現行 → .1）し、m2 は新しい現行へ入る
+        await log.append(type: .upload, path: "f1.txt", message: "m1")
+        await log.append(type: .upload, path: "f2.txt", message: "m2")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fileURL.path + ".1"))
+        let second = await log.readNew(since: first.position)
+        XCTAssertEqual(messages(second.records), ["m1", "m2"])
+        let third = await log.readNew(since: second.position)
+        XCTAssertTrue(third.records.isEmpty)
+    }
+
+    /// ローテーションの直後（新しい現行がまだ無い）も `.1` の残りを読み、次の追記で現行へ移る。
+    func testReadNewRightAfterRotation() async throws {
+        let log = makeLog(maxBytes: 150)
+        await log.append(type: .upload, path: "f0.txt", message: "m0")
+        let first = await log.readNew(since: nil)
+        await log.append(type: .upload, path: "f1.txt", message: "m1")  // ここでローテーション
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path))
+        let second = await log.readNew(since: first.position)
+        XCTAssertEqual(messages(second.records), ["m1"])
+        await log.append(type: .upload, path: "f2.txt", message: "m2")
+        let third = await log.readNew(since: second.position)
+        XCTAssertEqual(messages(third.records), ["m2"])
+    }
+
+    /// 改行で終わっていない末尾の行（書きかけ）は読まず、書き終わったら次回に読む。
+    func testReadNewLeavesPartialLineForNextRead() async throws {
+        let log = makeLog()
+        await log.append(type: .upload, path: "a.txt", message: "m1")
+        let line = try JSONEncoder().encode(
+            FPEventRecord(timestamp: 2, bucket: "b", eventType: "upload", path: "b.txt", message: "m2"))
+        let handle = try FileHandle(forWritingTo: fileURL)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: line.prefix(10))
+        let first = await log.readNew(since: nil)
+        XCTAssertEqual(messages(first.records), ["m1"])
+        try handle.write(contentsOf: line.dropFirst(10) + [0x0A])
+        try handle.close()
+        let second = await log.readNew(since: first.position)
+        XCTAssertEqual(messages(second.records), ["m2"])
+    }
+
+    /// 現行が位置より短くなった（作り直された）ら頭から読む。
+    func testReadNewRereadsWhenFileShrinks() async throws {
+        let log = makeLog()
+        await log.append(type: .upload, path: "a.txt", message: "m1")
+        await log.append(type: .upload, path: "b.txt", message: "m2")
+        let first = await log.readNew(since: nil)
+        // 同じ inode のまま短くする
+        let handle = try FileHandle(forWritingTo: fileURL)
+        try handle.truncate(atOffset: 0)
+        try handle.close()
+        await log.append(type: .upload, path: "c.txt", message: "m3")
+        let second = await log.readNew(since: first.position)
+        XCTAssertEqual(messages(second.records), ["m3"])
+    }
+
+    /// 位置がどのファイルとも合わない（2 回以上ローテーションした）ら、残っている世代を頭から読む。
+    func testReadNewRereadsAllWhenPositionIsUnknown() async throws {
+        let log = makeLog()
+        await log.append(type: .upload, path: "a.txt", message: "m1")
+        let result = await log.readNew(since: FPEventLog.ReadPosition(inode: 0, offset: 12_345))
+        XCTAssertEqual(messages(result.records), ["m1"])
+    }
+
+    /// 差分読みも読込時の再検証（bucket 不一致・不正 path）を通す。
+    func testReadNewValidatesRecords() async throws {
+        await makeLog(bucket: "other").append(type: .upload, path: "x.txt", message: "other bucket")
+        let log = makeLog()
+        await log.append(type: .upload, path: "../escape", message: "bad path")
+        await log.append(type: .upload, path: "ok.txt", message: "ok")
+        let result = await log.readNew(since: nil)
+        XCTAssertEqual(messages(result.records), ["ok"])
+    }
+
+    // MARK: - 追記の Darwin 通知（Issue #148）
+
+    /// 通知の名前を渡したログは追記のたびに送り、受け取り側に届く。渡さないログは送らない。
+    func testAppendPostsChangeNotificationOnlyWhenNamed() async throws {
+        let name = "\(TideAppGroup.identifier).fp-events-test-\(UUID().uuidString)"
+        let received = expectation(description: "change notification")
+        let observation = FPEventLog.observeChanges(name: name, queue: .main) { received.fulfill() }
+        XCTAssertNotNil(observation)
+
+        await makeLog().append(type: .upload, path: "silent.txt", message: "m")
+        let notifying = FPEventLog(bucket: "b", fileURL: fileURL, changeNotificationName: name)
+        await notifying.append(type: .upload, path: "a.txt", message: "m")
+        await fulfillment(of: [received], timeout: 5)
+        withExtendedLifetime(observation) {}
     }
 
     /// 通知に出す名前: symlink は path、それ以外は details（表示用のパス）。
@@ -212,5 +324,29 @@ final class FPEventLogTests: XCTestCase {
         XCTAssertEqual(FPEventNotice.unsyncableName.subject(of: record), "new/name.env")
         XCTAssertEqual(FPEventNotice.renamedFileExcluded.subject(of: record), "new/name.env")
         XCTAssertEqual(FPEventNotice.renamedFolderExcluded.subject(of: record), "new/name.env")
+        for notice in [FPEventNotice.conflictCopyCreated, .fileTooLarge, .writeFailed] {
+            XCTAssertEqual(notice.subject(of: record), "old/name.txt", "\(notice) は path")
+        }
+    }
+
+    /// 再送されるか・数えるか（#148）。競合コピーだけが再送されない側。
+    func testNoticeDeliveryKinds() {
+        XCTAssertFalse(FPEventNotice.conflictCopyCreated.isResentByDaemon)
+        XCTAssertTrue(FPEventNotice.fileTooLarge.isResentByDaemon)
+        XCTAssertTrue(FPEventNotice.writeFailed.isResentByDaemon)
+        XCTAssertEqual(FPEventNotice.allCases.filter(\.isCountedFailure), [.writeFailed])
+    }
+
+    /// 書込の失敗の印（#148）: 一過性（ネットワーク・並行書込の衝突）とキャンセルには付けない。
+    /// サイズ超過（`SyncError.fileTooLarge` = 設定の上限）は `fileTooLarge`、それ以外の書込の失敗は `writeFailed`。
+    func testNoticeForWriteFailure() {
+        XCTAssertNil(FPEventNotice.forWriteFailure(CancellationError()))
+        XCTAssertNil(FPEventNotice.forWriteFailure(URLError(.notConnectedToInternet)))
+        XCTAssertNil(FPEventNotice.forWriteFailure(SyncError.manifestUpdateFailed("412")))
+        XCTAssertNil(FPEventNotice.forWriteFailure(SyncError.indexUpdateFailedAfterCommit("cas")))
+        let tooLarge = SyncError.fileTooLarge(path: "big.mov", size: 2_000_000_000)
+        XCTAssertEqual(FPEventNotice.forWriteFailure(tooLarge), .fileTooLarge)
+        XCTAssertEqual(FPEventNotice.forWriteFailure(SyncError.ioError(underlying: CocoaError(.fileReadNoPermission))), .writeFailed)
+        XCTAssertEqual(FPEventNotice.forWriteFailure(NSError(domain: "x", code: 1)), .writeFailed)
     }
 }

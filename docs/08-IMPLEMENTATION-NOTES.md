@@ -1640,9 +1640,9 @@ revert 復帰ランブックを含む）。実施 3 段の記録は本ファイ�
 
 ### 通知（UserNotifications・M4・2026-06-15）
 
-- **発火は「ユーザの介入が要る／取りこぼし（未バックアップ）が起きうる確定的な事象」だけに絞る**（6 種）: ① 競合コピー作成（`reconcileRemoteEntry` の `.conflictThenDownload`）、② サイズ上限超過 `fileTooLarge`、③ リトライ give-up（`attempts >= 5`）、④ 不安定ファイル（`unstableFile` 警告・既に `unstableWarned` で dedup 済み）、⑤ **FP 拡張のユーザ OFF**（`fileProviderDisabled`・fpOnly = 全同期停止・Issue #103・2026-08-15 追加。発火元は SyncEngine ではなく `RemoteChangeSignaler` のエッジ検出 = 連発しない・identifier 固定 `"fpDisabled"`・復帰エッジで配達済みを撤去。詳細は「FP 拡張トグル OFF の検出」節）、⑥ **バックアップされないファイル**（`notBackedUp`・fpOnly・Issue #147・2026-10-28 追加。同期できない名前・symlink の新規作成と、追跡中のファイル / フォルダの同期しない名前への改名。発火元は FP 拡張の `FPEventLog` の印を拾う `FPEventNoticeWatcher`。詳細は下の「バックアップされないファイルの通知」節）。**fpOnly では ①〜④ は出ない**（`SyncEngine` を作らないため。Issue #148 で ⑥ と同じ経路に載せる予定）。**一過性エラー（network 等）は出さない**（オフラインのたびに通知が溢れるのを避ける＝本ファイル「構造化エラー」の `recentIssues` とは別ポリシー: recentIssues は全失敗を載せるが通知は確定事象だけ）。
+- **発火は「ユーザの介入が要る／取りこぼし（未バックアップ）が起きうる確定的な事象」だけに絞る**（6 種）: ① 競合コピー作成（`reconcileRemoteEntry` の `.conflictThenDownload`）、② サイズ上限超過 `fileTooLarge`、③ リトライ give-up（`attempts >= 5`）、④ 不安定ファイル（`unstableFile` 警告・既に `unstableWarned` で dedup 済み）、⑤ **FP 拡張のユーザ OFF**（`fileProviderDisabled`・fpOnly = 全同期停止・Issue #103・2026-08-15 追加。発火元は SyncEngine ではなく `RemoteChangeSignaler` のエッジ検出 = 連発しない・identifier 固定 `"fpDisabled"`・復帰エッジで配達済みを撤去。詳細は「FP 拡張トグル OFF の検出」節）、⑥ **バックアップされないファイル**（`notBackedUp`・fpOnly・Issue #147・2026-10-28 追加。同期できない名前・symlink の新規作成と、追跡中のファイル / フォルダの同期しない名前への改名。発火元は FP 拡張の `FPEventLog` の印を拾う `FPEventNoticeWatcher`。詳細は下の「バックアップされないファイルの通知」節）。**fpOnly では ①〜④ は `SyncEngine` からは出ない**（`SyncEngine` を作らないため）。#148 で ①・② を ⑥ と同じ経路に載せ、③ を「書込の失敗が続く」に置き換えた（④ は出さない。下の「fpOnly の競合コピー・サイズ超過・書込の失敗が続く」節）。**一過性エラー（network 等）は出さない**（オフラインのたびに通知が溢れるのを避ける＝本ファイル「構造化エラー」の `recentIssues` とは別ポリシー: recentIssues は全失敗を載せるが通知は確定事象だけ）。
 - **配線は `SyncEngine`（@MainActor）の各点から fire-and-forget の `Task { await self.notifier?.post(...) }`**（PR #18 レビュー Medium）。`post` の初回呼びは許可プロンプト応答までサスペンドし得るため、インライン `await` だと確定エラー 1 件で以降のアップロード処理（特に `fileTooLarge` 分岐はキュー除去 Tx の直前）が宙吊りになる。通知は順序保証不要なので同期処理から切り離す（@MainActor 同士＋ path 値渡しで安全）。
-- **判定は純粋関数 `NotificationPolicy.content(for:) -> NotificationContent`（`Tide/Core/NotificationPolicy.swift`）**。`NotificationEvent` enum（上記 6 種）→ `(identifier, title, body)`。**identifier は `"<種別>:<path>"`**（例 `conflict:a/b.txt`。path を持たない `fileProviderDisabled` は固定 `"fpDisabled"`）で、UNUserNotificationCenter の「同一 identifier は置換」仕様により同一 (path, 種別) の連発を 1 件に畳む（バナー溢れ防止）。本文はフルパスでなく**末尾コンポーネント**（通知は幅が狭い）。全分岐 `NotificationPolicyTests`（identifier の安定性 / path・種別での分離 / 本文がファイル名を含む）。表示文言は xcstrings（ファイル名の `%@` 一個・例外はまとめの通知 `notBackedUpMore` の件数 `%lld` 一個〈#147〉・`extractionState:"manual"`）。
+- **判定は純粋関数 `NotificationPolicy.content(for:) -> NotificationContent`（`Tide/Core/NotificationPolicy.swift`）**。`NotificationEvent` enum（上記 6 種）→ `(identifier, title, body)`。**identifier は `"<種別>:<path>"`**（例 `conflict:a/b.txt`。path を持たない `fileProviderDisabled` は固定 `"fpDisabled"`）で、UNUserNotificationCenter の「同一 identifier は置換」仕様により同一 (path, 種別) の連発を 1 件に畳む（バナー溢れ防止）。本文はフルパスでなく**末尾コンポーネント**（通知は幅が狭い）。全分岐 `NotificationPolicyTests`（identifier の安定性 / path・種別での分離 / 本文がファイル名を含む）。表示文言は xcstrings（ファイル名の `%@` 一個・例外はまとめの通知 `notBackedUpMore` / `writeKeepsFailingMore` の件数 `%lld` 一個〈#147 / #148〉と、`writeKeepsFailing` のファイル名 `%@` + 回数 `%lld`〈#148〉・`extractionState:"manual"`）。
 - **発行と OS 連携は `NotificationManager`（`Tide/App/NotificationManager.swift`・@MainActor・`SyncNotifying` 実装）**。SyncEngine には `SyncNotifying`（`NotificationPolicy.swift` 定義）だけ注入し、UserNotifications / AppKit を持ち込まない（テストでも nil 差し替え可・既存 SyncEngine 直構築は AppEnvironment 1 箇所のみ）。`AppEnvironment` が 1 インスタンス保持し `notifier:` で SyncEngine へ注入。
 - **許可（authorization）は初回 `post` 時に一度だけリクエスト**（起動時・セットアップ時には出さない＝エラー/競合が一度も起きないユーザにいきなりプロンプトしない）。許可されていなければ静かに諦める。Settings の「Notifications」トグル（`ConfigStore.notificationsEnabled`・**既定 on**・presence 判定）が off なら許可も求めない。`factoryReset` で消える設定群にも追加済み。
 - **初回リクエストは単一タスク `authorizationRequest: Task<Void, Never>?` に集約**（PR #18 レビュー Low）。並行 post はこのタスクの完了を `await` してから `notificationSettings()` を読むので、初回プロンプト応答待ち中に来た 2 件目が `.notDetermined` で early-return＝取りこぼされない。許可状態は毎回読む（後から System Settings で許可された場合も拾う）。`requestAuthorization` は `.notDetermined` のときだけプロンプトを出し確定済みなら即返る。
@@ -1670,25 +1670,34 @@ FP 拡張が `excludedFromSync` で拒否したファイルは、ローカルに
   （`packageTooManyFiles`）。どちらも作成時の除外と同じく再送される種類（同じパッケージは起動中 1 回だけ）。
 - **経路**: 拡張がアプリへ伝える手段は共有ログ `FPEventLog` だけなので、拡張がイベントに印（`FPEventRecord.notice` =
   `FPEventNotice` の rawValue）を付け、アプリの `FPEventNoticeWatcher`（`Tide/Core/`・fpOnly 起動で signaler と
-  一緒に立てて一緒に止める）が 5 秒ごとに新着を見る。ログが変わったかは stat の署名（`FPEventLog.changeSignature`
-  = 現行と `.1` のサイズ・更新時刻）で先に確かめ、変わったときだけ読む。印は他の出来事にも付けられる形にしてあり、
-  #148 で競合コピー等を載せる予定。未知の印は読込時に外す（レコードは表示用に残す）。
+  一緒に立てて一緒に止める）が新着を見る。拡張は追記のたびに Darwin 通知（`notify_post`・名前 =
+  `FPEventLog.defaultChangeNotificationName` = App Group の ID + `.fp-events`）を送り、アプリは受けたら読む（#148。
+  当初は 5 秒ごとのポーリングだけだった）。通知を取りこぼしたときの保険として 60 秒ごとの確認も残す。確認の途中で
+  通知が来たら、終わったあとにもう一度読む。読むのは前回読んだ位置から先だけ（`FPEventLog.readNew` =
+  現行の inode とバイト位置・下記「新着の差分読み」・#148。当初は stat の署名で変化を見て、変わるたびに最大 4MB を
+  全部読み直していた）。印は他の出来事にも付けられる形にしてあり、
+  #148 で競合コピー・サイズ超過・書込の失敗を載せた（下の節）。未知の印は読込時に外す（レコードは表示用に残す）。
 - **通知に出す名前**: symlink は `path`、それ以外は `details`（表示用のパス）。検証できない名前は `path` に入れられない
   （読込時の `validateRelativePath` で行ごと捨てられる）ため、親フォルダを含む表示用のパスを `details` に入れる。
   改名は新しい名前を出したいので、新しい表示用のパスを `details` に入れる（`path` は旧 path のまま）。
 - **どこから知らせるか（カーソル 2 本・PR #149 レビュー指摘 2 でユーザ確定）**: 作成時の除外（再送される種類）は
   起動した時点より後だけ（起動直後にまとめて出さない。止まっていた間の分も、再送されたときに知らせる）。改名の除外
-  （再送されない種類）は位置を `ConfigStore.fpNoticeRenameCursor` に保存し、**アプリが止まっていた間の改名も次の
+  （再送されない種類）は位置を `ConfigStore.fpNoticeCursor`（#148 で `fpNoticeRenameCursor` から改名・キーの文字列は同じ）に保存し、**アプリが止まっていた間の改名も次の
   起動で知らせる**（再送されないので、ここで逃すと二度と出ない。保存が無い初回・`reset()` 後は起動時刻から）。
 - **重複の防ぎ方**: fileproviderd は作成時の除外を再送する（実測: フォルダ単位の除外は 10 日で 33 件に 799 回）ので、
-  再送される種類（`isResentByDaemon` = 作成時の 2 種）は同じアイテムを**起動中に 1 回だけ**通知する（記録はメモリだけ・
+  再送される種類（`isResentByDaemon` = 作成時の 2 種・パッケージの丸ごと除外 2 種〈#140〉・サイズ超過と書込の失敗〈#148・下の「fpOnly の競合コピー…」節〉）は同じアイテムを**起動中に 1 回だけ**通知する（記録はメモリだけ・
   ユーザ確定 = 再起動すると再送分をもう一度知らせる。記録は 1 万件で空にする）。改名の除外は後片付けで終わり再送されない
   （実測 17 件に 17 回）ので毎回知らせる。identifier は `notBackedUp:<種類>:<表示パス>`。
 - **多数のときはまとめる（PR #149 レビュー指摘 1 でユーザ確定）**: symlink を多く含むフォルダ（venv・`node_modules/.bin` 等）を
   入れると 1 件ずつ通知が並ぶため、1 回の確認で 4 件以上なら最初の 3 件だけ個別に出し、残りを「ほか N 件のファイルが
   バックアップされていません」の 1 件（`notBackedUpMore`・identifier 固定 = 次のまとめで置き換わる）にまとめる。
-- **取りこぼしうる場合**（通知が 1 件欠けるだけ・同期には影響しない）: `loadRecords()` の `.1` と現行の読み取りの
-  合間に拡張がローテーションしたとき（2MB ごと）、タイムスタンプが同じ値のイベントの片方だけを先に読んだとき、
+- **新着の差分読み（#148）**: `FPEventLog.readNew(since:)` は、前回読んだファイルの inode とバイト位置から先だけを読む。
+  位置の inode が現行と同じなら現行を位置から、`.1` と同じ（読んだあとにローテーションした）なら `.1` の残りと現行の頭から、
+  どちらとも違えば残っている世代を頭から読む。改行で終わっていない末尾の行（書きかけ）は読まず、次回その行の頭から読む。
+  現行を `.1` より先に開くので、開く合間のローテーションは 2 つが同じ inode になるだけで（1 つとして扱う）読み飛ばさない。
+  肥大ファイル（改ざん）は `loadRecords` と同じ上限で読まない。Sync Activity は従来どおり `loadRecords` で全部読む。
+- **取りこぼしうる場合**（通知が 1 件欠けるだけ・同期には影響しない）: 読まないまま 2 回以上ローテーションしたとき
+  （新着が 2MB 以上たまったとき・失われた世代）、タイムスタンプが同じ値のイベントの片方だけを先に読んだとき、
   時計が戻ったとき（カーソルは壁時計の時刻）。
 - **実機受け入れ（2026-10-28・全 14 項目パス）**: 同期できない名前・symlink・追跡中のファイルの `.pem` への改名・
   追跡中のファイルを含むフォルダの `.ssh` への改名で通知が出て、改名の 2 件は後片付けの deleteItem で S3 から外れた。
@@ -1710,6 +1719,48 @@ FP 拡張が `excludedFromSync` で拒否したファイルは、ローカルに
   採らなかった。
 - **据え置き**: 機密網・`.syncignore` に当たるようになった追跡中のファイルが、再取り込み（`createItem(mayAlreadyExist)`）や
   ドメイン作り直しで黙って外れる経路（#136 の注記）は通知の対象外。
+
+#### fpOnly の競合コピー・サイズ超過・書込の失敗が続く（Issue #148・2026-10-31）
+
+fpOnly では `SyncEngine` を作らないため、`SyncEngine` から出していた通知（① 競合コピー・② サイズ上限超過・③ give-up・
+④ 不安定）が一度も出なかった。同じ出来事を起こしているのは FP 拡張なので、#147 の経路（拡張が `FPEventLog` に印を付け、
+アプリの `FPEventNoticeWatcher` が拾う）に載せた。
+
+- **印の種類（`FPEventNotice`）**: 3 種を足した。通知に出す名前はどれも `path`。
+  - `conflictCopyCreated`: 競合を記録する 6 か所（作成・更新・形式の切り替え・パッケージ・移動先が同じ更新）。退避先の
+    パスは `details` に入れる（Sync Activity で見える）。書込は成功として終わるので**再送されない種類** = 位置を保存し、
+    アプリが止まっていた間の競合コピーも次の起動で知らせる（ユーザ確定）。まとめない（1 件ずつ手で直す必要がある）。
+  - `fileTooLarge`: 作成・更新の catch で `SyncError.fileTooLarge` のとき。fileproviderd が再試行するので**再送される種類**
+    = 起動後の分を、同じファイルは起動中 1 回だけ。内容つきの移動（改名と同時の編集）で新しい内容が設定の上限を超えたときも
+    これになる。移動のコピーの上限（5 GiB）による拒否は設定を変えても直らないので、拡張は別のエラー
+    （`ExtensionWriter.MoveError.copyTooLarge`）で投げ、`writeFailed` として数える（PR #160 レビュー指摘 1: 移動の
+    catch で一律に `writeFailed` にすると、内容つきの移動の上限超過まで「上限を調整して」が出なくなる）。
+  - `writeFailed`: 書込（作成・更新・移動・削除）の catch 9 か所。**一過性のエラーには付けない**（`SyncIssueClassifier` の
+    `network` と `remoteConflict` = 並行書込の衝突・index の部分完了・ユーザ確定）。キャンセルにも付けない。実体化（読み取り）の
+    失敗は数えない。
+- **③ give-up の置き換え（ユーザ確定）**: FP では fileproviderd が上限なしに再試行するので「諦めた」出来事は無い。代わりに、
+  アプリが同じパスの `writeFailed` を数え、**続けて 5 回**（folderSync の give-up と同じ・`FPEventNoticeWatcher.failureThreshold`）
+  に達したら「同期の失敗が続いています」（`NotificationEvent.writeKeepsFailing`）を 1 回知らせる。そのパスの書込が成功した記録
+  （`upload` / `delete` / `move` / `conflict`）で数え直し、また 5 回続けばもう一度知らせる。数えるのは起動後の失敗だけ
+  （起動前の記録も数えると、成功の記録が出ないまま残った古い失敗が効き、後日 1 回失敗しただけで「5 回続けて」と出る・
+  PR #160 レビュー指摘 6 でユーザ確定。アプリを再起動すると数え直しになる）。回数の記録はメモリだけで、1 万件で空にする。
+  1 回の確認で 4 件以上なら 3 件 +「ほか N 件」（`writeKeepsFailingMore`）にまとめる。
+- **④ 不安定は出さない（ユーザ確定）**: 拡張は fileproviderd が用意した静止したファイルを受け取るので、書きかけのファイルを
+  読む出来事が無い。万一起きたとき（`SyncError.fileChangedDuringUpload` = `unstableFile`）は、一過性ではない書込の失敗として
+  `writeFailed` に数える（続けば「失敗が続く」で知らせる・PR #160 レビュー指摘 2）。
+- **まとめ方**: 「バックアップされない」出来事（#147 の 6 種 + サイズ超過）と「失敗が続く」出来事を別々に数え、それぞれ 3 件 +
+  「ほか N 件」。競合コピーはまとめない。
+- **文面**: ① ② は folderSync と同じ。③ の代わりは新しい文面（「「名前」の同期が 5 回続けて失敗しました。Tide は再試行を
+  続けます。詳しくは同期アクティビティで確認できます。」・identifier = `keepsFailing:<パス>` / まとめは `keepsFailing:more`）。
+- **実機の受け入れ（2026-11-01・PR #160 の `b254ad9`・dev バケット・全項目パス）**:
+  - **Darwin 通知は sandbox をまたいで届く**: symlink を作ると、通知はすぐ出た（60 秒ごとの確認を待たない）。続けて 2 つ作っても
+    両方出た。起動時に登録の失敗（`falling back to periodic checks only`）は出ない。
+  - **競合コピー**: 1 台で起こすには、帯域を 1 MB/s に絞って 200MB に書き換え、アップロード中に S3 内復元で前の版を現行に
+    する。1 MB/s でもアップロードには約 7 分かかった（計算の倍）。アプリを終了している間に起きた競合も、次の起動で知らせた。
+  - **再試行の間隔**: fileproviderd の再試行は約 5・10・20・40・80・150・300 秒と延びる。書込の失敗が 5 回に達して知らせる
+    までは約 36 秒（拒否はバケットポリシーで `files/<dir>/*` への PutObject だけを Deny して起こした）。サイズ超過・失敗が続く
+    の通知は、以後の再送では繰り返さない。アプリを起動し直すと、起動の約 1 秒後の再送でサイズ超過をもう一度 1 回知らせた。
+  - **オフライン**: 失敗（NSURLError -1009）は 10 分で 8 回あったが印は付かず、通知は出なかった。戻すと次の再試行で上がった。
 
 ### reconcile 入口の stat ゲート（M4 perf・pull コスト削減・2026-06-16）
 
