@@ -17,7 +17,12 @@ struct ExtensionServices: Sendable {
     /// 一括ダウンロード等で普通に超えるため引き上げ（2026-07-14 ユーザ確定）。溢れた分は
     /// バッジが付かないだけ（`MaterializedBadge.cappedReport` / `PersistedPathSet.replace` が
     /// 同一規則で決定的に切り詰める = チャーンなし）。
-    static let materializedBadgeCap = 10_000
+    /// 10,000 では、ツリーのファイル（2026-11-01 で 11,671 件）をほぼ全部実体化すると溢れ、パス昇順で
+    /// 後ろに並ぶファイルとフォルダにチェックが付かなかった。報告に入るのはほぼツリーにあるファイル
+    /// だけ（例外は、凍結中の伝え済みのパスと、まだ畳み込んでいない返却分 = どちらも少数）なので、
+    /// ツリーより十分大きくしておけば溢れない。100,000 に上げた（Issue #141・ユーザ確定。
+    /// レジストリの JSON は最大で約 9MB。重さは上限ではなく実際の件数で決まる）。
+    static let materializedBadgeCap = 100_000
 
     let s3: TideS3Client
     let cache: ManifestGenerationCache
