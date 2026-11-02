@@ -91,6 +91,19 @@ final class FileProviderItem: NSObject, NSFileProviderItem, NSFileProviderItemDe
         }
     }
 
+    /// 旗の中身は TideCore の `FileProviderWritePolicy.fileSystemFlags(for:)`（#162）。**このプロパティを
+    /// 消さない** — 未実装だとシステムが「拡張子を隠す」を立てたプレースホルダを作る。
+    var fileSystemFlags: NSFileProviderFileSystemFlags {
+        let policy = FileProviderWritePolicy.fileSystemFlags(for: node)
+        var flags: NSFileProviderFileSystemFlags = []
+        if policy.userReadable { flags.insert(.userReadable) }
+        if policy.userWritable { flags.insert(.userWritable) }
+        if policy.userExecutable { flags.insert(.userExecutable) }
+        if policy.hidden { flags.insert(.hidden) }
+        if policy.pathExtensionHidden { flags.insert(.pathExtensionHidden) }
+        return flags
+    }
+
     var itemVersion: NSFileProviderItemVersion {
         // 符号化は TideCore の `FileProviderWritePolicy` に集約（`baseSha` の対・書込経路の
         // 3-way ベース抽出と往復整合を保証。PR #58 レビュー #8）。

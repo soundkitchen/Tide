@@ -287,4 +287,51 @@ final class FileProviderWritePolicyTests: XCTestCase {
         XCTAssertNil(FileProviderWritePolicy.copySourceFallbackVersion(
             entry: noEtag, latestEtag: "", latestVersionId: "v-latest", latestSize: 550))
     }
+
+    // MARK: - fileSystemFlags（#162）
+
+    private func fileNode(_ path: String) -> ManifestTree.Node {
+        .file(path: path, entry: ManifestFileEntry(
+            size: 1, mtime: "2026-11-03T00:00:00Z", sha256: String(repeating: "a", count: 64),
+            s3VersionId: nil, etag: "e", deviceId: "d", uploadedAt: "2026-11-03T00:00:00Z"))
+    }
+
+    /// どの種類の item にも「拡張子を隠す」を立てない（未実装だとシステムが立てる = #162）。
+    func testFileSystemFlagsNeverHidePathExtension() {
+        let nodes: [ManifestTree.Node] = [
+            fileNode("Projects/README.md"),
+            .directory(path: "Privates", mtime: nil),
+            .directory(path: "", mtime: nil),
+            .package(path: "a/App.xcodeproj", members: [:], digest: "d", mtime: nil),
+        ]
+        for node in nodes {
+            XCTAssertFalse(
+                FileProviderWritePolicy.fileSystemFlags(for: node).pathExtensionHidden, node.path)
+        }
+    }
+
+    /// 読み書きは常に立て、実行はフォルダとパッケージだけ（未実装のときの値と同じ）。
+    func testFileSystemFlagsPermissionsByKind() {
+        let file = FileProviderWritePolicy.fileSystemFlags(for: fileNode("a/run.sh"))
+        XCTAssertTrue(file.userReadable)
+        XCTAssertTrue(file.userWritable)
+        XCTAssertFalse(file.userExecutable)
+
+        let dir = FileProviderWritePolicy.fileSystemFlags(for: .directory(path: "a", mtime: nil))
+        XCTAssertTrue(dir.userReadable && dir.userWritable && dir.userExecutable)
+
+        let pkg = FileProviderWritePolicy.fileSystemFlags(
+            for: .package(path: "a/Talk.key", members: [:], digest: "d", mtime: nil))
+        XCTAssertTrue(pkg.userReadable && pkg.userWritable && pkg.userExecutable)
+    }
+
+    /// ドットで始まる名前だけ隠す（名前は最後の要素で見る）。
+    func testFileSystemFlagsHideDotNamesOnly() {
+        XCTAssertTrue(FileProviderWritePolicy.fileSystemFlags(for: fileNode(".syncignore")).hidden)
+        XCTAssertTrue(FileProviderWritePolicy.fileSystemFlags(for: fileNode("p/.gitignore")).hidden)
+        XCTAssertTrue(
+            FileProviderWritePolicy.fileSystemFlags(for: .directory(path: "p/.git", mtime: nil)).hidden)
+        XCTAssertFalse(FileProviderWritePolicy.fileSystemFlags(for: fileNode(".hidden/visible.txt")).hidden)
+        XCTAssertFalse(FileProviderWritePolicy.fileSystemFlags(for: .directory(path: "", mtime: nil)).hidden)
+    }
 }

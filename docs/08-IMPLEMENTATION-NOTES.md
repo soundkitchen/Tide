@@ -66,6 +66,17 @@
 - **拡張のログは既定レベル以上（notice/error）で出す**: `.info` は永続化されず `log show` で追えない。拡張プロセスは対話デバッグしづらいため、設定チェック等の診断は notice 以上に（`log stream` はリダイレクトでバッファされるので `script -q` 経由の pty で取る）。
 - **拡張の Info.plist 必須キー**: `NSExtension` 配下に `NSExtensionFileProviderDocumentGroup`（App Group 指定）と `NSExtensionFileProviderSupportsEnumeration`。欠けると `NSFileProviderManager.add` が `-2014 applicationExtensionNotFound`。初回はシステム設定（ログイン項目と機能拡張 → ファイルプロバイダ）でユーザが拡張を有効化する必要がある（それまでドメインは `user-disabled`）。
 
+### FP item の fileSystemFlags（#162・2026-11-03）
+- **きっかけ**: レプリカの約 5,600 item（深さ 6 まで）の FinderInfo に「拡張子を隠す」（`0x0010`）が立っていた。付いていたのは S3 から来た item だけで、この Mac で作った item には無い。2 台目の Mac は無いので、「S3 から来た」= 2026-10-30 のドメインの作り直し（`"main2"`・下記「パッケージ」節）でプレースホルダとして作り直された全件。
+- **原因（実機で確定）**: `FileProviderItem` が `fileSystemFlags` を実装していなかった。`fileproviderctl dump` の FP 側（拡張が報告した item）では全件が `m:rw-e`（フォルダとパッケージは `rwxe`）だった。`e` が `NSFileProviderFileSystemPathExtensionHidden`（`1 << 4` = FinderInfo の `0x0010`）。未実装のときの既定値は「ユーザの読み書き（フォルダとパッケージは実行も）+ 拡張子を隠す」で、ヘッダーには書かれていない。システムがこの旗をディスクに書くのはプレースホルダを作るとき（と下記の配り直し）で、ローカルで作った item は FP 側が `rw-e` でもディスクは元のまま。
+- **実装**: `FileProviderItem.fileSystemFlags` を必ず返す。中身は TideCore の `FileProviderWritePolicy.fileSystemFlags(for:)`（テストは `FileProviderWritePolicyTests`）。未実装のときの値に揃え、違いは「拡張子を隠す」を立てないことだけにした:
+  - 読み書きは常に立てる。実行はフォルダとパッケージだけ（マニフェストは実行ビットを持たない = 別の端末から来たスクリプトは `+x` にならない・従来どおり）
+  - ドットで始まる名前は隠す（未実装のときも FP 側は全件 `h` だった）
+- **権限**: FP の旗が持てるのはユーザの rwx だけ。S3 から来たファイルは `0600`、フォルダは `0700` になる（Google Drive のレプリカも同じ）。`0644` 相当は API では出せない。
+- **実機確認（2026-11-03）**:
+  - **返す item の旗はディスクの権限を変えない**: ローカルで作った `755` のスクリプト・`444` のファイルに `touch`（メタデータだけの modifyItem → 新しい旗の item を返す）しても、FP 側は `rw-` に変わり、ディスクは `755` / `444` のまま（実行ビットは落ちず、書けるようにもならない）。
+  - **既存の item は配り直しで直る**: 旗付きのファイルに `touch` する、または退避（`evictUbiquitousItem`）して読み直すと、FinderInfo が消える（権限は `600` のまま・中身の sha256 はマニフェストと一致）。ドメインの作り直しは要らない。
+
 ### File Provider 増分列挙 + リモート追従（M5 Phase 4・2026-07-04）
 - **世代モデル**: マニフェストのスナップショットを「世代」として扱い、`NSFileProviderSyncAnchor` = 世代 ID（UUID 文字列。**anchor は 500 バイト上限**＝SDK 明文）。直近 64 世代（**Issue #131〜・旧 8**）のファイルマップを `ManifestGenerationLog`（App Group コンテナ内 `Library/Caches/Tide/fileprovider-manifest-log.json`・bucket-keyed・atomic 書出）に永続化し（**Issue #128〜スキーマ v2 = 全件を持つのは最新世代だけで、古い世代は「1 つ新しい世代から戻す逆差分」〈`ReverseDelta` = restored / removed〉で持つ**。v1 は世代ごとに全件を複製し、追跡 4 万件で 135MB・読込 1.2 秒 / ピーク 544MB・保存 2.25 秒 / ピーク約 900MB だった → v2 は 16.9MB・0.16 秒 / 83MB・0.29 秒 / 123MB〈2026-10-17 実測〉。古い世代は `generation(anchor:in:)` が逆差分を新しい順に当てて組み立てる・shardEtags は最新世代だけが持つ。v1 のログは読めない = cold として捨てる〈更新後に一度だけ全再列挙・ユーザ確定〉。実機確認〈2026-10-17・dev-tide〉: 更新直後に `unknown sync anchor (expired)` が 1 回だけ出て v2 で書き直し・作成 / 編集 / 削除のたびに逆差分が 1 件ずつ積まれ〈各 1 パス〉、レプリカと S3 が一致・anchor 切れや拒否のログなし・`soak-check-fp` OK・拡張の RSS は 300〜630MB → 約 150MB）、`enumerateChanges(from:)` は「anchor の世代 → 現在」を `ManifestTreeDiff` で didUpdate / didDeleteItems へ写像する。**未知/世代落ち anchor は `.syncAnchorExpired`** → システムがキャッシュを破棄して全再列挙（自己回復。ログ消失・bucket 変更・Phase 3 の静的 anchor もこの経路で吸収＝ドメイン作り直し不要）。同一内容のリフレッシュは世代を増やさない（anchor 安定・shard etag と取得時刻のみ更新）。
 - **増分ロード**: `ManifestSnapshotLoader.load(previous:)` が index の shard etag 差分で変化したシャードだけ GET し、無変化シャードは前回世代から持ち越す（etag の意味論 = `ManifestReader` の shard_state と同一。比較は index 宣言値・記録は取得オブジェクトの実 etag・404 レースは未記録で次回再取得）。**DB 非接触の不変条件は維持**（世代ログは拡張専用 JSON。書き手は拡張プロセスの `ManifestGenerationCache` アクターのみ）。

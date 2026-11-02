@@ -45,6 +45,36 @@ public enum FileProviderWritePolicy {
         return Data((materialized ? base + Self.materializedSuffix : base).utf8)
     }
 
+    /// item の `fileSystemFlags` を FP の型に依存せずに表したもの（#162）。拡張側
+    /// （`FileProviderItem.fileSystemFlags`）が `NSFileProviderFileSystemFlags` に写す。
+    public struct FileSystemFlags: Equatable, Sendable {
+        public var userReadable: Bool
+        public var userWritable: Bool
+        public var userExecutable: Bool
+        /// `NSFileProviderFileSystemHidden`（ディスク上は UF_HIDDEN）。
+        public var hidden: Bool
+        /// `NSFileProviderFileSystemPathExtensionHidden`（FinderInfo の「拡張子を隠す」）。
+        public var pathExtensionHidden: Bool
+    }
+
+    /// item の `fileSystemFlags`（#162）。**未実装に戻さない・拡張子を隠す旗を立てない** —
+    /// 未実装だとシステムは「ユーザの読み書き（フォルダとパッケージは実行も）+ 拡張子を隠す」として
+    /// 扱い、S3 から作るプレースホルダの FinderInfo に「拡張子を隠す」を書く（`fileproviderctl dump` の
+    /// FP 側で全 item が `rw-e` / `rwxe`・2026-11-03 実機）。
+    /// それ以外は未実装のときの値に揃える（今との違いを「拡張子を隠す」だけにする）:
+    /// - 読み書きは常に立てる。実行はフォルダとパッケージだけ（マニフェストは実行ビットを持たない）
+    /// - ドットで始まる名前は隠す（未実装のときも FP 側は全件 `h` だった）
+    /// FP の旗はユーザの分しか持てないので、group / other の権限はここでは決まらない
+    /// （リモートから来たファイルは 0600・フォルダは 0700 になる。Google Drive も同じ）。
+    public static func fileSystemFlags(for node: ManifestTree.Node) -> FileSystemFlags {
+        FileSystemFlags(
+            userReadable: true,
+            userWritable: true,
+            userExecutable: node.isDirectory || node.isPackage,
+            hidden: node.name.hasPrefix("."),
+            pathExtensionHidden: false)
+    }
+
     /// ディレクトリの `metadataVersion`（`dir-<ISO8601 mtime>`・実体化の `|m` 付きも）から日時を
     /// 取り出す（`metadataVersion(for:)` の dir 側の逆写像・Issue #144）。日時を持たない `"dir"`・
     /// ファイルやパッケージの版・読めない形は nil。
