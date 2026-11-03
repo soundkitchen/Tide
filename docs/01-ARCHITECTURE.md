@@ -140,7 +140,8 @@ Tide/（リポジトリルート）
 ├── TideFileProvider/                 【appex: NSFileProviderReplicatedExtension・DB 非接触】
 │   ├── FileProviderExtension.swift    コールバック本体（列挙 anchor / fetchContents / 書込系）
 │   ├── FileProviderEnumerator.swift   working set / ディレクトリ列挙・enumerateChanges
-│   ├── FileProviderItem.swift         item 表現（f:/d:/k: identifier・capabilities・バッジ / evict）
+│   ├── FileProviderItem.swift         item 表現（capabilities・fileSystemFlags = 権限の旗〈#162〉・バッジ / evict）
+│   ├── FileProviderItemIdentifier.swift  item identifier ⇄ 相対パス（f:/d:/k:・TideItemRef。#162 で切り出し・TideTests でもコンパイル）
 │   ├── ExtensionWriter.swift          書込系の実務（S3 PUT / delete / move → ManifestUpdater 合流）
 │   ├── ExtensionServices.swift        共有サービス束（S3 client / ignore / ログ・DB 非接触の不変条件）。プロセス内で共有し、変わった段だけ作り直す（#151・`docs/08`「拡張のサービスはプロセスで共有」）
 │   ├── MaterializedSetObserver.swift  実体化セット観測（バッジ live 側）
