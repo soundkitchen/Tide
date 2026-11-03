@@ -306,7 +306,6 @@ public enum ShardUpdateOutcome: Equatable, Sendable {
     case alreadyUpToDate(ManifestFileEntry)
 }
 
-/// `removeFileEntry` の結果（FP 拡張の deleteItem 用・M5 Phase 5-2）。
 /// `ManifestUpdater.updateFilePermissions` の結果（#162）。
 public enum PermissionsUpdateOutcome: Equatable, Sendable {
     /// 権限の旗を書き換えた（付随する entry = 書いた後の権威 entry）。
@@ -317,6 +316,7 @@ public enum PermissionsUpdateOutcome: Equatable, Sendable {
     case stale(ManifestFileEntry?)
 }
 
+/// `removeFileEntry` の結果（FP 拡張の deleteItem 用・M5 Phase 5-2）。
 public enum ShardRemoveOutcome: Equatable, Sendable {
     /// entry を除去した。
     case removed

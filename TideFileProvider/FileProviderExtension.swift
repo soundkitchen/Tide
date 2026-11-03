@@ -874,9 +874,10 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         }
         let path = ref.path
         let completion = UncheckedSendableBox(value: completionHandler)
-        // 旗の変更（chmod・Finder の「拡張子を隠す」など・#162）は、システムが渡した旗をそのまま返す。
-        // 固定の旗を返すと、システムがそれをディスクに書き、chmod が 20 秒以内に 0600 へ戻される
-        // （2026-11-03 実機）。旗はマニフェストに保存先が無いので、ほかの端末へは伝わらない。
+        // 旗の変更（chmod・Finder の「拡張子を隠す」など・#162）で、保存先の無い item（フォルダ・パッケージ）に
+        // 返す旗 = システムが渡した旗そのまま。固定の旗を返すと、システムがそれをディスクに書き、chmod が
+        // 20 秒以内に戻される（2026-11-03 実機）。フォルダとパッケージの旗はほかの端末へは伝わらない
+        // （ファイルの実行・読み取り専用はマニフェストに保存する = 下のメタデータのみの分岐）。
         // `changedFields` に無いフィールドは item に入っている保証が無いので、旗が変わったときだけ使う。
         let systemFlags: NSFileProviderFileSystemFlags? =
             changedFields.contains(.fileSystemFlags) ? item.fileSystemFlags : nil

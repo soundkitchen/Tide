@@ -144,8 +144,12 @@ struct ExtensionWriter: Sendable {
         //   フォールスルー。機会的最適化なので、従来 snapshot ロードなしで到達できた base nil
         //   書込（modifyItem .contents / move noop）に新しい失敗面を作らない（RMW は権威シャード
         //   1 枚しか読まないため、無関係シャードの持続故障を致命化しない。PR #113 レビュー #1）。
+        // 権限の旗（#162）が違う再作成はファストパスに乗せない（PR #164 再レビュー A）: 旗を保存しないまま
+        // マニフェストの旗の item を返すと、システムがそれをディスクに書いてローカルの chmod を戻す。
+        // 旗の指定が無い（nil）ときは旗を見ない（引き継ぐ側なので食い違わない）。
         if baseSha == nil, let contentsURL,
            case .file(_, let current)? = (try? await cache.current())?.tree.node(at: path),
+           permissions == nil || permissions == current.permissions,
            let localSha = try? HashCalculator.sha256NoFollow(of: contentsURL),
            localSha == current.sha256 {
             return .unchanged(current)
