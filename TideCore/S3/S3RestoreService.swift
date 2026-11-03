@@ -101,7 +101,8 @@ public struct S3RestoreService: Sendable {
         // 3. 3-way ベース = 復元開始時点の現行マニフェスト entry の sha
         //    （無ければ削除済み/未追跡 = base nil の新規作成側で decideUpload に合流）。
         let shardId = ManifestSharding.shardId(for: relativePath)
-        let baseSha = try await updater.store.getShard(shardId)?.value.files[relativePath]?.sha256
+        let current = try await updater.store.getShard(shardId)?.value.files[relativePath]
+        let baseSha = current?.sha256
 
         // 4. tmp へストリーミング DL（走りながら sha256・真実サイズ超過は即破棄）。
         try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
@@ -182,7 +183,9 @@ public struct S3RestoreService: Sendable {
             sha256: uploadedSha,
             mtime: Date(),
             put: putResult,
-            deviceId: updater.deviceId
+            deviceId: updater.deviceId,
+            // 権限の旗（#162）は今の entry から引き継ぐ（履歴版は旗を持たない・削除済みの復元は旗なし）。
+            permissions: current?.permissions ?? .none
         )
         let outcome = try await updater.updateFileEntry(
             for: relativePath, base: baseSha, newEntry: entry

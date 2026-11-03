@@ -1275,4 +1275,74 @@ final class ManifestUpdaterTests: XCTestCase {
         let toShard = await store.shards[ManifestSharding.shardId(for: to)]
         XCTAssertEqual(toShard?.files[to]?.sha256, "content")
     }
+
+    // MARK: - updateFilePermissions（#162）
+
+    private func seedEntry(
+        _ store: InMemoryManifestStore, path: String, sha: String,
+        permissions: ManifestFilePermissions = .none
+    ) async -> ManifestFileEntry {
+        var entry = makeManifestEntry(sha: sha)
+        entry.permissions = permissions
+        var shard = ManifestShard.empty(id: ManifestSharding.shardId(for: path))
+        shard.files[path] = entry
+        await store.seed(shard: shard)
+        return entry
+    }
+
+    /// sha がベースと一致 → 旗だけ書き換えて .wrote・発火 1 回（内容のフィールドはそのまま）。
+    func testUpdatePermissionsWritesFlagsOnly() async throws {
+        let store = InMemoryManifestStore()
+        let counter = SignalCounter()
+        let path = "bin/run.sh"
+        let seeded = await seedEntry(store, path: path, sha: "s1")
+        let perms = ManifestFilePermissions(executable: true, readOnly: false)
+
+        let outcome = try await makeUpdater(store: store, counter: counter)
+            .updateFilePermissions(for: path, base: "s1", permissions: perms)
+
+        var expected = seeded
+        expected.permissions = perms
+        XCTAssertEqual(outcome, .wrote(expected))
+        XCTAssertEqual(counter.count, 1)
+        let stored = await store.shards[ManifestSharding.shardId(for: path)]?.files[path]
+        XCTAssertEqual(stored, expected)
+    }
+
+    /// 旗が既に同じ → 書かない・発火 0 回。
+    func testUpdatePermissionsUnchangedDoesNotWrite() async throws {
+        let store = InMemoryManifestStore()
+        let counter = SignalCounter()
+        let path = "bin/run.sh"
+        let perms = ManifestFilePermissions(executable: true, readOnly: true)
+        let seeded = await seedEntry(store, path: path, sha: "s1", permissions: perms)
+
+        let outcome = try await makeUpdater(store: store, counter: counter)
+            .updateFilePermissions(for: path, base: "s1", permissions: perms)
+
+        XCTAssertEqual(outcome, .unchanged(seeded))
+        XCTAssertEqual(counter.count, 0)
+    }
+
+    /// ベースと違う（ほかの書き手が内容を変えた）・ベース不明・entry 無し → .stale・書かない。
+    func testUpdatePermissionsStaleBaseDoesNotWrite() async throws {
+        let store = InMemoryManifestStore()
+        let counter = SignalCounter()
+        let path = "bin/run.sh"
+        let seeded = await seedEntry(store, path: path, sha: "s2")
+        let perms = ManifestFilePermissions(executable: true, readOnly: false)
+        let updater = makeUpdater(store: store, counter: counter)
+
+        let changed = try await updater.updateFilePermissions(for: path, base: "s1", permissions: perms)
+        XCTAssertEqual(changed, .stale(seeded))
+        let unknown = try await updater.updateFilePermissions(for: path, base: nil, permissions: perms)
+        XCTAssertEqual(unknown, .stale(seeded))
+        let missing = try await updater.updateFilePermissions(
+            for: "bin/none.sh", base: "s1", permissions: perms)
+        XCTAssertEqual(missing, .stale(nil))
+
+        XCTAssertEqual(counter.count, 0)
+        let stored = await store.shards[ManifestSharding.shardId(for: path)]?.files[path]
+        XCTAssertEqual(stored, seeded)
+    }
 }

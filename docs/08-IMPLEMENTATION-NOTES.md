@@ -66,19 +66,26 @@
 - **拡張のログは既定レベル以上（notice/error）で出す**: `.info` は永続化されず `log show` で追えない。拡張プロセスは対話デバッグしづらいため、設定チェック等の診断は notice 以上に（`log stream` はリダイレクトでバッファされるので `script -q` 経由の pty で取る）。
 - **拡張の Info.plist 必須キー**: `NSExtension` 配下に `NSExtensionFileProviderDocumentGroup`（App Group 指定）と `NSExtensionFileProviderSupportsEnumeration`。欠けると `NSFileProviderManager.add` が `-2014 applicationExtensionNotFound`。初回はシステム設定（ログイン項目と機能拡張 → ファイルプロバイダ）でユーザが拡張を有効化する必要がある（それまでドメインは `user-disabled`）。
 
-### FP item の fileSystemFlags（#162・2026-11-03）
-- **きっかけ**: レプリカの約 5,600 item（深さ 6 まで）の FinderInfo に「拡張子を隠す」（`0x0010`）が立っていた。付いていたのは S3 から来た item だけで、この Mac で作った item には無い。2 台目の Mac は無いので、「S3 から来た」= 2026-10-30 のドメインの作り直し（`"main2"`・下記「パッケージ」節）でプレースホルダとして作り直された全件。
-- **原因（実機で確定）**: `FileProviderItem` が `fileSystemFlags` を実装していなかった。`fileproviderctl dump` の FP 側（拡張が報告した item）では全件が `m:rw-e`（フォルダとパッケージは `rwxe`）だった。`e` が `NSFileProviderFileSystemPathExtensionHidden`（`1 << 4` = FinderInfo の `0x0010`）。未実装のときの既定値は「ユーザの読み書き（フォルダとパッケージは実行も）+ 拡張子を隠す」で、ヘッダーには書かれていない。システムがこの旗をディスクに書くのはプレースホルダを作るとき（と下記の配り直し）で、ローカルで作った item は FP 側が `rw-e` でもディスクは元のまま。
-- **実装**: `FileProviderItem.fileSystemFlags` を必ず返す。中身は TideCore の `FileProviderWritePolicy.fileSystemFlags(for:)`（テストは `FileProviderWritePolicyTests`）。未実装のときの値に揃え、違いは「拡張子を隠す」を立てないことだけにした:
-  - 読み書きは常に立てる。実行はフォルダとパッケージだけ（マニフェストは実行ビットを持たない = 別の端末から来たスクリプトは `+x` にならない・従来どおり）
-  - ドットで始まる名前は隠す（未実装のときも FP 側は全件 `h` だった）
-- **権限**: FP の旗が持てるのはユーザの rwx だけ。S3 から来たファイルは `0600`、フォルダは `0700` になる（Google Drive のレプリカも同じ）。`0644` 相当は API では出せない。
-- **実機確認（2026-11-03）**:
-  - **返す item の旗はディスクの権限を変えない**: ローカルで作った `755` のスクリプト・`444` のファイルに `touch`（メタデータだけの modifyItem → 新しい旗の item を返す）しても、FP 側は `rw-` に変わり、ディスクは `755` / `444` のまま（実行ビットは落ちず、書けるようにもならない）。
-  - **新しいプレースホルダには付かない**: 削除したファイルを Version History から復元した（アプリが S3 へ書く = 別の端末から来たのと同じ）。届いたプレースホルダは FinderInfo なし（xattr ゼロ）・`0600`・FP 側 `rw-`。読むと中身の sha256 は元と一致した。
-  - **既存の item は配り直しで直る**: 旗付きのファイルに `touch` する、または退避（`evictUbiquitousItem`）して読み直すと、FinderInfo が消える（権限は `600` のまま・中身の sha256 はマニフェストと一致）。ドメインの作り直しは要らない。
-- **既存分の一括の直し（2026-11-03・ユーザ確定）**: FinderInfo が「拡張子を隠す」だけ（32 バイト中 `0x0010` だけ）の item に限って `touch -c` した（レプリカ全体で 14,507 件・うちフォルダ 2,859 件・1,000 件ずつ 30 秒おき）。日時はシステムがマニフェストの値に戻すので、ファイルは変わらない（`docs/09` の「touch（mtime のみ）はダエモンに握りつぶされ」と同じ挙動）。結果: 旗はすべて消えた・拡張のエラーログ 0 件・ローカルの実行ビット / 読み取り専用はそのまま・`make soak-check-fp` 整合 OK（12,124 件）。
-  - **触らなかったもの**（FinderInfo がほかの形の 13 件）: パッケージ 4 件（`0x2010` = パッケージの旗 + 拡張子を隠す。追跡中の `.xcodeproj` 3 件と、fileproviderd が名前の衝突で作った複製 `LCCAD 2.xcodeproj` = `com.apple.fileprovider.before-bounce` 付き・FP 側に無い）・`.DS_Store` 3 件（`0x4010`）・除外した `build/` の中のパッケージ 6 件（`0x2000`・拡張に届かない）。
+### FP item の fileSystemFlags と権限の旗（#162・2026-11-03）
+- **きっかけ**: レプリカの 14,507 item の FinderInfo に「拡張子を隠す」（`0x0010`）が立っていた（Finder で `README.md` が `README` に見える）。付いていたのは S3 から来た item だけで、この Mac で作った item には無い。2 台目の Mac は無いので、「S3 から来た」= 2026-10-30 のドメインの作り直し（`"main2"`・下記「パッケージ」節）でプレースホルダとして作り直された全件。
+- **原因（実機で確定）**: `FileProviderItem` が `fileSystemFlags` を実装していなかった。`fileproviderctl dump` の FP 側（拡張が報告した item）では全件が `m:rw-e`（フォルダとパッケージは `rwxe`）だった。`e` が `NSFileProviderFileSystemPathExtensionHidden`（`1 << 4` = FinderInfo の `0x0010`）。未実装のときの既定値は「ユーザの読み書き（フォルダとパッケージは実行も）+ 拡張子を隠す」で、ヘッダーには書かれていない。
+- **システムが旗をディスクに書くとき（2026-11-03 実機）**: プレースホルダを作るときと、FP 側の旗が変わったとき（変わったビットだけ）。
+  - `touch`（旗は変わらない）では、返した item の旗と違ってもディスクの権限は変わらない（ローカルで作った `755` / `444` はそのまま）。「拡張子を隠す」は FP 側で立っていたビットが消えたので、ディスクからも消える（下記の一括の直し）。
+  - `chmod` すると旗の変更の modifyItem が届き、**返した item の旗がディスクに書かれる**。固定の旗（`rw`）を返していたときは、`chmod 755` / `444` が 20 秒以内に `600` へ戻された（group / other も落ちる）。
+  - 名前の先頭のドットの付け外し（改名）では、返した item の隠す旗がすぐディスクに反映される（UF_HIDDEN が付く / 外れる）。
+- **実装**: `FileProviderItem.fileSystemFlags` を必ず返す。中身は TideCore の `FileProviderWritePolicy.fileSystemFlags(for:)`（ビット値は `NSFileProviderFileSystemFlags` と同じ OptionSet・拡張は rawValue をそのまま写す）。「拡張子を隠す」は立てない。
+  - ファイル: 読み取りは常に。書き込み・実行はマニフェストの権限の旗（`ManifestFileEntry.permissions` = `executable` / `read_only`・`docs/02`）。
+  - フォルダとパッケージ: 読み書き・実行（保存先が無い）。ドットで始まる名前は隠す（未実装のときも FP 側は全件 `h` だった）。
+- **権限の旗の保存（ユーザ確定 2026-11-03）**: 実行と読み取り専用だけをマニフェストに持つ（真偽値 2 つ・true のときだけ書く = 旗の無い既存の entry もそのまま読める・`false` を読んでも旗なしと等しい）。「拡張子を隠す」は保存しない（#162 の旗を再び配る扉になる）。隠すは名前から決める。
+  - **書く経路**: createItem（`fields` に旗があればローカルの旗）・内容の変更の modifyItem（`changedFields` に旗があればその旗・無ければツリーの今の entry の旗を引き継ぐ）・**旗だけの modifyItem（chmod）= `ManifestUpdater.updateFilePermissions`**（内容を PUT せず entry の旗だけを RMW で書き換える。ガードは RMW 内の sha 一致 = ほかの書き手が内容を変えていたら `.stale` で書かず、権威 entry の旗を返す）。改名・移動（`ManifestFileEntry.copied`）と内容つきの改名は元の entry の旗を引き継ぐ。Version History の復元は今の entry の旗を引き継ぐ（削除済みの復元は旗なし）。
+  - **版**: file の metadataVersion に旗を織り込む = `<sha>|p=x` / `|p=r` / `|p=xr`（+ 実体化の `|m`）。chmod だけの変更でも版が変わり、ほかの端末へ届く。旗なしは素の sha のまま（既存レプリカの baseVersion がそのまま復元できる）。**`baseSha` が剥がす既知のサフィックス**なので、形を変えるときは `permissionsSuffix` と `baseSha` を対で変える（往復は `FileProviderWritePolicyTests`）。contentVersion には載せない（内容の変化の意味になる）。
+  - **保存先が無いもの**: フォルダとパッケージの旗の modifyItem は、システムが渡した旗をそのまま返す（配り直されるまでは保たれ、配り直されると `rwx` に戻る）。パッケージの中身の権限は対象外（`docs/09` #162 節）。
+  - **書かない書き手**: folderSync 世代の `Uploader`（デッドコード）とウィザードの seed は旗なしで書く（folderSync の再アップロードは旗を落とす・到達は git revert のみ）。
+- **権限の上限**: FP の旗が持てるのはユーザの rwx だけ。S3 から来たファイルは `0600`、フォルダは `0700` になる（旗を持つファイルは、ユーザの分に実行・読み取り専用が反映される見込み = 新しいプレースホルダでは未確認）（Google Drive のレプリカも同じ）。`0644` 相当は API では出せない。
+- **既存の item はコードだけでは直らない（PR #164 レビュー指摘 1）**: 旗の無い entry の版は変わらないので、コードを入れただけでは既存のプレースホルダは配り直されず、「拡張子を隠す」が付いたまま残る。配り直し（`touch` = メタデータだけの modifyItem / 退避して読み直す / 内容の変更）が起きた item から直る。ドメインの作り直し（#104 の epoch リセット付き）でも全件が配り直されるが、除外してローカルにしか無いファイルが消えるので使わなかった。
+- **実機確認（2026-11-03）**: 新しいプレースホルダ（削除したファイルを Version History から復元）に FinderInfo なし・`0600`・中身一致。旗付きの既存 item は `touch` / 退避して読み直すと FinderInfo が消える。`chmod 755` / `444` は保存され（FP 側 `rwx` / `r--`・版に `|p=x` / `|p=r`）、退避して読み直しても `755` / `444` のまま。`chmod 644` で旗が外れ版も元に戻る。最初から `755` で作ったファイルは作成時に旗が保存される。
+- **既存分の一括の直し（2026-11-03・ユーザ確定）**: FinderInfo が「拡張子を隠す」だけ（32 バイト中 `0x0010` だけ）の item に限って `touch -c` した（レプリカ全体で 14,507 件・うちフォルダ 2,859 件・1,000 件ずつ 30 秒おき）。日時はシステムがマニフェストの値に戻すので、ファイルは変わらない（`docs/09` の「touch（mtime のみ）はダエモンに握りつぶされ」と同じ挙動）。結果: 旗はすべて消えた・拡張のエラーログ 0 件・ローカルの実行ビット / 読み取り専用はそのまま・`make soak-check-fp` 整合 OK（12,124 件）。続けて追跡中のパッケージ 3 件（`0x2010` = パッケージの旗 + 拡張子を隠す）も `touch` し、`0x2000` だけになった（PR #164 レビュー指摘 2）。
+  - **触らなかったもの**: `.DS_Store` 3 件（`0x4010`）・除外した `build/` の中のパッケージ 6 件（`0x2000`・拡張に届かない）・fileproviderd が名前の衝突で作った複製 `Privates/LCCAD/LCCAD 2.xcodeproj`（`0x2010`・`com.apple.fileprovider.before-bounce` 付き・FP 側に無い = 拡張に届かない）。
 
 ### File Provider 増分列挙 + リモート追従（M5 Phase 4・2026-07-04）
 - **世代モデル**: マニフェストのスナップショットを「世代」として扱い、`NSFileProviderSyncAnchor` = 世代 ID（UUID 文字列。**anchor は 500 バイト上限**＝SDK 明文）。直近 64 世代（**Issue #131〜・旧 8**）のファイルマップを `ManifestGenerationLog`（App Group コンテナ内 `Library/Caches/Tide/fileprovider-manifest-log.json`・bucket-keyed・atomic 書出）に永続化し（**Issue #128〜スキーマ v2 = 全件を持つのは最新世代だけで、古い世代は「1 つ新しい世代から戻す逆差分」〈`ReverseDelta` = restored / removed〉で持つ**。v1 は世代ごとに全件を複製し、追跡 4 万件で 135MB・読込 1.2 秒 / ピーク 544MB・保存 2.25 秒 / ピーク約 900MB だった → v2 は 16.9MB・0.16 秒 / 83MB・0.29 秒 / 123MB〈2026-10-17 実測〉。古い世代は `generation(anchor:in:)` が逆差分を新しい順に当てて組み立てる・shardEtags は最新世代だけが持つ。v1 のログは読めない = cold として捨てる〈更新後に一度だけ全再列挙・ユーザ確定〉。実機確認〈2026-10-17・dev-tide〉: 更新直後に `unknown sync anchor (expired)` が 1 回だけ出て v2 で書き直し・作成 / 編集 / 削除のたびに逆差分が 1 件ずつ積まれ〈各 1 パス〉、レプリカと S3 が一致・anchor 切れや拒否のログなし・`soak-check-fp` OK・拡張の RSS は 300〜630MB → 約 150MB）、`enumerateChanges(from:)` は「anchor の世代 → 現在」を `ManifestTreeDiff` で didUpdate / didDeleteItems へ写像する。**未知/世代落ち anchor は `.syncAnchorExpired`** → システムがキャッシュを破棄して全再列挙（自己回復。ログ消失・bucket 変更・Phase 3 の静的 anchor もこの経路で吸収＝ドメイン作り直し不要）。同一内容のリフレッシュは世代を増やさない（anchor 安定・shard etag と取得時刻のみ更新）。

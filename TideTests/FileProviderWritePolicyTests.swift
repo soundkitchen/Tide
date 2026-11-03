@@ -288,50 +288,65 @@ final class FileProviderWritePolicyTests: XCTestCase {
             entry: noEtag, latestEtag: "", latestVersionId: "v-latest", latestSize: 550))
     }
 
-    // MARK: - fileSystemFlags（#162）
+    // MARK: - fileSystemFlags と権限の版（#162）
 
-    private func fileNode(_ path: String) -> ManifestTree.Node {
+    private let sha64 = String(repeating: "a", count: 64)
+
+    private func fileNode(
+        _ path: String, permissions: ManifestFilePermissions = .none
+    ) -> ManifestTree.Node {
         .file(path: path, entry: ManifestFileEntry(
-            size: 1, mtime: "2026-11-03T00:00:00Z", sha256: String(repeating: "a", count: 64),
-            s3VersionId: nil, etag: "e", deviceId: "d", uploadedAt: "2026-11-03T00:00:00Z"))
+            size: 1, mtime: "2026-11-03T00:00:00Z", sha256: sha64,
+            s3VersionId: nil, etag: "e", deviceId: "d", uploadedAt: "2026-11-03T00:00:00Z",
+            permissions: permissions))
     }
 
-    /// どの種類の item にも「拡張子を隠す」を立てない（未実装だとシステムが立てる = #162）。
-    func testFileSystemFlagsNeverHidePathExtension() {
-        let nodes: [ManifestTree.Node] = [
-            fileNode("Projects/README.md"),
-            .directory(path: "Privates", mtime: nil),
-            .directory(path: "", mtime: nil),
-            .package(path: "a/App.xcodeproj", members: [:], digest: "d", mtime: nil),
+    /// システムの旗 → 保存する権限: 実行 = userExecutable・読み取り専用 = userWritable なし。
+    /// 隠す・拡張子を隠すは保存しない。
+    func testPermissionsFromSystemFlags() {
+        typealias F = FileProviderWritePolicy.FileSystemFlags
+        XCTAssertEqual(
+            FileProviderWritePolicy.permissions(from: [.userReadable, .userWritable]), .none)
+        XCTAssertEqual(
+            FileProviderWritePolicy.permissions(from: [.userReadable, .userWritable, .userExecutable]),
+            ManifestFilePermissions(executable: true, readOnly: false))
+        XCTAssertEqual(
+            FileProviderWritePolicy.permissions(from: [F.userReadable, .hidden, .pathExtensionHidden]),
+            ManifestFilePermissions(executable: false, readOnly: true))
+    }
+
+    /// file の metadataVersion: 旗なしは従来どおり素の sha（後方互換）・旗ありは `<sha>|p=…`（+ `|m`）。
+    /// どの形も baseSha が sha に戻す（rebind のベース復元を壊さない）。
+    func testMetadataVersionCarriesPermissionsAndRoundtrips() {
+        let cases: [(ManifestFilePermissions, String)] = [
+            (.none, ""),
+            (ManifestFilePermissions(executable: true, readOnly: false), "|p=x"),
+            (ManifestFilePermissions(executable: false, readOnly: true), "|p=r"),
+            (ManifestFilePermissions(executable: true, readOnly: true), "|p=xr"),
         ]
-        for node in nodes {
-            XCTAssertFalse(
-                FileProviderWritePolicy.fileSystemFlags(for: node).pathExtensionHidden, node.path)
+        for (perms, suffix) in cases {
+            for materialized in [false, true] {
+                let mv = FileProviderWritePolicy.metadataVersion(
+                    for: fileNode("a.sh", permissions: perms), materialized: materialized)
+                let expected = sha64 + suffix + (materialized ? FileProviderWritePolicy.materializedSuffix : "")
+                XCTAssertEqual(String(data: mv, encoding: .utf8), expected)
+                XCTAssertEqual(
+                    FileProviderWritePolicy.baseSha(contentVersion: Data("stamp".utf8), metadataVersion: mv),
+                    sha64, expected)
+            }
         }
+        // contentVersion には旗を載せない（内容の変化の意味になる）
+        XCTAssertEqual(
+            FileProviderWritePolicy.contentVersion(
+                for: fileNode("a.sh", permissions: ManifestFilePermissions(executable: true, readOnly: true))),
+            Data(sha64.utf8))
     }
 
-    /// 読み書きは常に立て、実行はフォルダとパッケージだけ（未実装のときの値と同じ）。
-    func testFileSystemFlagsPermissionsByKind() {
-        let file = FileProviderWritePolicy.fileSystemFlags(for: fileNode("a/run.sh"))
-        XCTAssertTrue(file.userReadable)
-        XCTAssertTrue(file.userWritable)
-        XCTAssertFalse(file.userExecutable)
-
-        let dir = FileProviderWritePolicy.fileSystemFlags(for: .directory(path: "a", mtime: nil))
-        XCTAssertTrue(dir.userReadable && dir.userWritable && dir.userExecutable)
-
-        let pkg = FileProviderWritePolicy.fileSystemFlags(
-            for: .package(path: "a/Talk.key", members: [:], digest: "d", mtime: nil))
-        XCTAssertTrue(pkg.userReadable && pkg.userWritable && pkg.userExecutable)
-    }
-
-    /// ドットで始まる名前だけ隠す（名前は最後の要素で見る）。
-    func testFileSystemFlagsHideDotNamesOnly() {
-        XCTAssertTrue(FileProviderWritePolicy.fileSystemFlags(for: fileNode(".syncignore")).hidden)
-        XCTAssertTrue(FileProviderWritePolicy.fileSystemFlags(for: fileNode("p/.gitignore")).hidden)
-        XCTAssertTrue(
-            FileProviderWritePolicy.fileSystemFlags(for: .directory(path: "p/.git", mtime: nil)).hidden)
-        XCTAssertFalse(FileProviderWritePolicy.fileSystemFlags(for: fileNode(".hidden/visible.txt")).hidden)
-        XCTAssertFalse(FileProviderWritePolicy.fileSystemFlags(for: .directory(path: "", mtime: nil)).hidden)
+    /// 権限のサフィックスは既知の形だけ剥がす（順序違い・重ね・未知の値は不正）。
+    func testBaseShaRejectsUnknownPermissionsSuffixes() {
+        for bad in ["|p=rx", "|p=", "|p=xx", "|p=x|p=x", "|m|p=x", "|p=z"] {
+            XCTAssertNil(
+                FileProviderWritePolicy.baseSha(fromContentVersion: Data((sha64 + bad).utf8)), bad)
+        }
     }
 }
