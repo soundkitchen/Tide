@@ -200,6 +200,10 @@ targets:
     deploymentTarget: "26.0"
     sources:
       - path: TideTests
+      # 拡張の item（fileSystemFlags など）を直接テストするため、拡張のソースのうち item と
+      # identifier の 2 ファイルだけテストにも入れる（拡張ターゲットは import できない・#162）。
+      - path: TideFileProvider/FileProviderItem.swift
+      - path: TideFileProvider/FileProviderItemIdentifier.swift
     dependencies:
       - target: Tide
       # core を TideCore framework へ分離したため、テストも TideCore と、

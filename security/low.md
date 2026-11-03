@@ -373,3 +373,17 @@ FP 拡張の書込（deleteItem / modifyItem / createItem / move）は `Extensio
   通知は名前だけで中身を運ばない（名前 = App Group の ID + `.fp-events`）。同じ名前の通知は他のプロセスからも送れるが、
   受けたアプリは前回の位置から先のログを読むだけで、新着が無ければ何もしない（読込ゲートは従来どおり）。偽の通知で
   起きるのは空読みだけ。
+
+## L20. マニフェスト由来の実行ビット（#162）
+
+**Status:** ✅ Reviewed（2026-11-03・PR #164）— マニフェストの file entry に `executable` / `read_only`（真偽値・true のときだけ書く）を足し、File Provider 拡張が item の `fileSystemFlags` としてシステムへ渡すようにした。**S3 のマニフェストから、この Mac のファイルに実行ビットを付けられるようになった**。
+
+**該当箇所:** `TideCore/Models/FileEntry.swift`（`ManifestFilePermissions`）・`TideCore/Core/FileProviderWritePolicy.swift`（`fileSystemFlags(for:)`）・`TideCore/S3/Uploader.swift`（`ManifestUpdater.updateFilePermissions`）・`TideFileProvider/FileProviderExtension.swift`（createItem / modifyItem の旗の保存）。
+
+**重要度:** Low（マニフェストに書ける者 = バケットへの書込権限を持つ者は、もともとファイルの中身を差し替えられる。実行ビットを付けられることで増えるのは「ダブルクリックやパスで実行できる形で置ける」ことだけ）。
+
+**境界と対策:**
+- **扱えるのはユーザの rwx だけ**: FP の旗にユーザの分しか無いので、setuid / setgid / sticky や group / other の権限は表せない（マニフェストにも持たない）。
+- **読み込みは真偽値だけ**: `executable` / `read_only` 以外のキーは無視し、値は Bool としてデコードする（型が違えばその entry のデコードが失敗 = 従来の不正 entry と同じ扱い）。
+- **パスの検証は従来どおり**: 旗の書込（`updateFilePermissions`）も `PathValidator.validateRelativePath` を通し、ガードは RMW 内の sha 一致（ほかの書き手が内容を変えていたら書かない）。
+- **フォルダ・パッケージ・パッケージの中身には付かない**（保存先が無い・`docs/09` #162 節）。

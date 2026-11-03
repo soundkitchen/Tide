@@ -25,7 +25,7 @@ public enum FileProviderWritePolicy {
     public static let materializedSuffix = "|m"
 
     /// `NSFileProviderItemVersion.metadataVersion` に載せるバイト列（Issue #65 で複合符号化に拡張）。
-    /// - file = sha256（+ 実体化時 `|m`）。**sha プレフィックスは rebind 対応の load-bearing**
+    /// - file = sha256（+ 権限の旗 `|p=x` など・#162）（+ 実体化時 `|m`）。**sha プレフィックスは rebind 対応の load-bearing**
     ///   （rebind 後の操作は contentVersion がローカル版スタンプに差し替わるため、`baseSha` が
     ///   metadataVersion 側から 3-way ベースを復元する。M5 Phase 5-4）。
     /// - directory = `dir-<ISO8601 mtime>` / `dir`（+ 実体化時 `|m`）。dir は `baseSha` の対象外
@@ -34,7 +34,8 @@ public enum FileProviderWritePolicy {
         let base: String
         switch node {
         case .file(_, let entry):
-            base = entry.sha256
+            // 権限の旗（#162）は sha の直後。chmod だけの変更でも版が変わり、ほかの端末へ届く。
+            base = entry.sha256 + Self.permissionsSuffix(entry.permissions)
         case .package(_, _, let digest, _):
             // パッケージも digest を先頭に置く（ファイルと同じく rebind 後の 3-way ベースを
             // metadataVersion から復元するため・#140）。
@@ -44,6 +45,64 @@ public enum FileProviderWritePolicy {
         }
         return Data((materialized ? base + Self.materializedSuffix : base).utf8)
     }
+
+    /// item の `fileSystemFlags` を FP の型に依存せずに表したもの（#162）。**ビット値は
+    /// `NSFileProviderFileSystemFlags` と同じ**（拡張側は rawValue をそのまま写す。一致は
+    /// `FileProviderItemFlagsTests` が FP の定数と突き合わせて固定する）。
+    public struct FileSystemFlags: OptionSet, Sendable {
+        public let rawValue: UInt
+        public init(rawValue: UInt) { self.rawValue = rawValue }
+        public static let userExecutable = FileSystemFlags(rawValue: 1 << 0)
+        public static let userReadable = FileSystemFlags(rawValue: 1 << 1)
+        public static let userWritable = FileSystemFlags(rawValue: 1 << 2)
+        /// ディスク上は UF_HIDDEN。
+        public static let hidden = FileSystemFlags(rawValue: 1 << 3)
+        /// FinderInfo の「拡張子を隠す」。**Tide は立てない**（#162）。
+        public static let pathExtensionHidden = FileSystemFlags(rawValue: 1 << 4)
+    }
+
+    /// item の `fileSystemFlags`（#162）。**未実装に戻さない・拡張子を隠す旗を立てない** —
+    /// 未実装だとシステムは「ユーザの読み書き（フォルダとパッケージは実行も）+ 拡張子を隠す」として
+    /// 扱い、S3 から作るプレースホルダの FinderInfo に「拡張子を隠す」を書く（`fileproviderctl dump` の
+    /// FP 側で全 item が `rw-e` / `rwxe`・2026-11-03 実機）。
+    /// - ファイル: 読み取りは常に。書き込み・実行はマニフェストの `permissions`（`chmod` を保存したもの）
+    /// - フォルダとパッケージ: 読み書き・実行（保存先が無い・パッケージの中身の旗は対象外）
+    /// - ドットで始まる名前は隠す（未実装のときも FP 側は全件 `h` だった）
+    /// FP の旗はユーザの分しか持てないので、group / other の権限はここでは決まらない
+    /// （リモートから来たファイルは 0600・フォルダは 0700 になる。Google Drive も同じ）。
+    public static func fileSystemFlags(for node: ManifestTree.Node) -> FileSystemFlags {
+        var flags: FileSystemFlags = [.userReadable]
+        switch node {
+        case .file(_, let entry):
+            if !entry.permissions.readOnly { flags.insert(.userWritable) }
+            if entry.permissions.executable { flags.insert(.userExecutable) }
+        case .directory, .package:
+            flags.formUnion([.userWritable, .userExecutable])
+        }
+        if node.name.hasPrefix(".") { flags.insert(.hidden) }
+        return flags
+    }
+
+    /// システムが渡した旗（chmod・作成時のローカルの旗）からマニフェストに保存する権限を取る（#162）。
+    /// 隠す・拡張子を隠すは保存しない（隠すは名前から決める・拡張子を隠すは立てない）。
+    public static func permissions(from flags: FileSystemFlags) -> ManifestFilePermissions {
+        ManifestFilePermissions(
+            executable: flags.contains(.userExecutable), readOnly: !flags.contains(.userWritable))
+    }
+
+    /// file の metadataVersion に織り込む権限のサフィックス（#162）。旗なしは空 = 旗を持たない entry の
+    /// 版は従来と同じ（既存レプリカの baseVersion がそのまま復元できる）。並びは `<sha><権限>|m`。
+    /// **`baseSha` が剥がす既知のサフィックス**なので、形を変えるときは `baseSha` と対で変える。
+    public static func permissionsSuffix(_ permissions: ManifestFilePermissions) -> String {
+        switch (permissions.executable, permissions.readOnly) {
+        case (false, false): return ""
+        case (true, false): return "|p=x"
+        case (false, true): return "|p=r"
+        case (true, true): return "|p=xr"
+        }
+    }
+
+    static let knownPermissionsSuffixes = ["|p=xr", "|p=x", "|p=r"]
 
     /// ディレクトリの `metadataVersion`（`dir-<ISO8601 mtime>`・実体化の `|m` 付きも）から日時を
     /// 取り出す（`metadataVersion(for:)` の dir 側の逆写像・Issue #144）。日時を持たない `"dir"`・
@@ -80,7 +139,8 @@ public enum FileProviderWritePolicy {
     /// - "dir" / 非 UTF-8 / 空 / sha256 hex（64 桁小文字）以外 → nil = 内容ベース不明。
     ///   nil の扱いは呼び出し側の意味論に委ねる（削除ガードは「根拠なしに消さない」= 拒否側、
     ///   アップロード競合判定は `decideUpload(base: nil)` = remote 有りなら競合側、へ倒れる）。
-    /// - 実体化バッジの複合符号化（`<sha>|m`・metadataVersion 経由で届く）は剥がしてから検証する。
+    /// - 実体化バッジの複合符号化（`<sha>|m`・metadataVersion 経由で届く）と権限のサフィックス
+    ///   （`<sha>|p=x` など・#162）は剥がしてから検証する。
     ///   既知のサフィックス以外の付加は従来どおり不正として弾く。なお `|m` は metadataVersion に
     ///   しか発行しないため contentVersion 位置での剥がしは厳密には過剰受理だが、両 version を
     ///   同一デコーダで裁く単純さを優先する（64-hex 検証は維持・PR #66 レビュー nit 2 の記録）。
@@ -88,6 +148,10 @@ public enum FileProviderWritePolicy {
         guard let data, var s = String(data: data, encoding: .utf8) else { return nil }
         if s.hasSuffix(Self.materializedSuffix) {
             s = String(s.dropLast(Self.materializedSuffix.count))
+        }
+        // 権限のサフィックス（#162・`permissionsSuffix`）。`|m` の手前にある。
+        if let suffix = Self.knownPermissionsSuffixes.first(where: { s.hasSuffix($0) }) {
+            s = String(s.dropLast(suffix.count))
         }
         guard s.count == 64,
               s.allSatisfy({ ("0"..."9").contains($0) || ("a"..."f").contains($0) }) else {

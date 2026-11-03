@@ -53,4 +53,47 @@ final class ManifestFileEntryFactoryTests: XCTestCase {
         XCTAssertEqual(entry.deviceId, "dev-new")
         XCTAssertEqual(entry.uploadedAt, ISO8601.format(uploadedAt))
     }
+
+    // MARK: - 権限の旗（#162）
+
+    func testUploadedCarriesPermissionsAndCopiedKeepsThem() {
+        let perms = ManifestFilePermissions(executable: true, readOnly: true)
+        let source = ManifestFileEntry.uploaded(
+            size: 1, sha256: "s", mtime: Date(), put: put, deviceId: "d", permissions: perms)
+        XCTAssertEqual(source.permissions, perms)
+        XCTAssertEqual(
+            ManifestFileEntry.uploaded(size: 1, sha256: "s", mtime: Date(), put: put, deviceId: "d").permissions,
+            .none)
+        let copied = ManifestFileEntry.copied(
+            from: source, copy: TideS3Client.PutObjectResult(etag: "e2", versionId: "v-2"), deviceId: "d2")
+        XCTAssertEqual(copied.permissions, perms)
+    }
+
+    /// JSON: 旗は true のときだけ書く（旗なしの entry は従来と同じ形）・無ければ旗なしとして読む・
+    /// `false` を読んでも旗なしと等しい。
+    func testPermissionsJSONOmitsFalseAndReadsAbsentAsNone() throws {
+        var entry = ManifestFileEntry.uploaded(size: 1, sha256: "s", mtime: Date(), put: put, deviceId: "d")
+        let plain = try JSONSerialization.jsonObject(with: JSONEncoder().encode(entry)) as? [String: Any]
+        XCTAssertNil(plain?["executable"])
+        XCTAssertNil(plain?["read_only"])
+
+        entry.permissions = ManifestFilePermissions(executable: true, readOnly: false)
+        let flagged = try JSONSerialization.jsonObject(with: JSONEncoder().encode(entry)) as? [String: Any]
+        XCTAssertEqual(flagged?["executable"] as? Bool, true)
+        XCTAssertNil(flagged?["read_only"])
+        XCTAssertEqual(try JSONDecoder().decode(ManifestFileEntry.self, from: JSONEncoder().encode(entry)), entry)
+
+        let legacy = Data("""
+            {"size":1,"mtime":"2026-11-03T00:00:00Z","sha256":"s","etag":"e","device_id":"d",\
+            "uploaded_at":"2026-11-03T00:00:00Z"}
+            """.utf8)
+        let legacyEntry = try JSONDecoder().decode(ManifestFileEntry.self, from: legacy)
+        XCTAssertEqual(legacyEntry.permissions, .none)
+
+        let explicitFalse = Data("""
+            {"size":1,"mtime":"2026-11-03T00:00:00Z","sha256":"s","etag":"e","device_id":"d",\
+            "uploaded_at":"2026-11-03T00:00:00Z","executable":false,"read_only":false}
+            """.utf8)
+        XCTAssertEqual(try JSONDecoder().decode(ManifestFileEntry.self, from: explicitFalse), legacyEntry)
+    }
 }

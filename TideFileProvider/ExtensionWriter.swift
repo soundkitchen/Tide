@@ -118,8 +118,11 @@ struct ExtensionWriter: Sendable {
     ///   - baseSha: システムが最後に見た itemVersion 由来の sha（3-way ベース）。新規作成は nil —
     ///     `decideUpload(base: nil)` が「リモート不在 = 作成 / 同一 sha = 冪等 / 別内容 = 競合」を裁く。
     ///   - contentModified: システム提供の contentModificationDate（無ければ now）。
+    ///   - permissions: 保存する権限の旗（#162）。nil = 指定なし（`changedFields` に旗が無い内容の変更）=
+    ///     ツリーの今の entry の旗を引き継ぐ（無ければ旗なし）。
     func modifyFileContents(
-        path: String, contentsURL: URL?, baseSha: String?, contentModified: Date?
+        path: String, contentsURL: URL?, baseSha: String?, contentModified: Date?,
+        permissions: ManifestFilePermissions? = nil
     ) async throws -> ModifyOutcome {
         try PathValidator.validateRelativePath(path)
         // createItem（base nil）の同一 sha ファストパス（#93・2026-08-25 ユーザ確定）:
@@ -141,14 +144,29 @@ struct ExtensionWriter: Sendable {
         //   フォールスルー。機会的最適化なので、従来 snapshot ロードなしで到達できた base nil
         //   書込（modifyItem .contents / move noop）に新しい失敗面を作らない（RMW は権威シャード
         //   1 枚しか読まないため、無関係シャードの持続故障を致命化しない。PR #113 レビュー #1）。
+        // 権限の旗（#162）が違う再作成はファストパスに乗せない（PR #164 再レビュー A）: 旗を保存しないまま
+        // マニフェストの旗の item を返すと、システムがそれをディスクに書いてローカルの chmod を戻す。
+        // 旗の指定が無い（nil）ときは旗を見ない（引き継ぐ側なので食い違わない）。
         if baseSha == nil, let contentsURL,
            case .file(_, let current)? = (try? await cache.current())?.tree.node(at: path),
+           permissions == nil || permissions == current.permissions,
            let localSha = try? HashCalculator.sha256NoFollow(of: contentsURL),
            localSha == current.sha256 {
             return .unchanged(current)
         }
+        // 権限の旗（#162）: 指定が無ければツリーの今の entry から引き継ぐ（キャッシュが古くても、
+        // 読み違えるのは旗だけ = 次の chmod で直る）。取得の失敗は旗なしに倒す（書込を止めない）。
+        let resolvedPermissions: ManifestFilePermissions
+        if let permissions {
+            resolvedPermissions = permissions
+        } else if case .file(_, let current)? = (try? await cache.current())?.tree.node(at: path) {
+            resolvedPermissions = current.permissions
+        } else {
+            resolvedPermissions = .none
+        }
         let entry = try await uploadObject(
-            path: path, contentsURL: contentsURL, contentModified: contentModified
+            path: path, contentsURL: contentsURL, contentModified: contentModified,
+            permissions: resolvedPermissions
         )
         do {
             let outcome = try await updater.updateFileEntry(for: path, base: baseSha, newEntry: entry)
@@ -174,7 +192,8 @@ struct ExtensionWriter: Sendable {
             let copyPath = ConflictNamer.localCopyRelativePath(for: path)
             try PathValidator.validateRelativePath(copyPath)
             let copyEntry = try await uploadObject(
-                path: copyPath, contentsURL: contentsURL, contentModified: contentModified
+                path: copyPath, contentsURL: contentsURL, contentModified: contentModified,
+                permissions: resolvedPermissions
             )
             let copyOutcome = try await updater.updateFileEntry(
                 for: copyPath, base: nil, newEntry: copyEntry
@@ -188,6 +207,20 @@ struct ExtensionWriter: Sendable {
             await cache.invalidateAfterLocalWrite()
             return .conflict(remote: remoteEntry, copyPath: copyPath, copyEntry: copyEntry)
         }
+    }
+
+    /// 権限の旗だけの書込（chmod の modifyItem・#162）。内容は PUT せず、マニフェストの entry の旗だけを
+    /// 書き換える（`ManifestUpdater.updateFilePermissions`・ガードは RMW 内の sha 一致）。
+    func updatePermissions(
+        path: String, baseSha: String?, permissions: ManifestFilePermissions
+    ) async throws -> PermissionsUpdateOutcome {
+        try PathValidator.validateRelativePath(path)
+        let outcome = try await updater.updateFilePermissions(
+            for: path, base: baseSha, permissions: permissions)
+        if case .wrote = outcome {
+            await cache.invalidateAfterLocalWrite()
+        }
+        return outcome
     }
 
     /// パッケージの書込（createItem = `baseDigest: nil` / modifyItem の .contents・#140）。
@@ -567,9 +600,10 @@ struct ExtensionWriter: Sendable {
 
         let newEntry: ManifestFileEntry
         if let contentsURL {
-            // 複合（rename + contents）: 新内容を新 path へ直接アップロード
+            // 複合（rename + contents）: 新内容を新 path へ直接アップロード（権限の旗は元の entry から・#162）
             newEntry = try await uploadObject(
-                path: to, contentsURL: contentsURL, contentModified: contentModified)
+                path: to, contentsURL: contentsURL, contentModified: contentModified,
+                permissions: entry.permissions)
             guard FileProviderWritePolicy.moveMayRemoveSource(baseSha: baseSha, current: entry.sha256) else {
                 AppLogger.fileProvider.notice("moveFile: source changed since base; keeping it: \(from, privacy: .private)")
                 return try await writeKeepingSource(to: to, newEntry: newEntry)
@@ -747,7 +781,8 @@ struct ExtensionWriter: Sendable {
     /// （多層防御）。サイズ上限・SSE-S3（putObject/MPU 内で明示）・sha256 は同一規約。
     /// `contentsURL == nil` は内容なしの createItem = 空ファイルを単発 PUT（M5 Phase 5-3）。
     private func uploadObject(
-        path: String, contentsURL: URL?, contentModified: Date?
+        path: String, contentsURL: URL?, contentModified: Date?,
+        permissions: ManifestFilePermissions = .none
     ) async throws -> ManifestFileEntry {
         guard let contentsURL else {
             let put = try await s3.putObject(key: "files/\(path)", data: Data())
@@ -756,7 +791,8 @@ struct ExtensionWriter: Sendable {
                 sha256: HashCalculator.hex(SHA256.hash(data: Data())),
                 mtime: contentModified ?? Date(),
                 put: put,
-                deviceId: deviceId
+                deviceId: deviceId,
+                permissions: permissions
             )
         }
         let reader = try NoFollowFileReader(path: contentsURL.path)
@@ -788,7 +824,8 @@ struct ExtensionWriter: Sendable {
             sha256: sha256,
             mtime: contentModified ?? Date(),
             put: put,
-            deviceId: deviceId
+            deviceId: deviceId,
+            permissions: permissions
         )
     }
 }

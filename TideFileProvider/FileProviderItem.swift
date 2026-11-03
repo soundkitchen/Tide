@@ -18,15 +18,23 @@ final class FileProviderItem: NSObject, NSFileProviderItem, NSFileProviderItemDe
 
     private let node: ManifestTree.Node
     private let materialized: Bool
+    private let systemFileSystemFlags: NSFileProviderFileSystemFlags?
 
     /// - Parameter materialized: 実体化バッジ（Issue #65）。file = 報告済み集合に掲載 /
     ///   dir = 配下 1 ファイル以上かつ全実体化（`BadgeFlags` で判定）。省略時 false = バッジなし
     ///   （root・仮想フォルダ等、構造的にバッジが付かない構築箇所用）。**報告済みでありうる item を
     ///   false で返すとバッジが消えたまま固着する**（メタデータ regress は次の差分が出るまで
     ///   再配信されない）ので、ツリー由来の item は `BadgeFlags` 経由で構築すること。
-    init(node: ManifestTree.Node, materialized: Bool = false) {
+    /// - Parameter systemFileSystemFlags: 旗の変更（chmod など）の modifyItem で、保存先の無い item
+    ///   （フォルダ・パッケージ）にシステムが渡した旗をそのまま返すときに渡す（#162）。nil なら
+    ///   `FileProviderWritePolicy.fileSystemFlags(for:)`（ファイルはマニフェストの旗）。
+    init(
+        node: ManifestTree.Node, materialized: Bool = false,
+        systemFileSystemFlags: NSFileProviderFileSystemFlags? = nil
+    ) {
         self.node = node
         self.materialized = materialized
+        self.systemFileSystemFlags = systemFileSystemFlags
     }
 
     var itemIdentifier: NSFileProviderItemIdentifier {
@@ -89,6 +97,15 @@ final class FileProviderItem: NSObject, NSFileProviderItem, NSFileProviderItemDe
                 .allowsRenaming, .allowsReparenting, .allowsEvicting,
             ]
         }
+    }
+
+    /// 旗の中身は TideCore の `FileProviderWritePolicy.fileSystemFlags(for:)`（#162・ビット値は FP と同じ）。
+    /// **このプロパティを消さない** — 未実装だとシステムが「拡張子を隠す」を立てたプレースホルダを作る
+    /// （回帰は `FileProviderItemFlagsTests`。消すとテストがコンパイルできなくなる）。
+    var fileSystemFlags: NSFileProviderFileSystemFlags {
+        if let systemFileSystemFlags { return systemFileSystemFlags }
+        return NSFileProviderFileSystemFlags(
+            rawValue: FileProviderWritePolicy.fileSystemFlags(for: node).rawValue)
     }
 
     var itemVersion: NSFileProviderItemVersion {
@@ -183,5 +200,13 @@ final class BadgeFlags {
 
     func item(_ node: ManifestTree.Node) -> FileProviderItem {
         FileProviderItem(node: node, materialized: isOn(node))
+    }
+
+    /// 旗の変更の modifyItem で、システムが渡した旗をそのまま返す item（#162）。nil なら `item(_:)` と同じ。
+    func item(
+        _ node: ManifestTree.Node, systemFileSystemFlags: NSFileProviderFileSystemFlags?
+    ) -> FileProviderItem {
+        FileProviderItem(
+            node: node, materialized: isOn(node), systemFileSystemFlags: systemFileSystemFlags)
     }
 }

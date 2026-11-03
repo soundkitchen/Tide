@@ -588,6 +588,10 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         let completion = UncheckedSendableBox(value: completionHandler)
         let boxedURL = UncheckedSendableBox(value: url)
         let contentModified = itemTemplate.contentModificationDate ?? nil
+        // 権限の旗（#162）: ローカルで作ったファイルの実行・読み取り専用をマニフェストに保存する。
+        // `fields` に無ければ指定なし（旗なし）。
+        let createPermissions: ManifestFilePermissions? = Self.systemPermissions(
+            of: itemTemplate, present: fields.contains(.fileSystemFlags))
         let mayAlreadyExist = options.contains(.mayAlreadyExist)
         let task = Task {
             defer { progress.completedUnitCount = progress.totalUnitCount }
@@ -634,7 +638,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     }
                     // 内容なしの新規作成 = 空ファイルとしてアップロード
                     let outcome = try await services.writer.modifyFileContents(
-                        path: path, contentsURL: nil, baseSha: nil, contentModified: contentModified
+                        path: path, contentsURL: nil, baseSha: nil, contentModified: contentModified,
+                        permissions: createPermissions
                     )
                     // 実体化した祖先の仮想フォルダはレジストリ保護を外す（M5 Phase 5-4 —
                     // 残すと「実体化後にリモート削除された dir」を空フォルダとして復活させる）。
@@ -651,7 +656,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 // マニフェスト不在なら編集内容で再作成（keepLocalRemoteDeleted と同じ側）。
                 let outcome = try await services.writer.modifyFileContents(
                     path: path, contentsURL: contentsURL, baseSha: nil,
-                    contentModified: contentModified
+                    contentModified: contentModified, permissions: createPermissions
                 )
                 await services.virtualDirs.removeAncestors(of: path)
                 await services.exclusionCleanups.removeSubtree(at: path)
@@ -869,6 +874,13 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         }
         let path = ref.path
         let completion = UncheckedSendableBox(value: completionHandler)
+        // 旗の変更（chmod・Finder の「拡張子を隠す」など・#162）で、保存先の無い item（フォルダ・パッケージ）に
+        // 返す旗 = システムが渡した旗そのまま。固定の旗を返すと、システムがそれをディスクに書き、chmod が
+        // 20 秒以内に戻される（2026-11-03 実機）。フォルダとパッケージの旗はほかの端末へは伝わらない
+        // （ファイルの実行・読み取り専用はマニフェストに保存する = 下のメタデータのみの分岐）。
+        // `changedFields` に無いフィールドは item に入っている保証が無いので、旗が変わったときだけ使う。
+        let systemFlags: NSFileProviderFileSystemFlags? =
+            changedFields.contains(.fileSystemFlags) ? item.fileSystemFlags : nil
 
         if changedFields.contains(.filename) || changedFields.contains(.parentItemIdentifier) {
             // 改名 / 移動（M5 Phase 5-4）。sha 不変の path 移動 = copyObject + 二相 RMW。
@@ -938,10 +950,14 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                         // 世代を進めない）ため、伝え済み（報告済み + 返却分）基準のフラグを維持する。
                         let told = await services.toldMaterialized()
                         completion.value(
-                            BadgeFlags(tree: tree, told: told).item(node), [], false, nil)
+                            BadgeFlags(tree: tree, told: told).item(
+                                node, systemFileSystemFlags: systemFlags),
+                            [], false, nil)
                     } else {
                         completion.value(
-                            FileProviderItem(node: .directory(path: path, mtime: virtualDirMtime)),
+                            FileProviderItem(
+                                node: .directory(path: path, mtime: virtualDirMtime),
+                                systemFileSystemFlags: systemFlags),
                             [], false, nil)
                     }
                 } catch {
@@ -956,18 +972,45 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             // メタデータのみ（mtime / タグ等）: マニフェストに保存先が無いので**黙って受理**する
             // （remainingFields に残すと fileproviderd が永久再試行する）。権威 = 現ツリーの
             // entry から item を返す。
+            // 例外 = ファイルの権限の旗（chmod・#162）: マニフェストに保存し、書いた entry の item を返す
+            // （版に旗が織り込まれるので、ほかの端末へも届く）。パッケージは保存先が無いので、
+            // システムが渡した旗をそのまま返す（配り直されるまでは保たれる）。
+            let permissions = Self.systemPermissions(
+                of: item, present: changedFields.contains(.fileSystemFlags))
+            let baseSha = FileProviderWritePolicy.baseSha(
+                contentVersion: version.contentVersion, metadataVersion: version.metadataVersion)
             let task = Task {
                 defer { progress.completedUnitCount = progress.totalUnitCount }
                 do {
-                    let tree = try await services.cache.current().tree
-                    guard let node = tree.node(at: path), node.kind == ref.kind else {
+                    var tree = try await services.cache.current().tree
+                    guard var node = tree.node(at: path), node.kind == ref.kind else {
                         completion.value(nil, [], false, NSFileProviderError(.noSuchItem))
                         return
+                    }
+                    if let permissions, case .file(_, let entry) = node, entry.permissions != permissions {
+                        let outcome = try await services.writer.updatePermissions(
+                            path: path, baseSha: baseSha, permissions: permissions)
+                        AppLogger.fileProvider.notice("modifyItem(permissions): \(String(describing: outcome), privacy: .private) \(path, privacy: .private)")
+                        // 書いた後（.stale なら今の権威）のツリーで返す。書いた entry を直接使うと、
+                        // キャッシュの読み直しが遅れても返す版と次の差分配信の版が揃う（自世代 append と同じ考え方）。
+                        switch outcome {
+                        case .wrote(let written), .unchanged(let written):
+                            node = .file(path: path, entry: written)
+                        case .stale:
+                            tree = try await services.cache.current().tree
+                            guard let current = tree.node(at: path), current.kind == ref.kind else {
+                                completion.value(nil, [], false, NSFileProviderError(.noSuchItem))
+                                return
+                            }
+                            node = current
+                        }
                     }
                     // 実体化バッジ（Issue #65）: 伝え済み（報告済み + 返却分）基準のフラグを維持（固着防止）。
                     let told = await services.toldMaterialized()
                     completion.value(
-                        BadgeFlags(tree: tree, told: told).item(node), [], false, nil)
+                        BadgeFlags(tree: tree, told: told).item(
+                            node, systemFileSystemFlags: node.isPackage ? systemFlags : nil),
+                        [], false, nil)
                 } catch {
                     completion.value(nil, [], false, Self.wrapForCompletion(error))
                 }
@@ -1008,13 +1051,17 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 progress: progress, completion: completion)
         }
         let contentModified = item.contentModificationDate ?? nil
+        // 内容と一緒に旗も変わったときだけ旗を保存する（無ければ今の entry の旗を引き継ぐ・#162）
+        let changedPermissions = Self.systemPermissions(
+            of: item, present: changedFields.contains(.fileSystemFlags))
         let boxedURL = UncheckedSendableBox(value: newContents)
         let task = Task {
             defer { progress.completedUnitCount = progress.totalUnitCount }
             do {
                 let outcome = try await services.writer.modifyFileContents(
                     path: path, contentsURL: boxedURL.value,
-                    baseSha: baseSha, contentModified: contentModified
+                    baseSha: baseSha, contentModified: contentModified,
+                    permissions: changedPermissions
                 )
                 switch outcome {
                 case .written(let entry):
@@ -1067,6 +1114,17 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
     }
 
     /// 届いた中身がフォルダか（lstat = 最後の要素のリンクは追わない）。取れなければ nil（従来の経路へ）。
+    /// システムが渡した item の旗からマニフェストに保存する権限を取る（#162）。`present` = その item の
+    /// `fileSystemFlags` が有効（createItem の `fields` / modifyItem の `changedFields` に旗がある）。
+    /// 無効なら nil = 指定なし（`changedFields` に無いフィールドは item に入っている保証が無い）。
+    static func systemPermissions(
+        of item: NSFileProviderItem, present: Bool
+    ) -> ManifestFilePermissions? {
+        guard present, let flags = item.fileSystemFlags else { return nil }
+        return FileProviderWritePolicy.permissions(
+            from: FileProviderWritePolicy.FileSystemFlags(rawValue: flags.rawValue))
+    }
+
     private static func isDirectoryNoFollow(_ url: URL) -> Bool? {
         var st = stat()
         guard lstat(url.path, &st) == 0 else { return nil }
@@ -2066,78 +2124,4 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             ]
         )
     }
-}
-
-extension NSFileProviderItemIdentifier {
-    /// Tide の item identifier のプレフィックス（M5 Phase 5-1 で kind 織り込み形式へ変更）:
-    /// ファイル = `f:<相対 POSIX パス>` / ディレクトリ = `d:<相対 POSIX パス>` /
-    /// パッケージ = `k:<相対 POSIX パス>`（#140）。ルートは
-    /// `.rootContainer`。予約 identifier（rootContainer 等の rawValue）と同名ファイルとの
-    /// 衝突回避（旧 `p:` の目的）も引き続きプレフィックスが担う。
-    ///
-    /// kind を id に織り込む理由: fileproviderd は同一 id の kind（file⇄dir）変化を受理しない —
-    /// 単一レスポンス内の delete+update も、moreComing ページ分割も、自己 signal による
-    /// 別セッション（22ms 差）でも「item changed」の ingest バッチに合成され delete が update を
-    /// 打ち消す（item 消失。2026-07-05〜06 実機確定）。kind ごとに別 id なら kind 変化 =
-    /// 「旧 id の削除 + 新 id の出現」となり、同一 id 合成の余地が構造的に消える。
-    /// **旧 `p:` 形式の有効化済みドメインは Disable → Enable で作り直す**（docs/09 の
-    /// 「identifier スキーマを変えたら作り直し」どおり。実験的 opt-in 機能のため移行コードは
-    /// 持たない — 旧 id は `tidePathAndKind == nil` → noSuchItem に落ちる）。
-    static let tideFilePrefix = "f:"
-    static let tideDirectoryPrefix = "d:"
-    /// パッケージ = `k:<相対 POSIX パス>`（#140）。ファイルとも別の id にする — Keynote は同じ名前の
-    /// 書類を単一ファイル ⇄ パッケージで保存し直せるので、`f:` を共用すると同じ id の種類変化
-    /// （fileproviderd の `doc` ⇄ `pkg`）になる（ユーザ確定 2026-10-30）。
-    static let tidePackagePrefix = "k:"
-
-    /// Tide の item identifier → (相対 POSIX パス, 種類)。ルートは `("", .directory)`。
-    /// working set / trash / 旧 `p:` / 未知の identifier は nil。
-    /// 裸の `"f:"` / `"d:"` / `"k:"`（空パス）も nil = 不正 id（root の正規表現は `.rootContainer` のみ。
-    /// 受理すると root 高速パス等が「要求 id と食い違う item」を成功応答しうる。自前の mint 経路は
-    /// この形を作らないが、書込対応でデーモン供給 id を受ける面が増える前の防御。PR #57 レビュー #5）。
-    var tidePathAndKind: TideItemRef? {
-        if self == .rootContainer { return TideItemRef(path: "", kind: .directory) }
-        for (prefix, kind) in [
-            (Self.tideFilePrefix, ManifestTree.Node.Kind.file),
-            (Self.tideDirectoryPrefix, .directory),
-            (Self.tidePackagePrefix, .package),
-        ] where rawValue.hasPrefix(prefix) {
-            let path = String(rawValue.dropFirst(prefix.count))
-            return path.isEmpty ? nil : TideItemRef(path: path, kind: kind)
-        }
-        return nil
-    }
-
-    /// 相対 POSIX パス + 種類 → Tide の item identifier。ルート（`""`）は `.rootContainer`。
-    init(tideRelativePath path: String, kind: ManifestTree.Node.Kind) {
-        if path.isEmpty {
-            self = .rootContainer
-        } else {
-            let prefix: String
-            switch kind {
-            case .file: prefix = Self.tideFilePrefix
-            case .directory: prefix = Self.tideDirectoryPrefix
-            case .package: prefix = Self.tidePackagePrefix
-            }
-            self = NSFileProviderItemIdentifier(prefix + path)
-        }
-    }
-
-    /// 相対 POSIX パス + ディレクトリか → Tide の item identifier（ファイルかディレクトリ）。
-    init(tideRelativePath path: String, isDirectory: Bool) {
-        self.init(tideRelativePath: path, kind: isDirectory ? .directory : .file)
-    }
-
-    /// ノード → item identifier（種類はノードから取る）。
-    init(tideNode node: ManifestTree.Node) {
-        self.init(tideRelativePath: node.path, kind: node.kind)
-    }
-}
-
-/// item identifier を分解した結果（`NSFileProviderItemIdentifier.tidePathAndKind`）。
-struct TideItemRef: Equatable {
-    let path: String
-    let kind: ManifestTree.Node.Kind
-    var isDirectory: Bool { kind == .directory }
-    var isPackage: Bool { kind == .package }
 }

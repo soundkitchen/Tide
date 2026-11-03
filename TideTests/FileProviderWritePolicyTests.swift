@@ -287,4 +287,66 @@ final class FileProviderWritePolicyTests: XCTestCase {
         XCTAssertNil(FileProviderWritePolicy.copySourceFallbackVersion(
             entry: noEtag, latestEtag: "", latestVersionId: "v-latest", latestSize: 550))
     }
+
+    // MARK: - fileSystemFlags と権限の版（#162）
+
+    private let sha64 = String(repeating: "a", count: 64)
+
+    private func fileNode(
+        _ path: String, permissions: ManifestFilePermissions = .none
+    ) -> ManifestTree.Node {
+        .file(path: path, entry: ManifestFileEntry(
+            size: 1, mtime: "2026-11-03T00:00:00Z", sha256: sha64,
+            s3VersionId: nil, etag: "e", deviceId: "d", uploadedAt: "2026-11-03T00:00:00Z",
+            permissions: permissions))
+    }
+
+    /// システムの旗 → 保存する権限: 実行 = userExecutable・読み取り専用 = userWritable なし。
+    /// 隠す・拡張子を隠すは保存しない。
+    func testPermissionsFromSystemFlags() {
+        typealias F = FileProviderWritePolicy.FileSystemFlags
+        XCTAssertEqual(
+            FileProviderWritePolicy.permissions(from: [.userReadable, .userWritable]), .none)
+        XCTAssertEqual(
+            FileProviderWritePolicy.permissions(from: [.userReadable, .userWritable, .userExecutable]),
+            ManifestFilePermissions(executable: true, readOnly: false))
+        XCTAssertEqual(
+            FileProviderWritePolicy.permissions(from: [F.userReadable, .hidden, .pathExtensionHidden]),
+            ManifestFilePermissions(executable: false, readOnly: true))
+    }
+
+    /// file の metadataVersion: 旗なしは従来どおり素の sha（後方互換）・旗ありは `<sha>|p=…`（+ `|m`）。
+    /// どの形も baseSha が sha に戻す（rebind のベース復元を壊さない）。
+    func testMetadataVersionCarriesPermissionsAndRoundtrips() {
+        let cases: [(ManifestFilePermissions, String)] = [
+            (.none, ""),
+            (ManifestFilePermissions(executable: true, readOnly: false), "|p=x"),
+            (ManifestFilePermissions(executable: false, readOnly: true), "|p=r"),
+            (ManifestFilePermissions(executable: true, readOnly: true), "|p=xr"),
+        ]
+        for (perms, suffix) in cases {
+            for materialized in [false, true] {
+                let mv = FileProviderWritePolicy.metadataVersion(
+                    for: fileNode("a.sh", permissions: perms), materialized: materialized)
+                let expected = sha64 + suffix + (materialized ? FileProviderWritePolicy.materializedSuffix : "")
+                XCTAssertEqual(String(data: mv, encoding: .utf8), expected)
+                XCTAssertEqual(
+                    FileProviderWritePolicy.baseSha(contentVersion: Data("stamp".utf8), metadataVersion: mv),
+                    sha64, expected)
+            }
+        }
+        // contentVersion には旗を載せない（内容の変化の意味になる）
+        XCTAssertEqual(
+            FileProviderWritePolicy.contentVersion(
+                for: fileNode("a.sh", permissions: ManifestFilePermissions(executable: true, readOnly: true))),
+            Data(sha64.utf8))
+    }
+
+    /// 権限のサフィックスは既知の形だけ剥がす（順序違い・重ね・未知の値は不正）。
+    func testBaseShaRejectsUnknownPermissionsSuffixes() {
+        for bad in ["|p=rx", "|p=", "|p=xx", "|p=x|p=x", "|m|p=x", "|p=z"] {
+            XCTAssertNil(
+                FileProviderWritePolicy.baseSha(fromContentVersion: Data((sha64 + bad).utf8)), bad)
+        }
+    }
 }

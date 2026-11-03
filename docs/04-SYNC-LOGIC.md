@@ -116,6 +116,12 @@ filename / parent 変化）を `TideFileProvider/ExtensionWriter.swift` が処�
   宣言版が失効し、最新版の ETag とサイズが entry と一致するときだけ、その版に固定してコピー・#130）+
   `moveFileEntries` の二相バッチ RMW（全 add → remove・中間状態は常に両存側）。
   詳細は `docs/08`「FP 双方向書込」「rename / reparent」節。
+- **権限の旗だけの変更**（chmod の modifyItem・#162）: 本体を PUT せず、
+  `ManifestUpdater.updateFilePermissions(for:base:permissions:)` で entry の `executable` / `read_only` だけを
+  書き換える（`ExtensionWriter.updatePermissions`）。作成・内容の変更でもシステムが渡した旗を保存し、旗が無ければ
+  今の entry の旗を引き継ぐ。旗は file の metadataVersion に織り込まれ、ほかの端末へ届く。詳細は
+  `docs/08`「FP item の fileSystemFlags と権限の旗」節。それ以外のメタデータだけの変更（mtime・タグ等）は
+  従来どおり保存先が無いので黙って受理する。
 - 書込確定後は世代キャッシュを invalidate + 自己 signal（自世代 append で bounce 防止）。
 - 現行の書き手は S3 オブジェクトに**ユーザーメタデータ（`x-amz-meta-*`）を付けない**。整合性の
   真実は `ManifestFileEntry.sha256`（folderSync 世代の metadata 規約は `docs/04a` / `docs/02`）。
@@ -143,6 +149,8 @@ M5 Track B-2）は再アップロードを本質的に伴うため、上限を *
 
 書込は全経路が **`ManifestUpdater`**（`TideCore/S3/Uploader.swift`）の共有チョークポイントを通る:
 `updateFileEntry(for:base:newEntry:)` / `removeFileEntry(for:base:)` /
+`updateFilePermissions(for:base:permissions:)`（#162・chmod の旗だけの RMW = 内容の PUT なし・権威 entry の sha が
+`base` と一致するときだけ書き、違えば・不明なら・entry が無ければ書かずに `.stale`）/
 `removeFileEntries(expecting:)` / `moveFileEntries(_:)` / `writeFileEntries(upserting:removing:)`（#140・パッケージの
 中身をまとめて書く二相のバッチ RMW = 各 entry を `decideUpload` で判定して書き足し〈先に全シャードを読んで判定し、
 `.conflict` が 1 件でもあれば 1 件も書かずに中断。`moveFileEntries` の add も同じ〉→ 除去は `removeFileEntries` へ委譲）。バッチ RMW（`removeFileEntries` / `moveFileEntries` /

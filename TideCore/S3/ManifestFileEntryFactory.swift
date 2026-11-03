@@ -18,13 +18,15 @@ extension ManifestFileEntry {
     ///   - put: S3 が返した versionId / etag。
     ///   - deviceId: 書き手のデバイス識別子。
     ///   - uploadedAt: 書込時刻（既定 = 今）。
+    ///   - permissions: 実行・読み取り専用の旗（#162）。既定 = 旗なし。
     public static func uploaded(
         size: Int64,
         sha256: String,
         mtime: Date,
         put: TideS3Client.PutObjectResult,
         deviceId: String,
-        uploadedAt: Date = Date()
+        uploadedAt: Date = Date(),
+        permissions: ManifestFilePermissions = .none
     ) -> ManifestFileEntry {
         ManifestFileEntry(
             size: size,
@@ -33,13 +35,14 @@ extension ManifestFileEntry {
             s3VersionId: put.versionId,
             etag: put.etag,
             deviceId: deviceId,
-            uploadedAt: ISO8601.format(uploadedAt)
+            uploadedAt: ISO8601.format(uploadedAt),
+            permissions: permissions
         )
     }
 
     /// `copyObject`（rename / reparent）の結果から entry を作る。内容不変なので size / mtime /
-    /// sha256 は元 entry を**そのまま維持**し（[mtime 不変条件] と整合）、versionId / etag だけを
-    /// コピー先オブジェクトのものへ差し替える。
+    /// sha256 と権限の旗（#162）は元 entry を**そのまま維持**し（[mtime 不変条件] と整合）、
+    /// versionId / etag だけをコピー先オブジェクトのものへ差し替える。
     public static func copied(
         from source: ManifestFileEntry,
         copy: TideS3Client.PutObjectResult,
@@ -53,7 +56,8 @@ extension ManifestFileEntry {
             s3VersionId: copy.versionId,
             etag: copy.etag,
             deviceId: deviceId,
-            uploadedAt: ISO8601.format(uploadedAt)
+            uploadedAt: ISO8601.format(uploadedAt),
+            permissions: source.permissions
         )
     }
 }

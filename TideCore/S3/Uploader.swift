@@ -306,6 +306,16 @@ public enum ShardUpdateOutcome: Equatable, Sendable {
     case alreadyUpToDate(ManifestFileEntry)
 }
 
+/// `ManifestUpdater.updateFilePermissions` の結果（#162）。
+public enum PermissionsUpdateOutcome: Equatable, Sendable {
+    /// 権限の旗を書き換えた（付随する entry = 書いた後の権威 entry）。
+    case wrote(ManifestFileEntry)
+    /// 権威 entry が既に同じ旗だった（書込せず）。
+    case unchanged(ManifestFileEntry)
+    /// 権威 entry が base と違う（ほかの書き手が内容を変えた）か、無い。書込せず、権威 entry（無ければ nil）を返す。
+    case stale(ManifestFileEntry?)
+}
+
 /// `removeFileEntry` の結果（FP 拡張の deleteItem 用・M5 Phase 5-2）。
 public enum ShardRemoveOutcome: Equatable, Sendable {
     /// entry を除去した。
@@ -548,6 +558,30 @@ public struct ManifestUpdater: Sendable {
     ) -> Bool {
         guard let uploadedVersion = uploaded.s3VersionId else { return false }
         return existing.s3VersionId != uploadedVersion
+    }
+
+    /// FP 拡張の旗だけの modifyItem（`chmod`・#162）用: 内容を変えずに、権威 entry の権限の旗だけを
+    /// 書き換える。ガードは RMW 内で、権威 entry の sha がベース（システムが最後に見た版）と一致するとき
+    /// だけ書く — 一致しなければ、ほかの書き手が内容を変えたので `.stale`（呼び出し側は権威 entry の
+    /// 旗を返す = ローカルの chmod は戻る）。ベース不明（nil）も `.stale`（根拠なしに書かない）。
+    /// 発火（index 更新）は `commitShardWrite` で従来どおり shard + index 双方確定時のみ。
+    public func updateFilePermissions(
+        for path: String, base: String?, permissions: ManifestFilePermissions
+    ) async throws -> PermissionsUpdateOutcome {
+        let shardId = ManifestSharding.shardId(for: path)
+        return try await withConditionalRetry("shard \(shardId)") {
+            let fetched = try await store.getShard(shardId)
+            let existing = fetched?.value.files[path]
+            guard let fetched, var entry = existing, let base, entry.sha256 == base else {
+                return .stale(existing)
+            }
+            if entry.permissions == permissions { return .unchanged(entry) }
+            entry.permissions = permissions
+            var shard = fetched.value
+            shard.files[path] = entry
+            try await commitShardWrite(shardId: shardId, shard: shard, etag: fetched.etag)
+            return .wrote(entry)
+        }
     }
 
     /// FP 拡張の deleteItem（M5 Phase 5-2）用: per-file entry を「権威 entry がベースと一致する
