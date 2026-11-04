@@ -80,7 +80,7 @@ signal を消費しない）。世代の系譜は `ManifestGenerationLog`（App 
   delete + 新 kind ノードの update」= 別 id の独立した 2 変化になり、fileproviderd の同一 id ingest 合成問題を
   構造的に回避する（後述）。
 - **パッケージ（#140・2026-10-30 有効化・2026-10-31 実機受け入れ済み）**: S3 とマニフェストにはパッケージの中身をファイルごとに置き、FP には
-  1 つの item（`k:<path>`・パッケージ型）として見せる。判定はその Mac の型情報（`PackageClassifier`）。
+  1 つの item（`k:<path>`・パッケージ型）として見せる。判定はその Mac の型情報（`PackageClassifier`）で、fileproviderd の判定と違うパスは台帳（`PackageKindLedger`・#163）を優先する。
   詳細は `docs/08`「パッケージ」節。
 - 実体化バッジ（Issue #65）は anchor 意味論と独立の eventual オーバーレイとして working set の
   enumerateChanges（**唯一の報告点**）に合流する。詳細は `docs/08`「FP 実体化連動バッジ」節。

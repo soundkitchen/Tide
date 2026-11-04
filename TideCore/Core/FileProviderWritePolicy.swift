@@ -1,4 +1,5 @@
 import Foundation
+import UniformTypeIdentifiers
 
 /// File Provider 書込経路（M5 Phase 5-2）の純粋判定。FP の型には依存しない
 /// （Data / String のみ受ける）— `TideFileProvider` ターゲットは TideTests から import
@@ -284,6 +285,43 @@ public enum FileProviderWritePolicy {
             }
             return .conflict
         }
+    }
+
+    /// テンプレートがパッケージか（Issue #163）。fileproviderd が `pkg` と判定した item は中身の URL を
+    /// 持って届く（contentType は `com.apple.framework` でも `dyn.…` でもパッケージ型に適合するとは
+    /// 限らない）。`dir` は `public.folder` で URL なし（2026-11-05 実機）。パッケージ型に適合していれば
+    /// URL が無くても（dataless の再取り込み）パッケージ。
+    public static func isPackageTemplate(contentType: UTType?, hasContents: Bool) -> Bool {
+        guard let contentType else { return false }
+        if contentType.conforms(to: .package) { return true }
+        return hasContents && contentType.conforms(to: .directory)
+    }
+
+    /// システムが持っている種類とツリーを揃えるための、台帳の操作（Issue #163）。
+    /// - Parameters:
+    ///   - systemIsPackage: システムが持っている（これから持つ）種類（`isPackageTemplate`・移動では item の種類）。
+    ///   - nameIsPackage: 名前の判定（`PackageClassifier`）。
+    ///   - node: 今のツリーのそのパスのノード。
+    ///
+    /// 追跡中の別の種類があるときは触らない（`.none`）: 台帳でツリーの id を変えると、システムが持っている
+    /// item が `noSuchItem` になる。衝突はこれまでどおり名前のバウンスで解消する。
+    public static func packageKindAction(
+        systemIsPackage: Bool, nameIsPackage: Bool, node: ManifestTree.Node?
+    ) -> PackageKindAction {
+        switch node {
+        case .file?:
+            return .none
+        case .directory? where systemIsPackage:
+            return .none
+        case .package? where !systemIsPackage:
+            return .none
+        default:
+            break
+        }
+        if systemIsPackage {
+            return nameIsPackage ? .clear : .recordPackage
+        }
+        return nameIsPackage ? .recordFolder : .clear
     }
 
     /// 書類の形式の切り替え（#140・Keynote の「ファイルタイプを変更」）の判定。fileproviderd は形式を

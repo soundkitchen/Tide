@@ -125,6 +125,7 @@
 		9B42F81B45D3BF526B70570B /* FullScanSinglePassTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F2555C9F91FD02C04A002D7 /* FullScanSinglePassTests.swift */; };
 		9B793A724C6B1B17CE22B11F /* HashCalculatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 16ED0B8D39615582C0CD3596 /* HashCalculatorTests.swift */; };
 		9E1D2DCF1D31132539923B49 /* FPEventLogTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85E7AEBB1325822C20880EF5 /* FPEventLogTests.swift */; };
+		9E6105CC246AB9A1D72A4A3F /* PackageKindLedger.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62D2A779D137054407A4403E /* PackageKindLedger.swift */; };
 		9E9171080F3707ED2C1CBF1B /* ConditionalRetryPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E576EB308965637141B6285 /* ConditionalRetryPolicyTests.swift */; };
 		9F2CB4C73CB4901DA44770EC /* TideAppGroup.swift in Sources */ = {isa = PBXBuildFile; fileRef = F04B07DC0E849CB713B2A06F /* TideAppGroup.swift */; };
 		9FF79ED9D02C034D4A29C8CB /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = 868B594F3D527CF261BDC653 /* GRDB */; };
@@ -187,6 +188,7 @@
 		F7F017FA5CF345F97250D0B1 /* ManifestStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = CBFF8BB27234D7F163744C2C /* ManifestStore.swift */; };
 		F88388132C4D026976FE68FD /* SettingsTransferTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F30DF069AA0B9737745C681A /* SettingsTransferTests.swift */; };
 		F9775ABEBA07DE60E14AD2E7 /* ManifestTree.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A35749893F24240084B7E8A /* ManifestTree.swift */; };
+		FA012159785D845854699BD1 /* PackageKindOverrides.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B3CA5170D02DD17B35AC9DA /* PackageKindOverrides.swift */; };
 		FAEB8A42EB4D23963468CF15 /* ManifestTreeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B8665F814F4338316C32E779 /* ManifestTreeTests.swift */; };
 		FD35F8C47AB1658EC0890532 /* RestoreServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 99DE7A484340CA1A25A27706 /* RestoreServiceTests.swift */; };
 		FDCD956EFEDDD91574E2D912 /* ConfigStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF18F96672340265B0CAE32E /* ConfigStore.swift */; };
@@ -291,6 +293,7 @@
 		1775C971BA4151BEBF4AA74C /* PathValidator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PathValidator.swift; sourceTree = "<group>"; };
 		1A9CB8EA6B406E2E0BB8E34C /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
 		1AFDD6DC6B26F6450EF4A09D /* ManifestGenerationLogTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManifestGenerationLogTests.swift; sourceTree = "<group>"; };
+		1B3CA5170D02DD17B35AC9DA /* PackageKindOverrides.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PackageKindOverrides.swift; sourceTree = "<group>"; };
 		1BD4B605839107E1638A0D11 /* HardcodedIgnoreRulesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HardcodedIgnoreRulesTests.swift; sourceTree = "<group>"; };
 		1C705728A081B44DE2A5B6F5 /* PackageScannerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PackageScannerTests.swift; sourceTree = "<group>"; };
 		1CD4D6AEC058769C22EA5E74 /* RemoteChangeSignaler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteChangeSignaler.swift; sourceTree = "<group>"; };
@@ -347,6 +350,7 @@
 		5BC8957AF1EC682C5F301DCC /* VersionHistoryKindConflictTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VersionHistoryKindConflictTests.swift; sourceTree = "<group>"; };
 		5D267182BF4D5A067BA32C6D /* FileProviderController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileProviderController.swift; sourceTree = "<group>"; };
 		5D5816AA8726DE5B8FABC39D /* FileEntry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileEntry.swift; sourceTree = "<group>"; };
+		62D2A779D137054407A4403E /* PackageKindLedger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PackageKindLedger.swift; sourceTree = "<group>"; };
 		64DE907E2B5F3A1E362A67CA /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		64F4A83AA66D120162DC8DF2 /* TransferProgress.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TransferProgress.swift; sourceTree = "<group>"; };
 		67C1B635F7A6B62B6D365062 /* TransferStateStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TransferStateStore.swift; sourceTree = "<group>"; };
@@ -505,6 +509,7 @@
 				1E107EBBD4359FF734A4E032 /* MaterializedBadge.swift */,
 				0243D1F40FF684683FF7A8FA /* NoFollowFileReader.swift */,
 				A5D5931DF91AB9E61056A563 /* PackageClassifier.swift */,
+				1B3CA5170D02DD17B35AC9DA /* PackageKindOverrides.swift */,
 				EDB70AC0906913E041151774 /* PackageScanner.swift */,
 				1775C971BA4151BEBF4AA74C /* PathValidator.swift */,
 				12E97E750C4BF1695416B157 /* RateLimiter.swift */,
@@ -676,6 +681,7 @@
 				CBFF8BB27234D7F163744C2C /* ManifestStore.swift */,
 				B65FE95D48D3620972574EEB /* MultipartUploader.swift */,
 				C5EEAB488947C3F584A23FAC /* ObjectVersionHistory.swift */,
+				62D2A779D137054407A4403E /* PackageKindLedger.swift */,
 				247AD143645CCEE156530544 /* PartPlan.swift */,
 				FEB390DF37AD672F4E44B4B7 /* PersistedPathSet.swift */,
 				88605F9B48FCB78A345BA0E1 /* S3Client.swift */,
@@ -1022,6 +1028,8 @@
 				1088EBA6975DA2156CA1213F /* NoFollowFileReader.swift in Sources */,
 				B7A644814B3D5F04C1596EEC /* ObjectVersionHistory.swift in Sources */,
 				BB11924AFC884BF5D548C34A /* PackageClassifier.swift in Sources */,
+				9E6105CC246AB9A1D72A4A3F /* PackageKindLedger.swift in Sources */,
+				FA012159785D845854699BD1 /* PackageKindOverrides.swift in Sources */,
 				93043E2398CD32A857C5D340 /* PackageScanner.swift in Sources */,
 				876DE341084A9646C3DE440E /* PartPlan.swift in Sources */,
 				D5F9249F05BC8F54A0DE7FB8 /* PathValidator.swift in Sources */,

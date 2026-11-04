@@ -1,4 +1,5 @@
 import XCTest
+import os
 import TideCore
 @testable import Tide
 
@@ -373,5 +374,28 @@ final class ManifestGenerationCacheTests: XCTestCase {
         // while ループが最後の書込まで読み直す → 両方の書込が見える
         XCTAssertNotNil(result.tree.node(at: "w1.txt"))
         XCTAssertNotNil(result.tree.node(at: "w2.txt"))
+    }
+
+    // MARK: - パッケージの種類の台帳（Issue #163）
+
+    func testTreeUsesPackageOverridesAndRefreshesWithoutS3() async throws {
+        let source = MutableSource(files: ["Tool.app/Contents/Info.plist": entry(sha: "1")])
+        let overrides = OSAllocatedUnfairLock(initialState: PackageKindOverrides(folders: ["Tool.app"]))
+        let cache = ManifestGenerationCache(
+            loader: ManifestSnapshotLoader(source: source), bucket: "b", logURL: nil, maxAge: 3600,
+            packageOverridesSource: { overrides.withLock { $0 } }
+        )
+        let first = try await cache.current()
+        XCTAssertEqual(first.tree.node(at: "Tool.app")?.kind, .directory, "最初のツリーから台帳が効く")
+        let fetches = source.indexFetchCount
+
+        overrides.withLock { $0 = .none }
+        await cache.refreshPackageOverrides()
+        let second = try await cache.current()
+        XCTAssertEqual(second.tree.node(at: "Tool.app")?.kind, .package)
+        XCTAssertEqual(second.anchor, first.anchor, "台帳の変更で世代は進まない（差分を生まない）")
+        XCTAssertEqual(source.indexFetchCount, fetches, "S3 は読まない")
+        let current = await cache.currentPackageOverrides()
+        XCTAssertEqual(current, .none)
     }
 }

@@ -81,6 +81,7 @@ Tide/（リポジトリルート）
 │   │   ├── FileProviderWritePolicy.swift  FP 書込のパス合成 / 検証 (M5 Phase 5)
 │   │   ├── FileProviderServiceSharing.swift  FP 拡張サービスのプロセス内共有の段判定（状態 / 接続 / 書き手・#151）
 │   │   ├── PackageClassifier.swift    パッケージの判定（その Mac の型情報 = UTType・#140）
+│   │   ├── PackageKindOverrides.swift システムと判定が食い違ったパスの記録（#163）
 │   │   ├── PackageScanner.swift       パッケージの中身の走査と丸ごと除外の判定（#140）
 │   │   ├── ConflictNamer.swift        コンフリクト時のリネーム命名 (M2)
 │   │   ├── NoFollowFileReader.swift   O_NOFOLLOW 単一 FD 読み出し（TOCTOU 解消）(M3)
@@ -102,6 +103,7 @@ Tide/（リポジトリルート）
 │   │   ├── S3RestoreService.swift     S3 内復元（fpOnly の Version History）(Track B-2)
 │   │   ├── ObjectVersionHistory.swift バージョン一覧 / 削除済み列挙 (M4)
 │   │   ├── PersistedPathSet.swift     拡張の永続パス集合（バッジ報告済み / 仮想フォルダ / 後始末予約）
+│   │   ├── PackageKindLedger.swift    パッケージの種類の台帳（PersistedPathSet 2 本・#163）
 │   │   ├── BucketPolicyBuilder.swift  HTTPS 強制バケットポリシー生成（C3）
 │   │   ├── KnownRegions.swift         AWS リージョン一覧（Picker 用）
 │   │   └── （folderSync 世代: ManifestReader / Downloader）

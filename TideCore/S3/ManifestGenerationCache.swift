@@ -30,6 +30,11 @@ public actor ManifestGenerationCache {
     /// バーストで S3 を叩き続けない床。
     private let minRefreshInterval: TimeInterval
     private let onNewGeneration: @Sendable () -> Void
+    /// パッケージの種類の台帳の読み手（Issue #163）。
+    private let packageOverridesSource: @Sendable () async -> PackageKindOverrides
+    /// ツリーの構築に使う今の台帳。
+    private var packageOverrides: PackageKindOverrides = .none
+    private var packageOverridesLoaded = false
 
     private var payload: ManifestGenerationLog.Payload? {
         // 中身が変われば、組み立て済みの古い世代は使えない
@@ -55,7 +60,8 @@ public actor ManifestGenerationCache {
         logURL: URL?,
         maxAge: TimeInterval = 30,
         minRefreshInterval: TimeInterval = 2,
-        onNewGeneration: @escaping @Sendable () -> Void = {}
+        onNewGeneration: @escaping @Sendable () -> Void = {},
+        packageOverridesSource: @escaping @Sendable () async -> PackageKindOverrides = { .none }
     ) {
         self.loader = loader
         self.bucket = bucket
@@ -63,6 +69,41 @@ public actor ManifestGenerationCache {
         self.maxAge = maxAge
         self.minRefreshInterval = minRefreshInterval
         self.onNewGeneration = onNewGeneration
+        self.packageOverridesSource = packageOverridesSource
+    }
+
+    /// 今の台帳（列挙の差分が過去の世代からツリーを組むとき・Issue #163）。世代の間でツリーの判定を
+    /// 揃えないと、差分に種類の違う id の削除と追加が出てしまう。
+    public func currentPackageOverrides() async -> PackageKindOverrides {
+        await loadPackageOverridesIfNeeded()
+        return packageOverrides
+    }
+
+    /// 台帳を書き換えたあとに呼ぶ（Issue #163）。キャッシュ済みのツリーを今の世代の中身で組み直す
+    /// （S3 は読まない）。次の `current()` が古い判定のツリーを返さないようにする。
+    public func refreshPackageOverrides() async {
+        let latest = await packageOverridesSource()
+        packageOverridesLoaded = true
+        guard latest != packageOverrides else { return }
+        packageOverrides = latest
+        guard let cached else { return }
+        guard let generation = ManifestGenerationLog.latest(of: payload),
+              generation.anchor == cached.current.anchor else {
+            self.cached = nil
+            return
+        }
+        self.cached = (
+            Current(tree: ManifestTree(files: generation.files, overrides: latest), anchor: generation.anchor),
+            cached.fetchedAt)
+    }
+
+    private func loadPackageOverridesIfNeeded() async {
+        guard !packageOverridesLoaded else { return }
+        let loaded = await packageOverridesSource()
+        // await の間に `refreshPackageOverrides` が先に確定していたら、そちらを優先する
+        guard !packageOverridesLoaded else { return }
+        packageOverrides = loaded
+        packageOverridesLoaded = true
     }
 
     /// TTL 内は同じ世代を返す（列挙・item・fetch 用）。
@@ -105,6 +146,7 @@ public actor ManifestGenerationCache {
     /// - Parameter minStartedAt: 使用する S3 ロードは「これ以降に開始したもの」であることを保証する
     ///   （`refreshedCurrent` が signal 前開始の stale ロードで「変更なし」と誤答しないため）。
     private func current(maxStaleness: TimeInterval, minStartedAt: Date? = nil) async throws -> Current {
+        await loadPackageOverridesIfNeeded()
         if minStartedAt == nil, let cached, Date().timeIntervalSince(cached.fetchedAt) < maxStaleness {
             return cached.current
         }
@@ -155,7 +197,8 @@ public actor ManifestGenerationCache {
             // PR #51 レビュー #6）
             current = cached.current
         } else {
-            current = Current(tree: ManifestTree(files: latest.files), anchor: latest.anchor)
+            current = Current(
+                tree: ManifestTree(files: latest.files, overrides: packageOverrides), anchor: latest.anchor)
         }
         cached = (current, fetchedAt)
         if appended {

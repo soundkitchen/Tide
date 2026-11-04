@@ -336,4 +336,59 @@ final class PersistedPathSetTests: XCTestCase {
         XCTAssertTrue(first)
         XCTAssertFalse(second)
     }
+
+    // MARK: - パッケージの種類の台帳（Issue #163）
+
+    func testCopySubtreeKeepsSourceAndRespectsCap() async {
+        let registry = PersistedPathSet(bucket: "b", fileURL: nil, epoch: nil, maxEntries: 3)
+        await registry.add("old")
+        await registry.add("old/sub")
+        await registry.copySubtree(from: "old", to: "new")
+        let snapshot = await registry.snapshot()
+        XCTAssertEqual(snapshot.count, 3, "上限で打ち切る")
+        XCTAssertTrue(snapshot.contains("old"))
+        XCTAssertTrue(snapshot.contains("old/sub"))
+    }
+
+    func testLedgerSwitchesKindAndForgetsSubtree() async {
+        let ledger = PackageKindLedger(
+            folders: PersistedPathSet(bucket: "b", fileURL: tempURL(), epoch: nil),
+            packages: PersistedPathSet(bucket: "b", fileURL: tempURL(), epoch: nil))
+        let recorded = await ledger.apply(.recordFolder, path: "a/X.app")
+        XCTAssertTrue(recorded)
+        await ledger.apply(.recordFolder, path: "a/X.app/Inner.key")
+        var overrides = await ledger.overrides()
+        XCTAssertEqual(overrides.folders, ["a/X.app", "a/X.app/Inner.key"])
+
+        // 同じパスの種類が変われば、もう一方の記録を残さない
+        await ledger.apply(.recordPackage, path: "a/X.app")
+        overrides = await ledger.overrides()
+        XCTAssertEqual(overrides.folders, ["a/X.app/Inner.key"])
+        XCTAssertEqual(overrides.packages, ["a/X.app"])
+
+        await ledger.copySubtree(from: "a/X.app", to: "b/Y.app")
+        overrides = await ledger.overrides()
+        XCTAssertEqual(overrides.folders, ["a/X.app/Inner.key", "b/Y.app/Inner.key"])
+        XCTAssertEqual(overrides.packages, ["a/X.app", "b/Y.app"])
+
+        await ledger.removeSubtree(at: "a/X.app")
+        overrides = await ledger.overrides()
+        XCTAssertEqual(overrides.folders, ["b/Y.app/Inner.key"])
+        XCTAssertEqual(overrides.packages, ["b/Y.app"])
+
+        await ledger.apply(.clear, path: "b/Y.app")
+        overrides = await ledger.overrides()
+        XCTAssertEqual(overrides.packages, [])
+    }
+
+    func testLedgerRecordFailsWithoutDurableStorage() async {
+        // 再起動で消える記録では、ツリーの判定を変えない（呼び出し側は記録が無いときの振る舞いに倒す）
+        let ledger = PackageKindLedger(
+            folders: PersistedPathSet(bucket: "b", fileURL: nil, epoch: nil),
+            packages: PersistedPathSet(bucket: "b", fileURL: nil, epoch: nil))
+        let recorded = await ledger.apply(.recordFolder, path: "X.app")
+        XCTAssertFalse(recorded)
+        let overrides = await ledger.overrides()
+        XCTAssertEqual(overrides, .none)
+    }
 }

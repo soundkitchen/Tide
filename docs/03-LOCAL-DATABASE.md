@@ -44,7 +44,7 @@ App Group の Caches（`~/Library/Group Containers/G5G54TCH8W.org.izukawa.Tide/L
 | group defaults | `ConfigStore`（`TideAppGroup.sharedDefaults()`） | 設定（bucket / region / deviceId / setupCompleted / syncMode〈外部ツール契約キー〉/ fileProviderDomainEpoch / fpNoticeCursor〈再送されない出来事（改名による除外・競合コピー）の通知をどこまで済ませたか・#147 / #148。キー文字列は #147 のまま〉） |
 | Data Protection Keychain | `KeychainStore` | AWS 認証情報 |
 
-`PersistedPathSet` 5 本（materialized / virtual-dirs / exclusion-cleanups / dir-exclusion-holds / dir-cleanup-freezes）はドメイン epoch（`fileProviderDomainEpoch`）を構築時 capture し、
+`PersistedPathSet` 7 本（materialized / virtual-dirs / exclusion-cleanups / dir-exclusion-holds / dir-cleanup-freezes / package-kind-folders / package-kind-packages）はドメイン epoch（`fileProviderDomainEpoch`）を構築時 capture し、
 ドメイン作り直し跨ぎの stale を読込時全体破棄で防ぐ（#104）。
 
 ## テーブル定義

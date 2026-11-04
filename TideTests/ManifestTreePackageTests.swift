@@ -223,4 +223,52 @@ final class ManifestTreePackageTests: XCTestCase {
         let tree = ManifestTree(files: ["bin/Tool.app/Contents/Info.plist": entry()])
         XCTAssertEqual(members(of: tree.node(at: "bin/Tool.app")), ["Contents/Info.plist"])
     }
+
+    // MARK: - fileproviderd と判定が食い違ったパス（Issue #163）
+
+    func testFolderOverrideKeepsPackageNamedPathAsDirectory() {
+        let tree = ManifestTree(files: [
+            "p/Tool.app/Contents/Info.plist": entry(),
+            "p/Other.app/Contents/Info.plist": entry(),
+        ], packages: packages, overrides: PackageKindOverrides(folders: ["p/Tool.app"]))
+        XCTAssertEqual(tree.node(at: "p/Tool.app")?.kind, .directory)
+        XCTAssertEqual(tree.node(at: "p/Tool.app/Contents")?.kind, .directory)
+        XCTAssertEqual(tree.node(at: "p/Tool.app/Contents/Info.plist")?.kind, .file)
+        XCTAssertEqual(tree.node(at: "p/Other.app")?.kind, .package, "記録の無いパスは名前で畳む")
+    }
+
+    func testNestedPackageNameUnderFolderOverrideFoldsUnlessRecorded() {
+        let files = ["p/Tool.app/Inner.key/a": entry()]
+        let folded = ManifestTree(
+            files: files, packages: packages, overrides: PackageKindOverrides(folders: ["p/Tool.app"]))
+        XCTAssertEqual(folded.node(at: "p/Tool.app")?.kind, .directory)
+        XCTAssertEqual(folded.node(at: "p/Tool.app/Inner.key")?.kind, .package)
+
+        let kept = ManifestTree(
+            files: files, packages: packages,
+            overrides: PackageKindOverrides(folders: ["p/Tool.app", "p/Tool.app/Inner.key"]))
+        XCTAssertEqual(kept.node(at: "p/Tool.app/Inner.key")?.kind, .directory)
+        XCTAssertEqual(kept.node(at: "p/Tool.app/Inner.key/a")?.kind, .file)
+    }
+
+    func testPackageOverrideFoldsFolderNamedPath() {
+        let tree = ManifestTree(
+            files: ["p/Thing.bundle2/a/b": entry(), "p/Plain/c": entry()],
+            packages: packages, overrides: PackageKindOverrides(packages: ["p/Thing.bundle2"]))
+        XCTAssertEqual(tree.node(at: "p/Thing.bundle2")?.kind, .package)
+        XCTAssertEqual(members(of: tree.node(at: "p/Thing.bundle2")), ["a/b"])
+        XCTAssertEqual(tree.node(at: "p/Plain")?.kind, .directory)
+    }
+
+    func testDiffWithSameOverridesDoesNotChangeKinds() {
+        let overrides = PackageKindOverrides(folders: ["Tool.app"])
+        let from = ManifestTree(
+            files: ["Tool.app/a": entry()], packages: packages, overrides: overrides)
+        let to = ManifestTree(
+            files: ["Tool.app/a": entry(), "Tool.app/b": entry()], packages: packages, overrides: overrides)
+        let changes = ManifestTreeDiff.changes(from: from, to: to)
+        XCTAssertEqual(changes.deleted.map(\.path), [], "同じ台帳なら k: の削除が出ない")
+        XCTAssertTrue(changes.updated.contains { $0.path == "Tool.app/b" && $0.kind == .file })
+        XCTAssertFalse(changes.updated.contains { $0.kind == .package })
+    }
 }
