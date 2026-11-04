@@ -32,6 +32,9 @@ import Foundation
 ///    パス」の集合。live（fileproviderd の実体化セット）との差分が enumerateChanges の didUpdate に
 ///    合流してバッジの点灯/消灯を届ける。失っても再報告でバッジが付き直るだけ（cosmetic）。
 ///
+/// 4. **パッケージの種類の台帳**（Issue #163・`PackageKindLedger` が 2 本持つ）。システムの持つ種類が
+///    名前の判定と違うパス。失っても名前で畳むだけで、S3 の中身は変わらない。
+///
 /// - 上限 `maxEntries`（init 注入・既定 1000）: 超過 add は無視（notice ログ）。溢れた分は
 ///   温存保証/バッジを失うだけ（安全側）。
 /// - 保存の失敗はログのみで、`add` した分は集合に残る（プロセス生存中は効く）。再起動を跨ぐ
@@ -183,6 +186,33 @@ public actor PersistedPathSet {
             }
         }
         if changed {
+            paths = next
+            persist()
+        }
+    }
+
+    /// subtree の記録を新しいパスへ写す（元も残す）。移動の途中で止まっても、元の記録が失われない
+    /// ようにするための `renameSubtree` の前半（パッケージの種類の台帳・Issue #163）。上限は `add` と同じ。
+    public func copySubtree(from: String, to: String) {
+        loadIfNeeded()
+        let prefix = from + "/"
+        var next = paths
+        for p in paths {
+            let mapped: String
+            if p == from {
+                mapped = to
+            } else if p.hasPrefix(prefix) {
+                mapped = to + "/" + p.dropFirst(prefix.count)
+            } else {
+                continue
+            }
+            guard next.count < maxEntries else {
+                AppLogger.fileProvider.notice("persisted path set full; new entry dropped (preservation/cleanup guarantee lost for it)")
+                break
+            }
+            next.insert(mapped)
+        }
+        if next != paths {
             paths = next
             persist()
         }

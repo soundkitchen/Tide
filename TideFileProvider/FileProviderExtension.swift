@@ -515,10 +515,9 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         }
 
         // パッケージ（#140）: フォルダの判定より先に見る（パッケージ型は `.directory` にも適合する）。
-        // ツリーの判定（`PackageClassifier.active`）もパッケージとみなすときだけ（食い違うと、書いた後の
-        // ツリーでフォルダに見え、返した item と種類が合わない）。
-        if contentType?.conforms(to: .package) == true,
-           PackageClassifier.active.isPackage(name: itemTemplate.filename) {
+        // 種類はシステムの判定を正とする（Issue #163）。名前の判定と違えば `createPackage` が台帳に記録し、
+        // 書いた後のツリーも同じ種類に揃える。
+        if FileProviderWritePolicy.isPackageTemplate(contentType: contentType, hasContents: url != nil) {
             return createPackage(
                 path: path, contents: url, mayAlreadyExist: options.contains(.mayAlreadyExist),
                 services: services, progress: progress, completionHandler: completionHandler)
@@ -547,6 +546,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             // 同期しない」と同じ）。id は path 決定的（`d:<path>`）なので、実体化後の合成 dir と
             // 同一 item に収束する。
             //
+            // パッケージ名のパスは、下の Task でフォルダとして台帳に記録する（Issue #163）。
+            //
             // 同 path にマニフェスト **file** が実在する kind 衝突は意図的にチェックしない
             // （PR #59 レビュー #2）: 並存した場合は別 id（`d:` と `f:`）の同名 item となり、
             // システムの名前衝突バウンスが解消する。#120 以降はフォルダ単位除外の判定のために
@@ -562,6 +563,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             // 以後の baseVersion が "dir" になって改名の補完が効かなくなるかは未確認・docs/09 #144 項）。
             // 実体化後は配下最大 mtime の合成値に収束する。
             let dirMtime = itemTemplate.contentModificationDate ?? nil
+            let isPackageNamed = PackageClassifier.active.isPackage(name: itemTemplate.filename)
+            let contentTypeID = contentType?.identifier ?? "unknown"
             let dirCompletion = UncheckedSendableBox(value: completionHandler)
             let task = Task {
                 defer { progress.completedUnitCount = progress.totalUnitCount }
@@ -573,6 +576,22 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                         type: .info, path: path, message: "Excluded folder from sync (kept local)")
                     dirCompletion.value(nil, [], false, NSFileProviderError(.excludedFromSync))
                     return
+                }
+                // 種類はシステムの判定を正とする（Issue #163）: パッケージ名なのにフォルダとして届いたら
+                // 台帳に記録し、ツリーを `d:` のままにする。記録しないと、配下を書いた時点でツリーが `k:` に
+                // 畳み、ここで返す `d:` と同名で並んでバウンスの複製（`* 2.xcodeproj`）ができる。
+                // ツリーが読めない（オフライン）ときは記録しない（同じパスの `k:` を消しうるため。
+                // 受理は維持し、振る舞いは記録が無いときと同じ）。
+                if let tree = try? await services.cache.current().tree {
+                    let action = FileProviderWritePolicy.packageKindAction(
+                        systemIsPackage: false, nameIsPackage: isPackageNamed, node: tree.node(at: path))
+                    let recorded = await services.applyPackageKind(action, path: path)
+                    if action == .recordFolder {
+                        AppLogger.fileProvider.notice("createItem: kept package-named folder as folder (contentType: \(contentTypeID, privacy: .public), recorded: \(recorded)): \(path, privacy: .private)")
+                        await services.events.append(
+                            type: .info, path: path, message: "Folder template with package name",
+                            details: "contentType: \(contentTypeID)")
+                    }
                 }
                 // レジストリ登録 = item(for:) / enumerator の合成 dir 温存の根拠（M5 Phase 5-4）
                 await services.virtualDirs.add(path)
@@ -713,6 +732,20 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     }
                     return
                 }
+                // 種類はシステムの判定を正とする（Issue #163）: 名前でパッケージと判定できない（`.framework`
+                // など）なら、中身を書く前に台帳へ記録する。記録できないとツリーで畳めず、フォルダとして
+                // 見えて返した item と種類が合わない = 再試行が続いて上がらないので、除外と通知で見えるようにする。
+                let nameIsPackage = PackageClassifier.active.isPackage(name: (path as NSString).lastPathComponent)
+                let kindAction = FileProviderWritePolicy.packageKindAction(
+                    systemIsPackage: true, nameIsPackage: nameIsPackage, node: node)
+                guard await services.applyPackageKind(kindAction, path: path) else {
+                    AppLogger.fileProvider.error("createItem(package): package kind not recorded (kept local): \(path, privacy: .private)")
+                    await services.events.append(
+                        type: .error, path: path, message: "Excluded package from sync (kept local)",
+                        details: "package kind could not be recorded", notice: .packageHasUnsyncableItem)
+                    completion.value(nil, [], false, NSFileProviderError(.excludedFromSync))
+                    return
+                }
                 let outcome = try await services.writer.writePackage(
                     path: path, contentsURL: contentsURL, baseDigest: nil)
                 switch outcome {
@@ -734,13 +767,16 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                         details: copyPath,
                         notice: .conflictCopyCreated)
                     await services.virtualDirs.removeAncestors(of: path)
+                    await services.recordReturnedPackageCopy(at: copyPath)
                     let materialized = await services.returnedMaterializedFlag(for: copyPath)
                     completion.value(FileProviderItem(node: copyNode, materialized: materialized), [], false, nil)
                 case .excluded(let reason):
                     await Self.recordPackageExclusion(reason, path: path, services: services)
+                    if kindAction == .recordPackage { await services.forgetPackageKinds(at: path) }
                     completion.value(nil, [], false, NSFileProviderError(.excludedFromSync))
                 case .empty:
                     AppLogger.fileProvider.notice("createItem(package): nothing to sync (kept local): \(path, privacy: .private)")
+                    if kindAction == .recordPackage { await services.forgetPackageKinds(at: path) }
                     completion.value(nil, [], false, NSFileProviderError(.excludedFromSync))
                 case .kindCollision:
                     completion.value(nil, [], false, NSFileProviderError(.filenameCollision))
@@ -1490,6 +1526,9 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                         completion.value(nil, [], false, NSFileProviderError(.filenameCollision))
                         return
                     }
+                    // 種類の台帳（Issue #163）も S3 を書く前に新しいパスへ写す。システムの持つ `d:` は移動で
+                    // 変わらないので、配下の記録と、新しい名前の判定との食い違いをここで揃える。
+                    await services.beginPackageKindMove(from: oldPath, to: newPath, systemIsPackage: false)
                     guard !children.isEmpty else {
                         // 仮想フォルダ（マニフェスト非表現）の改名 = ローカル受理のみで成立
                         //（5-3 の空フォルダ姿勢を継承。id は新 path で振り直し = rebind）。
@@ -1497,6 +1536,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                         // レジストリ未登録の仮想フォルダも rename を機に保護下へ入れる）。
                         await services.virtualDirs.renameSubtree(from: oldPath, to: newPath)
                         await services.virtualDirs.add(newPath)
+                        await services.forgetPackageKinds(at: oldPath)
                         // 日時を付けて返す（Issue #144: nil は 1970 になる）
                         completion.value(
                             FileProviderItem(node: .directory(path: newPath, mtime: virtualDirMtime)),
@@ -1511,8 +1551,13 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                         if case .directory(_, let mtime)? = current.tree.node(at: oldPath) { return mtime }
                         return nil
                     }()
-                    switch try await services.writer.moveDirectory(descendants: descendants) {
+                    let moveOutcome = try await services.writer.moveDirectory(descendants: descendants)
+                    switch moveOutcome {
                     case .moved, .movedKeepingSource:
+                        // 旧パスが残るとき（他の端末が更新していた）は、旧パスの種類の記録も残す
+                        if case .moved = moveOutcome {
+                            await services.forgetPackageKinds(at: oldPath)
+                        }
                         AppLogger.fileProvider.notice("modifyItem(move): dir moved (\(descendants.count) files): -> \(newPath, privacy: .private)")
                         await services.events.append(
                             type: .move, path: oldPath,
@@ -1537,9 +1582,11 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                         // 届かなくなる）。移動したファイルのクラウドアイコンは、次に編集するか開くまで
                         // 残ることがある（表示だけ）。
                     case .destinationOccupied:
+                        await services.forgetPackageKinds(at: newPath)
                         completion.value(nil, [], false, NSFileProviderError(.filenameCollision))
                     case .sourceChanged(let path, _):
                         AppLogger.fileProvider.notice("modifyItem(move): source changed under dir (retry later): \(path, privacy: .private)")
+                        await services.forgetPackageKinds(at: newPath)
                         completion.value(nil, [], false, Self.moveConflictError())
                     }
                     return
@@ -1699,23 +1746,32 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         }
         let told = await services.toldMaterialized()
         let wasMaterialized = told.reported.contains(oldPath) || told.pendingReturned.contains(oldPath)
+        // 新しいパスに別のノードがあるときは台帳を触らない（その id を変えてしまう）。衝突は下の判定に任せる。
+        let destinationFree = current.tree.node(at: newPath) == nil
 
         if let contents {
+            // 種類の台帳（Issue #163）: S3 を書く前に新しいパスへ写す
+            if destinationFree {
+                await services.beginPackageKindMove(from: oldPath, to: newPath, systemIsPackage: true)
+            }
             let written: ManifestTree.Node
             switch try await services.writer.writePackage(path: newPath, contentsURL: contents, baseDigest: nil) {
             case .written(let node), .unchanged(let node):
                 written = node
             case .conflict, .kindCollision:
                 // 新しいパスに別の中身・フォルダがある（競合コピーは上がっている）= 名前をずらしてもらう
+                if destinationFree { await services.forgetPackageKinds(at: newPath) }
                 completion.value(nil, [], false, NSFileProviderError(.filenameCollision))
                 return
             case .excluded(let reason):
                 await recordPackageExclusion(reason, path: oldPath, services: services)
                 await services.exclusionCleanups.add(oldPath)
+                if destinationFree { await services.forgetPackageKinds(at: newPath) }
                 completion.value(nil, [], false, NSFileProviderError(.excludedFromSync))
                 return
             case .empty:
                 await services.exclusionCleanups.add(oldPath)
+                if destinationFree { await services.forgetPackageKinds(at: newPath) }
                 completion.value(nil, [], false, NSFileProviderError(.excludedFromSync))
                 return
             }
@@ -1736,6 +1792,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             } else {
                 AppLogger.fileProvider.notice("modifyItem(move package): source changed since base; keeping it: \(oldPath, privacy: .private)")
             }
+            if !keptSource { await services.forgetPackageKinds(at: oldPath) }
             await services.events.append(
                 type: .move, path: oldPath,
                 message: keptSource
@@ -1747,15 +1804,21 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             return
         }
 
-        guard current.tree.node(at: newPath) == nil else {
+        guard destinationFree else {
             completion.value(nil, [], false, NSFileProviderError(.filenameCollision))
             return
         }
         let descendants = members.map {
             (from: oldPath + "/" + $0.key, to: newPath + "/" + $0.key, entry: $0.value)
         }
-        switch try await services.writer.moveDirectory(descendants: descendants) {
+        // 種類の台帳（Issue #163）: S3 を書く前に新しいパスへ写す
+        await services.beginPackageKindMove(from: oldPath, to: newPath, systemIsPackage: true)
+        let moveOutcome = try await services.writer.moveDirectory(descendants: descendants)
+        switch moveOutcome {
         case .moved, .movedKeepingSource:
+            if case .moved = moveOutcome {
+                await services.forgetPackageKinds(at: oldPath)
+            }
             await services.events.append(
                 type: .move, path: oldPath, message: "Moved → \(newPath)")
             // 実体化状態は旧 path を引き継ぐ（ファイルの move と同じ）
@@ -1767,9 +1830,11 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 [], false, nil)
             // 版スタンプの治癒は頼まない（#151・フォルダの移動のコメント参照）
         case .destinationOccupied:
+            await services.forgetPackageKinds(at: newPath)
             completion.value(nil, [], false, NSFileProviderError(.filenameCollision))
         case .sourceChanged(let path, _):
             AppLogger.fileProvider.notice("modifyItem(move package): source changed (retry later): \(path, privacy: .private)")
+            await services.forgetPackageKinds(at: newPath)
             completion.value(nil, [], false, moveConflictError())
         }
     }
@@ -1837,6 +1902,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                         await services.dirExclusionHolds.removeSubtree(at: dirPath)
                         await services.exclusionCleanups.removeSubtree(at: dirPath)
                         await services.dirCleanupFreezes.removeSubtree(at: dirPath)
+                        await services.forgetPackageKinds(at: dirPath)
                         // 実体化バッジ: 消えた subtree を報告済み・live・台帳から外す（PR #142
                         // レビュー指摘 9）。
                         await services.followMaterializedRemoval(at: dirPath)
@@ -1862,6 +1928,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                         // フォルダを除外名へ改名したときの後片付け予約・凍結予約（Issue #138）を外す。
                         await services.exclusionCleanups.removeSubtree(at: dirPath)
                         await services.dirCleanupFreezes.removeSubtree(at: dirPath)
+                        await services.forgetPackageKinds(at: dirPath)
                         // 実体化バッジ（Issue #65）: 消えた subtree の報告済みエントリも掃除
                         await services.followMaterializedRemoval(at: dirPath)
                         dirCompletion.value(nil)
@@ -2009,6 +2076,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             defer { progress.completedUnitCount = progress.totalUnitCount }
             func forgetLocalState() async {
                 await services.exclusionCleanups.removeSubtree(at: path)
+                await services.forgetPackageKinds(at: path)
                 await services.followMaterializedRemoval(at: path)
             }
             do {

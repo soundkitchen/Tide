@@ -59,6 +59,8 @@ struct ExtensionServices: Sendable {
     /// コンテナ enumerator や書込コールバックが消費すると、working set 経由の差分配信が
     /// 空振りしてバッジが固着する）。move/削除の構造追従（renameSubtree / removeSubtree）は例外。
     let materializedReported: PersistedPathSet
+    /// パッケージの種類の台帳（Issue #163）。システムが持っている種類が名前の判定と違うパスの記録。
+    let packageKinds: PackageKindLedger
     /// 実体化バッジ（Issue #65）: fileproviderd から最後に観測した live 集合（メモリのみ）。
     let materializedObserver: MaterializedObserver
     /// FP 拡張イベントの共有ログ（Issue #83・fpOnly の Sync Activity 復権）。書込・materialize・
@@ -87,6 +89,45 @@ struct ExtensionServices: Sendable {
         if live != reported {
             signalWorkingSet()
         }
+    }
+
+    /// 台帳を更新してツリーへ反映する（Issue #163）。**S3 に書く前に呼ぶ**（書いた後だと、その間に
+    /// ツリーが名前で畳み、システムの持つ item と食い違う）。戻り値はディスクまで記録できたか。
+    @discardableResult
+    func applyPackageKind(_ action: PackageKindAction, path: String) async -> Bool {
+        guard action != .none else { return true }
+        let recorded = await packageKinds.apply(action, path: path)
+        await cache.refreshPackageOverrides()
+        return recorded
+    }
+
+    /// 移動の前に台帳を新しいパスへ写す（Issue #163）。システムが持っている種類は移動で変わらないので、
+    /// 新しい名前の判定と食い違えば記録する（`.xcodeproj` の `d:` の改名や、フォルダを `.key` へ改名した場合）。
+    func beginPackageKindMove(from: String, to: String, systemIsPackage: Bool) async {
+        await packageKinds.copySubtree(from: from, to: to)
+        let name = (to as NSString).lastPathComponent
+        await packageKinds.apply(
+            FileProviderWritePolicy.packageKindAction(
+                systemIsPackage: systemIsPackage,
+                nameIsPackage: PackageClassifier.active.isPackage(name: name), node: nil),
+            path: to)
+        await cache.refreshPackageOverrides()
+    }
+
+    /// 移動の完了（旧パスの記録を消す）・削除（Issue #163）。
+    func forgetPackageKinds(at path: String) async {
+        await packageKinds.removeSubtree(at: path)
+        await cache.refreshPackageOverrides()
+    }
+
+    /// 返却する競合コピーのパッケージ（`k:`）の種類を揃える（Issue #163）。コピーの名前は書込の中で
+    /// 決まるので書いた後になる（返却はこのあとなので、システムが受け取る前に揃う）。
+    func recordReturnedPackageCopy(at copyPath: String) async {
+        let name = (copyPath as NSString).lastPathComponent
+        await applyPackageKind(
+            FileProviderWritePolicy.packageKindAction(
+                systemIsPackage: true, nameIsPackage: PackageClassifier.active.isPackage(name: name), node: nil),
+            path: copyPath)
     }
 
     /// Finder へ伝え済みの実体化済みファイル（Issue #138）= 報告済み + 返却 item で伝えた分。
@@ -216,7 +257,8 @@ struct ExtensionServices: Sendable {
         } else {
             guard let built = makeConnection(
                 bucket: bucket, region: region, deviceId: deviceId,
-                credentials: credentials, signalWorkingSet: state.signalWorkingSet)
+                credentials: credentials, signalWorkingSet: state.signalWorkingSet,
+                packageKinds: state.packageKinds)
             else {
                 shared = SharedEntry(stateKey: key.state, state: state, connected: nil)
                 return nil
@@ -249,6 +291,7 @@ struct ExtensionServices: Sendable {
             dirCleanupFreezes: state.dirCleanupFreezes,
             dirExclusionHolds: state.dirExclusionHolds,
             materializedReported: state.materializedReported,
+            packageKinds: state.packageKinds,
             materializedObserver: state.materializedObserver,
             events: state.events,
             queryMaterializedFilePaths: state.queryMaterializedFilePaths,
@@ -266,6 +309,7 @@ struct ExtensionServices: Sendable {
         let dirCleanupFreezes: PersistedPathSet
         let dirExclusionHolds: PersistedPathSet
         let materializedReported: PersistedPathSet
+        let packageKinds: PackageKindLedger
         let materializedObserver: MaterializedObserver
         let events: FPEventLog
         let queryMaterializedFilePaths: @Sendable () async -> Set<String>?
@@ -335,12 +379,17 @@ struct ExtensionServices: Sendable {
             filename: "fileprovider-dir-exclusion-holds.json")
         let dirFreezesURL = try? PersistedPathSet.defaultURL(
             filename: "fileprovider-dir-cleanup-freezes.json")
+        let kindFoldersURL = try? PersistedPathSet.defaultURL(
+            filename: "fileprovider-package-kind-folders.json")
+        let kindPackagesURL = try? PersistedPathSet.defaultURL(
+            filename: "fileprovider-package-kind-packages.json")
         if virtualDirsURL == nil || cleanupsURL == nil || materializedURL == nil
-            || dirHoldsURL == nil || dirFreezesURL == nil {
+            || dirHoldsURL == nil || dirFreezesURL == nil
+            || kindFoldersURL == nil || kindPackagesURL == nil {
             AppLogger.fileProvider.error("Extension: path-set registry URL unavailable (persisting disabled)")
         }
         // ドメイン epoch（Issue #104）: アプリがドメイン除去のたびに進める世代値をここで
-        // 一度だけ capture し、レジストリ 5 本の payload スタンプ / 読込検証に使う。
+        // 一度だけ capture し、レジストリ 7 本の payload スタンプ / 読込検証に使う。
         // ドメイン作り直しを跨いだ stale レジストリ（バッジ永久不点灯・消えた dir の合成・
         // 無意味な削除受理予約）は epoch 不一致で読込時に全体破棄される。作ったレジストリの
         // capture 値は変えない — 遅延 persist は旧 epoch でスタンプされ次プロセスが破棄する
@@ -369,6 +418,9 @@ struct ExtensionServices: Sendable {
             materializedReported: PersistedPathSet(
                 bucket: bucket, fileURL: materializedURL, epoch: domainEpoch,
                 maxEntries: Self.materializedBadgeCap),
+            packageKinds: PackageKindLedger(
+                folders: PersistedPathSet(bucket: bucket, fileURL: kindFoldersURL, epoch: domainEpoch),
+                packages: PersistedPathSet(bucket: bucket, fileURL: kindPackagesURL, epoch: domainEpoch)),
             materializedObserver: MaterializedObserver(),
             // 追記のたびにアプリへ Darwin 通知を送る（Issue #148・アプリの通知の見張りが受けて新着を読む）
             events: FPEventLog(
@@ -383,7 +435,8 @@ struct ExtensionServices: Sendable {
 
     private static func makeConnection(
         bucket: String, region: String, deviceId: String, credentials: AWSCredentials,
-        signalWorkingSet: @escaping @Sendable () -> Void
+        signalWorkingSet: @escaping @Sendable () -> Void,
+        packageKinds: PackageKindLedger
     ) -> SharedConnection? {
         let s3: TideS3Client
         do {
@@ -407,7 +460,8 @@ struct ExtensionServices: Sendable {
                 // Phase 5-2 の自世代 append（recordLocalChange）もここを通る =
                 // 拡張自身の書込の anchor 前進もこの 1 本に集約。
                 signalWorkingSet()
-            }
+            },
+            packageOverridesSource: { await packageKinds.overrides() }
         )
         // 拡張の ManifestUpdater は onManifestDidWrite を**明示 nil**にする: 拡張の signal は
         // 書込後の `invalidateAfterLocalWrite` → onNewGeneration が担う。ここでも発火させると

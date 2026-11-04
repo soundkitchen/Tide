@@ -1,4 +1,5 @@
 import XCTest
+import UniformTypeIdentifiers
 import TideCore
 
 /// FP 書込経路の純粋判定（M5 Phase 5-2）。itemVersion → 3-way ベース sha の逆写像を固定する。
@@ -348,5 +349,45 @@ final class FileProviderWritePolicyTests: XCTestCase {
             XCTAssertNil(
                 FileProviderWritePolicy.baseSha(fromContentVersion: Data((sha64 + bad).utf8)), bad)
         }
+    }
+
+    // MARK: - パッケージの種類（Issue #163）
+
+    func testIsPackageTemplateFollowsContentsURL() {
+        // 実機の観測（2026-11-05）: `dir` は public.folder + URL なし、`.framework` は dyn. + URL あり
+        XCTAssertFalse(FileProviderWritePolicy.isPackageTemplate(contentType: .folder, hasContents: false))
+        XCTAssertTrue(FileProviderWritePolicy.isPackageTemplate(contentType: .folder, hasContents: true))
+        XCTAssertTrue(FileProviderWritePolicy.isPackageTemplate(contentType: .package, hasContents: true))
+        XCTAssertTrue(
+            FileProviderWritePolicy.isPackageTemplate(contentType: .package, hasContents: false),
+            "dataless の再取り込み")
+        XCTAssertFalse(FileProviderWritePolicy.isPackageTemplate(contentType: .plainText, hasContents: true))
+        XCTAssertFalse(FileProviderWritePolicy.isPackageTemplate(contentType: nil, hasContents: true))
+    }
+
+    func testPackageKindActionRecordsOnlyDisagreement() {
+        typealias P = FileProviderWritePolicy
+        XCTAssertEqual(P.packageKindAction(systemIsPackage: false, nameIsPackage: true, node: nil), .recordFolder)
+        XCTAssertEqual(P.packageKindAction(systemIsPackage: true, nameIsPackage: false, node: nil), .recordPackage)
+        XCTAssertEqual(P.packageKindAction(systemIsPackage: false, nameIsPackage: false, node: nil), .clear)
+        XCTAssertEqual(P.packageKindAction(systemIsPackage: true, nameIsPackage: true, node: nil), .clear)
+    }
+
+    func testPackageKindActionLeavesTrackedOtherKindAlone() {
+        typealias P = FileProviderWritePolicy
+        let file = ManifestFileEntry(
+            size: 1, mtime: "2026-07-03T00:00:00Z", sha256: "aa",
+            s3VersionId: nil, etag: "e", deviceId: "d", uploadedAt: "2026-07-03T00:00:00Z")
+        let package = ManifestTree.packageNode(path: "X.app", members: ["a": file])
+        let directory = ManifestTree.Node.directory(path: "X.app", mtime: nil)
+        // システムの持つ `k:` をフォルダの記録で消さない / その逆
+        XCTAssertEqual(P.packageKindAction(systemIsPackage: false, nameIsPackage: true, node: package), .none)
+        XCTAssertEqual(P.packageKindAction(systemIsPackage: true, nameIsPackage: false, node: directory), .none)
+        XCTAssertEqual(
+            P.packageKindAction(systemIsPackage: false, nameIsPackage: true, node: .file(path: "X.app", entry: file)),
+            .none)
+        // 同じ種類なら記録を揃える
+        XCTAssertEqual(P.packageKindAction(systemIsPackage: false, nameIsPackage: true, node: directory), .recordFolder)
+        XCTAssertEqual(P.packageKindAction(systemIsPackage: true, nameIsPackage: false, node: package), .recordPackage)
     }
 }

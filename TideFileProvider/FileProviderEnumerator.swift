@@ -84,8 +84,11 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @uncheck
                             boxed.value.finishEnumeratingWithError(NSFileProviderError(.pageExpired))
                             return
                         }
+                        // 過去の世代も今の台帳（Issue #163）で組む
+                        let overrides = await services.cache.currentPackageOverrides()
                         pinned = Self.pin(
-                            anchor: requested.anchor, tree: ManifestTree(files: generation.files),
+                            anchor: requested.anchor,
+                            tree: ManifestTree(files: generation.files, overrides: overrides),
                             workingSet: dirPath == nil)
                     } else if let cached, cached.anchor == current.anchor {
                         pinned = cached
@@ -205,7 +208,8 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @uncheck
                         if cursor.target == current.anchor {
                             target = (cursor.target, current.tree)
                         } else if let generation = await services.cache.generation(anchor: cursor.target) {
-                            target = (cursor.target, ManifestTree(files: generation.files))
+                            let overrides = await services.cache.currentPackageOverrides()
+                            target = (cursor.target, ManifestTree(files: generation.files, overrides: overrides))
                         } else {
                             expired()
                             return
@@ -217,12 +221,17 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @uncheck
                     }
                     // 起点のファイル一覧はツリーの葉（パッケージは 1 件・#140）で取る — マニフェストの
                     // キーそのままだとパッケージの中身が並び、目標側（`tree.filePaths`）と食い違う。
-                    let originTree = ManifestTree(files: origin.files)
+                    // 起点も目標と同じ台帳（Issue #163）で組む。判定が食い違うと、種類の違う id の削除と
+                    // 追加が差分に出る。
+                    let originTree = ManifestTree(
+                        files: origin.files, overrides: await services.cache.currentPackageOverrides())
                     originFilePaths = originTree.filePaths
                     if target.anchor == originAnchor {
                         changes = ManifestTreeDiff.Changes(updated: [], deleted: [])
                     } else {
-                        changes = ManifestTreeDiff.changes(from: originTree, to: target.tree)
+                        // 記録を消したパスは、起点でシステムと違う種類に見える（Issue #163）ので、両方の id を消す
+                        changes = ManifestTreeDiff.includingOtherKinds(
+                            ManifestTreeDiff.changes(from: originTree, to: target.tree), target: target.tree)
                         let computed = PendingChanges(
                             origin: originAnchor, target: target.anchor, tree: target.tree,
                             changes: changes, originFilePaths: originFilePaths)

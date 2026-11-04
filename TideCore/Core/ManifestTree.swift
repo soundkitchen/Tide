@@ -76,7 +76,11 @@ public struct ManifestTree: Sendable {
     public let nodesByPath: [String: Node]
 
     /// - Parameter packages: パッケージ名の判定（#140）。既定は `PackageClassifier.active`。
-    public init(files: [String: ManifestFileEntry], packages: PackageClassifier = .active) {
+    /// - Parameter overrides: fileproviderd と判定が食い違ったパスの記録（#163）。名前の判定より優先する。
+    public init(
+        files: [String: ManifestFileEntry], packages: PackageClassifier = .active,
+        overrides: PackageKindOverrides = .none
+    ) {
         var children: [String: [String: Node]] = ["": [:]]  // dir → (childName → node)
         var nodes: [String: Node] = ["": .directory(path: "", mtime: nil)]
         // パッケージのパス → (親ディレクトリ, 名前, 中身)。構造が確定した後でノードにする。
@@ -95,7 +99,7 @@ public struct ManifestTree: Sendable {
             var packaged = false
             for (index, component) in components.dropLast().enumerated() {
                 let childPath = dir.isEmpty ? component : "\(dir)/\(component)"
-                if packages.isPackage(name: component) {
+                if overrides.isPackage(path: childPath, name: component, classifier: packages) {
                     let relative = components[(index + 1)...].joined(separator: "/")
                     packageMembers[childPath, default: (dir, component, [:])].members[relative] = entry
                     packaged = true
@@ -122,7 +126,7 @@ public struct ManifestTree: Sendable {
         }
 
         // パッケージのノード（#140）。同名のファイルがあればパッケージで置換する（directory-wins と
-        // 同じ考え方 = 中身を持つ側を残す。名前の判定は一貫しているので同名のディレクトリは生じない）。
+        // 同じ考え方 = 中身を持つ側を残す。判定はパスごとに一貫しているので同名のディレクトリは生じない）。
         for (packagePath, info) in packageMembers {
             let node = Self.packageNode(path: packagePath, members: info.members)
             nodes[packagePath] = node

@@ -11,8 +11,9 @@ import UniformTypeIdentifiers
 /// パッケージを 1 ノードに畳む。
 ///
 /// 本番の判定（`.system`）は**その Mac の型情報**（拡張子をフォルダの型として引いた
-/// `UTType(filenameExtension:conformingTo: .directory)` が宣言済みの型で `.package` に適合するか）。fileproviderd 自身もその Mac の LaunchServices で決めているとみられるので、判定を
-/// 合わせて食い違いを避ける（ユーザ確定 2026-10-30）。アプリを入れたり消したりして結果が変わると、
+/// `UTType(filenameExtension:conformingTo: .directory)` が宣言済みの型で `.package` に適合するか・ユーザ確定 2026-10-30）。
+/// fileproviderd の判定とは一致しない（`.xcodeproj` は `dir`・`.framework` は `pkg` など・2026-11-05 実機）。
+/// 名前の判定は既定で、システムの判定と違うパスは `PackageKindOverrides` を優先する（Issue #163）。アプリを入れたり消したりして結果が変わると、
 /// そのパスはフォルダ ⇄ パッケージを行き来する（id の接頭辞が変わる = 旧 id の削除 + 新 id の出現
 /// として配られる）。
 public struct PackageClassifier: Sendable {
