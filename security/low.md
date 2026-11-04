@@ -321,7 +321,8 @@ FP 拡張の書込（deleteItem / modifyItem / createItem / move）は `Extensio
   他端末の同時更新）は `docs/09` に記録。ローカルの改名後のファイルを削除すれば後始末される
   `PersistedPathSet`（仮想フォルダ温存 / 後始末予約）は世代ログと同じ at-rest 規約 =
   App Group Caches・bucket キー・読込時 `validateRelativePath` 再適用・壊れは全体破棄
-- **Status（2026-11-05・#163）**: パッケージの種類の台帳（`PackageKindLedger` = `PersistedPathSet` 2 本）を App Group Caches に追加。保存するのは相対パス + bucket 名のみで、読込時に `validateRelativePath` を再適用する。判定は item の種類にしか効かず、S3 キーや除外の判定には使わない。`.framework` など名前で判定できないパッケージも createItem の同じゲート（`IgnoreDecision.shouldSkip` → `PackageScanner`）を通る。
+- **Status（2026-11-05・#166）**: パッケージのユーザパターン照合を `IgnoreDecision.shouldSkipPackage`（ディレクトリとして照合）に分けた。機密網の優先順位は変わらない（最初に評価し、否定でも覆せない・`testHardcodedAlwaysSkipsPackage`）。除外は末尾 `/` と中身全部のパターンの分だけ広がる。逆に、末尾 `/` の否定（`*.xcodeproj` + `!Keep.xcodeproj/`）もパッケージ本体に効くようになり、その分は再包含されて S3 へ上がる範囲が広がる（ユーザが書いた否定の通り。機密網は引き続き覆せない）。
+- **Status（2026-11-05・#163）**: パッケージの種類の台帳（`PackageKindLedger` = `PersistedPathSet` 2 本）を App Group Caches に追加。保存するのは相対パス + bucket 名のみで、読込時に `validateRelativePath` を再適用する。判定は item の種類にしか効かず、S3 キーや除外の判定には使わない。`.framework` など名前で判定できないパッケージも createItem の同じゲート（`IgnoreDecision.shouldSkipPackage` → `PackageScanner`）を通る。
 - **Status（2026-10-30・#140・有効化済み = 判定の既定 `PackageClassifier.active` は `.system`・ドメインは `"main2"` で作り直し済み・2026-10-31 実機受け入れ済み = 中にシンボリックリンク・中身 10,001 件・あとからリンクを足した既存パッケージの 3 通りとも丸ごと除外を実機で確認）: パッケージの書込も同じゲートを通す**。
   macOS のパッケージ（Keynote のパッケージ形式・`.xcodeproj` 等）は createItem / modifyItem に中身を持つ
   1 つのフォルダとして届くため、中身を拡張自身が走査する（`PackageScanner`）。**中身にシンボリックリンク・

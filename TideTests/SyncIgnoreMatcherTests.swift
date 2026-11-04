@@ -497,4 +497,31 @@ final class SyncIgnoreMatcherTests: XCTestCase {
         }
         return full
     }
+
+    // MARK: - パス自身をディレクトリとして照合する（Issue #166）
+
+    func testEvaluateDirectoryMatchesDirectoryOnlyPatternOnPathItself() {
+        let m = SyncIgnoreMatcher.parse("build/\n/Top/")
+        XCTAssertEqual(m.evaluate("build"), .unmatched)
+        XCTAssertEqual(m.evaluateDirectory("build"), .ignored)
+        XCTAssertEqual(m.evaluateDirectory("a/build"), .ignored)
+        XCTAssertEqual(m.evaluateDirectory("Top"), .ignored)
+        XCTAssertEqual(m.evaluateDirectory("a/Top"), .unmatched)
+        XCTAssertEqual(m.evaluateDirectory("build/inner"), .ignored, "祖先の一致はこれまでどおり")
+    }
+
+    func testEvaluateDirectoryDoesNotMatchContentsPattern() {
+        for pattern in ["foo/*", "foo/**", "foo/bar", "foo/*.tmp"] {
+            let m = SyncIgnoreMatcher.parse(pattern)
+            XCTAssertEqual(m.evaluateDirectory("foo"), .unmatched, pattern)
+        }
+        // `<path>/` だと `*` が空文字に一致して当たる（判定の 2 段目が使う）
+        XCTAssertEqual(SyncIgnoreMatcher.parse("foo/*").evaluate("foo/"), .ignored)
+    }
+
+    func testEvaluateDirectoryUsesLastMatchingLine() {
+        XCTAssertEqual(SyncIgnoreMatcher.parse("*.x/\n!k.x").evaluateDirectory("k.x"), .included)
+        XCTAssertEqual(SyncIgnoreMatcher.parse("*.x/\n!k.x/").evaluateDirectory("k.x"), .included)
+        XCTAssertEqual(SyncIgnoreMatcher.parse("!k.x\n*.x/").evaluateDirectory("k.x"), .ignored)
+    }
 }
