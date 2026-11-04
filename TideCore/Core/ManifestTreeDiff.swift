@@ -57,4 +57,64 @@ public enum ManifestTreeDiff {
         deleted.sort { $0.path < $1.path }
         return Changes(updated: updated, deleted: deleted)
     }
+
+    /// 削除に、システムが別の種類で持っているかもしれない id を足す（Issue #163）。
+    ///
+    /// ツリーの種類は今の台帳（`PackageKindOverrides`）で決まるが、削除・改名でパスの記録を消したあとは、
+    /// 起点の世代のそのパスが名前で判定され、システムが持っている種類と違う姿になる。`.xcodeproj` の `d:` の
+    /// 改名なら削除は `k:<旧パス>` の 1 件だけになり、配下の `d:` / `f:` の旧 id が届かない。逆向き
+    /// （`.framework` の `k:`）は `d:` / `f:` が出て `k:` が届かない。そこで両方の姿の id を削除に載せる。
+    /// 未知の id の削除は何も起こさない（2026-11-05 実機）。起点の世代のときの台帳を持たなくて済む。
+    ///
+    /// 目標のツリーにある id は載せない（生きている item を消さない）。
+    public static func includingOtherKinds(_ changes: Changes, target: ManifestTree) -> Changes {
+        var seen = Set(changes.deleted.map { Key(path: $0.path, kind: $0.kind) })
+        var deleted = changes.deleted
+        func add(_ node: ManifestTree.Node) {
+            guard target.node(at: node.path)?.kind != node.kind,
+                  seen.insert(Key(path: node.path, kind: node.kind)).inserted
+            else { return }
+            deleted.append(node)
+        }
+        func addDirectoryLike(_ path: String) {
+            add(.directory(path: path, mtime: nil))
+            add(ManifestTree.packageNode(path: path, members: [:]))
+        }
+        for node in changes.deleted {
+            switch node {
+            case .file:
+                break
+            case .directory(let path, _):
+                add(ManifestTree.packageNode(path: path, members: [:]))
+            case .package(let path, let members, _, _):
+                addDirectoryLike(path)
+                for (relative, entry) in members {
+                    var dir = path
+                    for component in relative.split(separator: "/").dropLast() {
+                        dir += "/\(component)"
+                        addDirectoryLike(dir)
+                    }
+                    add(.file(path: path + "/" + relative, entry: entry))
+                }
+            }
+        }
+        deleted.sort { ($0.path, $0.kind.sortOrder) < ($1.path, $1.kind.sortOrder) }
+        return Changes(updated: changes.updated, deleted: deleted)
+    }
+
+    private struct Key: Hashable {
+        let path: String
+        let kind: ManifestTree.Node.Kind
+    }
+}
+
+private extension ManifestTree.Node.Kind {
+    /// 削除の並びを決定的にする（同じパスに複数の種類が並ぶ）。
+    var sortOrder: Int {
+        switch self {
+        case .file: return 0
+        case .directory: return 1
+        case .package: return 2
+        }
+    }
 }

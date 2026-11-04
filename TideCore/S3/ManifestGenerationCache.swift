@@ -35,6 +35,8 @@ public actor ManifestGenerationCache {
     /// ツリーの構築に使う今の台帳。
     private var packageOverrides: PackageKindOverrides = .none
     private var packageOverridesLoaded = false
+    /// `refreshPackageOverrides` の開始順の番号（古い読みを捨てる）。
+    private var packageOverridesRefreshSequence = 0
 
     private var payload: ManifestGenerationLog.Payload? {
         // 中身が変われば、組み立て済みの古い世代は使えない
@@ -82,7 +84,13 @@ public actor ManifestGenerationCache {
     /// 台帳を書き換えたあとに呼ぶ（Issue #163）。キャッシュ済みのツリーを今の世代の中身で組み直す
     /// （S3 は読まない）。次の `current()` が古い判定のツリーを返さないようにする。
     public func refreshPackageOverrides() async {
+        // await の間に actor は再入し、読みの完了順は開始順と限らない。後から始めた読みはそれ以前の
+        // 記録をすべて含むので、最新の読みだけを適用する（古い読みで上書きすると、記録が消えたツリーで
+        // 名前で畳み、システムの `d:` と `k:` が並ぶ）。
+        packageOverridesRefreshSequence += 1
+        let sequence = packageOverridesRefreshSequence
         let latest = await packageOverridesSource()
+        guard sequence == packageOverridesRefreshSequence else { return }
         packageOverridesLoaded = true
         guard latest != packageOverrides else { return }
         packageOverrides = latest
@@ -99,9 +107,10 @@ public actor ManifestGenerationCache {
 
     private func loadPackageOverridesIfNeeded() async {
         guard !packageOverridesLoaded else { return }
+        let sequence = packageOverridesRefreshSequence
         let loaded = await packageOverridesSource()
-        // await の間に `refreshPackageOverrides` が先に確定していたら、そちらを優先する
-        guard !packageOverridesLoaded else { return }
+        // await の間に `refreshPackageOverrides` が始まっていたら、そちらの読みを優先する
+        guard !packageOverridesLoaded, sequence == packageOverridesRefreshSequence else { return }
         packageOverrides = loaded
         packageOverridesLoaded = true
     }

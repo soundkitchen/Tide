@@ -229,7 +229,9 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator, @uncheck
                     if target.anchor == originAnchor {
                         changes = ManifestTreeDiff.Changes(updated: [], deleted: [])
                     } else {
-                        changes = ManifestTreeDiff.changes(from: originTree, to: target.tree)
+                        // 記録を消したパスは、起点でシステムと違う種類に見える（Issue #163）ので、両方の id を消す
+                        changes = ManifestTreeDiff.includingOtherKinds(
+                            ManifestTreeDiff.changes(from: originTree, to: target.tree), target: target.tree)
                         let computed = PendingChanges(
                             origin: originAnchor, target: target.anchor, tree: target.tree,
                             changes: changes, originFilePaths: originFilePaths)

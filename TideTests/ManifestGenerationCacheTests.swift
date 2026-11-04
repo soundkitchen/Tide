@@ -398,4 +398,44 @@ final class ManifestGenerationCacheTests: XCTestCase {
         let current = await cache.currentPackageOverrides()
         XCTAssertEqual(current, .none)
     }
+
+    /// 読みを 1 回ずつ止めて、完了の順序をテストから決める。
+    private final class GatedOverridesSource: @unchecked Sendable {
+        private let lock = NSLock()
+        private var waiters: [CheckedContinuation<PackageKindOverrides, Never>] = []
+        var waitingCount: Int { lock.withLock { waiters.count } }
+
+        func read() async -> PackageKindOverrides {
+            await withCheckedContinuation { continuation in
+                lock.withLock { waiters.append(continuation) }
+            }
+        }
+
+        func complete(at index: Int, with value: PackageKindOverrides) {
+            let waiter = lock.withLock { waiters.remove(at: index) }
+            waiter.resume(returning: value)
+        }
+    }
+
+    func testStaleOverridesReadDoesNotOverwriteNewerRecord() async throws {
+        let source = GatedOverridesSource()
+        let cache = ManifestGenerationCache(
+            loader: ManifestSnapshotLoader(source: MutableSource(files: [:])), bucket: "b", logURL: nil,
+            packageOverridesSource: { await source.read() }
+        )
+        let older = Task { await cache.refreshPackageOverrides() }
+        while source.waitingCount < 1 { await Task.yield() }
+        let newer = Task { await cache.refreshPackageOverrides() }
+        while source.waitingCount < 2 { await Task.yield() }
+
+        // 後から始めた読み（新しい記録を含む）が先に戻り、古い読みが後から戻る
+        let recorded = PackageKindOverrides(folders: ["Tool.app"])
+        source.complete(at: 1, with: recorded)
+        await newer.value
+        source.complete(at: 0, with: .none)
+        await older.value
+
+        let current = await cache.currentPackageOverrides()
+        XCTAssertEqual(current, recorded, "古い読みで記録を失わない")
+    }
 }
