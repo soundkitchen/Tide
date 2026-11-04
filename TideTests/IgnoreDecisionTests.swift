@@ -179,4 +179,60 @@ final class IgnoreDecisionTests: XCTestCase {
         XCTAssertTrue(excludesDirOnRename(".ssh", LayeredSyncIgnore.empty))
         XCTAssertTrue(excludesDirOnRename("sub/.aws", root("!.aws/")))
     }
+
+    // MARK: - パッケージ（Issue #166）
+
+    private func skipsPackage(
+        _ path: String, tracked: Bool = false, _ m: LayeredSyncIgnore
+    ) -> Bool {
+        IgnoreDecision.shouldSkipPackage(relativePath: path, isAlreadyTracked: tracked, matcher: m)
+    }
+
+    func testDirectoryPatternExcludesPackage() {
+        // パス自身で照合する `shouldSkip` では当たらない（これが #166 の症状）
+        let m = root("*.xcodeproj/\n/Top.key/")
+        XCTAssertFalse(IgnoreDecision.shouldSkip(
+            relativePath: "a/P.xcodeproj", isAlreadyTracked: false, matcher: m))
+        XCTAssertTrue(skipsPackage("a/P.xcodeproj", m))
+        XCTAssertTrue(skipsPackage("P.xcodeproj", m))
+        // 先頭 `/` アンカーはルート直下のみ
+        XCTAssertTrue(skipsPackage("Top.key", m))
+        XCTAssertFalse(skipsPackage("sub/Top.key", m))
+    }
+
+    func testPlainPatternStillExcludesPackage() {
+        XCTAssertTrue(skipsPackage("a/P.xcodeproj", root("*.xcodeproj")))
+        XCTAssertFalse(skipsPackage("a/Deck.key", root("*.xcodeproj")))
+    }
+
+    func testPackageUnderIgnoredFolderIsExcluded() {
+        XCTAssertTrue(skipsPackage("build/P.xcodeproj", root("build/")))
+    }
+
+    func testDirectoryPatternOnlyAppliesToUntrackedPackage() {
+        XCTAssertFalse(skipsPackage("P.xcodeproj", tracked: true, root("*.xcodeproj/")))
+    }
+
+    func testLastMatchingLineDecidesForPackage() {
+        let keep = root("*.xcodeproj/\n!Keep.xcodeproj")
+        XCTAssertFalse(skipsPackage("Keep.xcodeproj", keep))
+        XCTAssertTrue(skipsPackage("Other.xcodeproj", keep), "フォルダと違い、否定があっても他は除外する")
+        XCTAssertFalse(skipsPackage("Keep.xcodeproj", root("*.xcodeproj/\n!Keep.xcodeproj/")))
+        // 順序を逆にすると後の行が勝つ
+        XCTAssertTrue(skipsPackage("Keep.xcodeproj", root("!Keep.xcodeproj\n*.xcodeproj/")))
+        // 無関係の否定は除外を止めない
+        XCTAssertTrue(skipsPackage("P.xcodeproj", root("*.xcodeproj/\n!notes.txt")))
+    }
+
+    func testHardcodedAlwaysSkipsPackage() {
+        XCTAssertTrue(skipsPackage(".ssh/P.key", root("")))
+        XCTAssertTrue(skipsPackage(".ssh/P.key", tracked: true, root("")))
+        XCTAssertTrue(skipsPackage(".ssh/P.key", root("!P.key")))
+    }
+
+    func testDirectoryPatternDoesNotTouchSingleFile() {
+        // 単一ファイル形式の `Deck.key` はファイルの判定のまま（末尾 `/` は当たらない）
+        XCTAssertFalse(IgnoreDecision.shouldSkip(
+            relativePath: "Deck.key", isAlreadyTracked: false, matcher: root("*.key/")))
+    }
 }

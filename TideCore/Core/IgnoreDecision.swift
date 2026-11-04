@@ -28,6 +28,32 @@ public enum IgnoreDecision {
         return false
     }
 
+    /// パッケージ（`pkg` で届く `k:` の item）が同期対象から外れるか（FP 拡張・#166）。
+    ///
+    /// `shouldSkip` との違いはユーザパターンの照合だけ。パッケージはディスク上ではディレクトリなので
+    /// `<path>/` で照合し、末尾 `/` のパターン（`*.xcodeproj/`）にも一致させる。パス自身で照合すると、
+    /// ディレクトリ限定のパターンは配下にしか当たらず、除外したつもりのまま S3 に上がり続ける。
+    ///
+    /// 否定（`!`）は最後に一致した行で決める（git と同じ・2026-11-05 ユーザ確定）。フォルダのように
+    /// 「否定があれば 1 ファイルずつの判定に戻す」ことはしない: パッケージは 1 つの書類で、中身に
+    /// パターンを当てない（`docs/08`「パッケージ」節）。
+    public static func shouldSkipPackage(
+        relativePath: String,
+        isAlreadyTracked: Bool,
+        matcher: LayeredSyncIgnore
+    ) -> Bool {
+        if HardcodedIgnoreRules.shouldIgnore(relativePath: relativePath) {
+            return true
+        }
+        if isSyncignoreFile(relativePath) {
+            return false
+        }
+        if matcher.evaluate(relativePath + "/") == .ignored {
+            return !isAlreadyTracked
+        }
+        return false
+    }
+
     /// ディレクトリを subtree ごと（フォルダ単位で）同期対象外にするか（FP 拡張・#120）。
     ///
     /// fileproviderd は除外（`excludedFromSync`）したアイテムを 1 件ずつ記録し、拡張の更新のたびに

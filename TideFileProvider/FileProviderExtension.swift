@@ -712,7 +712,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 let node = current.tree.node(at: path)
                 let layered = try await services.ignore.layeredIgnore(
                     tree: current.tree, anchor: current.anchor)
-                if IgnoreDecision.shouldSkip(
+                if IgnoreDecision.shouldSkipPackage(
                     relativePath: path, isAlreadyTracked: node != nil, matcher: layered) {
                     AppLogger.fileProvider.notice("createItem(package): excluded from sync: \(path, privacy: .private)")
                     await services.events.append(
@@ -1722,7 +1722,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         if let newPath = validNewPath {
             let layered = try await services.ignore.layeredIgnore(
                 tree: current.tree, anchor: current.anchor)
-            excluded = IgnoreDecision.shouldSkip(
+            excluded = IgnoreDecision.shouldSkipPackage(
                 relativePath: newPath, isAlreadyTracked: current.tree.node(at: newPath) != nil,
                 matcher: layered)
         } else {
