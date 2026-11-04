@@ -290,7 +290,7 @@ gitignore 構文の一般的サブセット。詳細な確定仕様は `docs/07-
 - **現行の適用点（fpOnly）は 3 つ**: ① FP 拡張の **`createItem`**（新規流入口）が
   `IgnoreDecision.shouldSkip(relativePath:isAlreadyTracked:matcher:)`（folderSync 3 経路と同一関数・
   同一優先順位）で判定し、該当は `NSFileProviderError(.excludedFromSync)` = ローカル温存・S3 非汚染。
-  パッケージ（`pkg` で届く item）は `IgnoreDecision.shouldSkipPackage` で `<path>/` として照合する（末尾 `/` のパターンも効く・#166）。
+  パッケージ（`pkg` で届く item）は `IgnoreDecision.shouldSkipPackage` でディレクトリとして照合する（末尾 `/` のパターンも効く・#166）。
   ② **`modifyItem` の move（rename/reparent）経路**も独立の適用点 — ファイルは**新 path** に
   `shouldSkip` を適用し、該当時は後始末予約 `exclusionCleanups.add(旧 path)` を積んだうえで
   `.excludedFromSync` を返す（追跡済みファイルを ignore 対象名へリネームすると S3 側は旧 path の

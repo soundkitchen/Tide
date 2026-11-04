@@ -171,13 +171,24 @@ public struct SyncIgnoreMatcher: Sendable {
     /// 相対パス（POSIX 区切り、先頭 `/` なし）に対する三状態の照合結果。
     /// gitignore と同様、後に書かれたパターンが優先（否定で再包含）。
     public func evaluate(_ relativePath: String) -> Verdict {
+        evaluate(relativePath, isDirectory: false)
+    }
+
+    /// パス自身をディレクトリとして照合する（Issue #166）。`evaluate` との違いは、ディレクトリ限定の
+    /// パターン（`foo/`）がパス自身にも一致すること。`evaluate(path + "/")` とは違い、中身に向けた
+    /// パターン（`foo/*`）には一致しない（`*` が空文字に一致して本体に当たらない）。
+    public func evaluateDirectory(_ relativePath: String) -> Verdict {
+        evaluate(relativePath, isDirectory: true)
+    }
+
+    private func evaluate(_ relativePath: String, isDirectory: Bool) -> Verdict {
         guard !patterns.isEmpty else { return .unmatched }
         // 防御的サニティ上限: 異常に長い入力は照合せず「マッチ無し」を返す（安全側）。
         guard relativePath.count <= Self.maxMatchPathLength else { return .unmatched }
         let pathChars = Array(relativePath)
         let n = pathChars.count
         var verdict: Verdict = .unmatched
-        for p in patterns where Self.matches(p, pathChars: pathChars, n: n) {
+        for p in patterns where Self.matches(p, pathChars: pathChars, n: n, isDirectory: isDirectory) {
             verdict = p.negated ? .included : .ignored
         }
         return verdict
@@ -250,7 +261,7 @@ public struct SyncIgnoreMatcher: Sendable {
     /// `tokens` を「パス位置の到達集合」で評価する。各トークンは到達集合を O(n) で更新するので、
     /// 全体は `O(トークン数 × パス長)` に有界（バックトラッキングが無い＝ReDoS 不能）。
     /// アンカー/ディレクトリ限定/祖先マッチの境界規則は旧 `globToRegex` の前後置換と同値。
-    private static func matches(_ p: Pattern, pathChars: [Character], n: Int) -> Bool {
+    private static func matches(_ p: Pattern, pathChars: [Character], n: Int, isDirectory: Bool) -> Bool {
         // 到達集合: cur[k] == true は「パス位置 k まで消費した状態に到達可能」を表す。
         var cur = [Bool](repeating: false, count: n + 1)
 
@@ -290,9 +301,10 @@ public struct SyncIgnoreMatcher: Sendable {
         }
 
         // 後置:
-        // - dirOnly: `/.*$` → 到達点に `/` があれば（その配下にマッチ）true。
+        // - dirOnly: `/.*$` → 到達点に `/` があれば（その配下にマッチ）true。パス自身がディレクトリなら、
+        //   パス全体を消費（cur[n]）でも true（`evaluateDirectory`・Issue #166）。
         // - 非 dirOnly: `(?:/.*)?$` → パス全体を消費（cur[n]）か、到達点に `/` があれば（祖先一致）true。
-        if !p.dirOnly && cur[n] { return true }
+        if (!p.dirOnly || isDirectory) && cur[n] { return true }
         for pos in 0..<n where cur[pos] && pathChars[pos] == "/" { return true }
         return false
     }
@@ -386,12 +398,24 @@ public struct LayeredSyncIgnore: Sendable {
 
     /// 祖先ディレクトリの `.syncignore` を浅い→深い順に合成した三状態の照合結果。
     public func evaluate(_ relativePath: String) -> SyncIgnoreMatcher.Verdict {
+        evaluate(relativePath) { $0.evaluate($1) }
+    }
+
+    /// パス自身をディレクトリとして照合する（`SyncIgnoreMatcher.evaluateDirectory`・Issue #166）。
+    public func evaluateDirectory(_ relativePath: String) -> SyncIgnoreMatcher.Verdict {
+        evaluate(relativePath) { $0.evaluateDirectory($1) }
+    }
+
+    private func evaluate(
+        _ relativePath: String,
+        with layerVerdict: (SyncIgnoreMatcher, String) -> SyncIgnoreMatcher.Verdict
+    ) -> SyncIgnoreMatcher.Verdict {
         guard !matchers.isEmpty else { return .unmatched }
         var verdict: SyncIgnoreMatcher.Verdict = .unmatched
         for dir in orderedDirs {
             // その層のディレクトリからの相対パス（dir 配下でなければ nil、dir 自身なら空）。
             guard let sub = Self.relativize(relativePath, under: dir), !sub.isEmpty else { continue }
-            switch matchers[dir]!.evaluate(sub) {
+            switch layerVerdict(matchers[dir]!, sub) {
             case .ignored: verdict = .ignored
             case .included: verdict = .included
             case .unmatched: break  // 上位層の判定を維持

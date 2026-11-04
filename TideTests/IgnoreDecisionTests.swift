@@ -224,6 +224,44 @@ final class IgnoreDecisionTests: XCTestCase {
         XCTAssertTrue(skipsPackage("P.xcodeproj", root("*.xcodeproj/\n!notes.txt")))
     }
 
+    func testContentsPatternWithNegationKeepsPackage() {
+        // gitignore.io の Xcode テンプレートの形。中身の一部を残す書き方で、丸ごと除外してはいけない
+        let m = root("*.xcodeproj/*\n!*.xcodeproj/project.pbxproj\n!*.xcodeproj/xcshareddata/")
+        XCTAssertFalse(skipsPackage("P.xcodeproj", m))
+        // 無関係の否定でも上げる側に倒す（効いている層に否定がある）
+        XCTAssertFalse(skipsPackage("P.xcodeproj", root("*.xcodeproj/*\n!notes.txt")))
+    }
+
+    func testContentsPatternWithoutNegationExcludesPackage() {
+        XCTAssertTrue(skipsPackage("P.xcodeproj", root("*.xcodeproj/*")))
+        XCTAssertTrue(skipsPackage("P.xcodeproj", root("*.xcodeproj/**")))
+        XCTAssertFalse(skipsPackage("P.xcodeproj", tracked: true, root("*.xcodeproj/*")), "追跡中は外さない")
+        // 中身の一部に向けたパターンは本体に当たらない
+        XCTAssertFalse(skipsPackage("P.xcodeproj", root("*.xcodeproj/xcuserdata/")))
+        XCTAssertFalse(skipsPackage("P.xcodeproj", root("*.xcodeproj/*.tmp")))
+    }
+
+    func testBodyNegationBeatsContentsPattern() {
+        // 本体への否定は最後に一致した行で決める。中身向けの除外より優先する
+        let m = root("*.xcodeproj/*\n!Keep.xcodeproj")
+        XCTAssertFalse(skipsPackage("Keep.xcodeproj", m))
+        XCTAssertFalse(skipsPackage("Other.xcodeproj", m), "層に否定があるので上げる側")
+    }
+
+    func testBodyPatternIsNotUndoneByContentsNegation() {
+        // 本体が除外されると中身は再包含できない（git と同じ）
+        XCTAssertTrue(skipsPackage("P.xcodeproj", root("*.xcodeproj/\n!*.xcodeproj/project.pbxproj")))
+    }
+
+    func testPackageMatchesNestedLayer() {
+        let m = LayeredSyncIgnore(matchers: [
+            "": SyncIgnoreMatcher.parse("*.key/"),
+            "keep": SyncIgnoreMatcher.parse("!*.key/"),
+        ])
+        XCTAssertTrue(skipsPackage("a/Deck.key", m))
+        XCTAssertFalse(skipsPackage("keep/Deck.key", m))
+    }
+
     func testHardcodedAlwaysSkipsPackage() {
         XCTAssertTrue(skipsPackage(".ssh/P.key", root("")))
         XCTAssertTrue(skipsPackage(".ssh/P.key", tracked: true, root("")))
