@@ -562,6 +562,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             // 以後の baseVersion が "dir" になって改名の補完が効かなくなるかは未確認・docs/09 #144 項）。
             // 実体化後は配下最大 mtime の合成値に収束する。
             let dirMtime = itemTemplate.contentModificationDate ?? nil
+            let isPackageNamed = PackageClassifier.active.isPackage(name: itemTemplate.filename)
+            let contentTypeID = contentType?.identifier ?? "unknown"
             let dirCompletion = UncheckedSendableBox(value: completionHandler)
             let task = Task {
                 defer { progress.completedUnitCount = progress.totalUnitCount }
@@ -573,6 +575,15 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                         type: .info, path: path, message: "Excluded folder from sync (kept local)")
                     dirCompletion.value(nil, [], false, NSFileProviderError(.excludedFromSync))
                     return
+                }
+                // パッケージ名なのにフォルダとして届いた（Issue #163）: 配下を書くとツリーが `k:` に畳み、
+                // ここで返す `d:` と同名で並んでバウンスの複製（`* 2.xcodeproj`）ができる。発生は稀で
+                // OS ログは数日で消えるので、原因を追えるようイベントログにも残す。
+                if isPackageNamed {
+                    AppLogger.fileProvider.notice("createItem: folder template with package name (contentType: \(contentTypeID, privacy: .public)): \(path, privacy: .private)")
+                    await services.events.append(
+                        type: .info, path: path, message: "Folder template with package name",
+                        details: "contentType: \(contentTypeID)")
                 }
                 // レジストリ登録 = item(for:) / enumerator の合成 dir 温存の根拠（M5 Phase 5-4）
                 await services.virtualDirs.add(path)
