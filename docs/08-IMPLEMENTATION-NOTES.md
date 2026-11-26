@@ -1712,6 +1712,8 @@ FP 拡張が `excludedFromSync` で拒否したファイルは、ローカルに
   **#169 で 1 種を追加**: 名前で判定できないパッケージの種類を台帳に記録できず、パッケージごと除外した
   （`packageKindNotRecorded`・再送される種類・通知に出すのは `path`）。この種類だけは原因（台帳の上限 / 保存の失敗）を
   `FPEventRecord.noticeCause` に持ち、本文を出し分ける（上の「パッケージ」節の「記録に失敗したとき」）。
+  そのパスの書込が成功した記録で通知済みを外す（`writeFailed` / `fileTooLarge` と同じ・空きを作って一度上がったあとに、
+  同じ起動中にまた記録に失敗したらもう一度知らせる・PR #174 レビュー指摘 1）。
 - **経路**: 拡張がアプリへ伝える手段は共有ログ `FPEventLog` だけなので、拡張がイベントに印（`FPEventRecord.notice` =
   `FPEventNotice` の rawValue）を付け、アプリの `FPEventNoticeWatcher`（`Tide/Core/`・fpOnly 起動で signaler と
   一緒に立てて一緒に止める）が新着を見る。拡張は追記のたびに Darwin 通知（`notify_post`・名前 =

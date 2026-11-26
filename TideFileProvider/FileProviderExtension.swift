@@ -744,7 +744,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     // `packageHasUnsyncableItem`（リンクや同期できない項目）は使わない。
                     AppLogger.fileProvider.error("createItem(package): package kind not recorded (\(cause.rawValue, privacy: .public)) (kept local): \(path, privacy: .private)")
                     let detail = switch cause {
-                    case .ledgerFull: "package kind could not be recorded: ledger is full (\(PersistedPathSet.maxEntries) entries)"
+                    case .ledgerFull: "package kind could not be recorded: ledger is full"
                     case .saveFailed: "package kind could not be recorded: could not save to disk"
                     }
                     await services.events.append(

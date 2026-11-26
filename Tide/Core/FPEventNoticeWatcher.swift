@@ -182,9 +182,10 @@ final class FPEventNoticeWatcher {
             next.saved = max(next.saved, record.timestamp)
             if successEventTypes.contains(record.eventType), let path = record.path {
                 // 成功したら、そのパスの「再送される失敗」の通知済みも外す（上限を上げて一度上がったあとに、
-                // 同じ起動中にまた上限を超えたら知らせる・PR #160 レビュー指摘 5）
+                // 同じ起動中にまた上限を超えたら知らせる・PR #160 レビュー指摘 5）。種類を記録できなかった
+                // パッケージも、空きを作って一度上がったあとにまた保存に失敗したら知らせる（PR #174 レビュー指摘 1）
                 state.failureCounts[path] = nil
-                for notice in [FPEventNotice.writeFailed, .fileTooLarge] {
+                for notice in [FPEventNotice.writeFailed, .fileTooLarge, .packageKindNotRecorded] {
                     state.notified.remove("\(notice.rawValue):\(path)")
                 }
             }

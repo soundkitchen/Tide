@@ -179,6 +179,26 @@ final class FPEventNoticeWatcherTests: XCTestCase {
         ])
     }
 
+    /// 種類を記録できなかったパッケージも、一度上がったら、同じ起動中にまた記録に失敗したときにもう一度
+    /// 知らせる（PR #174 レビュー指摘 1）。
+    func testSuccessAllowsPackageKindNotRecordedAgain() {
+        var state = FPEventNoticeWatcher.State()
+        let cause = FPEventNoticeCause.saveFailed.rawValue
+        let result = FPEventNoticeWatcher.notices(
+            in: [
+                record(110, path: "A.framework", notice: .packageKindNotRecorded, eventType: .error,
+                       noticeCause: cause),
+                record(120, path: "A.framework", eventType: .upload),
+                record(130, path: "A.framework", notice: .packageKindNotRecorded, eventType: .error,
+                       noticeCause: cause),
+            ],
+            after: cursors(100, 100), state: &state)
+        XCTAssertEqual(result.events, [
+            .packageKindNotRecorded(path: "A.framework", cause: .saveFailed),
+            .packageKindNotRecorded(path: "A.framework", cause: .saveFailed),
+        ])
+    }
+
     /// 上限を上げて一度上がったら、同じ起動中にまた上限を超えたときにもう一度知らせる（PR #160 レビュー指摘 5）。
     func testSuccessAllowsFileTooLargeAgain() {
         var state = FPEventNoticeWatcher.State()
