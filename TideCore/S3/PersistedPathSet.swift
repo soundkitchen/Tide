@@ -119,19 +119,34 @@ public actor PersistedPathSet {
     ///   path は読込由来か保存に成功した追加のどちらかで、ディスクにも載っている（後の保存が
     ///   失敗しても `.atomic` 書出なのでディスクには前の集合が残る・PR #127 レビュー N1）。
     public func addDurably(_ path: String) -> Bool {
+        tryAddDurably(path) == .added
+    }
+
+    /// `addDurably` の結果（Issue #169）。失敗の理由を呼び出し側が利用者へ伝え分けるために使う。
+    public enum DurableAddResult: Sendable, Equatable {
+        /// 加えてディスクまで保存した（既に入っていた場合も含む）
+        case added
+        /// 上限に達していて加えなかった
+        case full
+        /// ディスクに保存できなかった（保存先の無い縮退時を含む）。加えた分は取り消し済み
+        case notSaved
+    }
+
+    /// `addDurably` と同じ振る舞いで、失敗の理由まで返す（Issue #169）。
+    public func tryAddDurably(_ path: String) -> DurableAddResult {
         loadIfNeeded()
-        guard fileURL != nil else { return false }
-        guard !paths.contains(path) else { return true }
+        guard fileURL != nil else { return .notSaved }
+        guard !paths.contains(path) else { return .added }
         guard paths.count < maxEntries else {
             AppLogger.fileProvider.notice("persisted path set full; new entry dropped (preservation/cleanup guarantee lost for it)")
-            return false
+            return .full
         }
         paths.insert(path)
         guard persist() else {
             paths.remove(path)
-            return false
+            return .notSaved
         }
-        return true
+        return .added
     }
 
     /// 現在の集合のスナップショット（実体化バッジ・Issue #65: フラグ判定の一括参照用）。

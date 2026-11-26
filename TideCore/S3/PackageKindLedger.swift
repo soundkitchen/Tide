@@ -22,23 +22,24 @@ public struct PackageKindLedger: Sendable {
         return PackageKindOverrides(folders: folderPaths, packages: packagePaths)
     }
 
-    /// 操作を適用する。戻り値は「ディスクまで記録できたか」。記録を伴わない操作は true。
-    /// 上限超過や保存の失敗は false（呼び出し側は、記録が無いときの振る舞いに倒す）。
+    /// 操作を適用する。戻り値は「ディスクまで記録できたか」（`.added`）。記録を伴わない操作は `.added`。
+    /// 上限超過（`.full`）や保存の失敗（`.notSaved`）では、呼び出し側は記録が無いときの振る舞いに倒す。
+    /// 理由は利用者への通知の出し分けに使う（Issue #169）。
     @discardableResult
-    public func apply(_ action: PackageKindAction, path: String) async -> Bool {
+    public func apply(_ action: PackageKindAction, path: String) async -> PersistedPathSet.DurableAddResult {
         switch action {
         case .none:
-            return true
+            return .added
         case .clear:
             await folders.remove(path)
             await packages.remove(path)
-            return true
+            return .added
         case .recordFolder:
             await packages.remove(path)
-            return await folders.addDurably(path)
+            return await folders.tryAddDurably(path)
         case .recordPackage:
             await folders.remove(path)
-            return await packages.addDurably(path)
+            return await packages.tryAddDurably(path)
         }
     }
 

@@ -587,7 +587,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                         systemIsPackage: false, nameIsPackage: isPackageNamed, node: tree.node(at: path))
                     let recorded = await services.applyPackageKind(action, path: path)
                     if action == .recordFolder {
-                        AppLogger.fileProvider.notice("createItem: kept package-named folder as folder (contentType: \(contentTypeID, privacy: .public), recorded: \(recorded)): \(path, privacy: .private)")
+                        AppLogger.fileProvider.notice("createItem: kept package-named folder as folder (contentType: \(contentTypeID, privacy: .public), recorded: \(recorded == .added)): \(path, privacy: .private)")
                         await services.events.append(
                             type: .info, path: path, message: "Folder template with package name",
                             details: "contentType: \(contentTypeID)")
@@ -738,7 +738,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 let nameIsPackage = PackageClassifier.active.isPackage(name: (path as NSString).lastPathComponent)
                 let kindAction = FileProviderWritePolicy.packageKindAction(
                     systemIsPackage: true, nameIsPackage: nameIsPackage, node: node)
-                guard await services.applyPackageKind(kindAction, path: path) else {
+                guard await services.applyPackageKind(kindAction, path: path) == .added else {
                     AppLogger.fileProvider.error("createItem(package): package kind not recorded (kept local): \(path, privacy: .private)")
                     await services.events.append(
                         type: .error, path: path, message: "Excluded package from sync (kept local)",
