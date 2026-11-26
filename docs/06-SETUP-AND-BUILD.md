@@ -4,7 +4,7 @@
 
 - macOS 26.0 (Tahoe) 以降
 - Xcode 17 以降
-- [xcodegen](https://github.com/yonaskolb/XcodeGen)（`Tide.xcodeproj` は `project.yml` から**毎回生成**する。`brew install xcodegen`）
+- [xcodegen](https://github.com/yonaskolb/XcodeGen)（`Tide.xcodeproj` は `project.yml` から**毎回生成**する。`brew install xcodegen`。**2.48.0 以上**が必要 = `project.yml` の `minimumXcodeGenVersion`。古い版では生成が止まる）
 - AWS アカウント
 - テスト用 S3 バケット
 - AWS IAM ユーザー（テスト用、最小権限）

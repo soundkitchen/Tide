@@ -7,6 +7,9 @@ options:
   createIntermediateGroups: true
   groupSortPosition: top
   generateEmptyDirectories: true
+  # 生成物（LastUpgradeCheck など）が版で変わるので、古い xcodegen での再生成を止める
+  # （2.47 以前だと警告なしに 1430 側へ戻り、関係の無い PR に逆向きの差分が混ざる・PR #176）
+  minimumXcodeGenVersion: 2.48.0
 
 settings:
   base:

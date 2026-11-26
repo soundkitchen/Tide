@@ -27,7 +27,7 @@
 
 - **macOS 26.0 (Tahoe) 以降**（それ未満は非対応）
 - **自分の AWS アカウント**と、書き込み可能な **S3 バケット**（無い場合はアプリから作成も可能）
-- ビルド用に **Xcode** と [xcodegen](https://github.com/yonaskolb/XcodeGen)（`brew install xcodegen`）
+- ビルド用に **Xcode** と [xcodegen](https://github.com/yonaskolb/XcodeGen) 2.48.0 以上（`brew install xcodegen`。下限は `project.yml` の `minimumXcodeGenVersion`）
 
 プレビルドの配布物はありません。興味を持たれた場合は**手元の環境でビルドして**ご利用ください（コード署名・Notarization は不要）。
 
