@@ -190,6 +190,42 @@ final class FPEventLogTests: XCTestCase {
         XCTAssertNil(records[0].notice)
     }
 
+    // MARK: - 通知の原因（Issue #169）
+
+    /// 原因は印と一緒に往復する。原因の無いレコード（#169 より前の行を含む）は nil。
+    func testNoticeCauseRoundtrip() async throws {
+        let log = makeLog()
+        await log.append(
+            type: .error, path: "A.framework", message: "m",
+            notice: .packageKindNotRecorded, noticeCause: .ledgerFull)
+        await log.append(type: .info, path: "a/link", message: "m", notice: .symbolicLink)
+
+        let records = await log.loadRecords()
+        XCTAssertEqual(records.map(\.noticeCause), [FPEventNoticeCause.ledgerFull.rawValue, nil])
+    }
+
+    /// 未知の原因はレコードごと捨てず、原因だけ外す（印は残す = 既定の文面で知らせる）。
+    func testUnknownNoticeCauseIsClearedButRecordKept() async throws {
+        let log = makeLog()
+        var data = try JSONEncoder().encode(FPEventRecord(
+            timestamp: 1, bucket: "b", eventType: "error", path: "A.framework", message: "m",
+            notice: FPEventNotice.packageKindNotRecorded.rawValue, noticeCause: "bogus"))
+        data.append(0x0A)
+        try data.write(to: fileURL)
+
+        let records = await log.loadRecords()
+        XCTAssertEqual(records.count, 1)
+        XCTAssertEqual(records[0].notice, FPEventNotice.packageKindNotRecorded.rawValue)
+        XCTAssertNil(records[0].noticeCause)
+    }
+
+    /// 台帳への記録の結果 → 原因。記録できたら原因は無い。
+    func testNoticeCauseForFailedAdd() {
+        XCTAssertNil(FPEventNoticeCause.forFailedAdd(.added))
+        XCTAssertEqual(FPEventNoticeCause.forFailedAdd(.full), .ledgerFull)
+        XCTAssertEqual(FPEventNoticeCause.forFailedAdd(.notSaved), .saveFailed)
+    }
+
     // MARK: - 差分読み（Issue #148）
 
     private func messages(_ records: [FPEventRecord]) -> [String] { records.map(\.message) }
@@ -324,7 +360,7 @@ final class FPEventLogTests: XCTestCase {
         XCTAssertEqual(FPEventNotice.unsyncableName.subject(of: record), "new/name.env")
         XCTAssertEqual(FPEventNotice.renamedFileExcluded.subject(of: record), "new/name.env")
         XCTAssertEqual(FPEventNotice.renamedFolderExcluded.subject(of: record), "new/name.env")
-        for notice in [FPEventNotice.conflictCopyCreated, .fileTooLarge, .writeFailed] {
+        for notice in [FPEventNotice.conflictCopyCreated, .fileTooLarge, .writeFailed, .packageKindNotRecorded] {
             XCTAssertEqual(notice.subject(of: record), "old/name.txt", "\(notice) は path")
         }
     }
@@ -334,6 +370,8 @@ final class FPEventLogTests: XCTestCase {
         XCTAssertFalse(FPEventNotice.conflictCopyCreated.isResentByDaemon)
         XCTAssertTrue(FPEventNotice.fileTooLarge.isResentByDaemon)
         XCTAssertTrue(FPEventNotice.writeFailed.isResentByDaemon)
+        // 種類を記録できなかったパッケージの除外も、fileproviderd が送り直す（#169）
+        XCTAssertTrue(FPEventNotice.packageKindNotRecorded.isResentByDaemon)
         XCTAssertEqual(FPEventNotice.allCases.filter(\.isCountedFailure), [.writeFailed])
     }
 

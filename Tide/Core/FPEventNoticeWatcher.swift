@@ -182,9 +182,10 @@ final class FPEventNoticeWatcher {
             next.saved = max(next.saved, record.timestamp)
             if successEventTypes.contains(record.eventType), let path = record.path {
                 // 成功したら、そのパスの「再送される失敗」の通知済みも外す（上限を上げて一度上がったあとに、
-                // 同じ起動中にまた上限を超えたら知らせる・PR #160 レビュー指摘 5）
+                // 同じ起動中にまた上限を超えたら知らせる・PR #160 レビュー指摘 5）。種類を記録できなかった
+                // パッケージも、空きを作って一度上がったあとにまた保存に失敗したら知らせる（PR #174 レビュー指摘 1）
                 state.failureCounts[path] = nil
-                for notice in [FPEventNotice.writeFailed, .fileTooLarge] {
+                for notice in [FPEventNotice.writeFailed, .fileTooLarge, .packageKindNotRecorded] {
                     state.notified.remove("\(notice.rawValue):\(path)")
                 }
             }
@@ -224,6 +225,10 @@ final class FPEventNoticeWatcher {
             return .fileTooLarge(path: subject)
         case .writeFailed:
             return .writeKeepsFailing(path: subject)
+        case .packageKindNotRecorded:
+            // 原因の無い記録（読込で未知の値を外したもの等）は保存の失敗として扱う（Issue #169）
+            let cause = record.noticeCause.flatMap(FPEventNoticeCause.init(rawValue:)) ?? .saveFailed
+            return .packageKindNotRecorded(path: subject, cause: cause)
         case .unsyncableName, .symbolicLink, .renamedFileExcluded, .renamedFolderExcluded,
              .packageHasUnsyncableItem, .packageTooManyFiles:
             return .notBackedUp(path: subject, reason: notice)
@@ -240,7 +245,7 @@ final class FPEventNoticeWatcher {
         var keepsFailing = 0
         for event in events {
             switch event {
-            case .notBackedUp, .fileTooLarge:
+            case .notBackedUp, .packageKindNotRecorded, .fileTooLarge:
                 notBackedUp += 1
                 if notBackedUp <= limit { result.append(event) }
             case .writeKeepsFailing:

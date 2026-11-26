@@ -109,6 +109,30 @@ final class NotificationPolicyTests: XCTestCase {
         XCTAssertEqual(bodies.count, FPEventNotice.allCases.count)
     }
 
+    /// 種類を記録できなかったパッケージ（#169）: 原因で本文を出し分け、中身の問題の文面
+    /// （リンクや同期できない項目）は使わない。識別子は原因によらず同じ（同じパスは 1 件に畳む）。
+    func testPackageKindNotRecordedBodyDependsOnCause() {
+        let full = NotificationPolicy.content(
+            for: .packageKindNotRecorded(path: "dev/Foo.framework", cause: .ledgerFull))
+        let unsaved = NotificationPolicy.content(
+            for: .packageKindNotRecorded(path: "dev/Foo.framework", cause: .saveFailed))
+        let unsyncable = NotificationPolicy.content(
+            for: .notBackedUp(path: "dev/Foo.framework", reason: .packageHasUnsyncableItem))
+        for c in [full, unsaved] {
+            XCTAssertFalse(c.title.isEmpty)
+            XCTAssertTrue(c.body.contains("Foo.framework"), "body should mention the name: \(c.body)")
+            XCTAssertFalse(c.body.contains("dev/"), "body should not contain the full path: \(c.body)")
+            XCTAssertNotEqual(c.body, unsyncable.body)
+        }
+        XCTAssertNotEqual(full.body, unsaved.body)
+        XCTAssertEqual(full.identifier, "notBackedUp:packageKindNotRecorded:dev/Foo.framework")
+        XCTAssertEqual(full.identifier, unsaved.identifier)
+        // 原因の分からない経路（notBackedUp の reason）は保存の失敗の文面に倒す
+        XCTAssertEqual(
+            NotificationPolicy.content(for: .notBackedUp(path: "dev/Foo.framework", reason: .packageKindNotRecorded)),
+            unsaved)
+    }
+
     /// まとめの通知は identifier 固定（次のまとめで置き換える）で、本文に件数を含む。
     func testNotBackedUpMoreIsFixedIdentifierWithCount() {
         let a = NotificationPolicy.content(for: .notBackedUpMore(count: 7))

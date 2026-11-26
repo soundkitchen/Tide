@@ -92,10 +92,13 @@ struct ExtensionServices: Sendable {
     }
 
     /// 台帳を更新してツリーへ反映する（Issue #163）。**S3 に書く前に呼ぶ**（書いた後だと、その間に
-    /// ツリーが名前で畳み、システムの持つ item と食い違う）。戻り値はディスクまで記録できたか。
+    /// ツリーが名前で畳み、システムの持つ item と食い違う）。戻り値はディスクまで記録できたか
+    /// （`.added`）と、できなかった理由（Issue #169・通知の出し分けに使う）。
     @discardableResult
-    func applyPackageKind(_ action: PackageKindAction, path: String) async -> Bool {
-        guard action != .none else { return true }
+    func applyPackageKind(
+        _ action: PackageKindAction, path: String
+    ) async -> PersistedPathSet.DurableAddResult {
+        guard action != .none else { return .added }
         let recorded = await packageKinds.apply(action, path: path)
         await cache.refreshPackageOverrides()
         return recorded

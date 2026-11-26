@@ -327,6 +327,41 @@ final class PersistedPathSetTests: XCTestCase {
         XCTAssertTrue(hasA)
     }
 
+    func testTryAddDurablyReportsWhyItFailed() async throws {
+        // 失敗の理由を呼び出し側へ返す（Issue #169・通知の出し分け）
+        let url = tempURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let capped = PersistedPathSet(bucket: "b", fileURL: url, epoch: nil, maxEntries: 1)
+        let first = await capped.tryAddDurably("a")
+        let again = await capped.tryAddDurably("a")
+        let over = await capped.tryAddDurably("b")
+        XCTAssertEqual(first, .added)
+        XCTAssertEqual(again, .added, "既に入っている path は上限でも .added")
+        XCTAssertEqual(over, .full)
+
+        let unsaved = PersistedPathSet(bucket: "b", fileURL: unwritableURL(), epoch: nil)
+        let failed = await unsaved.tryAddDurably("a")
+        let has = await unsaved.contains("a")
+        XCTAssertEqual(failed, .notSaved)
+        XCTAssertFalse(has)
+
+        let memoryOnly = PersistedPathSet(bucket: "b", fileURL: nil, epoch: nil)
+        let degraded = await memoryOnly.tryAddDurably("a")
+        XCTAssertEqual(degraded, .notSaved, "保存先の無い縮退時は保存の失敗として扱う")
+    }
+
+    func testLedgerReportsFullWhenOverCap() async {
+        let url = tempURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let ledger = PackageKindLedger(
+            folders: PersistedPathSet(bucket: "b", fileURL: tempURL(), epoch: nil),
+            packages: PersistedPathSet(bucket: "b", fileURL: url, epoch: nil, maxEntries: 1))
+        let first = await ledger.apply(.recordPackage, path: "A.framework")
+        let second = await ledger.apply(.recordPackage, path: "B.framework")
+        XCTAssertEqual(first, .added)
+        XCTAssertEqual(second, .full)
+    }
+
     func testAddDurablyOverCapIsRejected() async {
         let url = tempURL()
         defer { try? FileManager.default.removeItem(at: url) }
@@ -355,7 +390,7 @@ final class PersistedPathSetTests: XCTestCase {
             folders: PersistedPathSet(bucket: "b", fileURL: tempURL(), epoch: nil),
             packages: PersistedPathSet(bucket: "b", fileURL: tempURL(), epoch: nil))
         let recorded = await ledger.apply(.recordFolder, path: "a/X.app")
-        XCTAssertTrue(recorded)
+        XCTAssertEqual(recorded, .added)
         await ledger.apply(.recordFolder, path: "a/X.app/Inner.key")
         var overrides = await ledger.overrides()
         XCTAssertEqual(overrides.folders, ["a/X.app", "a/X.app/Inner.key"])
@@ -387,7 +422,7 @@ final class PersistedPathSetTests: XCTestCase {
             folders: PersistedPathSet(bucket: "b", fileURL: nil, epoch: nil),
             packages: PersistedPathSet(bucket: "b", fileURL: nil, epoch: nil))
         let recorded = await ledger.apply(.recordFolder, path: "X.app")
-        XCTAssertFalse(recorded)
+        XCTAssertEqual(recorded, .notSaved)
         let overrides = await ledger.overrides()
         XCTAssertEqual(overrides, .none)
     }

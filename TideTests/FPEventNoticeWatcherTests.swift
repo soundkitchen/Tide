@@ -10,11 +10,11 @@ final class FPEventNoticeWatcherTests: XCTestCase {
 
     private func record(
         _ timestamp: Double, path: String? = nil, details: String? = nil, notice: FPEventNotice? = nil,
-        eventType: SyncLogEventType = .info
+        eventType: SyncLogEventType = .info, noticeCause: String? = nil
     ) -> FPEventRecord {
         FPEventRecord(
             timestamp: timestamp, bucket: "b", eventType: eventType.rawValue, path: path, message: "m",
-            details: details, notice: notice?.rawValue)
+            details: details, notice: notice?.rawValue, noticeCause: noticeCause)
     }
 
     private func cursors(_ created: Double, _ renamed: Double) -> FPEventNoticeWatcher.Cursors {
@@ -160,6 +160,45 @@ final class FPEventNoticeWatcherTests: XCTestCase {
         XCTAssertEqual(result.events, [.fileTooLarge(path: "big.mov")])
     }
 
+    /// 種類を記録できなかったパッケージ（#169）: 原因を通知へ運び、起動中に 1 回だけ知らせる。
+    /// 原因の無い記録は保存の失敗として扱う。
+    func testPackageKindNotRecordedCarriesCause() {
+        var state = FPEventNoticeWatcher.State()
+        let result = FPEventNoticeWatcher.notices(
+            in: [
+                record(110, path: "A.framework", notice: .packageKindNotRecorded, eventType: .error,
+                       noticeCause: FPEventNoticeCause.ledgerFull.rawValue),
+                record(120, path: "A.framework", notice: .packageKindNotRecorded, eventType: .error,
+                       noticeCause: FPEventNoticeCause.ledgerFull.rawValue),
+                record(130, path: "B.framework", notice: .packageKindNotRecorded, eventType: .error),
+            ],
+            after: cursors(100, 100), state: &state)
+        XCTAssertEqual(result.events, [
+            .packageKindNotRecorded(path: "A.framework", cause: .ledgerFull),
+            .packageKindNotRecorded(path: "B.framework", cause: .saveFailed),
+        ])
+    }
+
+    /// 種類を記録できなかったパッケージも、一度上がったら、同じ起動中にまた記録に失敗したときにもう一度
+    /// 知らせる（PR #174 レビュー指摘 1）。
+    func testSuccessAllowsPackageKindNotRecordedAgain() {
+        var state = FPEventNoticeWatcher.State()
+        let cause = FPEventNoticeCause.saveFailed.rawValue
+        let result = FPEventNoticeWatcher.notices(
+            in: [
+                record(110, path: "A.framework", notice: .packageKindNotRecorded, eventType: .error,
+                       noticeCause: cause),
+                record(120, path: "A.framework", eventType: .upload),
+                record(130, path: "A.framework", notice: .packageKindNotRecorded, eventType: .error,
+                       noticeCause: cause),
+            ],
+            after: cursors(100, 100), state: &state)
+        XCTAssertEqual(result.events, [
+            .packageKindNotRecorded(path: "A.framework", cause: .saveFailed),
+            .packageKindNotRecorded(path: "A.framework", cause: .saveFailed),
+        ])
+    }
+
     /// 上限を上げて一度上がったら、同じ起動中にまた上限を超えたときにもう一度知らせる（PR #160 レビュー指摘 5）。
     func testSuccessAllowsFileTooLargeAgain() {
         var state = FPEventNoticeWatcher.State()
@@ -252,13 +291,14 @@ final class FPEventNoticeWatcherTests: XCTestCase {
     /// 競合コピーはまとめない。
     func testBatchedGroupsByKindAndNeverBatchesConflicts() {
         let notBackedUp: [NotificationEvent] =
-            (1...3).map { .notBackedUp(path: "l\($0)", reason: .symbolicLink) } + [.fileTooLarge(path: "big")]
+            (1...3).map { .notBackedUp(path: "l\($0)", reason: .symbolicLink) }
+            + [.packageKindNotRecorded(path: "A.framework", cause: .ledgerFull), .fileTooLarge(path: "big")]
         let failing: [NotificationEvent] = (1...5).map { .writeKeepsFailing(path: "f\($0)") }
         let conflicts: [NotificationEvent] = (1...4).map { .conflictCopyCreated(path: "c\($0)", localCopyPath: "") }
         XCTAssertEqual(
             FPEventNoticeWatcher.batched(notBackedUp + failing + conflicts, limit: 3),
             Array(notBackedUp.prefix(3)) + Array(failing.prefix(3)) + conflicts
-                + [.notBackedUpMore(count: 1), .writeKeepsFailingMore(count: 2)])
+                + [.notBackedUpMore(count: 2), .writeKeepsFailingMore(count: 2)])
     }
 
     // MARK: - checkOnce（差分読み・起動時刻・改名カーソルの保存）

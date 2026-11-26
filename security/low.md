@@ -368,6 +368,10 @@ FP 拡張の書込（deleteItem / modifyItem / createItem / move）は `Extensio
   通知の注記どおり by-design）。検証できない名前の除外は `path` に入れられないため、親フォルダを含む表示用のパスを
   `details` に入れる（表示専用・FS 操作にも S3 キーにも使わない = 読込ゲートの前提は変わらない）。改ざんされたログは
   偽の通知を出しうるが、書けるのは本人の App Group コンテナに書ける者だけで、通知は表示のみ（同期に影響しない）。
+- **Status（2026-11-27・#169）: 印を 1 種（`packageKindNotRecorded`）と、通知の本文を出し分ける原因 `noticeCause` を追加した**。
+  原因は `FPEventNoticeCause` の rawValue（`ledgerFull` / `saveFailed` の固定 2 値）で、未知の値は印と同じく読込時に外す
+  （レコードと印は残し、アプリは保存の失敗の文面で知らせる）。at-rest の中身は固定の英文の識別子が 1 つ増えるだけで、
+  読込ゲートの前提は変わらない。
 - **Status（2026-10-31・#148）: 印を 3 種足した（`conflictCopyCreated` / `fileTooLarge` / `writeFailed`・通知に出すのは `path`）**。
   競合のレコードは退避先の相対パスを `details` に入れる（表示専用・FS 操作にも S3 キーにも使わない）。書込の失敗の
   `details` は従来どおりエラー記述で、通知の本文には出さない（ファイル名と回数だけ）。at-rest の中身の種類は変わらない。

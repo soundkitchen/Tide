@@ -2514,6 +2514,28 @@
         }
       }
     },
+    "“%@” isn’t backed up because Tide couldn’t record its type on this Mac. It stays only on this Mac. Check that your disk has free space." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "「%@」は、Tide がこの Mac に種類を記録できなかったため、バックアップしません。この Mac にだけ残っています。ディスクの空きを確かめてください。"
+          }
+        }
+      }
+    },
+    "“%@” isn’t backed up because Tide has reached the limit of package types it can record. It stays only on this Mac. See Sync Activity for details." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "「%@」は、Tide が記録できるパッケージの種類の数が上限に達したため、バックアップしません。この Mac にだけ残っています。詳しくは同期アクティビティで確認できます。"
+          }
+        }
+      }
+    },
     "“%@” was renamed to a name Tide doesn’t sync and is no longer backed up. It stays on this Mac." : {
       "extractionState" : "manual",
       "localizations" : {
