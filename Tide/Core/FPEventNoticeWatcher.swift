@@ -224,6 +224,10 @@ final class FPEventNoticeWatcher {
             return .fileTooLarge(path: subject)
         case .writeFailed:
             return .writeKeepsFailing(path: subject)
+        case .packageKindNotRecorded:
+            // 原因の無い記録（読込で未知の値を外したもの等）は保存の失敗として扱う（Issue #169）
+            let cause = record.noticeCause.flatMap(FPEventNoticeCause.init(rawValue:)) ?? .saveFailed
+            return .packageKindNotRecorded(path: subject, cause: cause)
         case .unsyncableName, .symbolicLink, .renamedFileExcluded, .renamedFolderExcluded,
              .packageHasUnsyncableItem, .packageTooManyFiles:
             return .notBackedUp(path: subject, reason: notice)
@@ -240,7 +244,7 @@ final class FPEventNoticeWatcher {
         var keepsFailing = 0
         for event in events {
             switch event {
-            case .notBackedUp, .fileTooLarge:
+            case .notBackedUp, .packageKindNotRecorded, .fileTooLarge:
                 notBackedUp += 1
                 if notBackedUp <= limit { result.append(event) }
             case .writeKeepsFailing:

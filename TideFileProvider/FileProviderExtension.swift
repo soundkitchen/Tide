@@ -738,11 +738,18 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 let nameIsPackage = PackageClassifier.active.isPackage(name: (path as NSString).lastPathComponent)
                 let kindAction = FileProviderWritePolicy.packageKindAction(
                     systemIsPackage: true, nameIsPackage: nameIsPackage, node: node)
-                guard await services.applyPackageKind(kindAction, path: path) == .added else {
-                    AppLogger.fileProvider.error("createItem(package): package kind not recorded (kept local): \(path, privacy: .private)")
+                let kindResult = await services.applyPackageKind(kindAction, path: path)
+                if let cause = FPEventNoticeCause.forFailedAdd(kindResult) {
+                    // 原因で通知の本文を出し分ける（Issue #169）。中身の問題ではないので
+                    // `packageHasUnsyncableItem`（リンクや同期できない項目）は使わない。
+                    AppLogger.fileProvider.error("createItem(package): package kind not recorded (\(cause.rawValue, privacy: .public)) (kept local): \(path, privacy: .private)")
+                    let detail = switch cause {
+                    case .ledgerFull: "package kind could not be recorded: ledger is full (\(PersistedPathSet.maxEntries) entries)"
+                    case .saveFailed: "package kind could not be recorded: could not save to disk"
+                    }
                     await services.events.append(
                         type: .error, path: path, message: "Excluded package from sync (kept local)",
-                        details: "package kind could not be recorded", notice: .packageHasUnsyncableItem)
+                        details: detail, notice: .packageKindNotRecorded, noticeCause: cause)
                     completion.value(nil, [], false, NSFileProviderError(.excludedFromSync))
                     return
                 }

@@ -21,6 +21,9 @@ enum NotificationEvent: Equatable, Sendable {
     /// 残りバックアップされない（Issue #147）。FP 拡張が `FPEventLog` に印を付けたイベントを
     /// `FPEventNoticeWatcher` が拾って発火する。`path` は表示用のパス（改名は新しい名前）。
     case notBackedUp(path: String, reason: FPEventNotice)
+    /// fpOnly: 名前で判定できないパッケージの種類を台帳に記録できず、パッケージごとこの Mac にだけ
+    /// 残った（Issue #169）。中身の問題ではないので、原因（台帳の上限 / 保存の失敗）で本文を出し分ける。
+    case packageKindNotRecorded(path: String, cause: FPEventNoticeCause)
     /// `notBackedUp` が 1 回の確認で多数出るとき（symlink を多く含むフォルダを入れた等）に、
     /// 個別に出した残りの件数をまとめる 1 件（Issue #147・PR #149 レビュー指摘 1）。
     case notBackedUpMore(count: Int)
@@ -89,6 +92,9 @@ enum NotificationPolicy {
             case .conflictCopyCreated: return content(for: .conflictCopyCreated(path: path, localCopyPath: ""))
             case .fileTooLarge: return content(for: .fileTooLarge(path: path))
             case .writeFailed: return content(for: .writeKeepsFailing(path: path))
+            case .packageKindNotRecorded:
+                // 原因が分からないときは保存の失敗の文面に倒す（対処 = ディスクの空きの確認）
+                return content(for: .packageKindNotRecorded(path: path, cause: .saveFailed))
             default: break
             }
             let name = lastComponent(path)
@@ -106,11 +112,26 @@ enum NotificationPolicy {
                 body = String(localized: "“\(name)” contains a link or an item Tide can’t sync, so Tide doesn’t back it up. It stays only on this Mac.")
             case .packageTooManyFiles:
                 body = String(localized: "“\(name)” contains more than \(PackageScanner.memberLimit) files, so Tide doesn’t back it up. It stays only on this Mac.")
-            case .conflictCopyCreated, .fileTooLarge, .writeFailed:
+            case .conflictCopyCreated, .fileTooLarge, .writeFailed, .packageKindNotRecorded:
                 preconditionFailure("handled above")
             }
             return NotificationContent(
                 identifier: "notBackedUp:\(reason.rawValue):\(path)",
+                title: String(localized: "File not backed up"),
+                body: body
+            )
+        case let .packageKindNotRecorded(path, cause):
+            let name = lastComponent(path)
+            let body: String
+            switch cause {
+            case .ledgerFull:
+                body = String(localized: "“\(name)” isn’t backed up because Tide has reached the limit of package types it can record. It stays only on this Mac. See Sync Activity for details.")
+            case .saveFailed:
+                body = String(localized: "“\(name)” isn’t backed up because Tide couldn’t record its type on this Mac. It stays only on this Mac. Check that your disk has free space.")
+            }
+            // 識別子は notBackedUp と同じ形（同じパスの同じ種類は 1 件に畳む）
+            return NotificationContent(
+                identifier: "notBackedUp:\(FPEventNotice.packageKindNotRecorded.rawValue):\(path)",
                 title: String(localized: "File not backed up"),
                 body: body
             )

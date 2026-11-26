@@ -16,10 +16,14 @@ public struct FPEventRecord: Codable, Sendable, Equatable {
     /// ユーザへ OS 通知で知らせる出来事なら、その種類（`FPEventNotice.rawValue`・Issue #147）。
     /// 通知しないイベントと #147 より前のレコードは nil（キー自体が無い行もそのまま読める）。
     public var notice: String?
+    /// 通知の本文を原因で出し分ける種類（`packageKindNotRecorded`）の原因（`FPEventNoticeCause.rawValue`・
+    /// Issue #169）。それ以外の種類と #169 より前のレコードは nil（キー自体が無い行もそのまま読める）。
+    public var noticeCause: String?
 
     public init(
         timestamp: Double, bucket: String, eventType: String,
-        path: String?, message: String, details: String? = nil, notice: String? = nil
+        path: String?, message: String, details: String? = nil, notice: String? = nil,
+        noticeCause: String? = nil
     ) {
         self.timestamp = timestamp
         self.bucket = bucket
@@ -28,6 +32,7 @@ public struct FPEventRecord: Codable, Sendable, Equatable {
         self.message = message
         self.details = details
         self.notice = notice
+        self.noticeCause = noticeCause
     }
 }
 
@@ -57,6 +62,9 @@ public enum FPEventNotice: String, Sendable, CaseIterable {
     case packageHasUnsyncableItem
     /// パッケージの中身が上限（`PackageScanner.memberLimit`）を超えていて、パッケージごと除外した（#140）
     case packageTooManyFiles
+    /// 名前で判定できないパッケージ（`.framework` など）の種類を台帳に記録できず、パッケージごと
+    /// 除外した（#163 / #169）。原因（台帳の上限 / 保存の失敗）は `FPEventRecord.noticeCause` に入れる
+    case packageKindNotRecorded
     /// 他の端末の変更とぶつかり、この Mac の編集を競合コピーへ退避した（#148・手で直す必要がある）
     case conflictCopyCreated
     /// アップロードのサイズ上限（設定）を超えていて、上げられなかった（#148）
@@ -74,7 +82,7 @@ public enum FPEventNotice: String, Sendable, CaseIterable {
     public var isResentByDaemon: Bool {
         switch self {
         case .unsyncableName, .symbolicLink, .packageHasUnsyncableItem, .packageTooManyFiles,
-             .fileTooLarge, .writeFailed:
+             .packageKindNotRecorded, .fileTooLarge, .writeFailed:
             return true
         case .renamedFileExcluded, .renamedFolderExcluded, .conflictCopyCreated:
             return false
@@ -89,7 +97,7 @@ public enum FPEventNotice: String, Sendable, CaseIterable {
     /// 通知に出す名前（表示用のパス）。上の型コメントの規約どおり。
     public func subject(of record: FPEventRecord) -> String? {
         switch self {
-        case .symbolicLink, .packageHasUnsyncableItem, .packageTooManyFiles,
+        case .symbolicLink, .packageHasUnsyncableItem, .packageTooManyFiles, .packageKindNotRecorded,
              .conflictCopyCreated, .fileTooLarge, .writeFailed:
             return record.path
         case .unsyncableName, .renamedFileExcluded, .renamedFolderExcluded: return record.details
@@ -110,6 +118,23 @@ public enum FPEventNotice: String, Sendable, CaseIterable {
         case .accessDenied, .notFound, .unstableFile, .localIO, .database, .configuration,
              .unsafePath, .other:
             return .writeFailed
+        }
+    }
+}
+
+/// 通知の本文を出し分けるための原因（Issue #169）。`packageKindNotRecorded` に付ける。
+public enum FPEventNoticeCause: String, Sendable, CaseIterable {
+    /// 台帳が上限（`PersistedPathSet.maxEntries`）に達していた
+    case ledgerFull
+    /// 台帳をディスクに保存できなかった
+    case saveFailed
+
+    /// 台帳への記録の結果 → 原因。記録できた（`.added`）なら nil。
+    public static func forFailedAdd(_ result: PersistedPathSet.DurableAddResult) -> FPEventNoticeCause? {
+        switch result {
+        case .added: return nil
+        case .full: return .ledgerFull
+        case .notSaved: return .saveFailed
         }
     }
 }
@@ -177,9 +202,10 @@ public actor FPEventLog {
 
     /// 1 イベント追記（best-effort・失敗はログのみ）。
     /// - Parameter notice: アプリに OS 通知で知らせる出来事なら、その種類（Issue #147）。
+    /// - Parameter noticeCause: 通知の本文を原因で出し分ける種類なら、その原因（Issue #169）。
     public func append(
         type: SyncLogEventType, path: String?, message: String, details: String? = nil,
-        notice: FPEventNotice? = nil
+        notice: FPEventNotice? = nil, noticeCause: FPEventNoticeCause? = nil
     ) {
         guard let fileURL else { return }
         let record = FPEventRecord(
@@ -189,7 +215,8 @@ public actor FPEventLog {
             path: path,
             message: message,
             details: details,
-            notice: notice?.rawValue
+            notice: notice?.rawValue,
+            noticeCause: noticeCause?.rawValue
         )
         do {
             var data = try JSONEncoder().encode(record)  // 1 行 JSON（改行は JSON 文字列内で必ずエスケープされる）
@@ -392,6 +419,9 @@ public actor FPEventLog {
             // 未知の通知種類はレコードごと捨てず、印だけ外す（表示には使えるため）
             if let notice = record.notice, FPEventNotice(rawValue: notice) == nil {
                 record.notice = nil
+            }
+            if let cause = record.noticeCause, FPEventNoticeCause(rawValue: cause) == nil {
+                record.noticeCause = nil
             }
             records.append(record)
         }
